@@ -96,16 +96,19 @@ def test_start_without_a_yes_makes_nothing(page, homes, monkeypatch):
 
 
 def test_a_folder_a_start_would_refuse_is_refused_with_the_reason(page, homes, wait, monkeypatch):
+    """A folder in XDG_RUNTIME_DIR (the sandbox's sockets and approvals live there) was refused; you decide now: it
+    is made, and the launcher's warning is shown (in the app's language, its own words below)."""
     from sandbox_ai_app import board_view
     said = []
     monkeypatch.setattr(board_view, "warn", lambda parent, title, text, *a, **kw: said.append((title, str(text))))
-    folder = homes / "runtime" / "inside"  # XDG_RUNTIME_DIR: the sandbox's sockets and approvals live there
+    folder = homes / "runtime" / "inside"
     workspace(page, folder)
     page.create_missing()
     assert wait(lambda: said)
     title, text = said[0]
-    assert title == "Not created" and "XDG_RUNTIME_DIR" in text and "Errno" not in text
-    assert not folder.exists()
+    assert title == "Created, with a warning" and "XDG_RUNTIME_DIR" in text and "socket" in text, text
+    assert "read-only is the safer choice" in text and "Errno" not in text
+    assert folder.is_dir()
 
 
 def test_the_start_page_creates_its_workspace_after_a_yes(qapp, homes, wait, monkeypatch):

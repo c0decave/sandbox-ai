@@ -63,8 +63,8 @@ def test_the_container_gets_setfcap_and_the_devices_and_nothing_without_the_opti
     assert run[run.index("SETFCAP") - 1] == "--cap-add"
     assert run[run.index("/dev/fuse") - 1] == "--device" and run[run.index("/dev/net/tun") - 1] == "--device"
     # Everything else stays as it was: the same capabilities, no privileged mode, seccomp left to Firejail.
-    # (and the host's folders nosuid: test_every_host_folder_is_mounted_nosuid_in_a_nested_run)
-    stripped = [x[:-len(",nosuid")] if x.startswith("type=bind,") and x.endswith(",nosuid") else x for x in run]
+    # (the host's folders are nosuid in every run: test_every_host_folder_is_mounted_nosuid_in_a_nested_run)
+    stripped = list(run)
     dropin = next(i for i, x in enumerate(stripped) if s.NESTED_CONF_DROPIN in x)  # (the engines' configuration)
     del stripped[dropin - 1:dropin + 1]
     for value in ("SETFCAP", "/dev/fuse", "/dev/net/tun"):
@@ -535,7 +535,10 @@ def test_every_host_folder_is_mounted_nosuid_in_a_nested_run(devices, tmp_path):
                             tmp_path / "home")
     binds = [x for x in run if x.startswith("type=bind,")]
     assert binds and all(x.endswith(",nosuid") and ",nodev" in x for x in binds)
-    assert not any("nosuid" in x for x in plain if x.startswith("type=bind,"))
+    # Since 0.1.121 in every run (security review SAI-06): a setuid file in a folder of yours gives nothing inside,
+    # whoever made it.
+    plain_binds = [x for x in plain if x.startswith("type=bind,")]
+    assert plain_binds and all(x.endswith(",nosuid") and ",nodev" in x for x in plain_binds)
     assert any(x.endswith(",dst=/mnt/data,rw,nodev,nosuid") for x in binds), binds
 
 

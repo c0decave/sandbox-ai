@@ -48,8 +48,8 @@ def test_show_set_unset(config):
 
 @pytest.mark.parametrize("key, value, why", [
     ("telemetry", "maybe", "telemetry is one of"), ("mode", "extreme", "security mode"),
-    ("canaries", '["passwords"]', "categories"), ("keep_days", "0", "keep_days"), ("nothing", "1", "no key"),
-    ("subnet", "8.8.8.0/24", "subnet"),
+    ("canaries", '["passwords"]', "categories"), ("keep_days", "-1", "keep_days"), ("nothing", "1", "no key"),
+    ("subnet", "8.8.8.0/24", "subnet"), ("hide_secrets", '"yes"', "hide_secrets is true or false"),
 ])
 def test_what_the_launcher_refuses_is_never_written(config, key, value, why):
     assert run("set", "telemetry", "strict")[0] == 0
@@ -58,6 +58,15 @@ def test_what_the_launcher_refuses_is_never_written(config, key, value, why):
         d.cli(["set", key, value])
     assert config.read_text() == before
     assert ".check" not in str(refused.value)  # review 5 (correctness L5): never the name of the checking copy
+
+
+def test_hide_secrets_is_a_default(config):
+    """Settings > Hide logins and keys in file views: hide_secrets true leaves them out of sandbox-ai session files
+    and memory (the app's and the web interface's file views); without it they are listed and marked."""
+    assert run("set", "hide_secrets", "true")[0] == 0
+    assert json.loads(config.read_text())["hide_secrets"] is True
+    assert "hide_secrets" in json.loads(run("show", "--json")[1][0])["keys"]
+    assert run("unset", "hide_secrets")[0] == 0 and "hide_secrets" not in json.loads(config.read_text())
 
 
 def test_a_broken_file_is_left_alone(config):
@@ -120,3 +129,17 @@ def test_an_old_on_in_the_file_is_ignored_and_never_written(config, capsys):
     assert run("set", "mode", "high")[0] == 0
     assert json.loads(config.read_text())["mode"] == "high"
     assert run("unset", "telemetry")[0] == 0 and "telemetry" not in json.loads(config.read_text())
+
+
+def test_the_update_keys_are_shown_but_set_by_update_mode(config):
+    """update_mode, update_window and update_source belong to `sandbox-ai update mode`, which makes or removes the
+    update timer with them: `defaults set` names it; a file with a wrong value is refused by the launcher's check."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="set by sandbox-ai update mode"):
+        run("set", "update_mode", "auto")
+    with _pytest.raises(ValueError, match="set by sandbox-ai update mode"):
+        run("unset", "update_window")
+    assert "update_mode" in json.loads(run("show", "--json")[1][0])["keys"]
+    document, path = d.read()
+    with _pytest.raises(ValueError, match="update_mode is one of off, notify, download, auto"):
+        d.check({**document, "update_mode": "sometimes"}, path)

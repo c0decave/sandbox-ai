@@ -12,7 +12,7 @@ lookup refused, the proxy refusing a connection or a request, a rule's deny, a q
 the privacy check refusing a push, a publishing request refused, the security mode or the administrator's
 policy refusing a run-time change, the run's taint holding an action, a device refused, the memory watch ending
 a process, the supervisor dropping its caches, the kernel's out-of-memory killer, a failed safety check and a
-canary that went off; and what ended or failed an MCP server's process (its container out of memory, at its
+canary that went off, the system monitor's resource warnings (sandbox-ai top); and what ended or failed an MCP server's process (its container out of memory, at its
 process limit, its /tmp full, an exit nobody asked for: the server's state directory's safeguards.jsonl). A record
 says when, which run, what was refused or ended, why (the rule, mode, policy or
 check), the process when it is known, and the fix: the exact command or option that would allow it, or that it
@@ -86,7 +86,26 @@ KINDS = {
     # An MCP server's container (mcp.py's watch): out of memory, its process limit, a full /tmp, an exit nobody asked for.
     "mcp-server": ("error", "an MCP server's process ended or failed",
                    "{count} times an MCP server's process ended or failed in the last minute ({target})"),
+    # The hidden-text checker (lint.py): invisible or bidi characters, instruction phrasing in what the agent reads.
+    "hidden-text": ("warning", "hidden text in what the agent reads",
+                    "hidden text found {count} times in the last minute ({target})"),
+    # The workspace review (workspace_review.py): a file the host runs or trusts changed during the run.
+    "workspace-review": ("warning", "the agent changed a file your host runs or trusts",
+                         "{count} workspace reviews with changes in the last minute ({target})"),
     "loop": ("warning", "loop guard intervened", "{count} loop guard interventions at {target} in the last minute"),
+    # The package guard (the proxy, runtime.PackageGuard): a download held or refused (a known malicious version: an
+    # error), a name the registry does not know or that is brand new (possibly hallucinated or slopsquatted).
+    "package": ("warning", "package guard", "{count} package guard findings ({target}) in the last minute"),
+    # The secret guard (the proxy, runtime.SecretGuard): a secret the run was given, or what looks like a credential,
+    # on its way to a host it was not given for (recorded, held for a question or refused); and one that entered the
+    # model's context (a request to the provider: recorded, never held). No record holds a value.
+    "secret-send": ("warning", "a secret on its way to another host",
+                    "{count} requests carried a secret to {target} in the last minute"),
+    "secret-context": ("warning", "a secret entered the model's context",
+                       "secrets entered the model's context {count} times in the last minute ({target})"),
+    # The system monitor (monitor.py): memory near the limit, the CPU limit holding back, IO pressure, an idle run
+    # holding memory, processes near the limit, the host low on memory or swapping; {target} is which.
+    "resources": ("warning", "resource warning", "{count} resource warnings ({target}) in the last minute"),
 }
 # What the supervisor may report itself (it runs beside the agent: nothing else is taken from its file).
 SUPERVISOR_KINDS = {"mode", "policy", "guard"}
@@ -161,10 +180,11 @@ def process_text(process):
 
 
 def record(kind, what, why, fix, run=None, process=None, target=None, rule=None, source=None, stays=False,
-           count=1, when=None, announced=False, redact=None, details=None):
-    """One safeguards.jsonl record. Everything that came from the sandbox goes through REDACT (a Redactor)."""
+           count=1, when=None, announced=False, redact=None, details=None, level=None):
+    """One safeguards.jsonl record. Everything that came from the sandbox goes through REDACT (a Redactor). LEVEL:
+    the kind's own unless given (a known malicious package is an error, a new name a warning)."""
     redact = redact or Redactor()
-    level = KINDS.get(kind, ("warning",))[0]
+    level = level if level in LEVELS else KINDS.get(kind, ("warning",))[0]
     entry = {"v": SCHEMA, "time": when if isinstance(when, str) and when else stamp(), "run": run, "kind": kind,
              "level": level, "what": redact(what), "why": redact(why), "fix": redact(fix, FIX_LIMIT),
              "stays": bool(stays), "count": count if isinstance(count, int) and count > 0 else 1,
@@ -294,10 +314,9 @@ def rule_fix(kind, run, rule, ruleset, reason, approval=None):
     if kind == "approval-timeout":
         question = approval.get("question") if isinstance(approval, dict) else None
         question = question if isinstance(question, str) and re.fullmatch(r"[0-9-]{1,40}", question) else None
-        return ("nobody answered in time: it is refused for 2 minutes without asking, then asked again; allow it for "
-                "the run on the app's Approvals page (Blocked)" + (f" or with sandbox-ai approvals allow {question} "
-                                                                    "--scope run" if question else "")
-                + ", or answer the next question in time", False)
+        return ("nobody answered in time: the question stays open, and allowed later it counts for the next try; "
+                "allow it on the app's Approvals page (Timed out)" + (f" or with sandbox-ai approvals allow {question}"
+                                                                       if question else ""), False)
     if kind == "publish":
         return ("publishing is asked first: start with --ask on (the default) and answer the question; with --ask "
                 "off it stays refused", False)
@@ -317,6 +336,12 @@ def rule_fix(kind, run, rule, ruleset, reason, approval=None):
 
 def from_egress(entry, run, redact):
     """egress-denied.jsonl: the firewall dropped a destination, or a name lookup was refused."""
+    if isinstance(entry.get("host"), str) and entry.get("reserved") is True:
+        # A reserved name (runtime.RESERVED_NAMES): the DNS stub refused it without a question - nothing to allow.
+        host = entry["host"]
+        return record("dns", f"lookup of {host}", f"{host} is a reserved name (RFC 2606/6761): it never exists, so its "
+                      "lookup is refused without a question", "nothing to allow: such a name never exists", run,
+                      entry.get("process"), host, source="dns", stays=True, when=entry.get("time"), redact=redact)
     if isinstance(entry.get("host"), str):
         host = entry["host"]
         fix = host_fix(run, host)
@@ -347,7 +372,8 @@ def connection_target(entry):
 
 
 LOOP_WHAT = {"note": "a note to the model", "paused tools": "tool use paused for one answer",
-             "answer stopped": "a repeating answer ended"}
+             "answer stopped": "a repeating answer ended",
+             "refused": "the same rejected request not sent to the server again"}
 
 
 def from_loop(entry, run, redact):
@@ -359,11 +385,16 @@ def from_loop(entry, run, redact):
         why = str(loop.get("detail") or "the answer repeated itself")
     elif kind == "watchdog":
         why = f"the watchdog: {loop.get('watchdog') or 'the turn went on too long'}"
+    elif kind == "failures":
+        why = f"{loop.get('tool') or 'a tool'} failed {loop.get('count') or 'several'} times in a row"
+    elif kind == "rejected":
+        why = f"the server rejected this exact request {loop.get('count') or 'several'} times (HTTP " \
+              f"{loop.get('status') or '4xx'}){': ' + str(loop['detail']) if loop.get('detail') else ''}"
     else:
         why = f"the model called {loop.get('tool') or 'a tool'} {loop.get('count') or 'several'} times with the same " \
               "arguments and the same result"
     fix = (f"nothing to allow: the model goes on with the note; to change it: sandbox-ai llm set {endpoint} "
-           "--loop-guard LAYER=VALUE (warn, block, text, watchdog_requests ...) or --loop-guard off")
+           "--loop-guard LAYER=VALUE (warn, block, failures, text, rejected, watchdog_requests ...) or --loop-guard off")
     what = LOOP_WHAT.get(action, action)
     if loop.get("ended"):  # the model called a tool again after the note: the relay answered in its place
         what += "; the model called a tool again, so sandbox-ai ended the turn"
@@ -371,12 +402,161 @@ def from_loop(entry, run, redact):
                   endpoint, source="proxy", when=entry.get("time"), redact=redact)
 
 
+PACKAGE_RULESET = "package-guard"  # runtime.PACKAGE_RULESET: the "ruleset" of what the package guard holds
+
+
+def from_package(entry, run, redact):
+    """A line of the proxy's connection log that the package guard marked (its "package"): a download it refused or
+    that nobody approved, a name the registry does not know, a package that is brand new, a young version that was
+    only recorded. None for everything else (a download that passed, the human's own "deny")."""
+    package = entry.get("package") if isinstance(entry.get("package"), dict) else {}
+    event, when = entry.get("event"), entry.get("time")
+    ecosystem, name, version = package.get("ecosystem"), package.get("name"), package.get("version")
+    if not ecosystem:
+        return None
+    label = " ".join(str(part) for part in (ecosystem, name, version) if part)
+    spec = f"{ecosystem}:{name}" + (f"@{version}" if version else "")
+    details = {key: package[key] for key in ("ecosystem", "name", "version", "age_days", "malicious", "new_name_days")
+               if package.get(key) is not None}
+    known = "if you know the package: sandbox-ai packages allow " + spec + " (every run of the project) or " \
+            "--allow-package " + spec + " (one start)"
+    slop = ("possibly a hallucinated or slopsquatted name: models make up package names, and attackers register "
+            "them")
+    if event == "denied" and entry.get("ruleset") == PACKAGE_RULESET:
+        approval = entry.get("approval") if isinstance(entry.get("approval"), dict) else {}
+        if approval.get("reason") == "answered":
+            return None  # the human said no
+        question = approval.get("question")
+        question = question if isinstance(question, str) and re.fullmatch(r"[0-9-]{1,40}", question) else None
+        answer = f"sandbox-ai approvals allow {question}" if question else "the app's Approvals page"
+        if package.get("malicious"):
+            fix = (f"it stays refused. Only your answer allows this one download ({answer}), never a list or an "
+                   f"answer for the run; the advisory: https://osv.dev/vulnerability/{package['malicious']}")
+            return record("package", f"download of {label}", entry.get("reason") or "a known malicious package",
+                          fix, run, entry.get("process"), label, "malicious", source="proxy", stays=True, when=when,
+                          redact=redact, details=details, level="error")
+        if not name:
+            return record("package", f"{entry.get('method')} {entry.get('url')}", entry.get("reason") or "refused",
+                          "it stays refused: no package manager sends such a path", run, entry.get("process"),
+                          ecosystem, entry.get("rule"), source="proxy", stays=True, when=when, redact=redact)
+        return record("package", f"download of {label}", entry.get("reason") or "held by the package guard",
+                      f"answer its question ({answer}); {known}", run, entry.get("process"), label,
+                      entry.get("rule"), source="proxy", when=when, redact=redact, details=details)
+    if event != "http":
+        return None
+    if package.get("missing"):
+        return record("package", f"{ecosystem} {name}: no such package",
+                      f"the registry does not know this name (404) - {slop}", "check the name: nothing was "
+                      "downloaded. If the agent goes on to install a similar name, look at that one too", run,
+                      entry.get("process"), label, "new-name", source="proxy", when=when, redact=redact,
+                      details=details)
+    if package.get("metadata") and package.get("new_name_days") is not None:
+        return record("package", f"{ecosystem} {name}: first released {package['new_name_days']} days ago",
+                      f"a brand-new package - {slop}",
+                      f"{known}; its downloads are asked about in the modes high and paranoid, or with a ruleset's "
+                      "\"packages\": {\"new_names\": \"ask\"}", run, entry.get("process"), label, "new-name",
+                      source="proxy", when=when, redact=redact, details=details)
+    if package.get("reported") == "min-age":
+        return record("package", f"download of {label}",
+                      f"released {package.get('age_days')} days ago: younger than the run's minimum release age "
+                      "(recorded only)", known, run, entry.get("process"), label, "min-age", source="proxy",
+                      when=when, redact=redact, details=details)
+    return None
+
+
+SECRET_RULESET = "secret-guard"  # runtime.SECRET_RULESET: the "ruleset" of what the secret guard held or refused
+SECRET_PLACES = {"url": "the URL", "header": "a header", "body": "the body"}
+
+
+def secret_phrase(finding):
+    """A finding of the secret guard in words (runtime.secret_phrase): a known value by its label, a shape as "what
+    looks like a GitHub token". Never a value: the proxy's records hold none."""
+    label = str(finding.get("label") or finding.get("id") or "a secret")
+    if finding.get("kind") == "value":
+        return label
+    article = "" if label.endswith("material") else "an " if label[:1] in "AEIOaeio" or label.startswith("npm") \
+        else "a "
+    return f"what looks like {article}{label}"
+
+
+def secret_words(texts):
+    texts = list(dict.fromkeys(texts))
+    return texts[0] if len(texts) == 1 else ", ".join(texts[:-1]) + " and " + texts[-1] if texts else ""
+
+
+def secret_allow(found, host):
+    """The fix of a secret guard record: the allow-list entries that would let FOUND pass to HOST."""
+    specs = " ".join(dict.fromkeys(f"{finding.get('id')}@{host}" for finding in found[:4]))
+    return (f"if that is as it should be (a test fixture, a token that belongs to that host): sandbox-ai secret-guard "
+            f"allow {specs} (every run of the project) or --allow-send {specs.replace(' ', ' --allow-send ')} (one "
+            "start)")
+
+
+def from_secret(entry, run, redact):
+    """A line of the proxy's connection log that the secret guard marked (its "secret"): a request it refused or that
+    nobody approved, a request that passed with a finding (said once per finding and host: the proxy marks the
+    repeats), a secret that entered the model's context. None for everything else (the human's own answer)."""
+    secret = entry.get("secret") if isinstance(entry.get("secret"), dict) else {}
+    found = [finding for finding in secret.get("found") or [] if isinstance(finding, dict) and finding.get("id")]
+    event, when = entry.get("event"), entry.get("time")
+    host = str(secret.get("host") or connection_target(entry) or "?")
+    if not found:
+        return None
+    details = {"host": host, "found": ", ".join(str(finding.get("id")) for finding in found),
+               "decision": secret.get("decision"), **({"more": secret["more"]} if secret.get("more") else {})}
+    approval = entry.get("approval") if isinstance(entry.get("approval"), dict) else {}
+    if event == "denied" and entry.get("ruleset") == SECRET_RULESET:
+        if approval.get("reason") == "answered":
+            return None  # the human said no
+        question = approval.get("question")
+        question = question if isinstance(question, str) and re.fullmatch(r"[0-9-]{1,40}", question) else None
+        answer = (f"answer its question (sandbox-ai approvals allow {question}); " if question else
+                  "answer its question (the app's Approvals page); " if approval else "")
+        return record("secret-send", f"{entry.get('method')} {entry.get('url')}",
+                      entry.get("reason") or "held by the secret guard", answer + secret_allow(found, host), run,
+                      entry.get("process"), host, entry.get("rule"), source="proxy", when=when, redact=redact,
+                      details=details)
+    if event != "http" or secret.get("repeat") or approval:
+        return None  # said already for this host; or the human allowed it
+    new = [finding for finding in found if not finding.get("repeat")] or found
+    what = secret_words(secret_phrase(finding) for finding in new)
+    if secret.get("context"):
+        return record("secret-context", f"{what} entered the model's context (a request to {host})",
+                      "the agent read it (a file, a command's output, a tool's answer) and its conversation went to "
+                      "the model provider with it; nothing was held or changed. Every later turn carries it too",
+                      "if it is a real secret, treat it as known to the provider: rotate it. --hide PATH keeps a "
+                      "file such as .env from the agent; " + secret_allow(new, host).replace(
+                          "if that is as it should be (a test fixture, a token that belongs to that host)",
+                          "if it is none (a test fixture)"),
+                      run, entry.get("process"), host, ",".join(str(finding.get("id")) for finding in new)[:120],
+                      source="proxy", when=when, redact=redact, details=details)
+    places = secret_words(SECRET_PLACES.get(finding.get("where"), "the body") for finding in new)
+    encodings = secret_words(part for finding in new for part in str(finding.get("encoding") or "").split("+")
+                             if part and part != "plain")
+    why = ("the secret guard found it in a request to a host it was not given for; the request passed (this run "
+           "reports)")
+    if secret.get("past_limit"):
+        why = ("the secret guard found it past the first mebibyte of the request's body: not held for a question "
+               "there, the request passed")
+    return record("secret-send", f"{what} went to {host} ({entry.get('method')}, in {places}"
+                  + (f", {encodings}" if encodings else "") + ")", why,
+                  secret_allow(new, host) + "; to hold such requests: the modes high and paranoid, or a ruleset's "
+                  "\"secrets\": {\"on_send\": \"ask\"}", run, entry.get("process"), host,
+                  ",".join(str(finding.get("id")) for finding in new)[:120], source="proxy", when=when, redact=redact,
+                  details=details)
+
+
 def from_connection(entry, run, redact):
-    """A line of the proxy's connection log: refusals, refused pushes, the run becoming tainted, the loop guard."""
+    """A line of the proxy's connection log: refusals, refused pushes, the run becoming tainted, the loop guard,
+    what the package guard held or noted, what the secret guard found."""
     event = entry.get("event")
     when = entry.get("time")
+    if isinstance(entry.get("secret"), dict) and (event == "http" or entry.get("ruleset") == SECRET_RULESET):
+        return from_secret(entry, run, redact)
     if event == "http" and isinstance(entry.get("llm_loop"), dict):
         return from_loop(entry, run, redact)
+    if isinstance(entry.get("package"), dict) and (event == "http" or entry.get("ruleset") == PACKAGE_RULESET):
+        return from_package(entry, run, redact)
     if event == "taint":
         state = entry.get("taint") if isinstance(entry.get("taint"), dict) else {}
         source = state.get("source") if isinstance(state.get("source"), dict) else {}
@@ -828,10 +1008,34 @@ class Watch:
                 f"sandbox-ai safeguards {run_word(self.run)}"]
 
 
+# The safeguards' kinds that are a limit reached, as the phone channels (sandbox-ai notify) take them; a canary's
+# alarm is sent by the canary itself.
+LIMIT_KINDS = {"memory", "oom", "resources", "supervisor-memory"}
+
+
+def phone_event(notification):
+    """(event, what, detail) of NOTIFICATION for the phone channels, or None (a canary's: it sends its own)."""
+    kind = notification.get("kind")
+    if kind == "canary":
+        return None
+    event = "limits" if kind in LIMIT_KINDS else "safeguards"
+    count = notification.get("count") if isinstance(notification.get("count"), int) else 1
+    if kind == "summary":
+        return event, f"{count} more safeguard events", ", ".join(notification.get("kinds") or [])
+    entry = notification.get("entry") if isinstance(notification.get("entry"), dict) else {}
+    label = KINDS[kind][1] if kind in KINDS else "a safeguard acted"
+    return event, (f"{label} ({count} times)" if count > 1 else label), entry.get("target") or entry.get("what")
+
+
 def desktop_sender(approvals=None):
-    """SEND for a Notifier: notify-send through approvals.desktop_notification, urgency by level."""
+    """SEND for a Notifier: notify-send through approvals.desktop_notification, urgency by level; the phone channels
+    of sandbox-ai notify too (safeguards, limits)."""
     def send(notification):
         module_ = approvals or module("approvals")
+        phoned = phone_event(notification)
+        if phoned is not None and hasattr(module_, "phone"):
+            with contextlib.suppress(Exception):
+                module_.phone(phoned[0], phoned[1], phoned[2], run=notification.get("run"))
         urgency = "critical" if notification["level"] == "error" else "normal"
         try:
             module_.desktop_notification(notification["title"], notification["text"], urgency=urgency)

@@ -400,3 +400,43 @@ def test_start_held_says_what_is_missing_and_offers_it(board_page, user, monkeyp
     assert run_tab(argv).returncode == 0
     ended(0)
     assert panel.isHidden() and "localhost/dsh-sandbox-tor:latest" in user.images()
+
+
+def test_an_approval_answer_that_fails_is_a_notice_not_a_box(qapp, tmp_path, monkeypatch):
+    """User 2026-11-17: "sandbox-ai approvals: proxy.example.org has no address (on this host: No address associated
+    with hostname)" came in a box with OK, after a box that asked first. Now: no question, no box - a short notice in
+    the error colour that goes by itself, the text kept in the page's note line (the real page, its real answer path;
+    only sandbox-ai's reply is given)."""
+    import time
+    from sandbox_ai_app import pages, short_notices
+    for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "runtime")):
+        monkeypatch.setenv(name, str(tmp_path / sub))
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    monkeypatch.setattr(short_notices, "SHOWN", [])
+    run = tmp_path / "runtime" / "sandbox-ai" / "runs" / "claude-1"
+    (run / "approvals").mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"run": "claude-1", "agent": "claude", "pid": os.getpid(),
+                                              "workspace": str(tmp_path), "session_dir": str(tmp_path),
+                                              "started": "2026-11-17T04:00:00Z", "ask_timeout": 60}))
+    (run / "approvals" / "1763352000-1-1.json").write_text(json.dumps({
+        "id": "1763352000-1-1", "kind": "dns", "name": "proxy.example.org", "timeout": 60,
+        "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+    sai = backend.SandboxAI()
+    why = ("sandbox-ai approvals: proxy.example.org has no address (on this host: No address associated with "
+           "hostname): there is nothing to allow")
+    monkeypatch.setattr(sai, "answer", lambda *a, **k: (1, "", why))
+    page = pages.ApprovalsPage(sai, interval=0, remote_interval=0)
+    try:
+        page.open.selectRow(0)
+        page.allow_run_button.click()
+        deadline = time.monotonic() + 10
+        while page.answers and time.monotonic() < deadline:
+            qapp.processEvents()
+        assert widgets.SHOWN == [], "no box"
+        assert short_notices.SHOWN and "has no address" in short_notices.SHOWN[-1][1]
+        assert "has no address" in page.message.text()
+    finally:
+        page.timer.stop()
+        page.blocked.timer.stop()
+        page.deleteLater()

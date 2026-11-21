@@ -7,7 +7,10 @@
   sandbox-ai vpn add NAME --tailscale [--auth-key-secret SECRET] [--exit-node HOST] [--login-server URL]
   sandbox-ai vpn add NAME --tor [--bridges FILE | --bridge-secret SECRET] [--exit-country CC] [--socks]
                              [--bootstrap-timeout SECONDS] [--bootstrap-attempts N] [--bootstrap-stall SECONDS]
-  sandbox-ai vpn set NAME [--bootstrap-timeout SECONDS] [--bootstrap-attempts N] [--bootstrap-stall SECONDS]
+  sandbox-ai vpn set NAME [--provider NAME] [--auth-secret SECRET] [--account-secret SECRET]
+                          [--auth-key-secret SECRET] [--exit-node HOST] [--login-server URL] [--hostname NAME]
+                          [--exit-country CC] [--bootstrap-timeout SECONDS] [--bootstrap-attempts N]
+                          [--bootstrap-stall SECONDS]      change a profile in place (what fits its type)
   sandbox-ai vpn list | show NAME | remove NAME | check NAME
   sandbox-ai vpn rotate NAME [--account-secret SECRET]   a Mullvad profile: a new WireGuard key for its device
 
@@ -23,9 +26,9 @@ default 600); a leak ends it. Names allowed during a run are looked up by the VP
 to its DNSPort (.onion names included), only tor's own connections leave, and the exit must be one by the Tor
 Project's check.
 
-Keys, account numbers, passwords and auth keys live in sandbox-ai secrets (or 0600 files); they reach only the VPN
-container, through its standard input, never the agent's or an MCP server's files, environment, logs or the
-dry-run plan. Profiles: ~/.config/sandbox-ai/vpn. Standard library only.
+Keys, account numbers, passwords and auth keys live in sandbox-ai secrets, an OpenVPN profile's file (with the client's
+key) encrypted like them (docs/SECRETS_DESIGN.md); they reach only the VPN container, through its standard input,
+never the agent's or an MCP server's files, environment, logs or the dry-run plan. Profiles: ~/.config/sandbox-ai/vpn. Standard library only.
 """
 import argparse
 import base64
@@ -43,6 +46,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -955,6 +959,9 @@ def evaluate(profile, tunnel, inside, host):
             failures.append(f"DNS: the resolver {server} does not answer through the tunnel ({answer})")
     if tor:
         failures += tor_dns_failures(dns)
+        dropped = front_dropped(dns)
+        if dropped and not any("in front of tor was full" in failure for failure in failures):
+            warnings.append(f"DNS: {front_full(dns, dropped)}")
     egress = dns.get("egress") or []
     if egress:
         own = {host.get("ipv4"), host.get("ipv6")} - {None}
@@ -986,6 +993,7 @@ def tor_dns_failures(dns):
             failures.append(f"DNS: the resolver {server} does not answer (tor's DNSPort; {answer})")
     network = ipaddress.ip_network(rt.TOR_VIRTUAL_NET)
     onion = dns.get("onion") or {}
+    dropped = front_dropped(dns)
     for where, what in (("tor", f"tor's DNSPort {rt.TOR_DNS}"),
                         ("outside", f"a lookup sent to {rt.OUTSIDE_RESOLVER} (it must reach tor's DNSPort too)")):
         got = onion.get(where)
@@ -993,8 +1001,25 @@ def tor_dns_failures(dns):
             ipaddress.ip_address(address) in network for address in got)
         if not mapped:
             failures.append(f"DNS: {what} did not map {rt.ONION_PROBE[:16]}....onion into {network} "
-                            f"({', '.join(got) if isinstance(got, list) and got else got or 'no answer'})")
+                            f"({', '.join(got) if isinstance(got, list) and got else got or 'no answer'})"
+                            + (f"; {front_full(dns, dropped)}" if where == "outside" and dropped else ""))
     return failures
+
+
+def front_dropped(dns):
+    """The questions the resolver in front of tor dropped for want of a place since the last check (the
+    container's "dns.front"), 0 where it says none or nothing readable."""
+    front = dns.get("front") if isinstance(dns, dict) else None
+    dropped = front.get("dropped") if isinstance(front, dict) else None
+    return dropped if isinstance(dropped, int) and not isinstance(dropped, bool) and 0 < dropped < 1 << 40 else 0
+
+
+def front_full(dns, dropped):
+    limit = (dns.get("front") or {}).get("limit")
+    places = f"its {limit} places" if isinstance(limit, int) and not isinstance(limit, bool) else "its places"
+    return (f"the resolver in front of tor was full: the sandbox's own lookups (--dns) filled {places}, and "
+            f"{dropped} questions were dropped since the last check. That is no leak: the kill switch holds, and "
+            "the VPN container's own lookups go to tor's DNSPort directly")
 
 
 def endpoint_text(endpoint):
@@ -1047,10 +1072,42 @@ def describe(profile):
                       "tailnet only (other connections follow the sandbox's own rules)",
                       "tailnet_allow": tailscale.get("tailnet_allow", []), "ephemeral": tailscale.get("ephemeral", False),
                       "dns": list(profile.get("dns") or [runtime().QUAD100])})
+    facts["settings"] = editable(profile)
     return facts
 
 
+def editable(profile):
+    """What `vpn set` changes of PROFILE, as it is now: {option name without --: value} - names of secrets, hosts,
+    countries; never a key. (What the app's and the web's Edit… fill in.)"""
+    kind = profile["type"]
+    section = profile.get(kind) or {}
+    found = {"provider": profile.get("provider")}
+    if kind == "openvpn":
+        found["auth-secret"] = section.get("auth_secret")
+    elif kind == "tailscale":
+        found.update({"auth-key-secret": section.get("auth_key_secret"), "exit-node": section.get("exit_node"),
+                      "login-server": section.get("login_server"), "hostname": section.get("hostname")})
+    elif kind == "tor":
+        found["exit-country"] = ",".join(section.get("exit_country") or []) or None
+        found.update({key.replace("_", "-"): section.get(key) for key in BOOTSTRAP_OPTIONS})
+    if isinstance(profile.get("mullvad"), dict):
+        found["account-secret"] = profile["mullvad"].get("account_secret")
+    return found
+
+
 # --- the VPN container ------------------------------------------------------------------------------------------
+
+def openvpn_config(store, config_file):
+    """The text of an OpenVPN profile's configuration (NAME.ovpn: the client's key and certificates in it), opened in
+    this process's memory - sealed with the secret store's key since 0.1.98; locked: asked on a terminal, else the
+    message says how to unlock. A plain one from before is sealed now when that needs nobody (secret_store.py)."""
+    path = profiles_dir() / config_file
+    name = f"vpn/{config_file}"
+    data, sealed = store.read_file(path, name)
+    if not sealed:
+        store.seal_on_use(path, name)
+    return data.decode("utf-8", "replace")
+
 
 def payload(profile, action, names=(), bypass=()):
     """The VPN container's standard input: the profile, its secrets, the names to resolve, the checks; BYPASS (a Tor
@@ -1070,7 +1127,7 @@ def payload(profile, action, names=(), bypass=()):
                                     for index, name in (profile["wireguard"].get("preshared_key_secrets") or {}).items()}
     elif kind == "openvpn":
         openvpn = profile["openvpn"]
-        values["openvpn_config"] = read_private(profiles_dir() / openvpn["config_file"])
+        values["openvpn_config"] = openvpn_config(store, openvpn["config_file"])
         if not blocks_closed_plainly(values["openvpn_config"]):  # (one imported before the check of parse_openvpn)
             raise ValueError(f"VPN profile {profile['name']}: a block of its OpenVPN configuration holds a '<', which "
                              "could end it early and smuggle in directives; add the profile again from its file "
@@ -1929,7 +1986,7 @@ def agent_note(a):
 
 
 def bring_up(profile, command, names, say, action="serve", log_dir=None, run=None, warn_only=False, podman=None,
-             bypass=(), mcp=False, lend=False, borrow=None):
+             bypass=(), mcp=False, lend=False, borrow=None, egress=None):
     """Start the container, wait for the tunnel, run the checks: (tunnel, ready event, verdict). Raises when a
     check fails, unless WARN_ONLY. PODMAN: the engine's command (a remote one: its own address is the baseline).
     BYPASS: the addresses of the local network a Tor start reaches past Tor (--vpn-bypass-tcp). MCP: the container
@@ -1937,10 +1994,14 @@ def bring_up(profile, command, names, say, action="serve", log_dir=None, run=Non
     run's, prepare_lending; "required": the start has servers that need it now}): the start's own container lends its
     tunnel to its MCP servers; BORROW (the run that lends it): a server's container borrows it - no tunnel, no secret
     of the profile but that run's token (lend_token), its checks made through the lent tunnel. The token travels with
-    the secrets, on the container's standard input only."""
+    the secrets, on the container's standard input only. EGRESS (with MCP): the server's egress rules, loaded in the
+    container (vpn_runtime.load_mcp_egress)."""
     data = payload(profile, action, names, bypass)
     if mcp:
         data["mcp"] = True
+        if egress is not None:
+            data["mcp_egress"] = {key: egress.get(key) or [] for key in ("hosts", "allow_private", "allow_tcp")}
+            data["mcp_egress"]["kind"] = egress["kind"]
     if lend:
         data["lend"] = {"required": bool(lend.get("required"))}
         data["secrets"] = {**data["secrets"], "lend_token": runtime().lend_token(lend.get("token"))}
@@ -1995,20 +2056,26 @@ def private_paths():
     return [profiles_dir(), data / "vpn", secret_store().files_dir()]
 
 
-def check_paths(paths, option):
-    """Once there are VPN profiles, no host path a sandbox gets (read-only mounts and copies included) may be, contain
-    or lie in a place where their keys are."""
+def check_paths(paths, option, warn=None):
+    """Once there are VPN profiles, a host path you give a sandbox (read-only mounts and copies included) that is,
+    contains or lies in a place where their keys are: you decide, so it is given, with a warning (WARN, default: the
+    launcher's warner) - the agent can read the keys. [warning] of what was said."""
     if not list_profiles():
-        return
+        return []
     private = {q for p in private_paths() for q in (Path(os.path.normpath(p.expanduser().absolute())),
                                                      p.expanduser().resolve())}
+    said = []
     for raw in paths:
         source = Path(os.path.normpath(Path(raw).expanduser().absolute()))
-        for candidate in {source, source.resolve()}:
-            for place in private:
-                if candidate == place or candidate in place.parents or place in candidate.parents:
-                    raise ValueError(f"{option} {raw} would show the sandbox {place}, where the VPN profiles keep "
-                                     "their keys; use a directory beside it")
+        place = next((place for candidate in {source, source.resolve()} for place in sorted(private)
+                      if candidate == place or candidate in place.parents or place in candidate.parents), None)
+        if place is not None:
+            said.append(f"{option} {raw} shows the sandbox {place}, where the VPN profiles keep their keys: the agent "
+                        "can read them and use your VPN accounts from elsewhere (writable, change the profiles every "
+                        "VPN start uses); read-only (--ro, a --mount with :ro) lowers this to reading them, a "
+                        "directory beside it is safer")
+            launcher().warner(warn)(said[-1])
+    return said
 
 
 def exposed_paths(a, l):
@@ -2400,6 +2467,11 @@ def resolver_for_run(record, run=None):
             answer = json.loads((done.stdout or "").strip().splitlines()[-1])
         except (ValueError, IndexError, RecursionError):
             answer = {"error": (done.stderr or "no answer").strip()[-300:]}
+        if isinstance(answer, dict) and (answer.get("no_address") is True or str(answer.get("error") or "").startswith(
+                "Cannot resolve allowed host ")):
+            # NXDOMAIN or no address through the tunnel: definite, as the host's resolver says it (an older
+            # container's vpn_runtime.py says it in words only)
+            raise socket.gaierror(socket.EAI_NONAME, "no such name or no address through the VPN")
         if not isinstance(answer, dict) or answer.get("error") or not isinstance(answer.get("hosts"), dict):
             raise OSError(f"the VPN's resolver: {answer.get('error') if isinstance(answer, dict) else answer}")
         found = answer["hosts"].get(name) or []
@@ -2454,6 +2526,10 @@ def mcp_container(server):
 #     check_pod_vpn proves that the VPN container and the server's container share the pod's network namespace
 #     (both container:INFRA-ID) and that the kill switch is in place, else the server is stopped (mcp.py).
 MCP_VPN_ID = "SANDBOX_AI_MCP_VPN_ID"  # the bridge's environment: the full ID of its VPN container
+# The wrapper's and the bridge's environment (= mcp_egress.EGRESS_ENV): the server's egress (JSON: kind, hosts,
+# allow_private, allow_tcp, hosts_file) - its VPN container loads the rules (payload "mcp_egress"), each connection
+# checks them before the server runs (check_vpn_egress). Not there: a server that reaches no network.
+MCP_EGRESS = "SANDBOX_AI_MCP_EGRESS"
 GUARD_WAIT = 15  # seconds mcp_guard waits for a server's container to run before it checks the VPN container again
 CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 # Options of `podman run|create` that choose or widen a container's network; an MCP server's run line has only its
@@ -2539,6 +2615,29 @@ def check_vpn_container(podman, ref, profile_name=None, run=None, killswitch=Tru
     return state
 
 
+def egress_of(environ):
+    """The MCP server's egress from ENVIRON (MCP_EGRESS), or None; ValueError for one that cannot be read."""
+    text = environ.get(MCP_EGRESS)
+    if not text:
+        return None
+    try:
+        egress = json.loads(text)
+    except (ValueError, RecursionError):
+        egress = None
+    if not isinstance(egress, dict) or egress.get("kind") not in runtime().EGRESS_KINDS:
+        raise ValueError(f"the MCP server's egress ({MCP_EGRESS}) is not readable: nothing starts")
+    return egress
+
+
+def check_vpn_egress(podman, ref, kind, run=None):
+    """The egress table of an MCP server (vpn_runtime.load_mcp_egress) is in place in the VPN container REF, as KIND
+    needs it; ValueError otherwise - the server does not run in its namespace."""
+    done = checked_podman(run, [*podman, "exec", ref, "nft", "list", "table", "inet", runtime().EGRESS_TABLE])
+    problem = runtime().egress_problem(done.stdout if done.returncode == 0 else "", kind)
+    if problem:
+        raise ValueError(f"the VPN container {ref[:12]}: {problem}")
+
+
 def check_pod_vpn(podman, pod, profile_name=None, run=None, member=None, killswitch=True, member_running=True):
     """A command server's (or helper's) pod POD as its launcher made it with --vpn (agent_up): its VPN container
     POD-vpn runs, of PROFILE_NAME, with its kill switch in place, and the server's container POD-agent runs in the
@@ -2603,6 +2702,7 @@ def mcp_guard(name, command, environ=None, run=None, popen=None, say=None):
     if not CONTAINER_ID.fullmatch(vpn_id):
         raise ValueError(f"no VPN container was handed to this MCP server ({MCP_VPN_ID}): nothing starts")
     podman, options, image, at = guarded_options(command, name)
+    egress = egress_of(environ)
 
     def leave(signum, _frame):  # stopped before the server runs: the finally below removes what was created
         raise SystemExit(128 + signum)
@@ -2612,17 +2712,24 @@ def mcp_guard(name, command, environ=None, run=None, popen=None, say=None):
         for sig in signals:
             signal.signal(sig, leave)
     try:
-        return guarded_start(podman, options, image, at, vpn_id, run, popen, say)
+        return guarded_start(podman, options, image, at, vpn_id, run, popen, say, egress)
     finally:
         with contextlib.suppress(ValueError, TypeError):
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
 
 
-def guarded_start(podman, options, image, at, vpn_id, run, popen, say):
-    """mcp_guard once the run line is checked: the VPN container checked, the server's container created in its
-    namespace, inspected, started, the VPN container checked again; removed at the end, whatever happened."""
+def guarded_start(podman, options, image, at, vpn_id, run, popen, say, egress=None):
+    """mcp_guard once the run line is checked: the VPN container checked (with EGRESS, the server's egress rules in
+    it too), the server's container created in its namespace, inspected, started, the VPN container checked again;
+    removed at the end, whatever happened."""
     before = check_vpn_container(podman, vpn_id, run=run)
+    if egress is not None:
+        try:
+            check_vpn_egress(podman, vpn_id, egress["kind"], run)
+        except ValueError as exc:
+            say(f"MCP server refused: {exc}")
+            raise
     options = [*options[:at], f"--network=container:{vpn_id}", *options[at + 1:]]
     created = run([*podman, "create", *options, image], capture_output=True, text=True, timeout=120)
     server = ((created.stdout or "").strip().splitlines() or [""])[-1]
@@ -2678,6 +2785,9 @@ def mcp_wrapper(profile_name, container, owner, command, lent_by=None):
     problem = egress_problem(profile)
     if problem:
         raise ValueError(problem)
+    egress = egress_of(os.environ)
+    names = [runtime().egress_host(host)[0] for host in egress.get("hosts") or []] \
+        if egress is not None and egress["kind"] == "hosts" else []
     if lent_by is not None and not lends(profile):
         raise ValueError(f"the VPN profile {profile_name} ({profile['type']}) is not lent: the server brings up a "
                          "tunnel of its own")
@@ -2705,12 +2815,14 @@ def mcp_wrapper(profile_name, container, owner, command, lent_by=None):
         lend = ("borrower", check_run(lent_by), sys.platform == "darwin") if lent_by is not None else None
         tunnel, ready, _ = bring_up(profile, container_command(podman, container, profile, network=network,
                                                                labels=[f"sandbox-ai.vpn-owner={owner}"], lend=lend),
-                                    (), say, mcp=True, borrow=lent_by)
+                                    sorted(set(names)), say, mcp=True, borrow=lent_by, egress=egress)
         child = None
         try:
             # Its ID, checked as each connection checks it: the bridge's containers join this container, not
             # whatever has its name later.
             checked = check_vpn_container(podman, container, profile["name"])
+            if egress is not None:
+                mcp_egress_ready(podman, checked["id"], egress, ready, say)
             child = subprocess.Popen(command, env={**os.environ, MCP_VPN_ID: checked["id"]})
             stop = lambda signum, _frame: child.send_signal(signum)  # noqa: E731
             for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -2736,6 +2848,29 @@ def mcp_wrapper(profile_name, container, owner, command, lent_by=None):
             tunnel.close()
             podman_run([*podman, "rm", "--force", "--time", "0", container], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
+
+
+def mcp_egress_ready(podman, vpn_id, egress, ready, say, run=None):
+    """The VPN container VPN_ID of an MCP server came up with the server's EGRESS rules (its ready event says so, its
+    table is there); an allowlist server's /etc/hosts written from the hosts it pinned through the tunnel. ValueError
+    otherwise: the server does not start."""
+    said = (ready.get("tunnel") or {}).get("egress")
+    if not isinstance(said, dict) or said.get("kind") != egress["kind"]:
+        raise ValueError("the VPN container did not load the MCP server's egress rules (an older runtime?): "
+                         "the server does not start")
+    check_vpn_egress(podman, vpn_id, egress["kind"], run)
+    for line in said.get("dropped") or []:
+        say(f"not pinned (a private address, refused): {line}")
+    if egress["kind"] == "hosts":
+        names = said.get("pins") if isinstance(said.get("pins"), dict) else {}
+        path = Path(egress["hosts_file"])
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}")
+        temporary.write_text(runtime().egress_hosts_file({
+            str(name): [str(ipaddress.ip_address(address)) for address in addresses]
+            for name, addresses in names.items() if runtime().EGRESS_HOST.fullmatch(f"{name}:1")}))
+        temporary.chmod(0o644)
+        os.replace(temporary, path)
 
 
 # --- sandbox-ai vpn ----------------------------------------------------------------------------------------------
@@ -2827,15 +2962,24 @@ def add_openvpn(args, out):
         if len(credentials) != 2:
             raise ValueError("auth-user-pass: expected a user name and a password")
         auth_secret, owned = secret_name(args.name, "AUTH"), True
-        store_secret(auth_secret, f"{credentials[0]}:{credentials[1]}")
-        out(f"note: the user name and password were moved to sandbox-ai secrets ({auth_secret})")
     if info["auth"] and not auth_secret:
         raise ValueError("the configuration asks for a user name and password: keep them as USER:PASSWORD with "
                          "`sandbox-ai secrets set NAME` and add --auth-secret NAME")
     if auth_secret:
         secret_store().check_name(auth_secret)
+    # The configuration holds the client's key: sealed with the secret store's key, as a secret is kept (a store
+    # without a primary password asks for one on a terminal, else says how; SANDBOX_AI_SECRETS_PLAIN=1: plain).
     config_file = f"{args.name}.ovpn"
-    write_private(profiles_dir() / config_file, config)
+    store = secret_store()
+    private_dir(profiles_dir())
+    store.write_file(profiles_dir() / config_file, f"vpn/{config_file}", config.encode())
+    if owned:
+        try:
+            store_secret(auth_secret, f"{credentials[0]}:{credentials[1]}")
+        except BaseException:
+            store.wipe_file(profiles_dir() / config_file)
+            raise
+        out(f"note: the user name and password were moved to sandbox-ai secrets ({auth_secret})")
     for note in notes:
         out(f"note: {note}")
     return new_profile(args, "openvpn", openvpn={
@@ -3008,30 +3152,113 @@ def bootstrap_options(args):
     return given
 
 
+SET_OPTIONS = ("provider", "auth_secret", "account_secret", "auth_key_secret", "exit_node", "login_server",
+               "hostname", "exit_country")
+SET_TYPES = {"auth_secret": "an OpenVPN", "auth_key_secret": "a Tailscale", "exit_node": "a Tailscale",
+             "login_server": "a Tailscale", "hostname": "a Tailscale", "exit_country": "a Tor"}
+
+
 def set_command(args, out=print):
-    """sandbox-ai vpn set NAME: change a Tor profile's bootstrap settings (--bootstrap-timeout, --bootstrap-attempts,
-    --bootstrap-stall; "default" for a setting goes back to its default) without adding it again."""
+    """sandbox-ai vpn set NAME: change a profile in place, without adding it again (its keys stay): --provider; an
+    OpenVPN profile's --auth-secret; a Mullvad profile's --account-secret; a Tailscale profile's --auth-key-secret,
+    --exit-node, --login-server, --hostname; a Tor profile's --exit-country and bootstrap settings (--bootstrap-
+    timeout, --bootstrap-attempts, --bootstrap-stall; "default" goes back to the default). "none" clears a value
+    that may be missing. A new key file or configuration is `vpn add NAME ... --force`."""
     profile = load_profile(args.name)
-    if profile["type"] != "tor":
-        raise ValueError(f"VPN profile {args.name} is {profile['type']}: the bootstrap settings are a Tor profile's")
-    tor, changed = dict(profile["tor"]), False
-    for key in BOOTSTRAP_OPTIONS:
-        value = getattr(args, key, None)
-        if value is None:
-            continue
-        changed = True
-        if value == "default":
-            tor.pop(key, None)
+    kind = profile["type"]
+    given = {key: getattr(args, key, None) for key in SET_OPTIONS if getattr(args, key, None) is not None}
+    bootstrap = {key: getattr(args, key, None) for key in BOOTSTRAP_OPTIONS if getattr(args, key, None) is not None}
+    if not given and not bootstrap:
+        raise ValueError("nothing to set: give --provider, --auth-secret (OpenVPN), --account-secret (Mullvad), "
+                         "--auth-key-secret, --exit-node, --login-server or --hostname (Tailscale), --exit-country, "
+                         "--bootstrap-timeout SECONDS, --bootstrap-attempts N or --bootstrap-stall SECONDS (Tor; each "
+                         "also as default)")
+    if bootstrap and kind != "tor":
+        raise ValueError(f"VPN profile {args.name} is {kind}: the bootstrap settings are a Tor profile's")
+    for key, what in SET_TYPES.items():
+        if key in given and kind != {"an OpenVPN": "openvpn", "a Tailscale": "tailscale", "a Tor": "tor"}[what]:
+            raise ValueError(f"VPN profile {args.name} is {kind}: --{key.replace('_', '-')} is {what} profile's")
+    if "account_secret" in given and not isinstance(profile.get("mullvad"), dict):
+        raise ValueError(f"VPN profile {args.name} is no Mullvad profile: --account-secret is a Mullvad profile's")
+    value = lambda key: None if given[key] in ("", "none") else given[key]  # noqa: E731
+    section, changes, notes = dict(profile[kind]), [], []
+    for key in ("auth_secret", "account_secret", "auth_key_secret"):
+        if key in given and value(key) is not None:
+            secret_store().check_name(value(key))
+    if "provider" in given:
+        if value("provider") is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}", value("provider")):
+            raise ValueError("--provider: a name of letters, digits, space and ._- (up to 40)")
+        profile["provider"] = value("provider")
+        changes.append(f"provider {profile['provider'] or 'generic'}")
+    if "auth_secret" in given:
+        if value("auth_secret") is None and section.get("auth"):
+            raise ValueError("the configuration asks for a user name and password: --auth-secret names the secret "
+                             "holding USER:PASSWORD")
+        if section.get("auth_secret_owned") and section.get("auth_secret") != value("auth_secret"):
+            notes.append(f"the login it kept itself, {section['auth_secret']}, stays in sandbox-ai secrets (sandbox-ai "
+                         f"secrets delete {section['auth_secret']})")
+        section.update(auth_secret=value("auth_secret"), auth_secret_owned=False)
+        changes.append(f"login from the secret {value('auth_secret') or 'none'}")
+    if "account_secret" in given:
+        profile["mullvad"] = {**profile["mullvad"], "account_secret": value("account_secret")}
+        changes.append(f"account number from the secret {value('account_secret') or 'none (asked for)'}")
+    if "auth_key_secret" in given:
+        if value("auth_key_secret") is None and section.get("ephemeral"):
+            raise ValueError("an ephemeral node logs in anew at every start: it needs --auth-key-secret")
+        section["auth_key_secret"] = value("auth_key_secret")
+        changes.append(f"auth key from the secret {value('auth_key_secret') or 'none (a login URL at the start)'}")
+    if "exit_node" in given:
+        if value("exit_node") is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.:-]{0,252}", value("exit_node")):
+            raise ValueError("--exit-node expects a node name or tailnet address")
+        section["exit_node"] = value("exit_node")
+        changes.append(f"exit node {value('exit_node') or 'none (tailnet only)'}")
+    if "login_server" in given:
+        if value("login_server") is not None:
+            parts = urllib.parse.urlsplit(value("login_server"))
+            if parts.scheme != "https" or not parts.hostname or parts.username:
+                raise ValueError("--login-server expects an https URL (Headscale, for one)")
+        section["login_server"] = value("login_server")
+        if profile.get("provider") in ("tailscale", "headscale"):
+            profile["provider"] = "headscale" if value("login_server") else "tailscale"
+        changes.append("login server " + (value("login_server") or "Tailscale's own"))
+    if "hostname" in given:
+        hostname = value("hostname") or f"sandbox-ai-{args.name}".lower().replace("_", "-")
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", hostname):
+            raise ValueError("--hostname: letters, digits and '-'")
+        section["hostname"] = hostname
+        changes.append(f"node name {hostname}")
+    if "exit_country" in given:
+        countries = runtime().exit_countries([c.strip() for c in value("exit_country").split(",")]
+                                             if value("exit_country") else [])
+        section["exit_country"] = countries
+        changes.append(f"exits in {', '.join(countries) or 'any country'}")
+    for key, setting in bootstrap.items():
+        if setting == "default":
+            section.pop(key, None)
         else:
-            tor[key] = value
-    if not changed:
-        raise ValueError("nothing to set: give --bootstrap-timeout SECONDS, --bootstrap-attempts N or "
-                         "--bootstrap-stall SECONDS (each also as default)")
-    bootstrap_options(argparse.Namespace(**{key: tor.get(key) for key in BOOTSTRAP_OPTIONS}))
-    profile["tor"] = tor
+            section[key] = setting
+    if bootstrap:
+        bootstrap_options(argparse.Namespace(**{key: section.get(key) for key in BOOTSTRAP_OPTIONS}))
+    profile[kind] = section
+    problem = shape_problem(profile)
+    if problem:
+        raise ValueError(f"not set: {problem}")
     save_profile(profile)
-    LOG.info("vpn", f"{args.name}: its bootstrap settings are now: {bootstrap_text(profile)}")
-    out(f"VPN profile {args.name}: Tor's bootstrap: {bootstrap_text(profile)}")
+    if bootstrap:
+        changes.append(f"Tor's bootstrap: {bootstrap_text(profile)}")
+        LOG.info("vpn", f"{args.name}: its bootstrap settings are now: {bootstrap_text(profile)}")
+    LOG.info("vpn", f"{args.name}: set: {'; '.join(changes)}")
+    out(f"VPN profile {args.name}: {'; '.join(changes)}")
+    for note in notes:
+        out(f"note: {note}")
+    if given:
+        users = []
+        with contextlib.suppress(Exception):  # noqa: BLE001 - a note only
+            users = profile_users(args.name)
+        out("note: this is for the starts from now on" + (f"; {len(users)} running use the profile as it was (a VPN "
+                                                           "is set up at the start: restart them for the change)"
+                                                           if users else "") + f"; check it: sandbox-ai vpn check "
+            f"{args.name}")
     return 0
 
 
@@ -3070,8 +3297,8 @@ def remove(name, out=print, client=None):
     elif mullvad:
         out(f"note: remove the Mullvad device {mullvad.get('device')} at https://mullvad.net/account/devices")
     drop_secrets(profile)
-    if profile["type"] == "openvpn":
-        (profiles_dir() / profile["openvpn"]["config_file"]).unlink(missing_ok=True)
+    if profile["type"] == "openvpn":  # (written over before it goes: it held the client's key)
+        secret_store().wipe_file(profiles_dir() / profile["openvpn"]["config_file"])
     shutil.rmtree(state_dir(name), ignore_errors=True)
     profile_path(name).unlink()
     out(f"VPN profile {name} removed")
@@ -3113,7 +3340,12 @@ def show(name, as_json=False, out=print):
         out(json.dumps(facts, indent=2))
         return 0
     for key, value in facts.items():
+        if key == "settings":  # (what vpn set changes: for the app and the web; its values are in the lines above)
+            continue
         out(f"{key}: {', '.join(map(str, value)) if isinstance(value, list) else value}")
+    named = {key: value for key, value in facts.get("settings", {}).items() if key.endswith("secret") and value}
+    for key, value in named.items():
+        out(f"{key.replace('-', ' ')}: {value}")
     return 0
 
 
@@ -3136,9 +3368,20 @@ def list_command(as_json=False, out=print):
     return 0
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def parser():
     p = argparse.ArgumentParser(prog="sandbox-ai vpn", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                formatter_class=help_style,
                                 epilog="\n\n".join(__doc__.split("\n\n")[1:3]))
     commands = p.add_subparsers(dest="command", required=True)
     add = commands.add_parser("add", help="Add a VPN profile")
@@ -3182,8 +3425,21 @@ def parser():
     add.add_argument("--socks", action="store_true",
                      help="Tor: a SocksPort at 127.0.0.1:9050 in the sandbox (Tor Browser, Playwright); what goes "
                           "through it passes the connection proxy by")
-    setting = commands.add_parser("set", help="Tor: change a profile's bootstrap settings")
+    setting = commands.add_parser("set", help="change a profile in place (its provider, which secret, exit node ...)",
+                                  description="Change the VPN profile NAME in place, without adding it again (its "
+                                              "keys stay). \"none\" clears a value that may be missing. For the "
+                                              "starts from then on: a sandbox that runs keeps the VPN it was "
+                                              "started with. A new key or configuration file: vpn add NAME ... "
+                                              "--force.")
     setting.add_argument("name")
+    setting.add_argument("--provider", metavar="NAME", help="The provider's name (mullvad enables its own check)")
+    setting.add_argument("--auth-secret", metavar="SECRET", help="OpenVPN: the secret holding USER:PASSWORD")
+    setting.add_argument("--account-secret", metavar="SECRET", help="Mullvad: the secret holding the account number")
+    setting.add_argument("--auth-key-secret", metavar="SECRET", help="Tailscale: the secret holding an auth key")
+    setting.add_argument("--exit-node", metavar="HOST", help="Tailscale: all egress through this exit node")
+    setting.add_argument("--login-server", metavar="URL", help="Tailscale: a Headscale server")
+    setting.add_argument("--hostname", metavar="NAME", help="Tailscale: the node's name")
+    setting.add_argument("--exit-country", metavar="CC", help="Tor: exits only in these countries (de, or de,nl)")
     for sub, values in ((add, int), (setting, bootstrap_value)):
         sub.add_argument("--bootstrap-timeout", type=values, metavar="SECONDS",
                          help="Tor: seconds an attempt at the bootstrap has (more while its percentage rises; "
@@ -3203,9 +3459,9 @@ def parser():
         if name != "list":
             sub.add_argument("name")
         if name in ("list", "show", "check"):
-            sub.add_argument("--json", action="store_true")
+            sub.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
         if name == "check":
-            sub.add_argument("--podman-url", metavar="URL")
+            sub.add_argument("--podman-url", metavar="URL", help="the URL of the Podman API socket to use instead of the default")
     return p
 
 

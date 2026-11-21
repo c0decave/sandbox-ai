@@ -1,0 +1,34 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "coding-pi",
+  "title": "Coding with Pi",
+  "description": "Pi on your project with Anthropic's API (your key stays outside the sandbox), PyPI, npm and GitHub open for the project's packages and code, its sessions kept with the start; everything else stays closed.",
+  "translations": {
+    "de": {
+      "title": "Programmieren mit Pi",
+      "description": "Pi an Ihrem Projekt mit der API von Anthropic (Ihr Schlüssel bleibt außerhalb der Sandbox), PyPI, npm und GitHub offen für die Pakete und den Code des Projekts, seine Sitzungen bleiben beim Start erhalten; alles andere bleibt zu."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "pi"
+  ],
+  "options": [
+    "--api-key",
+    "api.anthropic.com=ANTHROPIC_API_KEY",
+    "--model",
+    "anthropic/claude-sonnet-4-5",
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github"
+  ],
+  "notes": [
+    "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once). Pi sees a placeholder, the connection proxy puts the key in on the wire; --model names provider/model and --effort its thinking level. Another provider: --api-key api.openai.com=OPENAI_API_KEY or openrouter.ai=OPENROUTER_API_KEY with its --model, or a model server of yours with --llm (the preset pi-local-llm).",
+    "PyPI, npm and GitHub are open for the project's dependencies; everything else is refused or asked (--ask). Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy.",
+    "Memory: ~/.pi/agent/AGENTS.md holds notes about this project, read by Pi at every start and kept between runs (not with --no-memory); its sessions (~/.pi/agent/sessions) are kept with the start (sandbox-ai resume NAME goes on with the last one).",
+    "Pi asks before nothing (its design): the sandbox is the boundary. Its model catalogs, version check, packages from npm and GitHub (pi install) and /share stay off unless --pi-enable names them (model-catalog, updates, packages, share).",
+    "Pi's telemetry is always off and cannot be turned on (PI_TELEMETRY=0, and the proxy refuses its install report and bug report paths).",
+    "Pi is not live-tested yet (a start says so); its image first: sandbox-ai build pi."
+  ]
+}

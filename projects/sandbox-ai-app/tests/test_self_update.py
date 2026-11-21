@@ -53,6 +53,81 @@ def test_the_route_of_each_kind_of_copy(tmp_path):
     assert backend.update_route(pip)[0] == "other"
 
 
+def test_the_route_of_an_installation_the_app_finds_through_its_current_link(tmp_path, monkeypatch):
+    """The app finds install.sh's installation through DATA/current (the link is kept, so that an update is picked up):
+    its sandbox/ folder is DATA/current/sandbox, not DATA/versions/X/sandbox - a system installation this user cannot
+    write is still root's to update (sudo), and "Restart the app" still starts the installation's stable launcher."""
+    data = tmp_path / "usr" / "lib" / "sandbox-ai"
+    installation(data)
+    os.symlink("versions/0.9.0", data / "current")
+    (data / "versions" / "0.9.0" / "sandbox-ai-app").write_text("#!/bin/sh\n")
+    through_link = data / "current" / "sandbox"
+    assert backend.update_route(through_link, euid=1000, writable=lambda p: False) == ("root", str(data))
+    assert backend.update_route(through_link, euid=1000, writable=lambda p: True) == ("user", str(data))
+    assert backend.update_route(through_link, euid=0, writable=lambda p: False)[0] == "user"
+    monkeypatch.setattr(backend, "installed_launcher", lambda environ=None: None)
+    assert backend.restart_command(7, through_link, which=lambda name: None) == \
+        [str(data / "current" / "sandbox-ai-app"), "--wait-for-pid=7"]
+    own = tmp_path / "home" / ".local" / "share" / "sandbox-ai"
+    installation(own)
+    os.symlink("versions/0.9.0", own / "current")
+    assert backend.update_route(own / "current" / "sandbox", euid=1000, writable=lambda p: False) == ("user", str(own))
+
+
+SANDBOX = Path(os.environ.get("SANDBOX_AI_HOME") or Path(__file__).resolve().parents[3]) / "sandbox"
+needs_updater = pytest.mark.skipif(not (SANDBOX / "package_update.py").is_file(),
+                                   reason="this sandbox-ai has no package_update.py")
+
+
+def self_updating_copy(root, kind):
+    """A package (KIND: its PACKAGING) or a pip installation ("pip") with sandbox-ai's own package_update.py in it:
+    the folder with its modules."""
+    import shutil
+    directory = root / ("sandbox_ai" if kind == "pip" else "sandbox")
+    directory.mkdir(parents=True)
+    for name in ("package_update.py", "release_assets.py"):
+        shutil.copy2(SANDBOX / name, directory / name)
+    if kind == "pip":
+        (root / "sandbox_ai_app-1.0.0.dist-info").mkdir()
+        (root / "sandbox_ai_app-1.0.0.dist-info" / "INSTALLER").write_text("pip\n")
+    else:
+        (root / "install.sh").write_text("")
+        (root / "PACKAGING").write_text(kind + "\n")
+    return directory
+
+
+@needs_updater
+def test_a_package_or_a_pip_installation_that_can_be_written_updates_itself(tmp_path, monkeypatch):
+    """The AppImage, the .pyz, the macOS app and a pip installation replace themselves (sandbox-ai update): the
+    route "self", with the file or folder that is replaced; one this user cannot write keeps the hint, and the hint
+    is the exact command."""
+    image = tmp_path / "Applications" / "sandbox-ai-x86_64.AppImage"
+    image.parent.mkdir()
+    image.write_bytes(b"\x7fELF")
+    appimage = self_updating_copy(tmp_path / "cache" / "appimage" / "1.0.0-abc" / "sandbox-ai", "appimage")
+    environ = {"SANDBOX_AI_PACKAGE": str(image)}
+    monkeypatch.setattr(backend.package_updater(appimage).load("release_assets"), "arch_of",
+                        lambda kind, machine=None: "x86_64")
+    assert backend.update_route(appimage, environ=environ) == ("self", str(image))
+    assert backend.update_blocker(appimage, environ=environ) is None
+    no = lambda path, mode: False  # noqa: E731
+    assert backend.update_route(appimage, environ=environ, access=no) == ("package", "appimage")
+    why = backend.update_blocker(appimage, environ=environ, access=no)
+    assert f"{image.parent} is not writable for you" in why and f"sudo -H {image} cli update" in why
+    assert backend.update_route(appimage, environ={}) == ("package", "appimage"), "not started from its file"
+    bundle = tmp_path / "Applications" / "sandbox-ai.app"
+    app = self_updating_copy(bundle / "Contents" / "Resources" / "sandbox-ai", "macos-app")
+    assert backend.update_route(app, environ={}) == ("self", str(bundle))
+    site = tmp_path / "venv" / "lib" / "python3.12" / "site-packages"
+    pip = self_updating_copy(site, "pip")
+    monkeypatch.setattr(backend.package_updater(pip).importlib.util, "find_spec", lambda name: object())
+    assert backend.update_route(pip, environ={}) == ("self", str(site))
+    assert backend.update_route(pip, environ={}, access=no) == ("other", str(site))
+    assert "sudo " in backend.update_blocker(pip, environ={}, access=no)
+    sai = __import__("types").SimpleNamespace(directory=pip, command=lambda *args: ["python3", "-I", "main.py", *args])
+    assert backend.self_update_command(sai, "self") == ["python3", "-I", "main.py", "update"]
+
+
 def test_the_update_command_with_and_without_sudo(tmp_path):
     from types import SimpleNamespace
     directory = installation(tmp_path / "usr" / "lib" / "sandbox-ai")
@@ -154,6 +229,24 @@ def test_update_now_only_with_an_update_and_a_copy_that_updates_itself(window, m
     route(monkeypatch, "root", "/usr/local/lib/sandbox-ai")
     window.update_checked(0, NEWER, "")
     assert not window.update_now_button.isHidden() and "sudo" in window.update_now_button.toolTip()
+
+
+def test_update_now_for_a_copy_that_replaces_itself_and_the_command_for_one_that_cannot(window, monkeypatch):
+    route(monkeypatch, "self", "/home/u/Applications/sandbox-ai-x86_64.AppImage")
+    window.update_checked(0, NEWER, "")
+    assert not window.update_now_button.isHidden() and window.actions["self-update"].isEnabled()
+    assert "replaces /home/u/Applications/sandbox-ai-x86_64.AppImage" in window.update_now_button.toolTip()
+    runs = []
+    monkeypatch.setattr(window, "in_terminal", lambda argv, title, ended=None: runs.append(argv) or True)
+    window.update_now()
+    assert runs == [window.sai.command("update")]
+    window.update_running = False
+    route(monkeypatch, "package", "appimage")
+    monkeypatch.setattr(backend, "update_blocker", lambda directory: "/opt is not writable for you; run the update as "
+                        "someone who may write it: sudo -H /opt/sandbox-ai-x86_64.AppImage cli update")
+    window.update_checked(0, NEWER, "")
+    assert window.update_now_button.isHidden()
+    assert "sudo -H /opt/sandbox-ai-x86_64.AppImage cli update" in window.update_label.toolTip()
 
 
 def test_update_now_asks_and_runs_in_a_terminal(window, monkeypatch):

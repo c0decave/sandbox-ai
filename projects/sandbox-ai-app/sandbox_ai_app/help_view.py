@@ -276,8 +276,15 @@ class Corner(QObject):
         self.target, self.button = target, button
         self.header = header_of(target)
         target.installEventFilter(self)
+        self.bar = None
         if isinstance(target, QAbstractScrollArea):
-            target.verticalScrollBar().rangeChanged.connect(lambda *_: self.place())
+            # Placed when the bar is shown or hidden: Qt does that after rangeChanged (a queued call), and the
+            # table itself is not resized for it - placed on rangeChanged only, the (?) sat on the bar just shown,
+            # or over the last title where the hidden bar had been, until a LayoutRequest came later (the flaky
+            # test_a_tables_help_button_covers_no_column_title, 0.1.170).
+            self.bar = target.verticalScrollBar()
+            self.bar.installEventFilter(self)
+            self.bar.rangeChanged.connect(lambda *_: self.place())
         self.make_room()
         self.place()
 
@@ -297,7 +304,10 @@ class Corner(QObject):
         header.viewport().update()
 
     def eventFilter(self, watched, event):  # noqa: N802
-        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
+        if watched is self.bar:
+            if event.type() in (QEvent.Type.Show, QEvent.Type.Hide):
+                self.place()
+        elif event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.LayoutRequest):
             self.place()
         return False
 

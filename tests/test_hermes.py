@@ -97,12 +97,11 @@ def test_check_refuses_what_hermes_cannot_do_here():
     hermes.check(ns("claude"))  # nothing to say about another agent
     with pytest.raises(ValueError, match="is for Hermes"):
         hermes.check(ns("claude", "kanban"))
-    with pytest.raises(ValueError, match="not in the team image"):
-        hermes.check(ns("hermes"), companions=["claude"])
-    with pytest.raises(ValueError, match="not in the team image"):
-        hermes.check(ns("claude"), companions=["hermes"])
-    with pytest.raises(ValueError, match="not enforced for Hermes"):
-        hermes.check(ns("hermes"), hooks_active=True)
+    hermes.check(ns("hermes"), companions=["claude"])  # --with: a layer of the team image since 0.1.98
+    hermes.check(ns("claude"), companions=["hermes"])  # --with: a layer of the team image since 0.1.98
+    hermes.check(ns("hermes"), hooks_active=True)  # rules for its own tools: its shell hooks (managed)
+    with pytest.raises(ValueError, match="registers no shell hook"):
+        hermes.check(ns("hermes", agent_args=["--safe-mode"]), hooks_active=True)
     with pytest.raises(ValueError, match="needs the network"):
         hermes.check(ns("hermes", "kanban", offline=True))
 
@@ -279,7 +278,7 @@ def test_llm_show_hides_the_line_for_openrouter(capsys):
     llm.save_store(store)
     lines = llm.describe(llm.endpoint("openrouter"))
     assert not any("other models" in line for line in lines)
-    assert "  agents: codex, opencode, hermes, dsh, qwen, goose" in lines
+    assert "  agents: codex, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi" in lines
     assert any("other models: kept loaded" in line for line in llm.describe(llm.endpoint("box")))
 
 

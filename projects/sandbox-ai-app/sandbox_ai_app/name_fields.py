@@ -28,6 +28,10 @@ LOCAL = "local"
 KINDS = ("secret", "vpn", "image", "variant", "agent_image", "llm")
 KEEP_SECONDS = 30.0  # a list read this recently is offered again without asking the host again
 OPEN_SECONDS = 3.0  # a list opened: read again when it is older than this
+# A read that failed (no Podman here, a host that does not answer) is not tried again for this long by a field that
+# is merely made: the Board's inspector makes its fields anew at every change, and each new one asked at once - a
+# process (or a connection to a host that does not answer) per change of a property.
+FAILED_SECONDS = 20.0
 READ_SECONDS = 120  # a host that does not answer within this: the field stays typed in
 
 
@@ -110,11 +114,12 @@ def publish(sai, kind, host, names):
 
 def names_of(sai, kind, host, done, keep=KEEP_SECONDS):
     """DONE(names, problem) on the GUI thread: HOST's names of KIND (kept ones if read less than KEEP seconds ago), or
-    None and why not."""
+    None and why not (a failure is kept too, for at most FAILED_SECONDS)."""
     key = (id(sai), kind, host)
     generation = _generation.get((kind, host), 0)
     kept = _kept.get(key)
-    if kept is not None and kept[0]() is sai and kept[1] == generation and time.monotonic() - kept[2] < keep:
+    if kept is not None and kept[0]() is sai and kept[1] == generation and \
+            time.monotonic() - kept[2] < (keep if kept[4] is None else min(keep, FAILED_SECONDS)):
         done(kept[3], kept[4])
         return
     waiting = key + (generation,)
@@ -125,8 +130,8 @@ def names_of(sai, kind, host, done, keep=KEEP_SECONDS):
 
     def finished(result, error):
         names, problem = (result, None) if error is None else (None, printable_text(str(error))[-200:] or "?")
-        if error is None and _generation.get((kind, host), 0) == generation:
-            _kept[key] = (_weak(sai), generation, time.monotonic(), names, None)
+        if _generation.get((kind, host), 0) == generation:  # (a failure too, for a moment: FAILED_SECONDS)
+            _kept[key] = (_weak(sai), generation, time.monotonic(), names, problem)
         for callback in _waiting.pop(waiting, []):
             callback(names, problem)
     background(read_names, sai, kind, host, timeout=READ_SECONDS, done=finished)

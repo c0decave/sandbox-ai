@@ -42,7 +42,7 @@ SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 MODEL = re.compile(r"[\w.:/@+-]{1,200}", re.ASCII)
 VPN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 URL = re.compile(r"https?://(\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::[0-9]{1,5})?(/[A-Za-z0-9._~/-]{0,200})?")
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 # (kind, label, the port it listens on by default): llm.py's KINDS, in the order the wizard offers them.
 KINDS = (("lmstudio", N_("LM Studio"), 1234), ("ollama", N_("Ollama"), 11434), ("llamacpp", N_("llama.cpp"), 8080),
          ("vllm", N_("vLLM"), 8000), ("openai-compatible", N_("OpenAI-compatible API"), None))
@@ -285,6 +285,12 @@ def models_and_status(out):
         context = entry.get("context")
         if isinstance(context, int) and not isinstance(context, bool) and 0 < context < 1 << 31:
             model["context"] = context
+        # Ollama: the window it serves the model with and how that was learnt (llm.py's served_windows).
+        served = entry.get("served_context")
+        if isinstance(served, int) and not isinstance(served, bool) and 0 < served < 1 << 31:
+            model["served_context"] = served
+        if entry.get("served_how") in SERVED_HOW:
+            model["served_how"] = entry["served_how"]
         # What the server says it can do, and Ollama's families (llm.py's clean_models): model_tags reads them.
         for key in ("capabilities", "families"):
             words = entry.get(key)
@@ -587,18 +593,25 @@ def options(choice):
     if not choice:
         return []
     return ["--llm", llm_value(choice["name"], choice.get("model") or "")] + \
-        (["--no-provider-defaults"] if choice.get("only") else [])
+        (["--no-provider-defaults"] if choice.get("only") else []) + \
+        (["--use-case", str(choice["use_case"])] if choice.get("use_case") else [])
 
 
 def apply(board, choice):
     """Put CHOICE on BOARD (a board.Board): the LLM server node with --llm NAME[:MODEL] (for whichever agent the
-    board has), --no-provider-defaults on the network node as "only this server" says, and the agent node's own
-    model removed (the model is the server's: the launcher refuses --model with --llm). None leaves the board."""
+    board has) and --use-case when CHOICE has a use_case (an empty one takes the board's away: the existing project's
+    use case let go; a choice without the key leaves it), --no-provider-defaults on the network node as "only this
+    server" says, and the agent node's own model removed (the model is the server's: the launcher refuses --model
+    with --llm). None leaves the board."""
     if not choice:
         return board
     value = llm_value(choice["name"], choice.get("model") or "")
     node = board.first("llm") or board.add("llm")
     node.props["--llm"] = value
+    if choice.get("use_case"):  # the wizard's use case (a choice without one leaves the board's as it is)
+        node.props["--use-case"] = str(choice["use_case"])
+    elif "use_case" in choice:  # "none" chosen for a project that had one
+        node.props.pop("--use-case", None)
     agent = board.first("agent")
     if agent is not None:
         if agent.id not in [a for a, b in board.edges if b == node.id]:
@@ -650,7 +663,8 @@ def uses_server(board):
 
 
 def from_board(board):
-    """The choice ({name, model, only}) a board holds already (an existing project's --llm), or None."""
+    """The choice ({name, model, only}, and use_case when the LLM part has --use-case) a board holds already (an
+    existing project's --llm), or None."""
     node = board.first("llm")
     if node is None or not board.connected(node):
         return None
@@ -658,7 +672,10 @@ def from_board(board):
     if not name:
         return None
     network = board.first("network")
-    return {"name": name, "model": model, "only": bool(network and network.props.get("--no-provider-defaults"))}
+    choice = {"name": name, "model": model, "only": bool(network and network.props.get("--no-provider-defaults"))}
+    if node.props.get("--use-case"):
+        choice["use_case"] = str(node.props["--use-case"])
+    return choice
 
 
 # -- the "Model" choice beside the agent (the launch page, the board's agent node) --
@@ -968,9 +985,11 @@ def parameter_billions(model):
 
 def picker_rows(endpoints, agent, sai=None):
     """The entries a model picker offers (model_choices) with what is known of each model: [{"label", "value",
-    "hint", "server", "model", "tags", "params" (billions or None), "size" (bytes or None)}]. A server's details come
+    "hint", "server", "model", "tags", "params" (billions or None), "size" (bytes or None), "support" (the traffic
+    light of sandbox-ai's research: model_profile.support_of, None without SAI or a model)}]. A server's details come
     from its models' answer (host_llm_servers: "model_info"); a value without a model (the server's name, the agent's
     provider) has no tags."""
+    from . import model_profile as MP
     info = {}
     for endpoint in endpoints or []:
         if isinstance(endpoint, dict) and isinstance(endpoint.get("model_info"), dict):
@@ -984,7 +1003,8 @@ def picker_rows(endpoints, agent, sai=None):
         rows.append({"label": label, "value": value, "hint": hint, "server": server or "", "model": model or "",
                      "tags": model_tags(details) if details else [],
                      "params": parameter_billions(details) if details else None,
-                     "size": size if isinstance(size, int) and not isinstance(size, bool) else None})
+                     "size": size if isinstance(size, int) and not isinstance(size, bool) else None,
+                 "support": MP.support_of(sai, model) if model and sai is not None else None})
     return rows
 
 
@@ -1019,7 +1039,8 @@ def params_label(value):
 # -- a server's models as a table --
 
 MODEL_COLUMNS = (("name", N_("Name")), ("loaded", N_("Loaded")), ("type", N_("Type")), ("parameters", N_("Params")),
-                 ("quantization", N_("Quant")), ("context", N_("Context")), ("size", N_("Size")))
+                 ("quantization", N_("Quant")), ("context", N_("Context")), ("size", N_("Size")),
+                 ("support", N_("Support")))  # the traffic light (model_profile.support_of): last
 
 
 def size_text(value):
@@ -1031,13 +1052,42 @@ def size_text(value):
     return f"{value} B"
 
 
+# How the window Ollama serves a model with was learnt (`llm models --json`'s served_how).
+SERVED_HOW = {"loaded": N_("as it is loaded"), "modelfile": N_("its Modelfile's num_ctx")}
+SERVED_DEFAULT = N_("Ollama's default window for a model that is not loaded (OLLAMA_CONTEXT_LENGTH on the server; "
+                    "its API does not say it): the start learns it by loading the model")
+SERVED_HOW["default"] = SERVED_DEFAULT
+
+
+def served_text(model):
+    """The window Ollama serves MODEL (parse_models' entry) with, in words with how it was learnt; "" when the
+    listing does not say (another kind of server)."""
+    how = model.get("served_how")
+    if how == "default" and not model.get("served_context"):
+        return tr(SERVED_DEFAULT)
+    if model.get("served_context") and how in SERVED_HOW:
+        return tr("{tokens} tokens, as Ollama serves it ({how})", tokens=model["served_context"],
+                  how=tr(SERVED_HOW[how]))
+    return ""
+
+
 def model_cell(model, key):
-    """(text, sort value) of column KEY for MODEL (parse_models' entry)."""
+    """(text, sort value) of column KEY for MODEL (parse_models' entry). Context: the server's (LM Studio's, vLLM's
+    ...), else the window Ollama serves it with (served_text says how), "default" for Ollama's own default."""
     value = model.get(key)
+    if key == "support":  # the traffic light of the research: green first, then yellow, red, not tested
+        from . import model_profile as MP
+        if not isinstance(value, dict):
+            return "", 9
+        return MP.light_label(value), ("green", "yellow", "red", "grey").index(value.get("light", "grey")) \
+            if value.get("light") in ("green", "yellow", "red", "grey") else 3
     if key == "loaded":
         text = {True: tr("yes"), False: tr("no")}.get(value, "") if isinstance(value, bool) else ""
         return text, {True: 0, False: 1}.get(value, 2) if isinstance(value, bool) else 2
     if key == "context":
+        value = value or model.get("served_context")
+        if not value and model.get("served_how") == "default":
+            return tr("default"), 0
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             return "", -1
         return (f"{value // 1024}k" if value >= 1024 else str(value)), value

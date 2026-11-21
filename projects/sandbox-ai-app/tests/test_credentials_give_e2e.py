@@ -79,6 +79,7 @@ def registry(tmp_path, monkeypatch):
         # as a session's launcher registers (agent_sandbox.register_run): its pod as "session", its start's id
         "session": f"agent-{RUN}", "session_dir": str(session_dir), "name": SESSION, "start": SESSION,
         "kind": "agent", "proxy": True, "version": "0.1.94", "runtime_git_tokens": True, "host_relay": True,
+        "proxy_git_logins": True,  # (its proxy takes a Git login during the run: no token in the sandbox)
         "started": "2026-11-12T09:00:01Z"}))
     server = runs / "mcp-github"
     server.mkdir()
@@ -90,6 +91,7 @@ def registry(tmp_path, monkeypatch):
     proxy = tmp_path / "proxy-run"
     proxy.mkdir(mode=0o700)
     monkeypatch.setattr(rt, "PROXY_RUN", proxy)
+    monkeypatch.setattr(rt, "_added_git_logins", {"stamp": None, "entries": []})
     stop = threading.Event()
     network = rt.RuntimeNetwork({"loopback": []}, tmp_path / "allow.json", lambda *a: None)
     thread = threading.Thread(target=rt.control_server, args=(run / "control.sock", network, stop), daemon=True)
@@ -113,7 +115,7 @@ def registry(tmp_path, monkeypatch):
         return status, "\n".join(out) + "\n", err.getvalue()
     monkeypatch.setattr(sai, "host_run", host_run)
     yield {"sai": sai, "tokens": session_dir / "git-tokens.json", "keys": proxy / rt.ADDED_API_KEYS, "sent": sent,
-           "secret": secret, "net": net, "run": run}
+           "secret": secret, "net": net, "run": run, "logins": proxy / rt.ADDED_GIT_LOGINS}
     stop.set()
     thread.join(5)
     supervisor.kill()
@@ -159,10 +161,13 @@ def test_a_secret_given_to_a_running_session_as_a_git_login_reaches_its_git(page
     assert SESSION in offered[0][0] and RUN in offered[0][0]
     assert registry["sent"][-1] == ("local", "git-logins", "give", "--secret", "GH_PUSH", "--user", "x-access-token",
                                     "--", RUN, "https://github.com")
-    # Where the session's git reads it (its /sandbox/session/git-tokens.json): the token, for github.com.
-    assert json.loads(registry["tokens"].read_text())["logins"] == [
-        {"url": "https://github.com", "user": "x-access-token", "token": TOKEN}]
+    # Where it is: with the run's connection proxy (the supervisor's file for it) - and not in the sandbox (its
+    # /sandbox/session/git-tokens.json, where the agent could read it: there until 2026-11-19).
+    assert [(e["host"], e["user"], e["token"]) for e in json.loads(registry["logins"].read_text())["git_logins"]] \
+        == [("github.com", "x-access-token", TOKEN)]
+    assert not registry["tokens"].exists()
     text = page.message.text()
+    assert "connection proxy logs in with it" in text and "the token is not in the sandbox" in text
     assert f"{RUN} ({SESSION})" in text and "https://github.com" in text and "x-access-token" in text
     assert f"sandbox-ai net show {RUN}" in text, "how to check it"
     assert TOKEN not in text
@@ -209,8 +214,44 @@ def test_a_secret_given_to_github_as_an_api_key_is_for_its_api_host(page, regist
 
 def test_a_run_that_takes_no_git_login_is_said_with_its_name(page, registry, wait, monkeypatch):
     record = json.loads((registry["run"] / "run.json").read_text())
-    (registry["run"] / "run.json").write_text(json.dumps({**record, "runtime_git_tokens": False}))
+    (registry["run"] / "run.json").write_text(json.dumps({**record, "runtime_git_tokens": False, "proxy": False,
+                                                          "proxy_git_logins": False}))
     give(page, wait, monkeypatch, lambda dialog: dialog.host.setText("github.com"))
     text = page.message.text()
-    assert not registry["tokens"].exists()
+    assert not registry["tokens"].exists() and not registry["logins"].exists()
     assert "Not given" in text and RUN in text and "takes no Git login during the run" in text, text
+
+
+def test_a_run_without_the_proxy_gets_a_git_login_into_the_sandbox_only_after_a_second_yes(page, registry, wait,
+                                                                                           monkeypatch):
+    """A run whose connection proxy cannot log in (here: none): the give is refused by sandbox-ai, and the window asks
+    a second question that says where the token would be - in the sandbox, where the agent can read it. Only that
+    yes puts it there (--in-sandbox); a no leaves the run without the login."""
+    from sandbox_ai_app import widgets
+    record = json.loads((registry["run"] / "run.json").read_text())
+    (registry["run"] / "run.json").write_text(json.dumps({**record, "proxy": False, "proxy_git_logins": False}))
+    asked = []
+
+    def answer_no_to_the_sandbox(parent, action, title, text, accept, **kw):
+        asked.append((action, text))
+        return "into the sandbox" not in accept
+    monkeypatch.setattr(C, "ask_first", answer_no_to_the_sandbox)
+    give(page, wait, monkeypatch, lambda dialog: dialog.host.setText("github.com"))
+    assert not registry["tokens"].exists(), "no second yes: nothing in the sandbox"
+    assert "was not put into the sandbox" in page.message.text()
+    second = [text for action, text in asked if "the agent can read it" in text]
+    assert len(second) == 1 and f"{RUN} ({SESSION})" in second[0] and "session directory" in second[0]
+    first = [text for action, text in asked if "Give the secret" in text]
+    assert first and "the agent can read" not in first[0], "the first question is about the proxy's way"
+    del asked[:]
+    monkeypatch.setattr(C, "ask_first", lambda parent, action, title, text, accept, **kw: asked.append(
+        (action, text)) or True)
+    give(page, wait, monkeypatch, lambda dialog: dialog.host.setText("github.com"))
+    assert [action for action, _ in asked] == ["net-allow", "net-allow"], "both widen the run: asked each time"
+    assert registry["sent"][-1] == ("local", "git-logins", "give", "--secret", "GH_PUSH", "--user", "x-access-token",
+                                    "--in-sandbox", "--", RUN, "https://github.com")
+    assert json.loads(registry["tokens"].read_text())["logins"] == [
+        {"url": "https://github.com", "user": "x-access-token", "token": TOKEN}]
+    text = page.message.text()
+    assert "in the sandbox" in text and "the agent can read the token" in text and TOKEN not in text
+    assert widgets is not None

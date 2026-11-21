@@ -143,7 +143,7 @@ def page(qapp, tmp_path, monkeypatch, images):
 
 def test_the_service_part_is_set_up_in_the_inspector(page, wait):
     from PySide6 import QtWidgets
-    from sandbox_ai_app.board_view import LinesEdit
+    from sandbox_ai_app.list_fields import ListFields
     page.load_user_images()
     assert wait(lambda: page.user_images is not None, 30)
     page.add_node("service")
@@ -163,10 +163,9 @@ def test_the_service_part_is_set_up_in_the_inspector(page, wait):
     ports.setText("6379, 6380")
     ports.editingFinished.emit()
     page.inspect(page.board.first("service"))
-    lines = page.inspector_holder.findChildren(LinesEdit)
-    secrets = next(e for e in lines if "SECRET" in e.placeholderText())
-    secrets.setPlainText("REDIS_PASSWORD=redis_pw")
-    secrets.changed.emit(secrets.values())
+    # (variables, secrets and data folders: one field of kinds since 2026-11-19, list_fields)
+    lists = page.inspector_holder.findChildren(ListFields)[0]
+    assert lists.choose_kind("secrets") and lists.add("REDIS_PASSWORD=redis_pw")
     node = page.board.first("service")
     assert node.props["ports"] == [6379, 6380]
     assert node.props["secrets"] == [{"name": "REDIS_PASSWORD", "secret": "redis_pw"}]

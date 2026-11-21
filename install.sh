@@ -48,6 +48,9 @@ Installs the newest sandbox-ai release, or updates an existing installation.
                     a marked block there puts the command directory on PATH)
   --force           Reinstall the same version; replace foreign files in bin directories
   --check           Show the installed and the newest version and its signature, change nothing
+  --fetch DIR       Download the newest release (or --version) into DIR and check it fully - SHA256SUMS
+                    and a signature by a trusted key - without installing it (sandbox-ai update mode
+                    download; install it later with --from DIR/sandbox-ai-bundle-X.Y.Z.tar.gz --verify)
   --allow-downgrade Install a release older than the installed version
   --allow-unsigned  Install a release without a valid signature by a trusted key (not
                     recommended; refused when $POLICY_FILE sets
@@ -55,6 +58,9 @@ Installs the newest sandbox-ai release, or updates an existing installation.
   --verify          With --from BUNDLE.tar.gz: check it against the SHA256SUMS and
                     SHA256SUMS.sig next to it, like a download
   --uninstall       Remove the installation, its command links and the PATH block
+  --dry-run         With --uninstall: list what it removes (KIND, a tab, PATH on each
+                    line; sandbox-ai uninstall shows it as a table), remove nothing
+  --no-color        Without colour (also NO_COLOR=1; the default: colour on a terminal)
 
 The app (sandbox-ai-app, the graphical front end):
   --app-deps        Install PySide6 into the app's own environment (DATA/app-env)
@@ -80,11 +86,30 @@ to anything but localhost.
 EOF
 }
 
-die() { echo "install.sh: $*" >&2; exit 1; }
-note() { echo "install.sh: $*" >&2; }
+# Colour on a terminal, as sandbox-ai's own messages (sandbox/textout.py): an error red, a warning yellow, what to
+# run next in bold; never with NO_COLOR, TERM=dumb or --no-color, never in a pipe or a log; FORCE_COLOR forces it.
+colour=0
+for arg in "$@"; do
+  case "$arg" in --no-color|--color=never) export NO_COLOR=1; unset FORCE_COLOR ;; --color=always) export FORCE_COLOR=1; unset NO_COLOR ;; esac
+done
+if [[ -z "${NO_COLOR:-}" ]] && { [[ -n "${FORCE_COLOR:-}" ]] || [[ -t 2 && "${TERM:-}" != dumb ]]; }; then colour=1; fi
+say() {  # KIND TEXT: one line "install.sh: TEXT" on standard error
+  local kind=$1 code=""
+  shift
+  case "$kind" in error) code=31 ;; warning) code=33 ;; hint) code=1 ;; esac
+  if [[ $colour == 1 && -n "$code" ]]; then
+    printf '\033[1minstall.sh:\033[0m \033[%sm%s\033[0m\n' "$code" "$*" >&2
+  elif [[ $colour == 1 ]]; then
+    printf '\033[1minstall.sh:\033[0m %s\n' "$*" >&2
+  else
+    printf 'install.sh: %s\n' "$*" >&2
+  fi
+}
+die() { say error "$*"; exit 1; }
+note() { case "$*" in warning:*) say warning "$*" ;; *) say note "$*" ;; esac; }
 
 source_url=${SANDBOX_AI_SOURCE:-$DEFAULT_SOURCE}
-want_version="" from="" mode="" prefix=/usr/local bin_override="" force=0 action=install
+want_version="" from="" fetch_dir="" mode="" prefix=/usr/local bin_override="" force=0 action=install dry_run=0
 app=1 app_deps=auto app_terminal=1 allow_downgrade=0 allow_unsigned=0 verify=0 modify_rc=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -97,20 +122,24 @@ while [[ $# -gt 0 ]]; do
     --bin-dir) [[ $# -ge 2 ]] || die "--bin-dir needs a directory"; bin_override=$2; shift 2 ;;
     --force) force=1; shift ;;
     --check) action=check; shift ;;
+    --fetch) [[ $# -ge 2 ]] || die "--fetch needs a directory"; fetch_dir=$2; action=fetch; shift 2 ;;
     --allow-downgrade) allow_downgrade=1; shift ;;
     --allow-unsigned) allow_unsigned=1; shift ;;
     --verify) verify=1; shift ;;
     --uninstall) action=uninstall; shift ;;
+    --dry-run) dry_run=1; shift ;;
     --no-modify-rc) modify_rc=0; shift ;;
+    --no-color|--color=never|--color=always|--color=auto) shift ;;  # (taken above)
     --app-deps) app_deps=yes; shift ;;
     --no-app-deps) app_deps=no; shift ;;
     --app-terminal) app_terminal=1; shift ;;
     --no-app-terminal) app_terminal=0; shift ;;
     --no-app) app=0; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
+    *) say error "unknown option: $1"; usage >&2; exit 2 ;;
   esac
 done
+[[ $dry_run == 0 || $action == uninstall ]] || die "--dry-run goes with --uninstall"
 [[ -z "$want_version" || "$want_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$ ]] \
   || die "--version expects X.Y.Z"
 
@@ -184,7 +213,11 @@ def note(message):
 
 def warn(message):
     bar = "!" * 78
-    print(f"\n{bar}\ninstall.sh: WARNING: {message}\n{bar}\n", file=sys.stderr)
+    text = f"{bar}\ninstall.sh: WARNING: {message}\n{bar}"
+    if not os.environ.get("NO_COLOR") and (os.environ.get("FORCE_COLOR") or sys.stderr.isatty() and
+                                           os.environ.get("TERM", "") != "dumb"):
+        text = "\n".join(f"\033[33m{line}\033[0m" for line in text.split("\n"))  # (yellow, as install.sh's own)
+    print(f"\n{text}\n", file=sys.stderr)
 
 
 def read(path, mode="r"):
@@ -342,9 +375,18 @@ def cmd_record(state, version):
     if not os.path.isdir(os.path.dirname(state)) or (seen and version_key(seen) >= version_key(version)):
         return
     temporary = f"{state}.{os.getpid()}"
-    with open(temporary, "w") as stream:
-        json.dump({"highest_seen": version, "recorded": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, stream)
-    os.replace(temporary, state)
+    try:
+        with open(temporary, "w") as stream:
+            json.dump({"highest_seen": version, "recorded": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+                      stream)
+        os.replace(temporary, state)
+    except OSError:
+        # Not ours to write: a user's --check of a system installation (root's). The check itself stands; only root's
+        # own check and update remember the newest release seen.
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
 
 
 def check_version(found, current, state, allow_downgrade, explicit):
@@ -515,6 +557,38 @@ def cmd_download(source, version, target, current, state, allow_downgrade, *trus
     print(status)
 
 
+def cmd_fetch(source, version, directory, current, state, *trust):
+    """--fetch DIR: the release downloaded and checked as an update checks it - and more strictly: a trusted key must
+    have signed it (never unsigned, whatever --allow-unsigned says), never older than the installed one - then kept
+    in DIR as it came (the bundle, SHA256SUMS, SHA256SUMS.sig), for --from DIR/BUNDLE --verify to check again and
+    install. Prints the version, the signature status and the bundle's name."""
+    trust = Trust(*trust)
+    if not trust.keys:
+        fail("--fetch needs a trusted release key (the installed tree lists none): nothing downloaded")
+    found, name, bundle_url, sums_url, sig_url = release(source, version)
+    check_version(found, current, state, "0", bool(version))
+    sums = download(sums_url)
+    if sig_url is None:
+        fail(f"the release {found} is not signed (no SHA256SUMS.sig); nothing downloaded")
+    signature = download(sig_url)
+    verdict, detail = verify(sums, signature, trust)
+    if verdict != "good":
+        fail(f"{detail}; nothing downloaded. Trusted release keys: {trust.describe()}")
+    data = download(bundle_url)
+    if checksums(sums.decode(errors="replace")).get(name) != hashlib.sha256(data).hexdigest():
+        fail(f"checksum mismatch for {name}; nothing downloaded")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    for file, content in ((name, data), ("SHA256SUMS", sums), ("SHA256SUMS.sig", signature)):
+        temporary = os.path.join(directory, f".{file}.{os.getpid()}")
+        with open(temporary, "wb") as stream:
+            stream.write(content)
+        os.replace(temporary, os.path.join(directory, file))
+    cmd_record(state, found)
+    print(found)
+    print(f"good {detail}")
+    print(name)
+
+
 def cmd_verify(bundle, given, *trust):
     """--from BUNDLE --verify: the SHA256SUMS and SHA256SUMS.sig next to it, like a download."""
     trust, directory, name = Trust(*trust), os.path.dirname(os.path.abspath(given)), os.path.basename(given)
@@ -665,11 +739,73 @@ def cmd_copy(checkout, target):
         os.chmod(path, 0o755 if os.stat(source).st_mode & 0o111 else 0o644)
 
 
-{"check": cmd_check, "download": cmd_download, "verify": cmd_verify, "accept": cmd_accept, "record": cmd_record,
- "policy": cmd_policy, "unpack": cmd_unpack, "copy": cmd_copy}[sys.argv[1]](*sys.argv[2:])
+def invoking_user(source, environ=os.environ, getpwnam=None, owner_of=None):
+    """(name, home, uid) of the user a system installation runs for: sudo's SUDO_USER, else - a root login in a
+    user's folder - the owner of the --from tree SOURCE; None when it is root's own."""
+    import pwd
+    getpwnam = getpwnam or pwd.getpwnam
+    name = environ.get("SUDO_USER") or ""
+    if not name or name == "root":
+        try:
+            uid = (owner_of or (lambda path: os.stat(path).st_uid))(source) if source else 0
+            name = pwd.getpwuid(uid).pw_name if uid else ""
+        except (OSError, KeyError):
+            name = ""
+    if not name or name == "root":
+        return None
+    try:
+        entry = getpwnam(name)
+    except KeyError:
+        return None
+    return entry.pw_name, entry.pw_dir, entry.pw_uid
+
+
+def cmd_invoking_user(source=""):
+    found = invoking_user(source)
+    if found:
+        print("\t".join(map(str, found)))
+
+
+def user_note(source, version, environ=os.environ, getpwnam=None, owner_of=None):
+    """As root (a system installation): the line about the invoking user's own installation in
+    ~/.local/share/sandbox-ai, which stays at its version (and may come first in their PATH), or None."""
+    found = invoking_user(source, environ, getpwnam, owner_of)
+    if not found:
+        return None
+    name, home, _ = found
+    data = os.path.join(home, ".local", "share", "sandbox-ai")
+    own = None
+    try:
+        with open(os.path.join(data, "current", "sandbox", "agent_sandbox.py"), encoding="utf-8",
+                  errors="replace") as stream:
+            for line in stream:  # (some 600 lines down)
+                own = re.match(r'__version__ = "([^"\n]{1,40})"$', line.rstrip("\n"))
+                if own:
+                    break
+    except OSError:
+        return None
+    own = own.group(1) if own else "?"
+    if own == version:
+        return None
+    update = f"./install.sh --from {source}" if source else os.path.join(data, "current", "install.sh")
+    return (f"warning: {name} has an installation of their own, sandbox-ai {own} in {data}: it stays at {own}, and "
+            f"their PATH may find it first (~/.local/bin); update it as {name}: {update} (or remove it as {name}: "
+            f"{os.path.join(data, 'current', 'install.sh')} --uninstall)")
+
+
+def cmd_user_note(source, version):
+    line = user_note(source, version)
+    if line:
+        print(line)
+
+
+{"check": cmd_check, "fetch": cmd_fetch, "download": cmd_download, "verify": cmd_verify, "accept": cmd_accept, "record": cmd_record,
+ "policy": cmd_policy, "unpack": cmd_unpack, "copy": cmd_copy, "invoking_user": cmd_invoking_user,
+ "user_note": cmd_user_note}[sys.argv[1]](*sys.argv[2:])
 PY
 }
 
+skipped_links=()  # (said again at the end: end_notes)
 link_commands() {
   local dir cmd target link
   for dir in "${bin_dirs[@]}"; do
@@ -689,6 +825,7 @@ link_commands() {
           rm -f "$link"
         else
           note "skipping $link: exists and does not belong to sandbox-ai (use --force to replace)"
+          skipped_links+=("$link")
           continue
         fi
       fi
@@ -734,7 +871,7 @@ app_dependencies() {
   fi
   python="$env/bin/python3"
   "$python" -I -c "import PySide6.QtWidgets" 2>/dev/null \
-    || note "PySide6 is installed but Qt does not load: install the OpenGL/EGL, xkbcommon and fontconfig libraries (Debian/Ubuntu: libegl1 libgl1 libxkbcommon0 libfontconfig1)"
+    || note "PySide6 is installed but Qt does not load: install the OpenGL/EGL, xkbcommon and fontconfig libraries (Debian/Ubuntu: libegl1 libgl1 libxkbcommon0 libfontconfig1 libgssapi-krb5-2)"
   if [[ $app_terminal == 1 ]] && ! "$python" -I -c "import PySide6.QtWebEngineWidgets" 2>/dev/null; then
     note "QtWebEngine does not load (Debian/Ubuntu also need: libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libasound2); terminal tabs fall back to terminal windows"
   fi
@@ -754,6 +891,44 @@ app_xterm() {
 app_hint() {
   python3 -I -c "import PySide6.QtWidgets" 2>/dev/null || [[ -x "$data_dir/app-env/bin/python3" ]] \
     || note "sandbox-ai-app needs PySide6: sandbox-ai-update --force --app-deps (or pip install --user PySide6-Essentials)"
+}
+
+# The end of an installation: what may still keep the human on another version (2026-11-18: "I ran install.sh --from .
+# several times, but sandbox-ai-app says 0.1.97"): a command link left out for a foreign file (said again here, where
+# it is not missed), another installation that PATH finds first (a user installation: the PATH a new shell has),
+# an app that runs an older version, and - as root - the invoking user's own installation, which stays as it is.
+end_notes() {
+  local line tree="$data_dir/current" path=$PATH commands=() sockets=() who="" home="" uid=""
+  for line in ${skipped_links[@]+"${skipped_links[@]}"}; do
+    note "warning: not linked: $line exists and does not belong to sandbox-ai (install.sh --force replaces it)"
+  done
+  commands=("${COMMANDS[@]}" sandbox-ai-update)
+  if app_linked; then commands+=("$APP_COMMAND"); fi
+  if [[ $mode == user && -f "$tree/sandbox/path_order.py" ]]; then
+    if [[ $modify_rc == 1 ]]; then
+      case ":$PATH:" in *":${bin_dirs[0]}:"*) ;; *) path="${bin_dirs[0]}:$PATH" ;; esac
+    fi
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && note "$line"
+    done < <(python3 -I "$tree/sandbox/path_order.py" --mine "$tree" --folder "${bin_dirs[0]}" \
+               ${from:+--from "$from"} --path "$path" "${commands[@]}" 2>/dev/null || true)
+  fi
+  if [[ $mode == system ]]; then
+    IFS=$'\t' read -r who home uid < <(helper invoking_user "$from" 2>/dev/null || true) || true
+    line=$(helper user_note "$from" "$version" 2>/dev/null || true)
+    [[ -z "$line" ]] || note "$line"
+    if [[ -n "$who" && -n "$home" ]]; then
+      sockets=("/run/user/$uid/sandbox-ai-app.sock" "$home/.local/state/sandbox-ai/sandbox-ai-app.sock")
+    fi
+  fi
+  if app_linked && [[ $mode == user || ${#sockets[@]} -gt 0 ]]; then
+    # The installed copy's instance_probe.py asks the app on the single-instance socket what it is.
+    line=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from sandbox_ai_app import instance_probe
+sys.exit(instance_probe.main(sys.argv[2:]))' "$tree/projects/sandbox-ai-app" ${sockets[@]+"${sockets[@]}"} \
+             2>/dev/null || true)
+    [[ -z "$line" ]] || note "warning: $line"
+  fi
+  return 0
 }
 
 # A menu entry for user installations (removed by --uninstall).
@@ -795,28 +970,54 @@ shell_rc_files() {
 }
 
 # Tab completion (sandbox-ai completion): where bash (with bash-completion), zsh (on its fpath) and fish (always)
-# find the scripts; the rc block sources them for a bash without bash-completion and a zsh whose compinit ran.
+# find the scripts - a user's under XDG_DATA_HOME and XDG_CONFIG_HOME, a system installation's under PREFIX/share
+# (bash-completion, zsh's site-functions and fish's vendor completions look there); a user's rc block sources them
+# for a bash without bash-completion and a zsh whose compinit ran.
 completion_files() {
+  if [[ $mode == system ]]; then
+    printf '%s\n' "$prefix/share/bash-completion/completions/sandbox-ai" "$prefix/share/zsh/site-functions/_sandbox-ai" \
+      "$prefix/share/fish/vendor_completions.d/sandbox-ai.fish"
+    return 0
+  fi
   local data="${XDG_DATA_HOME:-$HOME/.local/share}" config="${XDG_CONFIG_HOME:-$HOME/.config}"
   printf '%s\n' "$data/bash-completion/completions/sandbox-ai" "$data/zsh/site-functions/_sandbox-ai" \
     "$config/fish/completions/sandbox-ai.fish"
 }
 
-completion_setup() {
-  [[ $mode == user ]] || return 0
-  if "${bin_dirs[0]}/sandbox-ai" completion install >/dev/null 2>&1; then
-    note "Tab completion for bash, zsh and fish: sandbox-ai completion install wrote $(completion_files | tr '\n' ' ')"
-  else
-    note "Tab completion could not be set up (run: sandbox-ai completion install)"
-  fi
-}
-
-completion_remove() {
-  [[ $mode == user ]] || return 0
+completion_state() {  # what the completion files hold now (to say only what changed)
   local file
   while IFS= read -r file; do
-    if [[ -f $file && ! -L $file ]] && grep -q "sandbox-ai __complete" "$file"; then rm -f -- "$file"; fi
+    if [[ -f $file ]]; then cksum < "$file"; else echo none; fi
   done < <(completion_files)
+}
+
+completion_changed=0
+completion_setup() {
+  local before shell file
+  before=$(completion_state)
+  if [[ $mode == user ]]; then
+    # (install.sh keeps the rc files itself: its block, or none with --no-modify-rc)
+    "${bin_dirs[0]}/sandbox-ai" completion install --no-rc >/dev/null 2>&1 || {
+      note "Tab completion could not be set up (run: sandbox-ai completion install)"; return 0; }
+  else
+    for shell in bash zsh fish; do
+      case $shell in
+        bash) file="$prefix/share/bash-completion/completions/sandbox-ai" ;;
+        zsh) file="$prefix/share/zsh/site-functions/_sandbox-ai" ;;
+        fish) file="$prefix/share/fish/vendor_completions.d/sandbox-ai.fish" ;;
+      esac
+      mkdir -p -- "$(dirname -- "$file")"
+      if [[ -L $file ]] || ! "${bin_dirs[0]}/sandbox-ai" completion "$shell" > "$file.new" 2>/dev/null; then
+        rm -f -- "$file.new"
+        note "Tab completion for $shell could not be written to $file (run: sandbox-ai completion $shell > $file)"
+        continue
+      fi
+      chmod 644 "$file.new" && mv -f -- "$file.new" "$file"
+    done
+  fi
+  [[ "$(completion_state)" != "$before" ]] || return 0
+  completion_changed=1
+  note "Tab completion for bash, zsh and fish: $(completion_files | tr '\n' ' ')"
 }
 
 shell_rc_block() {  # FILE DIR (no DIR: remove the block)
@@ -863,27 +1064,83 @@ if directory:
 if new != text:
     with open(path, "w", encoding="utf-8", errors="surrogateescape") as stream:
         stream.write(new)
+    print("changed")
 PY
 }
 
+rc_changed=()
 shell_rc_setup() {
   [[ $mode == user && $modify_rc == 1 ]] || { path_hint; return 0; }
-  local rc changed=()
+  local rc
   while IFS= read -r rc; do
-    if shell_rc_block "$rc" "${bin_dirs[0]}"; then changed+=("${rc/#$HOME/\~}"); fi
+    if [[ $(shell_rc_block "$rc" "${bin_dirs[0]}") == changed ]]; then rc_changed+=("${rc/#$HOME/\~}"); fi
   done < <(shell_rc_files)
-  [[ ${#changed[@]} -gt 0 ]] || return 0
-  note "PATH: ${bin_dirs[0]} in ${changed[*]} (a marked block; --no-modify-rc leaves the files alone)"
-  case ":$PATH:" in
-    *":${bin_dirs[0]}:"*) ;;
-    *) note "open a new terminal, or run: source ${changed[0]}" ;;
-  esac
+  [[ ${#rc_changed[@]} -gt 0 ]] || return 0
+  note "PATH: ${bin_dirs[0]} in ${rc_changed[*]} (a marked block; --no-modify-rc leaves the files alone)"
 }
 
-shell_rc_remove() {
-  [[ $mode == user && $modify_rc == 1 ]] || return 0
-  local rc
-  while IFS= read -r rc; do shell_rc_block "$rc" || true; done < <(shell_rc_files)
+# What a terminal open now does to get it: a program cannot change a shell that already runs (its PATH, its
+# completions); new terminals read the rc file (and the completion) themselves.
+running_shell_hint() {
+  local rc="" file shell_name=${SHELL##*/} on_path=1 completion=""
+  case ":$PATH:" in *":${bin_dirs[0]}:"*) ;; *) on_path=0 ;; esac
+  if [[ ${#rc_changed[@]} -eq 0 && $completion_changed == 0 && ( $on_path == 1 || $mode == system ) ]]; then return 0; fi
+  if [[ $mode == user && $modify_rc == 1 ]]; then
+    while IFS= read -r file; do
+      file=${file/#$HOME/\~}
+      [[ -z "$rc" ]] && rc=$file
+      if [[ $shell_name == zsh && $file == *zshrc ]] || [[ $shell_name != zsh && $file == *bash* ]]; then rc=$file; break; fi
+    done < <(shell_rc_files)
+    if [[ ${#rc_changed[@]} -gt 0 || $completion_changed == 1 || $on_path == 0 ]]; then
+      say hint "in a terminal open now run: source $rc (new terminals have it; a program cannot change a shell that already runs)"
+    fi
+    return 0
+  fi
+  [[ $completion_changed == 1 ]] || return 0
+  case $shell_name in
+    zsh) completion=$(completion_files | sed -n 2p) ;;
+    fish) completion=$(completion_files | sed -n 3p) ;;
+    *) completion=$(completion_files | sed -n 1p) ;;
+  esac
+  say hint "Tab completion in a terminal open now: source ${completion/#$HOME/\~} (a program cannot change a shell that already runs)"
+}
+
+# What --uninstall removes, one "KIND<TAB>PATH" line each (--uninstall --dry-run prints them; sandbox-ai uninstall
+# shows them with their sizes before it asks, then runs --uninstall): the command links into this installation, its
+# own files in DATA (never the data sandbox-ai keeps beside them in a user install), the menu entry, the app's login
+# entry when it starts this installation, the PATH blocks and the Tab completion files.
+UNINSTALL_FILES=(versions current app-env release-state.json update-pending)
+uninstall_targets() {
+  local dir cmd name file rc
+  for dir in "${bin_dirs[@]}"; do
+    for cmd in "${COMMANDS[@]}" "${OLD_COMMANDS[@]}" sandbox-ai-update "$APP_COMMAND"; do
+      if [[ -L "$dir/$cmd" && $(readlink "$dir/$cmd") == "$data_dir"/* ]]; then printf 'link\t%s\n' "$dir/$cmd"; fi
+    done
+  done
+  for name in "${UNINSTALL_FILES[@]}"; do
+    if [[ -e "$data_dir/$name" || -L "$data_dir/$name" ]]; then printf 'installation\t%s\n' "$data_dir/$name"; fi
+  done
+  for file in "$data_dir"/.install-*; do
+    if [[ -e "$file" || -L "$file" ]]; then printf 'installation\t%s\n' "$file"; fi
+  done
+  if [[ $mode == user ]]; then
+    file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/sandbox-ai-app.desktop"
+    if [[ -e "$file" || -L "$file" ]]; then printf 'menu\t%s\n' "$file"; fi
+    # The app's login entry (its settings: start at login), when it starts this installation's app: gone with it.
+    for file in "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/sandbox-ai-app.desktop" \
+                "$HOME/Library/LaunchAgents/org.sandbox-ai.app.plist"; do
+      if [[ -f "$file" && ! -L "$file" ]] && grep -qF -- "$data_dir/" "$file"; then printf 'login\t%s\n' "$file"; fi
+    done
+  fi
+  if [[ $mode == user && $modify_rc == 1 ]]; then
+    while IFS= read -r rc; do
+      if [[ -f "$rc" ]] && grep -qxF -- "$RC_BEGIN" "$rc"; then printf 'rc\t%s\n' "$rc"; fi
+    done < <(shell_rc_files)
+  fi
+  while IFS= read -r file; do
+    if [[ -f $file && ! -L $file ]] && grep -q "sandbox-ai __complete" "$file"; then printf 'completion\t%s\n' "$file"; fi
+  done < <(completion_files)
+  return 0
 }
 
 if [[ $action != uninstall ]]; then
@@ -896,6 +1153,10 @@ if [[ $action != uninstall ]]; then
 fi
 
 case "$action" in
+  fetch)
+    [[ -z "$from" ]] || die "--fetch downloads a release; --from installs one"
+    helper fetch "$source_url" "$want_version" "$fetch_dir" "$(installed_version)" "$state_file" "${trust[@]}"
+    exit 0 ;;
   check)
     current=$(installed_version)
     echo "installed: ${current:-none} ($data_dir)"
@@ -910,22 +1171,24 @@ case "$action" in
       note "no installation in $data_dir: nothing removed (a user's own installation: --user; a system one: as root)"
       exit 0
     fi
-    for dir in "${bin_dirs[@]}"; do
-      for cmd in "${COMMANDS[@]}" "${OLD_COMMANDS[@]}" sandbox-ai-update "$APP_COMMAND"; do
-        if [[ -L "$dir/$cmd" && $(readlink "$dir/$cmd") == "$data_dir"/* ]]; then rm -f "$dir/$cmd"; fi
-      done
+    if [[ $dry_run == 1 ]]; then uninstall_targets; exit 0; fi
+    # Only what this script made (uninstall_targets). In a user install $data_dir is also where sandbox-ai keeps your
+    # secrets (file store), saved logins, kits, plugins, VPN keys and MCP rootfs trees: those stay (sandbox-ai
+    # uninstall --purge removes them).
+    targets=()
+    while IFS= read -r line; do targets+=("$line"); done < <(uninstall_targets)
+    for line in ${targets[@]+"${targets[@]}"}; do
+      kind=${line%%$'\t'*} path=${line#*$'\t'}
+      case $kind in
+        installation)
+          # installed versions are read-only (go-w, and app files)
+          [[ -L "$path" ]] || chmod -R u+w -- "$path" 2>/dev/null || true
+          rm -rf -- "$path" ;;
+        rc) shell_rc_block "$path" >/dev/null || true ;;
+        *) rm -f -- "$path" ;;
+      esac
     done
-    # Only what this script made. In a user install $data_dir is also where sandbox-ai keeps your secrets (file
-    # store), saved logins, kits, plugins, VPN keys and MCP rootfs trees: those stay (remove them yourself).
-    if [[ -d "$data_dir" ]]; then
-      chmod -R u+w -- "$data_dir/versions" 2>/dev/null || true  # installed versions are read-only (go-w, and app files)
-      rm -rf -- "${data_dir:?}/versions" "${data_dir:?}/current" "${data_dir:?}/app-env" \
-        "${data_dir:?}/release-state.json" "${data_dir:?}"/.install-*
-      rmdir -- "$data_dir" 2>/dev/null || true  # gone if nothing else was in it (a system install's lib dir)
-    fi
-    if [[ $mode == user ]]; then rm -f -- "${XDG_DATA_HOME:-$HOME/.local/share}/applications/sandbox-ai-app.desktop"; fi
-    shell_rc_remove
-    completion_remove
+    rmdir -- "$data_dir" 2>/dev/null || true  # gone if nothing else was in it (a system install's lib dir)
     if [[ -d "$data_dir" ]]; then
       note "removed the installation in $data_dir, its command links, the PATH block and the Tab completion; your data there (secrets, logins, kits, plugins, VPN keys) and sessions and settings in ~/.local/state and ~/.config stay"
     else
@@ -951,6 +1214,10 @@ if [[ -n "$from" ]]; then
       # Checked and unpacked from the same copy.
       cp -- "$from" "$work/bundle.tar.gz"
       signature=$(helper verify "$work/bundle.tar.gz" "$from" "${trust[@]}")
+      # A release's bundle (its name is in the signed SHA256SUMS): its tree must be that version.
+      if [[ $verify == 1 && $(basename -- "$from") =~ ^sandbox-ai-bundle-([0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?)\.tar\.gz$ ]]; then
+        release_version=${BASH_REMATCH[1]}
+      fi
       note "verified $(basename -- "$from") against SHA256SUMS and its signature by ${signature#good }"
       helper unpack "$work/bundle.tar.gz" "$staged"
     else
@@ -990,7 +1257,10 @@ if [[ "$current" == "$version" && $force == 0 && -z "$from" ]]; then
   app_dependencies "$data_dir/current"
   app_desktop_entry
   note "sandbox-ai $version is already installed and up to date"
-  path_hint
+  shell_rc_setup  # (the block and the completion of this version again: one removed by hand, an older one)
+  completion_setup
+  end_notes
+  running_shell_hint
   exit 0
 fi
 
@@ -1039,4 +1309,6 @@ app_desktop_entry
 if app_linked; then note "the app: sandbox-ai-app (in the desktop menu as \"sandbox-ai\")"; fi
 shell_rc_setup
 completion_setup
+end_notes
+running_shell_hint
 command -v podman >/dev/null || note "Podman not found; install it (or Bubblewrap and Firejail), then build the images: sandbox-ai build all"

@@ -112,6 +112,44 @@ def test_a_tables_help_button_covers_no_column_title(qapp, isolated, monkeypatch
         close(window)
 
 
+def test_a_tables_help_button_follows_its_scroll_bar_coming_and_going(qapp):
+    """The flaky test above, made certain: the (?) was moved on the scroll bar's rangeChanged, but Qt shows or hides
+    the bar only after that (a queued call), and nothing moved the (?) then but a LayoutRequest posted for later - in
+    between (one turn of the event loop, the moment that test looked when a host's rows came late) the (?) sat on the
+    shown bar, or, rows gone, where the hidden bar had been: over the end of the last column's title (816 > 819)."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from sandbox_ai_app import help_texts as H
+    from sandbox_ai_app import help_view
+    view = widgets.table(["Kind", "Name", "State"], stretch=1)
+    view.resize(500, 220)
+    view.show()
+    button = help_view.corner(view, next(iter(H.TIPS)))
+    bar = view.verticalScrollBar()
+    header = view.horizontalHeader()
+
+    def covers_nothing():
+        """Right of the header's titles, left of the scroll bar (inside the table's viewport)."""
+        end = header.mapTo(view, header.viewport().geometry().topRight()).x()
+        right = view.viewport().mapTo(view, view.viewport().rect().topRight()).x()
+        return end < button.x() and button.x() + button.width() <= right + 1
+
+    try:
+        for _ in range(5):
+            qapp.processEvents()
+        assert not bar.isVisible() and covers_nothing(), (button.x(), view.width())
+        for rows in (40, 0, 40, 0):  # the bar comes, goes, comes and goes again
+            view.setRowCount(rows)
+            view.updateGeometries()  # the view's delayed layout, now: the bar's new range (rangeChanged)
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.MetaCall)  # Qt's queued show or hide of the bar
+            assert bar.isVisible() == bool(rows), rows
+            assert covers_nothing(), (rows, button.x(), header.viewport().geometry().getRect(),
+                                      view.viewport().geometry().getRect())
+    finally:
+        view.close()
+        view.deleteLater()
+
+
 # -- A-N1: a run without a kept start, paused on this machine --
 
 

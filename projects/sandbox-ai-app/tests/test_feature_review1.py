@@ -87,5 +87,6 @@ def test_a_notification_offers_no_allow_for_a_call_it_cannot_show_whole(qapp, mo
     ui.MainWindow.questions_changed(window, 2, [("claude-abc", long_call, ("local", "claude-abc", "1700000000-1-1")),
                                                 ("claude-abc", short_call, ("local", "claude-abc", "1700000000-1-2"))])
     labels = [[label for label, _ in actions] for actions in shown]
-    assert labels[0] == ["Block", "Block always…", "Open approvals"], labels
-    assert labels[1] == ["Allow", "Allow always…", "Block", "Block always…", "Open approvals"], labels
+    assert labels[0] == ["Block", "Block always", "Open approvals"], labels
+    assert labels[1] == ["Allow once", "Always allow", "Always, also for later sessions", "Block", "Block always",
+                         "Open approvals"], labels

@@ -101,10 +101,8 @@ def test_check_refuses_what_goose_cannot_do_here():
     goose.check(ns("claude"))  # nothing to say about another agent
     with pytest.raises(ValueError, match="is for Goose"):
         goose.check(ns("claude", "updates"))
-    with pytest.raises(ValueError, match="not in the team image"):
-        goose.check(ns("goose"), companions=["claude"])
-    with pytest.raises(ValueError, match="not enforced for Goose"):
-        goose.check(ns("goose"), hooks_active=True)
+    goose.check(ns("goose"), companions=["claude"])  # --with: a layer of the team image since 0.1.98
+    goose.check(ns("goose"), hooks_active=True)  # rules for its own tools: sandbox-ai's hooks plugin
     with pytest.raises(ValueError, match="needs the network"):
         goose.check(ns("goose", "updates", offline=True))
 
@@ -368,7 +366,7 @@ def test_build_all_builds_every_agent():
     """`sandbox-ai build all` builds every agent the app offers (it left the new ones out, and their starts from
     the app failed with "image not known" after a build all)."""
     text = (ROOT / "sandbox/build_image.sh").read_text()
-    assert "    all) agents=(codex claude opencode hermes dsh qwen goose); shift; break ;;" in text
+    assert "    all) agents=(codex claude opencode opencode2 hermes dsh qwen goose openhands nanobot letta pi); shift; break ;;" in text
 
 
 # --- the agent's other places: sessions, presets, kits, its helper mode ---------------------------------------------

@@ -84,38 +84,75 @@ def test_the_check_catches_a_missing_name(tmp_path):
 # SandboxAI methods that run a command, ask the keyring or read big logs (the window must keep polling the
 # approvals meanwhile, or questions are refused after a minute). Declared here; test_every_slow_backend_method_is_declared
 # finds every method of backend.py that runs a process, sleeps or calls one of these, and wants it here too.
-BLOCKING_SAI = {"call", "_call", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret",
-                "delete_secret", "secrets", "login_status", "remembered", "forget_remembered", "question_context",
+BLOCKING_SAI = {"call", "_call", "bridges", "bridge_json", "bridge_plan", "bridge_add", "bridge_show", "bridge_revoke",
+                "host_bridges", "bridge_resume", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret",
+                "mcp_tool_budget",  # mcp_budget.start_report: the profiles, the definitions, the pins read
+                "shared_wildcards",  # the Public Suffix List read (sandbox-ai's runtime) at the first call
+                "delete_secret", "secrets", "save_token", "login_status", "remembered", "forget_remembered", "question_context",
                 "run_log", "devices_added", "device_check", "device_candidates", "add_device", "remove_device",
+                "device_scan", "devices_listed",  # sandbox-ai devices scan|list --json: a process, also over SSH
                 "set_limits", "workspaces", "add_workspace", "remove_workspace",
                 "safeguards",  # sandbox-ai safeguards --json: a process, also over SSH
+                # sandbox-ai update mode, --check, --apply, --rollback (Settings › Updates, the Hosts page)
+                "update_status", "set_update_mode", "update_check_now", "update_apply", "update_install",
+                "update_rollback",
                 "report",  # sandbox-ai report: reads the logs bounded, writes the file (seconds)
-                "user_images", "variant_bases",  # sandbox-ai images list --json: a process, also over SSH
+                "host_report",  # sandbox-ai report on a host, over SSH
+                "user_images", "variant_bases", "service_templates",  # sandbox-ai images list --json: a process, also over SSH
                 "host_version_known",  # one short SSH command (review 6 A-N3)
+                # a start under a session's name, and its agent's login, on this machine or a host (over SSH)
+                "session_seen", "session_stop", "host_logins", "host_logged_in",
+                # sandbox-ai notify on this machine or a host (over SSH): the phone channels
+                "notify_channels", "notify_add", "notify_remove", "notify_test", "notify_link",
+                # sandbox-ai schedule on this machine or a host (over SSH): the scheduled runs
+                "schedules", "schedule_history", "schedule_report", "schedule_add", "schedule_action",
+                "schedule_timer",
                 "write_project",
                 # over SSH to the hosts of `sandbox-ai hosts` (seconds; a host that does not answer: up to the timeout)
                 "host_run", "host_json", "host_instances", "host_questions", "host_test", "host_update",
+                "host_file_roots",  # sandbox-ai list --folders --json on a host: the Files page's remote sandboxes
                 "limits_shown", "review_home", "host_remembered", "host_net_options", "ended_starts", "start_history",
                 "restore_home", "rules_check", "rules_show", "rules_reload",
-                "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "host_devices_added",
+                "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "state_usage", "home_details",
+                "host_devices_added",
                 "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
                 "recent_folders", "host_install",
                 # starts, MCP servers, net keep, the privacy check, version and demo device on a host (or here)
                 "host_launch_options", "host_dry_run", "host_mcp_servers", "host_mcp_list", "host_mcp_catalog", "host_mcp_targets",
                 "host_mcp_attach", "net_keep", "privacy_check", "version_details", "host_doctor", "demo_device",
+                # MCP servers of another host copied to one (sandbox-ai mcp copy here, over SSH to both), and the
+                # servers of every other host it offers (mcp list --json on each)
+                "host_mcp_copy", "host_mcp_copy_check", "host_mcp_elsewhere",
+                # a board or session as one file, and such a file taken in (sandbox-ai board export|import; with
+                # images: minutes)
+                "board_export", "board_import",
+                # a start's workspace checkpoints (sandbox-ai checkpoint, also on a host: a first one copies every
+                # file of the workspaces, a restore writes them)
+                "checkpoints", "checkpoint_create", "checkpoint_diff", "checkpoint_preview", "checkpoint_restore",
+                "checkpoint_delete", "checkpoint_json",
+                # the workspace review and the MCP tool pins (sandbox-ai workspace review, mcp tools; also on a host)
+                "workspace_reviews", "workspace_review_decide", "mcp_tool_pins", "mcp_tool_pin", "mcp_pin_change",
+                # a start's agent memory and session files, its folder as an archive (sandbox-ai session, also on a host)
+                "session_memory", "session_files", "session_export", "file_view_json", "session_logins",
+                # the storage check and an item of its plan (sandbox-ai gc --check, gc --only ...; also on a host)
+                "storage_check", "storage_apply",
+                "import_session_login",
                 "mcp_servers", "mcp_serving", "mcp_attach", "mcp_attach_targets",
                 # the parity section: the Manage pages, Activity, Statistics and Teams on every host
                 "host_listing", "host_vpn_profiles", "host_git_logins", "host_publish_logins", "host_identities",
                 "host_save_identity", "host_login_status", "host_kits_inventory", "host_kit_command", "revoke_hooks",
+                # what the agents on a host have of their own (kits host-list, host-show, host-import)
+                "host_agent_parts", "host_agent_part", "host_import_parts", "host_import_memory",
                 "plugins_status", "host_plugins", "host_canary_log", "canary_runs", "canary_run", "canary_resume", "host_preset_dirs",
                 "host_preset_dir_command", "trusted_projects", "forget_trusted", "host_activity", "host_statistics",
-                "teams", "team_show", "team_post", "team_stop", "team_delete", "kits_inventory", "kit_command",
+                "teams", "team_show", "team_check", "team_post", "team_stop", "team_delete", "kits_inventory", "kit_command",
                 "canary_log", "preset_dirs", "preset_dir_command", "identities", "save_identity", "git_logins",
                 "publish_logins", "vpn_check", "vpn_remove", "vpn_add",
                 # `sandbox-ai llm list` and `vpn list` (the wizard's Model page, the preset form, the VPN page)
                 "llm_endpoints", "vpn_profiles", "listing",
                 # MCP servers into a running start and out (--live), a host's model servers and connection logs
-                "host_mcp_attach_live", "host_mcp_detach_live", "mcp_live", "host_llm_endpoints", "host_llm_models",
+                "host_mcp_attach_live", "host_mcp_detach_live", "mcp_live",
+                "host_kits_attach", "host_kits_detach", "host_agent_restart", "kits_live", "host_running_starts", "host_llm_endpoints", "host_llm_models",
                 "host_llm_servers", "host_connections", "host_log_summary",
                 # every plugin marketplace of a host (the Kits page's browser) and its version check over SSH
                 "marketplaces", "host_marketplaces", "require_marketplaces",
@@ -124,7 +161,10 @@ BLOCKING_SAI = {"call", "_call", "answer", "dry_run", "doctor", "mcp_catalog", "
                 # a login added, and the known-options check (`COMMAND --help` there) under each of them
                 "host_preset", "host_presets", "host_start_choices", "host_project_show", "host_project_trust",
                 "host_trust_defaults", "host_web_users", "host_web_user_remove", "host_web_cert", "host_answer",
+                "host_answer_relaying",
                 "host_mcp_detach", "stop_mcp", "stop_run", "secrets_backend", "add_login", "checked",
+                # the primary password of a host's secrets: sandbox-ai secrets status|unlock|lock|password set there
+                "secrets_protection", "secrets_unlock", "secrets_lock", "secrets_new_password",
                 "cut_run", "cut_everywhere", "cut_every_host",  # the kill switch: sandbox-ai net cut, here or over SSH
                 "host_command_options", "require_options", "host_image_variants", "host_agent_images",
                 # sandbox-ai's registry of what runs (net.running) asks Podman whether the pod of a run whose launcher
@@ -167,8 +207,12 @@ BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models", "de
                     "chromium": {"check", "probe"},
                     # name_fields.read_names: a host's secrets or VPN profiles (`secrets list`, `vpn list` there)
                     "name_fields": {"read_names"}, "NF": {"read_names"},
+                    # device_picker.scan: a host's devices (`devices scan --json` there, over SSH for a host)
+                    "device_picker": {"scan"}, "DP": {"scan"},
                     # remote.py: connecting over SSH (ssh, a handshake), reading a host's keys (ssh-keyscan)
-                    "remote": {"RemoteRoot", "scan_host", "fingerprints", "Sftp"}}
+                    "remote": {"RemoteRoot", "scan_host", "fingerprints", "Sftp",
+                               # a host's folders looked at and made over SFTP (an MCP server's, Add… on a host)
+                               "folder_states", "make_folders"}}
 # widgets.background, ThreadCall, Task.thread and call_watched; the Kits page's start_change (its Task.call_watched)
 WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change", "run_each",
             # the Files page's: at once for a local root, in a thread (Task with Cancel / background) for a remote one;
@@ -180,6 +224,7 @@ WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change"
 # start a terminal's command (pty_bridge.py: a fork and exec, read with a QSocketNotifier).
 HELPER_MODULES = {"backend.py", "widgets.py", "files.py", "wizard_llm.py", "presets.py", "pty_bridge.py",
                   "name_fields.py", "chromium.py",
+                  "device_picker.py",  # (its scan reads a host's devices: in the pages' threads only, BLOCKING_HELPERS)
                   # remote.py itself runs ssh (in the Files page's threads only); what the pages call of it - a
                   # RemoteRoot's steps, connecting, ssh-keyscan - is checked as files.py's are (BLOCKING_FILES,
                   # BLOCKING_HELPERS["remote"])
@@ -481,6 +526,10 @@ MUTATIONS = {
     "team-delete": ["team_delete"],
     "image-remove": [("images", "remove")],
     "mcp-attach": ["mcp_attach", "host_mcp_attach_live"],
+    "mcp-copy": ["host_mcp_copy"],
+    "kits-attach": ["host_kits_attach"],
+    "kits-detach": ["host_kits_detach"],
+    "agent-restart": ["host_agent_restart"],
     "mcp-detach": ["host_mcp_detach_live", "host_mcp_detach"],
     "net-keep": ["net_keep"],
     "web-user-remove": ["host_web_user_remove"],
@@ -491,6 +540,11 @@ MUTATIONS = {
     "session-replace": ["session_copy", "session_move"],
     "home-restore": ["restore_home"],
     "rules-reload": ["rules_reload"],
+    "bridge-add": ["bridge_add"],
+    "bridge-revoke": ["bridge_revoke"],
+    "bridge-resume": ["bridge_resume"],
+    "checkpoint-restore": ["checkpoint_restore"],
+    "checkpoint-delete": ["checkpoint_delete"],
 }
 
 # The actions of the web interface's table (backend.NEEDS_CONFIRM is the same set) that no page of the app does yet:

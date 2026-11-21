@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGraphicsScene, QHBoxLayout, QLabel,
@@ -20,16 +20,18 @@ from PySide6.QtWidgets import (
 
 from . import applog
 from . import board as B
+from . import board_icons
 from . import presets as PR
 from . import theme, widgets
 from . import wizard_llm as WL
+from . import model_profile_view as MPV
 from .board_view import NODE_H, NODE_W, PathEdit, elide
 from .files import printable, printable_text
 from .model_combo import searchable
 from .i18n import language as i18n_language, tr
 from .short_notices import short_notice
 from .state import choose_file
-from .widgets import MONO, FlowLayout, ask_first, background, plain_label, safe_tooltip, warn
+from .widgets import MONO, FlowLayout, ask_first, background, explanation, plain_label, safe_tooltip, warn
 
 THUMB = QSize(248, 124)
 
@@ -79,15 +81,18 @@ def select_preset(combo, catalogue, wanted):
     return index >= 0
 
 
+# The gallery's cards: the first FIRST_CARDS made with it (about what its view shows), the others BATCH_CARDS per turn
+# of the event loop while it is shown (a card takes 1-2 ms here: a batch stays far below what a human notices).
+FIRST_CARDS, BATCH_CARDS = 12, 8
 THUMBS_KEPT = 300  # pictures of boards kept (about 120 KB each at a ratio of 2): the gallery's, in two themes and more
 _thumbs = {}  # {(the look, the board): QPixmap} - see thumbnail()
 
 
 def thumbnail(board, size=THUMB, ratio=1.0):
     """A small picture of BOARD in the current theme's colours: the canvas, the nodes as cards with their
-    title band (a part with a placeholder outlined in the warning colour), the edges. Drawn once for each look
-    (the theme's colours, the language, size and ratio) and board (its state): every opening of the gallery drew
-    every preset's anew (48 scenes, a third of the time it takes to open)."""
+    title band and their kind's icon (a part with a placeholder outlined in the warning colour), the edges. Drawn
+    once for each look (the theme's colours, the language, size and ratio) and board (its state): every opening of
+    the gallery drew every preset's anew (48 scenes, a third of the time it takes to open)."""
     key = (json.dumps([theme.colors(), theme.data().get("radius"), i18n_language(), size.width(), size.height(),
                        ratio], sort_keys=True, default=str), json.dumps(board.state(), sort_keys=True, default=str))
     pixmap = _thumbs.get(key)
@@ -129,10 +134,14 @@ def draw_thumbnail(board, size, ratio):
         header.addRect(QRectF(rect.left(), rect.top(), rect.width(), 40.0))
         band = QColor(colors["accent"] if node.kind == "agent" else colors["node_header"])
         scene.addPath(header.intersected(body), QPen(Qt.PenStyle.NoPen), QBrush(band)).setZValue(2)
-        text = scene.addSimpleText(elide(tr(B.KINDS[node.kind].title), 14), font)
-        text.setBrush(QBrush(QColor(colors["accent_text"] if node.kind == "agent"
-                                    else colors.get("node_title", colors["text"]))))
-        text.setPos(rect.left() + 12, rect.top() + 3)
+        title_color = colors["accent_text"] if node.kind == "agent" else colors.get("node_title", colors["text"])
+        mark = scene.addPixmap(board_icons.pixmap(node.kind, 30, title_color))  # its kind's icon, then the title
+        mark.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        mark.setPos(rect.left() + 8, rect.top() + 5)
+        mark.setZValue(3)
+        text = scene.addSimpleText(elide(tr(B.KINDS[node.kind].title), 12), font)
+        text.setBrush(QBrush(QColor(title_color)))
+        text.setPos(rect.left() + 46, rect.top() + 3)
         text.setZValue(3)
         bar = QPainterPath()  # the detail line, as a bar
         bar.addRoundedRect(QRectF(rect.left() + 12, rect.top() + 48, rect.width() * 0.6, 8), 4, 4)
@@ -198,6 +207,29 @@ class PresetCard(QFrame):
         self.setAccessibleName(preset.text(preset.title) + (f" ({tr('not live-tested yet')})" if experimental
                                                             else ""))
         self.select(False)
+
+    measured = None  # its size hint, until something in it changes (event)
+
+    def sizeHint(self):  # noqa: N802
+        """As high as its wrapped description needs at the card's fixed width: the gallery's flow layout places each
+        card at its size hint, which measured the description at a wrapping label's own width (about 80 characters)
+        and cut its last lines. Measured once until something in the card changes: the gallery's flow layouts ask
+        every card seven times while the gallery is made (a quarter of the time "New from preset…" held the window:
+        with a hundred presets close to the half second a click may take)."""
+        if self.measured is None:
+            hint = super().sizeHint()
+            layout = self.layout()
+            if layout is not None and layout.hasHeightForWidth():
+                hint.setHeight(max(hint.height(), layout.totalHeightForWidth(self.minimumWidth())))
+            self.measured = hint
+        return QSize(self.measured)
+
+    def event(self, event):  # noqa: N802
+        # (a text, a font or the style of something in it changed - Qt asks for a new layout -, or its own)
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.FontChange, QEvent.Type.StyleChange,
+                            QEvent.Type.Polish, QEvent.Type.LanguageChange):
+            self.measured = None
+        return super().event(event)
 
     def select(self, on):
         self.selected = on
@@ -287,7 +319,15 @@ class PresetGallery(QDialog):
         side.addWidget(plain_label(tr("Command line"), role="section"))
         side.addWidget(self.command)
         side.addStretch()
-        split.addWidget(details)
+        # The details scroll where the dialog is lower than they need (a large font on a laptop: at most 90% of the
+        # screen) - a wrapped note was squeezed and cut instead.
+        side_scroll = QScrollArea()
+        side_scroll.setObjectName("presetDetails")
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        side_scroll.setWidget(details)
+        split.addWidget(side_scroll)
         split.addWidget(self.scroll)
         split.setSizes([360, 820])
         layout.addWidget(split, 1)
@@ -325,7 +365,7 @@ class PresetGallery(QDialog):
         buttons.rejected.connect(self.reject)
         row.addWidget(buttons)
         layout.addLayout(row)
-        self.cards, self.sections, self.selected = [], [], None
+        self.made, self.section_list, self.selected, self.queue = [], [], None, []
         self.populate()
         if self.host != "local":
             self.read_host_presets()
@@ -366,10 +406,17 @@ class PresetGallery(QDialog):
         return self.catalogue.groups()
 
     def populate(self, select=None):
+        """The gallery's sections and cards made anew: every section at once, with its count; the cards of the first
+        FIRST_CARDS presets (and of the one to SELECT) now, the others BATCH_CARDS at a time while the gallery is shown
+        (make_next) - made in one go, a card per preset (106 and more), they held the GUI thread (R2-23). The search,
+        the counts and the keys see every preset meanwhile (cards: all of them, made now)."""
         holder = QWidget()
         column = QVBoxLayout(holder)
-        self.cards, self.sections, self.selected = [], [], None  # the cards shown until now go
+        self.made, self.section_list, self.selected = [], [], None  # the cards shown until now go
         self.section_notes = {}  # {section key: the label under its heading (sandbox-ai's category's description)}
+        self.section_presets = {}  # {section key: its presets, cards made or not}
+        self.queue = []  # [(the section's cards, its flow layout, preset)] of the cards still to make
+        self.generation = getattr(self, "generation", 0) + 1  # (batches of an older populate stop)
         for key, title, presets in self.presets():
             if key == PR.SAI_CATEGORY and not presets:
                 continue  # a sandbox-ai without presets of its own: no empty section
@@ -377,18 +424,11 @@ class PresetGallery(QDialog):
             described = self.catalogue.description(key)
             if described:
                 heading.setToolTip(safe_tooltip(described))
-                self.section_notes[key] = plain_label(described, role="secondary")
+                self.section_notes[key] = explanation(described)
             box = QWidget()
             flow = FlowLayout(box, spacing=10)
             cards = []
-            for preset in presets:
-                board = self.build(preset)
-                card_ = PresetCard(preset, board, B.badges(board, self.policy)[0])
-                card_.chosen.connect(self.choose)
-                card_.opened.connect(lambda _card: self.create())
-                card_.menu_requested.connect(self.card_menu)
-                flow.addWidget(card_)
-                cards.append(card_)
+            self.queue += [(cards, flow, preset) for preset in presets]
             if key == "mine" and not presets:
                 empty = plain_label(tr("None yet: “Save the board as a preset…” keeps the board shown now."),
                                     role="secondary")
@@ -397,25 +437,83 @@ class PresetGallery(QDialog):
             if key in self.section_notes:
                 column.addWidget(self.section_notes[key])
             column.addWidget(box)
-            self.sections.append((heading, box, cards, key))
-            self.cards += cards
+            self.section_list.append((heading, box, cards, key))
+            self.section_presets[key] = list(presets)
         column.addStretch()
         self.scroll.setWidget(holder)
         self.categories.clear()
-        for heading, _box, cards, key in self.sections:
-            item = QListWidgetItem(f"{heading.text()} ({len(cards)})")
+        for heading, _box, _cards, key in self.section_list:
+            item = QListWidgetItem(f"{heading.text()} ({len(self.section_presets[key])})")
             item.setData(Qt.ItemDataRole.UserRole, key)
             if key in self.section_notes:
                 item.setToolTip(safe_tooltip(self.section_notes[key].text()))
             self.categories.addItem(item)
         self.fit_categories()
-        wanted = next((c for c in self.cards if select in (c.preset.key, c.preset.id)), None) or \
-            (self.cards[0] if self.cards else None)
+        self.make_cards(FIRST_CARDS)
+        if select is not None:  # the card to select made now, with those before it
+            while self.queue and not any(select in (c.preset.key, c.preset.id) for c in self.made):
+                self.make_cards(BATCH_CARDS)
+        wanted = next((c for c in self.made if select in (c.preset.key, c.preset.id)), None) or \
+            (self.made[0] if self.made else None)
         if wanted is not None:
             self.choose(wanted)
         self.filter(self.search.text())
         if select is None:
             self.scroll.verticalScrollBar().setValue(0)
+        self.next_batch()
+
+    def make_cards(self, count):
+        """The next COUNT cards of the queue made, each shown as the search says."""
+        text = self.search.text()
+        for cards, flow, preset in self.queue[:count]:
+            board = self.build(preset)
+            card_ = PresetCard(preset, board, B.badges(board, self.policy)[0])
+            card_.chosen.connect(self.choose)
+            card_.opened.connect(lambda _card: self.create())
+            card_.menu_requested.connect(self.card_menu)
+            if text.strip() and not PR.matches(preset, text, self.catalogue):
+                card_.setVisible(False)
+            flow.addWidget(card_)
+            cards.append(card_)
+            self.made.append(card_)
+        del self.queue[:count]
+
+    def next_batch(self):
+        if self.queue:
+            generation = self.generation
+            QTimer.singleShot(0, self, lambda: self.generation == generation and self.make_next())
+
+    def make_next(self):
+        """One batch of the cards still to make (the event loop runs between two: the gallery answers)."""
+        if not self.queue:
+            return
+        self.make_cards(BATCH_CARDS)
+        if self.selected is None:
+            visible = [c for c in self.made if not c.isHidden()]
+            if visible:
+                self.choose(visible[0])
+        self.next_batch()
+
+    def finish_cards(self):
+        """Every card made now (what needs them all: the keys' order, a category's place)."""
+        while self.queue:
+            self.make_cards(len(self.queue))
+        if self.selected is None:
+            visible = [c for c in self.made if not c.isHidden()]
+            if visible:
+                self.choose(visible[0])
+
+    @property
+    def cards(self):
+        """Every card of the gallery (those not made yet are made now)."""
+        self.finish_cards()
+        return self.made
+
+    @property
+    def sections(self):
+        """[(heading, box, cards, key)] of every section, each with all its cards (made now)."""
+        self.finish_cards()
+        return self.section_list
 
     def build(self, preset, values=None):
         return PR.build(self.sai, preset, self.directory, agent=self.agent, values=values,
@@ -425,11 +523,10 @@ class PresetGallery(QDialog):
         return [c for c in self.cards if not c.isHidden()]
 
     def filter(self, text):
-        for heading, box, cards, key in self.sections:
-            shown = 0
+        for heading, box, cards, key in self.section_list:
             for card_ in cards:
                 card_.setVisible(PR.matches(card_.preset, text, self.catalogue))
-                shown += not card_.isHidden()
+            shown = sum(PR.matches(preset, text, self.catalogue) for preset in self.section_presets[key])
             visible = bool(shown) or (key == "mine" and not text.strip())
             heading.setVisible(visible)
             box.setVisible(visible)
@@ -442,7 +539,10 @@ class PresetGallery(QDialog):
                     item.setText(f"{heading.text()} ({shown})")
         self.fit_categories()
         if self.selected is None or self.selected.isHidden():
-            visible = self.visible_cards()
+            visible = [c for c in self.made if not c.isHidden()]
+            if not visible and self.queue and text.strip():  # matches among the cards not made yet: made now
+                self.finish_cards()
+                visible = [c for c in self.made if not c.isHidden()]
             self.choose(visible[0] if visible else None)
 
     def fit_categories(self):
@@ -454,7 +554,10 @@ class PresetGallery(QDialog):
     def show_category(self, item):
         """Scroll the cards to the section of the category clicked."""
         key = item.data(Qt.ItemDataRole.UserRole)
-        for heading, _box, _cards, section in self.sections:
+        if self.queue:  # (the sections above it at their full height first)
+            self.finish_cards()
+            self.scroll.widget().layout().activate()
+        for heading, _box, _cards, section in self.section_list:
             if section == key and not heading.isHidden():
                 self.scroll.verticalScrollBar().setValue(heading.y())
                 return
@@ -684,9 +787,9 @@ class PlaceholderForm(QDialog):
                             tr("Fill in: {name} (on {host})", name=preset.text(preset.title), host=printable(self.host)))
         self.resize(620, 120 + 70 * len(preset.placeholders))
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("What only you know. Left empty, a value stays a placeholder on the board "
+        layout.addWidget(explanation(tr("What only you know. Left empty, a value stays a placeholder on the board "
                                         "(shown as a problem until it is filled in); an optional part is left "
-                                        "out."), role="secondary"))
+                                        "out.")))
         form = QFormLayout()
         layout.addLayout(form)
         kinds = {p.kind for p in preset.placeholders}
@@ -747,7 +850,7 @@ class PlaceholderForm(QDialog):
     def field(self, placeholder):
         default = getattr(placeholder, "default", "")  # sandbox-ai's presets: the value's default (a port, a name)
         if placeholder.kind == "folder":
-            return PathEdit(default)
+            return PathEdit(default, host=self.host)  # a folder of the host it starts on: its folders listed
         if getattr(placeholder, "names", "") == "secret":  # the host's secrets to choose from (names only)
             from .name_fields import NameField
             field = NameField("secret", self.sai, self.host, placeholder=tr("empty: fill in later"))
@@ -798,6 +901,9 @@ class PlaceholderForm(QDialog):
                                           Qt.ItemDataRole.ToolTipRole)
                         if hint:  # e.g. Claude Code with a server without the Anthropic API: shown, not offered
                             combo.model().item(combo.count() - 1).setEnabled(False)
+            if kind == "llm":  # each NAME:MODEL's traffic light: how far the research supports the model
+                MPV.mark_combo(combo, self.sai, lambda index, c=combo:
+                               WL.parse_value(c.itemText(index))[1].split(",")[0] or None)
             for entry in entries if kind != "llm" else []:
                 name = entry.get("profile") or entry.get("name")
                 if not isinstance(name, str) or combo.findText(name) >= 0:
@@ -864,7 +970,9 @@ class PlaceholderForm(QDialog):
         for marker, widget in self.fields.items():
             value = widget.edit.text() if isinstance(widget, PathEdit) else widget.currentText()
             if value.strip():
-                found[marker] = os.path.expanduser(value.strip()) if isinstance(widget, PathEdit) else value.strip()
+                # (~ is this machine's HOME only for this machine: another host's path stays as it is there)
+                found[marker] = os.path.expanduser(value.strip()) if isinstance(widget, PathEdit) and \
+                    self.host == "local" else value.strip()
         return found
 
     def fill_later(self):
@@ -948,10 +1056,10 @@ class SavePresetDialog(QDialog):
         return self.name.text(), self.description.toPlainText(), self.category.currentData()
 
 
-def save_board_preset(parent, sai, board, choices, replacing=None):
+def save_board_preset(parent, sai, board, choices, replacing=None, host=None):
     """Keep BOARD as a preset of yours with CHOICES (SavePresetDialog.choices: title, description, category, notes,
-    keep); REPLACING (a preset of yours) is replaced after asking, keeping its id. The preset, or None (said: refused,
-    or not replaced)."""
+    keep); REPLACING (a preset of yours) is replaced after asking, keeping its id. HOST: the host the board starts on
+    (its paths are that host's). The preset, or None (said: refused, or not replaced)."""
     ident = None
     if replacing is not None and choices.get("replace"):
         if not ask_first(parent, "preset-replace", tr("Replace the preset"),
@@ -962,7 +1070,7 @@ def save_board_preset(parent, sai, board, choices, replacing=None):
     try:
         preset = PR.from_board(sai, board, choices["title"], choices.get("description", ""),
                                choices.get("category") or "simple", ident=ident, keep=choices.get("keep", True),
-                               notes=choices.get("notes", ()))
+                               notes=choices.get("notes", ()), host=host)
         PR.add_mine(sai, preset)
     except (OSError, ValueError) as exc:
         warn(parent, tr("Not saved"), printable_text(exc))

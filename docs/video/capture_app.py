@@ -34,12 +34,14 @@ import traceback
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-PAGES = ["launch", "board", "sandboxes", "approvals", "terminals", "files", "kits", "mcp", "llm", "images", "credentials",
-         "team", "connections", "activity", "traffic", "statistics", "system", "hosts", "help"]
+PAGES = ["launch", "board", "sandboxes", "terminals", "approvals", "files", "kits", "mcp", "llm", "images", "credentials",
+         "team", "connections", "activity", "traffic", "statistics", "monitor", "system", "hosts",
+         "help"]
 # The extra states: name -> the page they are on. How each is made is in Capture.state_NAME (dashes as _).
 STATES = {
     "launch-network": "launch", "board-preset": "board", "board-gallery": "board", "board-agents": "board",
     "board-agent": "board", "board-guide": "board", "sandboxes-cut": "sandboxes", "sandboxes-browser": "sandboxes",
+    "sandboxes-schedules": "sandboxes",
     "approvals-arguments": "approvals", "approvals-blocked": "approvals", "traffic-parameters": "traffic", "connections-record": "connections", "files-markdown": "files",
     "mcp-properties": "mcp", "llm-parameters": "llm", "images-yours": "images",
     "activity-safeguards": "activity", "files-editor": "files",
@@ -675,6 +677,17 @@ class Capture:
         self.tab(page.tabs, 1)
         image = self.window.grab().toImage()
         self.tab(page.tabs, 0)
+        return image
+
+    def state_sandboxes_schedules(self, page):
+        """The page's tab Schedules (since 2026-11-19 a tab of its own)."""
+        if not hasattr(page, "show_schedules"):
+            raise AttributeError("this app has no tab Schedules")
+        page.show_schedules()
+        self.settle(1.0)
+        image = self.window.grab().toImage()
+        page.show_sessions()
+        self.settle(0.3)
         return image
 
     def state_sandboxes_cut(self, page):

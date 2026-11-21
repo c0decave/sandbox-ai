@@ -38,9 +38,13 @@ DESCRIPTION_LIMIT = 2000  # characters of a description (the save dialog's has s
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 # Options a preset may not carry: they copy a login in (a preset is meant to be passed on), or select what
 # only a start decides.
-REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentials", "--workspace", "--config",
-           "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name", "--mcp-socket-dir",
-           "--mcp-approvals-dir")
+# (--workspace and --workspace-name only with a folder to fill in at the use; the launcher's own words to a start of
+# its own - --start-id, --helper-of, --vpn-lent-by, --workspaces-as-given - never: from_document knows every option the
+# launcher takes, also those its --help leaves out.)
+REFUSED = ("--copy-auth", "--auth-file", "--auth-from-session", "--import-codex-auth", "--git-credentials", "--workspace",
+           "--workspace-name", "--config", "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name",
+           "--mcp-socket-dir", "--mcp-approvals-dir", "--start-id", "--helper-of", "--vpn-lent-by",
+           "--workspaces-as-given")
 
 
 @dataclass(frozen=True)
@@ -674,14 +678,20 @@ def from_document(sai, document):
     from .state import scrub_arguments
     _check(scrub_arguments(lists["agent_args"]) == lists["agent_args"],
            N_("The agent arguments hold what may be a secret."))
-    options = B._options(sai)
-    values, unknown = backend.values_from_argv(list(options.values()), list(lists["options"]),
-                                               backend.canonical_of(sai))
+    # Every option the launcher takes, also those its --help leaves out (--workspace-name: the private preset
+    # sandbox-ai-dev was "unknown" in the gallery, 2026-11-19); what a preset may not carry is refused by name below.
+    taken = getattr(sai, "taken_options", None)
+    options = taken() if callable(taken) else list(B._options(sai).values())
+    values, unknown = backend.values_from_argv(list(options), list(lists["options"]), backend.canonical_of(sai))
     _check(not unknown, N_("Options this sandbox-ai does not know: {options}."),
            options=" ".join(map(str, unknown))[:200])
-    # A workspace only as a folder to fill in at the use (a placeholder: never a path wired in), as a saved board names it.
-    refused = [o for o in REFUSED if values.get(o) and not (o == "--workspace" and all(
-        B.PLACEHOLDER.fullmatch(str(v).strip()) for v in (values[o] if isinstance(values[o], list) else [values[o]])))]
+
+    def to_fill_in(option, value):  # a folder to fill in at the use (a placeholder: never a path wired in)
+        folder = str(value).partition("=")[2] if option == "--workspace-name" else str(value)
+        return bool(B.PLACEHOLDER.fullmatch(folder.strip()))
+    # A workspace only as a folder to fill in at the use, as a saved board names it.
+    refused = [o for o in REFUSED if values.get(o) and not (o in ("--workspace", "--workspace-name") and all(
+        to_fill_in(o, v) for v in (values[o] if isinstance(values[o], list) else [values[o]])))]
     _check(not refused, N_("A preset may not carry {options}: it copies a login in or belongs to one start."),
            options=", ".join(refused))
     for name in lists["mcp"]:
@@ -722,14 +732,14 @@ def from_document(sai, document):
                   name=ident)
 
 
-def from_board(sai, board, title, description="", category="simple", ident=None, keep=False, notes=()):
+def from_board(sai, board, title, description="", category="simple", ident=None, keep=False, notes=(), host=None):
     """The current BOARD as a preset of the user's own: its options (the project file's own settings on the board too:
     mode, canaries ...), its MCP servers and ruleset, its services, MCP limits and folders, LLM parameters, the agent's
     arguments, the placeholders it still has (with the labels and hints of the preset it came from), NOTES and the
     positions. The folders (workspaces, mounts' sources, MCP servers' folders) become placeholders to fill in at the
     next use: with KEEP the board's workspaces are kept too and each folder is offered with its current path as the
-    default (a note says the preset holds paths of this computer); without, the workspaces are left out (a preset for
-    any project) and the folders asked for anew. ValueError if it holds what looks like a secret or options a preset
+    default (a note says the preset holds paths of this computer - of HOST, the host the board starts on, when that is
+    another); without, the workspaces are left out (a preset for any project) and the folders asked for anew. ValueError if it holds what looks like a secret or options a preset
     may not carry."""
     agent, _, agent_args = B.values(board)
     options = [*B.document_argv(board), *B.to_argv(sai, board, workspaces=keep)]
@@ -750,7 +760,7 @@ def from_board(sai, board, title, description="", category="simple", ident=None,
     marks += [{"marker": marker, "label": text[:120], "hint": "", "optional": False, "follows": "",
                **({"default": path[:200]} if keep else {})} for marker, text, path in folders]
     notes = [str(note).strip()[:1000] for note in notes if str(note).strip()]
-    here = machine_specific(options, [path for _, _, path in folders] if keep else [])
+    here = machine_specific(options, [path for _, _, path in folders] if keep else [], host=host)
     if here:
         notes.append(here[:1000])
     keys = role_keys(board)
@@ -810,10 +820,12 @@ def folder_placeholders(options, keep):
     return out, found
 
 
-def machine_specific(options, paths):
-    """The note of a preset that holds what belongs to this computer: the folders PATHS (offered as defaults at the
-    next use), devices, and what is registered here by name (VPN profiles, LLM servers, identities, image variants,
-    MCP servers, images of services); "" for none."""
+def machine_specific(options, paths, host=None):
+    """The note of a preset that holds what belongs to this computer (HOST: to that host of sandbox-ai, the board's
+    when it starts on another): the folders PATHS (offered as defaults at the next use), devices, and what is
+    registered there by name (VPN profiles, LLM servers, identities, image variants, MCP servers, images of services);
+    "" for none."""
+    remote = host not in (None, "", "local")
     named = {"--device": [], "--vpn": [], "--llm": [], "--identity": [], "--image-variant": []}
     for index, token in enumerate(options):
         option, equals, value = token.partition("=")
@@ -822,14 +834,20 @@ def machine_specific(options, paths):
             if value and not B.PLACEHOLDER.search(value):
                 named[option].append(value)
     parts = []
-    if paths:
+    if paths and remote:
+        parts.append(tr("This preset holds paths of {host} ({paths}): at its next use each is offered as the default, "
+                        "to change for another project or host.", host=host, paths=", ".join(paths)))
+    elif paths:
         parts.append(tr("This preset holds paths of this computer ({paths}): at its next use each is offered as the "
                         "default, to change for another project or computer.", paths=", ".join(paths)))
     if named["--device"]:
-        parts.append(tr("Devices of this computer: {devices}.", devices=", ".join(named["--device"])))
+        parts.append(tr("Devices of {host}: {devices}.", host=host, devices=", ".join(named["--device"])) if remote
+                     else tr("Devices of this computer: {devices}.", devices=", ".join(named["--device"])))
     registered = [*named["--vpn"], *named["--llm"], *named["--identity"], *named["--image-variant"]]
     if registered:
-        parts.append(tr("Registered on this computer by name (another one needs them too): {names}.",
+        parts.append(tr("Registered on {host} by name (another host needs them too): {names}.", host=host,
+                        names=", ".join(dict.fromkeys(registered))) if remote else
+                     tr("Registered on this computer by name (another one needs them too): {names}.",
                         names=", ".join(dict.fromkeys(registered))))
     return " ".join(parts)
 

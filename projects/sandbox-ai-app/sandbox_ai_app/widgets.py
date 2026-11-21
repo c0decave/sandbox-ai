@@ -13,18 +13,20 @@ import signal
 import sys
 import threading
 import time
+import weakref
 
 from PySide6.QtCore import (
     QAbstractItemModel, QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel, QModelIndex, QObject, QPoint,
     QProcess, QRect, QSize, Qt, QTimer, Signal, Slot,
 )
+from PySide6 import QtGui
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QFont, QFontMetrics, QPainter, QPalette, QTextDocument, QTextOption,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSpacerItem, QStyle, QStyledItemDelegate, QTabBar,
+    QAbstractButton, QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QScrollArea, QSizePolicy, QSpacerItem, QStyle, QStyledItemDelegate, QTabBar,
     QTableView, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetItem,
 )
 
@@ -161,6 +163,101 @@ def plain_label(text="", word_wrap=True, role=None, selectable=False, log=None, 
     return label
 
 
+# The setting explanations ("Show explanations", off by default): the purely explanatory texts of the pages and
+# dialogs - a page's intro line, a hint below a form or a table, a "how this works" paragraph - are shown only while
+# it is on (user 2026-11-18: "such info texts we don't need in the app"). Never one of them: a warning, an error, a
+# refusal, a status or result line, an empty list's line, a note that a choice is dangerous. The (?) buttons and the
+# tooltips stay: they are the way to the explanations while the setting is off.
+_EXPLAINED = [False]
+_EXPLANATIONS = weakref.WeakSet()  # every Explanation made, shown or hidden when the setting changes
+_EXPLANATION_LISTENERS = []  # weakref.WeakMethod of callbacks (an explanation that is no label: a wizard's subtitle)
+
+
+def explanations_shown():
+    return _EXPLAINED[0]
+
+
+def set_explanations_shown(on):
+    """Show or hide every explanation of the app at once, live: on every page and in every dialog open now (and in
+    those made later, as they are made). A hidden one takes no room: its layout closes the space."""
+    on = bool(on)
+    if on == _EXPLAINED[0]:
+        return
+    _EXPLAINED[0] = on
+    for label in list(_EXPLANATIONS):
+        try:
+            label.apply_shown()
+        except RuntimeError:  # its C++ side is gone
+            _EXPLANATIONS.discard(label)
+    for ref in list(_EXPLANATION_LISTENERS):
+        method = ref()
+        try:
+            if method is None:
+                raise RuntimeError
+            method(on)
+        except RuntimeError:
+            _EXPLANATION_LISTENERS.remove(ref)
+
+
+def on_explanations_changed(method):
+    """Call the bound METHOD(shown) whenever the setting explanations changes (kept weakly: a page that is gone is
+    dropped) - for an explanation that is no label (a wizard page's subtitle)."""
+    _EXPLANATION_LISTENERS.append(weakref.WeakMethod(method))
+
+
+class Explanation(QLabel):
+    """A purely explanatory text (widgets.explanation): shown only while the setting explanations is on. What the
+    page asks of it (setVisible, show, hide) is kept and applied with the setting: a hint the page hides for a while
+    stays hidden when the setting is switched on, and comes back when the page shows it again."""
+
+    def __init__(self, text="", word_wrap=True, selectable=False):
+        super().__init__()
+        self.wanted = None  # what setVisible asked for (None: as Qt decides, with its parent)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(word_wrap)
+        self.setText(str(text))
+        self.setProperty("role", "secondary")
+        self.setProperty("explanation", True)
+        if selectable:
+            self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                         | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        _EXPLANATIONS.add(self)
+        if not _EXPLAINED[0]:
+            QLabel.setVisible(self, False)
+
+    def setVisible(self, visible):  # noqa: N802 - Qt's name; the setting explanations wins
+        self.wanted = bool(visible)
+        QLabel.setVisible(self, self.wanted and _EXPLAINED[0])
+        self.follow_row()
+
+    def apply_shown(self):
+        if not _EXPLAINED[0]:
+            QLabel.setVisible(self, False)
+        elif self.wanted is not False:
+            if self.parentWidget() is None:  # not placed yet: shown with its parent later, never as a window
+                self.setAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide, False)
+            else:
+                QLabel.setVisible(self, True)
+        self.follow_row()
+
+    def follow_row(self):
+        """In a form, the empty label of its row (form.addRow("", explanation)) goes and comes with it: no gap."""
+        parent = self.parentWidget()
+        form = parent.layout() if parent is not None else None
+        if not isinstance(form, QFormLayout):
+            return
+        buddy = form.labelForField(self)
+        if isinstance(buddy, QLabel) and not buddy.text():
+            buddy.setVisible(not self.isHidden())
+
+
+def explanation(text="", word_wrap=True, selectable=False):
+    """A purely explanatory text of a page or dialog: a page's intro line, a hint below a form or a table, a "how this
+    works" paragraph. Shown only while the setting explanations ("Show explanations") is on; never for a warning, an
+    error, a status line or an empty list's line (those are plain_label's, always shown). Plain text, never HTML."""
+    return Explanation(text, word_wrap=word_wrap, selectable=selectable)
+
+
 NOTICE_ROLES = {"ok": "notice-ok", "warn": "notice-warn", "error": "notice-error"}
 
 
@@ -286,7 +383,8 @@ class ElidedLabel(QLabel):
 
 
 def title(text, subtitle=None):
-    """The heading of a page: a title and an optional line of explanation."""
+    """The heading of a page: a title and an optional line of explanation (an explanation: shown only while the
+    setting explanations is on)."""
     box = QWidget()
     layout = QVBoxLayout(box)
     layout.setContentsMargins(0, 0, 0, 4)
@@ -295,7 +393,7 @@ def title(text, subtitle=None):
     heading.setAccessibleName(text)
     layout.addWidget(heading)
     if subtitle:
-        layout.addWidget(plain_label(subtitle, role="secondary"))
+        layout.addWidget(explanation(subtitle))
     return box
 
 
@@ -319,6 +417,23 @@ def disclosure(widget):
     return widget
 
 
+class MoreHeader(QToolButton):
+    """The header line of rows folded away (with disclosure(): an arrow, right folded, down open): Space and also
+    Enter or Return show or fold them, as on a link; reached with Tab."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)  # its own width, not the row's
+
+    def keyPressEvent(self, event):  # noqa: N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.isAutoRepeat():
+            self.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 def button(text, tooltip, slot=None, role=None, shortcut=None):
     """A push button with a tooltip (every button explains itself) and an optional role (primary, danger)."""
     widget = QPushButton(text)
@@ -330,6 +445,46 @@ def button(text, tooltip, slot=None, role=None, shortcut=None):
     if slot:
         widget.clicked.connect(lambda _=False: slot())
     return widget
+
+
+def nav_button(text, tooltip, slot, glyph=None):
+    """A button that goes somewhere or does one small thing beside a list (Home, Up, Refresh, New folder): an action,
+    never a toggle, and it takes no focus from a click (a focused button looks pressed in some themes, as if Home
+    stayed on); Tab still reaches it. GLYPH (a key of theme.GLYPHS): an icon instead of TEXT, which stays its
+    accessible name (screen readers, the list's context menu: button_text) - TOOLTIP says what it does; paint_glyph
+    draws it in the look's text colour, repaint_glyphs again after a change of theme. The Files page's panes and the
+    remote folder chooser use it."""
+    widget = button("" if glyph else text, tooltip, slot)
+    widget.setCheckable(False)
+    widget.setAutoDefault(False)
+    widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+    widget.setAccessibleName(text)
+    if glyph:
+        widget.glyph = glyph
+        paint_glyph(widget)
+    return widget
+
+
+GLYPH_SIZE = 16
+
+
+def paint_glyph(widget):
+    """WIDGET's glyph in the text colour of the look now (again after a change of theme: readable in the dark and
+    high-contrast looks), drawn sharp at twice the size too (a HiDPI screen takes that one)."""
+    tint = theme.colors()["text"]
+    icon = theme.glyph(widget.glyph, tint, GLYPH_SIZE)
+    icon.addPixmap(theme.glyph(widget.glyph, tint, 2 * GLYPH_SIZE).pixmap(2 * GLYPH_SIZE, 2 * GLYPH_SIZE))
+    widget.setIcon(icon)
+    widget.setIconSize(QSize(GLYPH_SIZE, GLYPH_SIZE))
+
+
+def repaint_glyphs(holder, event):
+    """In HOLDER's changeEvent: after another look (EVENT a palette or style change), every nav_button's glyph in
+    HOLDER drawn again in its text colour."""
+    if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
+        for widget in holder.findChildren(QAbstractButton):
+            if getattr(widget, "glyph", None):
+                paint_glyph(widget)
 
 
 def set_enabled(widget, enabled, why=None, tooltip=None):
@@ -629,6 +784,10 @@ def inform(parent, title_text, text, details=None, warning=False, modal=True):
     back every answer given meanwhile: nested loops return last-in, first-out). MODAL: the page PARENT is on waits
     behind a veil until OK (show_veiled); not MODAL (the outcome of a finished background job): nothing is veiled,
     the Approvals page stays usable while it is open."""
+    from .files import printable_text
+    # (what sandbox-ai, an agent or a host wrote is in many messages: its control characters shown escaped, whoever
+    # put the text together - its line breaks and tabs kept)
+    text = printable_text(str(text if text is not None else "").replace("\r\n", "\n").replace("\r", "\n"))
     log_message(parent, title_text, text, details, warning)
     if AUTO_ANSWER is not None:
         SHOWN.append((title_text, text, details))
@@ -993,7 +1152,7 @@ def nonblocking_dialogs(platform=sys.platform):
                 except (RuntimeError, TypeError):
                     pass
         try:
-            ending = QApplication.closingDown() or bool(getattr(parent.window(), "shut_down", False)) \
+            ending = QApplication.closingDown() or bool(getattr(QWidget.window(parent), "shut_down", False)) \
                 if parent is not None else QApplication.closingDown()
         except RuntimeError:  # its window is gone
             ending = True
@@ -1151,7 +1310,7 @@ def make_readable(dialog):
     sizes itself from its layout when it is shown), its text never wider than the screen."""
     area = screen_area(dialog)
     room = area.width() if area is not None and area.width() >= 200 else None
-    want = title_width(dialog)
+    want = max(title_width(dialog), least_width(dialog))
     if room is not None:
         want = min(want, room - 4)  # (a layout that wraps a label may add a pixel to the minimum it is given)
     from PySide6.QtWidgets import QInputDialog
@@ -1230,9 +1389,455 @@ def fit_on_screen(widget):
         widget.move(x, y)
 
 
+# -- the size and place of every dialog and extra window (one rule: dialog_rule) --
+
+DIALOG_LEAST = 420  # px: the least width of a dialog, a question (more with a larger font: LEAST_CHARS)
+LEAST_CHARS = 52  # characters of the dialog's font: the least width with a larger font
+NAME_CHARS = 40  # a text field alone in its row (a name, a path) shows about this many characters
+SHARED_CHARS = 16  # a text field that shares its row with others (a host and its port)
+READABLE_CHARS = 80  # a long text wraps at about this many characters (Qt's own measure for a wrapping label)
+BREAK_WORD = 40  # a word longer than this (a path, a URL) may break after its separators
+BREAK_AFTER = "/\\._-?=:,@+"
+ZERO_WIDTH_SPACE = "\u200b"
+SCREEN_SHARE = 0.9  # the most of its screen's free area a dialog takes; beyond that its content scrolls
+SMALL_SCREEN = 800  # px: on a smaller screen (a phone) a dialog may take all of the free area
+LARGE_SHARE = 0.7  # a dialog wider or higher than this share of the screen: at its window's top left, not centred
+LARGE_INSET = 24  # px: a large dialog's place inside its window's top left corner
+MOVED = 24  # px: a dialog this far from where it was placed (or sized this much otherwise) was moved by the human
+PLACES = {}  # the dialog's key (place_key) -> QRect: where the human moved or sized it, for this app session
+UNLIMITED = (1 << 24) - 1  # QWIDGETSIZE_MAX
+
+
+def own_rule(dialog):
+    """Whether DIALOG takes the whole rule (its texts, fields, size and place): a window of its own, not Qt's file,
+    colour or font dialog (a native one is no widget at all) and no popup."""
+    from PySide6.QtWidgets import QColorDialog, QFileDialog, QFontDialog
+    if isinstance(dialog, (QFileDialog, QColorDialog, QFontDialog)) or not dialog.isWindow():
+        return False
+    return dialog.windowType() not in (Qt.WindowType.Popup, Qt.WindowType.ToolTip, Qt.WindowType.SplashScreen)
+
+
+def least_width(dialog):
+    """The least width of DIALOG: DIALOG_LEAST, more with a larger font (LEAST_CHARS of it)."""
+    return max(DIALOG_LEAST, LEAST_CHARS * max(1, dialog.fontMetrics().averageCharWidth()))
+
+
+def screen_limit(dialog):
+    """The most a dialog may take of its screen: (width, height), SCREEN_SHARE of its free area (all of it on a
+    small screen, a phone's); None without a screen."""
+    area = screen_area(dialog)
+    if area is None or area.width() < 200 or area.height() < 150:
+        return None
+    if area.width() < SMALL_SCREEN:
+        return area.width(), area.height()
+    return int(area.width() * SCREEN_SHARE), int(area.height() * SCREEN_SHARE)
+
+
+def breakable(text, rich=False):
+    """TEXT with a zero-width space after the separators (BREAK_AFTER) of each word longer than BREAK_WORD - a path,
+    a URL - so that a wrapping label breaks it there instead of growing as wide as the word; RICH: TEXT is markup,
+    whose tags and entities are left as they are."""
+    def words(part):
+        return re.sub(r"\S{%d,}" % (BREAK_WORD + 1),
+                      lambda m: "".join(c + ZERO_WIDTH_SPACE if c in BREAK_AFTER else c for c in m.group(0)).rstrip(
+                          ZERO_WIDTH_SPACE), part)
+    if ZERO_WIDTH_SPACE in text:
+        return text
+    if not rich:
+        return words(text)
+    return "".join(part if part.startswith("<") else re.sub(r"[^&]+|&\w+;|&#\d+;|&", lambda m: m.group(0) if
+                                                            m.group(0).startswith("&") else words(m.group(0)), part)
+                   for part in re.split(r"(<[^>]*>)", text))
+
+
+def readable_labels(dialog):
+    """The labels of DIALOG wrap at a readable width: a text longer than READABLE_CHARS wraps (at about that width:
+    Qt's own measure for a wrapping label), and a long word in it (a path, a URL) breaks after its separators instead
+    of making the dialog as wide as the word. A label whose text can be selected keeps its words (a copied path must
+    stay the path); a message box's text is the box's own."""
+    for label in dialog.findChildren(QLabel):
+        if label.objectName().startswith("qt_msgbox") or getattr(label, "elides", False) or \
+                isinstance(label, ElidedLabel) or label.pixmap() is not None and not label.pixmap().isNull():
+            continue
+        text = label.text()
+        if not text:
+            continue
+        rich = label.textFormat() == Qt.TextFormat.RichText or \
+            label.textFormat() == Qt.TextFormat.AutoText and QtGui.Qt.mightBeRichText(text)
+        metrics = label.fontMetrics()
+        readable = READABLE_CHARS * max(1, metrics.averageCharWidth())
+        if not label.wordWrap() and label.sizeHint().width() > readable:
+            label.setWordWrap(True)
+        if label.wordWrap() and not label.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse \
+                and re.search(r"\S{%d,}" % (BREAK_WORD + 1), text):
+            shown = breakable(text, rich)
+            if shown != text:
+                label.setText(shown)
+
+
+def wrapped_lines(text, metrics, width):
+    """TEXT broken at its spaces into lines of at most WIDTH pixels in METRICS (a word longer stays whole)."""
+    lines = []
+    for paragraph in str(text).split("\n"):
+        line = ""
+        for word in paragraph.split(" "):
+            joined = f"{line} {word}" if line else word
+            if line and metrics.horizontalAdvance(joined) > width:
+                lines.append(line)
+                line = word
+            else:
+                line = joined
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def readable_buttons(dialog):
+    """The check boxes and radio buttons of DIALOG with a text longer than READABLE_CHARS: on lines of about that
+    width (a QCheckBox keeps its text on one line and made a dialog wider than the screen with a large font). Its
+    one-line text stays its accessible name and its property "wholeText"."""
+    from PySide6.QtWidgets import QRadioButton
+    for box in dialog.findChildren(QAbstractButton):
+        if not isinstance(box, (QCheckBox, QRadioButton)) or getattr(box, "wraps", False) or "\n" in box.text():
+            continue
+        metrics = box.fontMetrics()
+        readable = READABLE_CHARS * max(1, metrics.averageCharWidth())
+        if metrics.horizontalAdvance(box.text()) <= readable:
+            continue
+        whole = box.text()
+        box.setProperty("wholeText", whole)
+        if not box.accessibleName():
+            box.setAccessibleName(whole.replace("&&", "\0").replace("&", "").replace("\0", "&"))
+        box.setText(wrapped_lines(whole, metrics, readable))
+
+
+def shares_row(field):
+    """Whether FIELD stands in a row with other fields (a host and its port), not alone in it (a name)."""
+    from PySide6.QtWidgets import QAbstractSpinBox, QBoxLayout, QFormLayout
+    widget, holder = field, None
+    while holder is None and widget.parentWidget() is not None and not widget.isWindow():
+        parent = widget.parentWidget()
+        holder = owning_layout(parent.layout(), widget) if parent.layout() is not None else None
+        if holder is None:
+            widget = parent  # (FIELD in a widget of its own: a path field with its button)
+    if holder is None or isinstance(holder, QFormLayout):
+        return False
+    inputs = (QLineEdit, QAbstractSpinBox, QComboBox)
+    if isinstance(holder, QBoxLayout):
+        if holder.direction() not in (QBoxLayout.Direction.LeftToRight, QBoxLayout.Direction.RightToLeft):
+            return False
+        others = [holder.itemAt(i).widget() for i in range(holder.count())]
+    elif isinstance(holder, QGridLayout):
+        row = holder.getItemPosition(holder.indexOf(widget))[0]
+        others = [item.widget() for item in (holder.itemAtPosition(row, column)
+                                             for column in range(holder.columnCount())) if item is not None]
+    else:
+        return False
+    return any(isinstance(other, inputs) and other is not widget and not other.isHidden() for other in others)
+
+
+def owning_layout(layout, widget):
+    """The layout (LAYOUT or one inside it) that holds WIDGET itself; None."""
+    if layout.indexOf(widget) >= 0:
+        return layout
+    for index in range(layout.count()):
+        inner = layout.itemAt(index).layout()
+        if inner is not None:
+            found = owning_layout(inner, widget)
+            if found is not None:
+                return found
+    return None
+
+
+def field_least(field):
+    """The least width of the text field FIELD: NAME_CHARS of its font alone in its row, SHARED_CHARS beside other
+    fields; 0 for one that is no field of its own (a spin box's, a combo box's), one given a width of its own (a
+    maximum, a fixed size policy) or one in a list."""
+    from PySide6.QtWidgets import QAbstractSpinBox
+    parent = field.parentWidget()
+    if isinstance(parent, (QAbstractSpinBox, QComboBox)) or field.maximumWidth() < UNLIMITED or \
+            field.sizePolicy().horizontalPolicy() in (QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum):
+        return 0
+    while parent is not None and not parent.isWindow():
+        if isinstance(parent, QAbstractItemView):
+            return 0
+        parent = parent.parentWidget()
+    metrics = field.fontMetrics()
+    frame = max(0, QLineEdit.sizeHint(field).width() - 17 * metrics.horizontalAdvance("x"))
+    return (SHARED_CHARS if shares_row(field) else NAME_CHARS) * max(1, metrics.averageCharWidth()) + frame
+
+
+def wide_fields(dialog):
+    """The text fields of DIALOG at least field_least wide (within its screen): a name field shows about 40
+    characters - the file manager's New folder showed 17."""
+    limit = screen_limit(dialog)
+    for field in dialog.findChildren(QLineEdit):
+        least = field_least(field)
+        if limit is not None:
+            least = min(least, limit[0] - 160)
+        if least > 0 and field.minimumWidth() < least:
+            field.setMinimumWidth(least)
+
+
+def scroll_contents(dialog):
+    """DIALOG's contents (all but the row of buttons at its bottom) in a scroll area of their own: they need more
+    height than its screen has, and the buttons stay in reach below. Once."""
+    layout = dialog.layout()
+    if layout is None or dialog.property("scrolledContents") or isinstance(dialog, QMessageBox):
+        return False
+    count = layout.count()
+    last = layout.itemAt(count - 1) if count else None
+    if last is None:
+        return False
+    holder = last.widget() or last.layout()
+    rows = [holder] if isinstance(holder, QDialogButtonBox) else \
+        (holder.findChildren(QDialogButtonBox) if isinstance(holder, QWidget) else [])
+    in_layout = last.layout() is not None and any(isinstance(last.layout().itemAt(i).widget(),
+                                                             (QDialogButtonBox, QAbstractButton))
+                                                  for i in range(last.layout().count()))
+    if not rows and not in_layout:
+        return False
+    margins = layout.contentsMargins()
+    inner = QWidget()
+    inner.setObjectName("scrolledContents")
+    inner.setLayout(layout)  # (takes the layout and its widgets from the dialog)
+    item = layout.takeAt(layout.count() - 1)
+    layout.setContentsMargins(0, 0, 0, 0)
+    area = QScrollArea()
+    area.setObjectName("dialogScroll")
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    area.setWidget(inner)
+    outer = QVBoxLayout(dialog)
+    outer.setContentsMargins(margins)
+    outer.addWidget(area, 1)
+    if item.widget() is not None:
+        outer.addWidget(item.widget())
+    elif item.layout() is not None:
+        row = item.layout()
+        row.setParent(None)
+        outer.addLayout(row)
+    dialog.setProperty("scrolledContents", True)
+    return True
+
+
+def needed_height(dialog, width):
+    """The height DIALOG's layout needs at WIDTH (its wrapping texts laid out there)."""
+    layout = dialog.layout()
+    if layout is None:
+        return dialog.sizeHint().height()
+    layout.activate()
+    if layout.hasHeightForWidth():
+        return max(layout.totalHeightForWidth(width), layout.totalMinimumSize().height())
+    return max(layout.totalSizeHint().height(), layout.totalMinimumSize().height())
+
+
+def fit_size(dialog):
+    """DIALOG (about to be shown) as large as its content needs - its size hint, its least width (least_width), its
+    title (title_width), its wrapping texts at that width - and at most SCREEN_SHARE of its screen; contents that
+    need more height than that scroll (scroll_contents), its buttons stay below. A message box sizes itself (Qt):
+    make_readable gives it its least width."""
+    if isinstance(dialog, QMessageBox):
+        return
+    limit = screen_limit(dialog)
+    layout = dialog.layout()
+    if layout is not None:
+        layout.activate()
+    hint = dialog.sizeHint().expandedTo(dialog.minimumSizeHint())
+    # The size its code gave it is kept (it may be larger than its hint: a list's room); the one Qt gave it before
+    # the texts above were wrapped is not (a long line made an input dialog as wide as the screen).
+    given = QWidget.size(dialog) if dialog.testAttribute(Qt.WidgetAttribute.WA_Resized) else QSize(0, 0)
+    width = max(given.width(), hint.width(), min(least_width(dialog), dialog.maximumWidth()))
+    if limit is not None:
+        width = min(width, limit[0])
+    height = max(given.height(), needed_height(dialog, width))
+    if limit is not None and height > limit[1]:
+        least = layout.totalMinimumSize().height() if layout is not None else 0
+        if layout is not None and layout.hasHeightForWidth():
+            least = max(least, layout.totalHeightForWidth(width))
+        if least > limit[1] and scroll_contents(dialog):
+            dialog.layout().activate()
+        height = limit[1]
+    if limit is not None:
+        if dialog.minimumWidth() > limit[0]:
+            dialog.setMinimumWidth(limit[0])
+        if dialog.minimumHeight() > limit[1]:
+            dialog.setMinimumHeight(limit[1])
+    width, height = min(width, dialog.maximumWidth()), min(height, dialog.maximumHeight())
+    if (width, height) != (dialog.width(), dialog.height()):
+        dialog.resize(width, height)
+
+
+def place_key(window):
+    """What a dialog is remembered by (PLACES): its class; a plain dialog, message box or input dialog also by its
+    title (each question is another)."""
+    from PySide6.QtWidgets import QInputDialog
+    kind = type(window)
+    key = f"{kind.__module__}.{kind.__qualname__}"
+    if kind in (QDialog, QMessageBox, QInputDialog, MessageDialog, QWidget):
+        key += "|" + window.windowTitle()
+    return key + "|" + window.objectName()
+
+
+def anchor_of(window):
+    """The window WINDOW is placed over: the window of its parent, else the app's active window (the one it was
+    opened from); None."""
+    parent = window.parentWidget()
+    anchor = parent.window() if parent is not None else QApplication.activeWindow()
+    if anchor is window or anchor is None or not anchor.isVisible():
+        return None
+    return anchor
+
+
+def placement(window, size=None):
+    """Where WINDOW (of SIZE, default its own) goes by the rule: a small or medium one centred over the window that
+    opened it (anchor_of), a large one (wider or higher than LARGE_SHARE of the screen) at that window's top left,
+    LARGE_INSET inside; without such a window, the same on the screen; always inside the screen's free area. Returns
+    a QPoint (None without a screen)."""
+    area = screen_area(window)
+    if area is None:
+        return None
+    size = size or QWidget.size(window)
+    anchor = anchor_of(window)
+    over = anchor.frameGeometry() if anchor is not None else area
+    if anchor is not None and not over.intersects(area):
+        over = area
+    large = size.width() > area.width() * LARGE_SHARE or size.height() > area.height() * LARGE_SHARE
+    if large:
+        x, y = over.left() + LARGE_INSET, over.top() + LARGE_INSET
+    else:
+        x, y = over.center().x() - size.width() // 2, over.center().y() - size.height() // 2
+    return inside(area, QPoint(x, y), size)
+
+
+def inside(area, point, size):
+    """POINT moved so that a window of SIZE there lies inside AREA (its top left corner first)."""
+    x = max(area.left(), min(point.x(), area.right() - size.width() + 1))
+    y = max(area.top(), min(point.y(), area.bottom() - size.height() + 1))
+    return QPoint(x, y)
+
+
+def place(window):
+    """WINDOW (being shown) where the rule puts it (placement) - or, when the human moved or sized it earlier in this
+    app session, where they left it (PLACES), its size never below what it needs nor beyond its screen."""
+    try:
+        area = screen_area(window)
+        if area is None:
+            return
+        kept = PLACES.get(place_key(window))
+        if kept is not None:
+            limit = screen_limit(window) or (area.width(), area.height())
+            size = kept.size().expandedTo(window.minimumSizeHint()).expandedTo(window.minimumSize())
+            size = QSize(min(size.width(), limit[0], window.maximumWidth()),
+                         min(size.height(), limit[1], window.maximumHeight()))
+            if not isinstance(window, QMessageBox) and size != QWidget.size(window):
+                window.resize(size)
+            point = inside(area, kept.topLeft(), QWidget.size(window))
+        else:
+            point = placement(window)
+        if point is None:
+            return
+        if point != window.pos():
+            window.move(point)
+        window.setProperty("placedAt", QRect(window.pos(), QWidget.size(window)))
+    except RuntimeError:  # (deleted meanwhile)
+        pass
+
+
+def keep_place(window):
+    """WINDOW (being hidden) moved or sized by the human from where the rule placed it: remembered for this app
+    session (PLACES), so that it opens there again."""
+    try:
+        placed = window.property("placedAt")
+        if not isinstance(placed, QRect):
+            return
+        now = QRect(window.pos(), QWidget.size(window))
+        moved = (now.topLeft() - placed.topLeft()).manhattanLength() > MOVED
+        sized = abs(now.width() - placed.width()) > MOVED or abs(now.height() - placed.height()) > MOVED
+        if moved or sized:
+            PLACES[place_key(window)] = now
+    except RuntimeError:  # (deleted meanwhile)
+        pass
+
+
+def dialog_rule(dialog):
+    """The one rule for every dialog, message box and input dialog (DIALOG, about to be shown; fitting_dialogs
+    applies it to each, so a new one follows it too): its texts wrap at a readable width (readable_labels), a long
+    check box's text is on lines (readable_buttons), a text field shows about 40 characters (wide_fields), it is at
+    least DIALOG_LEAST and its title wide (make_readable), as large as its content needs and at most SCREEN_SHARE of
+    its screen, scrolling beyond (fit_size). place() then puts it where it belongs once its size is known."""
+    if not own_rule(dialog):
+        fit_on_screen(dialog)
+        return
+    dialog.ensurePolished()  # (its theme's fonts and paddings: what it needs is measured with them)
+    readable_labels(dialog)
+    readable_buttons(dialog)
+    wide_fields(dialog)
+    make_readable(dialog)
+    fit_size(dialog)
+
+
+def window_rule(window):
+    """The rule for an extra window that is no dialog (the log window, a video, a browser): at most SCREEN_SHARE of
+    its screen, placed by the rule (place) when it is first shown - afterwards it stays where the human leaves it."""
+    try:
+        if window.property("placedAt") is not None:
+            return
+        limit = screen_limit(window)
+        if limit is not None:
+            width, height = min(window.width(), limit[0]), min(window.height(), limit[1])
+            if window.minimumWidth() > width:
+                window.setMinimumWidth(width)
+            if window.minimumHeight() > height:
+                window.setMinimumHeight(height)
+            if (width, height) != (window.width(), window.height()):
+                window.resize(width, height)
+        place(window)
+    except RuntimeError:  # (deleted meanwhile)
+        pass
+
+
+def within_limit(dialog):
+    """DIALOG (shown) still at most SCREEN_SHARE of its screen: what it got after it was sized (its [x]'s room at the
+    top, a row shown, a text read in the background) made it higher than that - its content scrolls then, its
+    buttons stay below."""
+    limit = screen_limit(dialog)
+    layout = dialog.layout()
+    if limit is None or layout is None or isinstance(dialog, QMessageBox):
+        return
+    size = QWidget.size(dialog)
+    if size.width() <= limit[0] and size.height() <= limit[1]:
+        return
+    need = layout.totalMinimumSize().height()
+    if layout.hasHeightForWidth():
+        need = max(need, layout.totalHeightForWidth(min(size.width(), limit[0])))
+    if need > limit[1] and scroll_contents(dialog):
+        dialog.layout().activate()
+    if dialog.minimumWidth() > limit[0]:
+        dialog.setMinimumWidth(limit[0])
+    if dialog.minimumHeight() > limit[1]:
+        dialog.setMinimumHeight(limit[1])
+    dialog.resize(min(size.width(), limit[0]), min(size.height(), limit[1]))
+
+
+def after_shown(dialog):
+    """DIALOG, shown: as high as its wrapping texts need at its final width (fit_height), and placed again when its
+    size changed since it was placed (its own code, a text laid out) while it stays where it was put."""
+    try:
+        if dialog.layout() is not None:
+            dialog.layout().activate()  # (a layout request still waiting: the minimum size it sets, now)
+        fit_height(dialog)
+        within_limit(dialog)
+        placed = dialog.property("placedAt")
+        if isinstance(placed, QRect) and placed.topLeft() == dialog.pos() and placed.size() != QWidget.size(dialog):
+            place(dialog)
+    except RuntimeError:  # (deleted meanwhile)
+        pass
+
+
 def fitting_dialogs():
-    """Every dialog and message box can be read and fits on its screen when it is shown (make_readable,
-    fit_on_screen). Once per process."""
+    """Every dialog and message box follows the one rule when it is shown (dialog_rule, then place), and a dialog
+    the human moved or sized opens there again (keep_place). Once per process."""
     from PySide6.QtWidgets import QMessageBox as Box
     for cls in (QDialog, Box):
         original = cls.showEvent
@@ -1240,17 +1845,28 @@ def fitting_dialogs():
             continue
 
         def show_event(dialog, event, original=original):
-            if not event.spontaneous():
-                try:
-                    make_readable(dialog)
-                    fit_on_screen(dialog)
-                except RuntimeError:  # (deleted meanwhile)
-                    pass
+            if event.spontaneous():
+                return original(dialog, event)
+            try:
+                dialog_rule(dialog)
+            except RuntimeError:  # (deleted meanwhile)
+                pass
+            result = original(dialog, event)  # (a message box sizes itself here; Qt centres a dialog here)
+            if own_rule(dialog):
+                place(dialog)
                 if not isinstance(dialog, Box):  # (a message box sizes itself)
-                    QTimer.singleShot(0, lambda d=dialog: fit_height(d))
-            return original(dialog, event)
+                    QTimer.singleShot(0, lambda d=dialog: after_shown(d))
+            return result
         show_event.fits = True
         cls.showEvent = show_event
+    hidden = QDialog.hideEvent
+    if not getattr(hidden, "fits", False):
+        def hide_event(dialog, event, original=hidden):
+            if not event.spontaneous():
+                keep_place(dialog)
+            return original(dialog, event)
+        hide_event.fits = True
+        QDialog.hideEvent = hide_event
 
 
 def log_window_shortcut(dialog):
@@ -1274,8 +1890,10 @@ def emergency_shortcut(dialog):
     if action is None:
         return
     try:
-        if action not in dialog.actions():
-            dialog.addAction(action)
+        # (QWidget's own: a dialog may have an attribute of that name - the bridge dialog's observer actions hid it,
+        # and New bridge… opened nothing)
+        if action not in QWidget.actions(dialog):
+            QWidget.addAction(dialog, action)
     except RuntimeError:  # the window and its action are gone
         pass
 
@@ -1309,6 +1927,76 @@ def confirm(parent, title_text, text, accept, destructive=False, details=None, r
     exec_dropped(box)  # (made anew for each question)
     log_answer(parent, title_text, text, accept if chosen else reject or tr("Cancel"))
     return bool(chosen)
+
+
+AUTO_SECRET = NotImplemented  # tests: the value ask_secret_value() answers (None: declined; NotImplemented: ask)
+
+
+class SecretValueDialog(QDialog):
+    """A question for one secret's value: a password field (what is typed is never shown), Keep and Cancel. value() is
+    the text typed, or None while nothing is typed. Nothing of it is ever logged."""
+
+    def __init__(self, parent, title_text, text, accept):
+        super().__init__(parent)
+        self.setWindowTitle(str(title_text))
+        self.setObjectName("secret_value_dialog")
+        layout = QVBoxLayout(self)
+        label = wrapping_text(text)
+        label.setObjectName("secret_value_text")
+        layout.addWidget(label)
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.edit.setAccessibleName(tr("Value"))
+        self.edit.setPlaceholderText(tr("the value (it is never shown or logged)"))
+        # (no clipboard history, no completion: what is typed here goes to the secret store and nowhere else)
+        self.edit.setClearButtonEnabled(False)
+        layout.addWidget(self.edit)
+        self.buttons = QDialogButtonBox()
+        self.keep_button = self.buttons.addButton(str(accept), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.buttons.addButton(tr("Cancel"), QDialogButtonBox.ButtonRole.RejectRole)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.edit.returnPressed.connect(self.accept)
+        self.edit.setFocus()
+
+    def value(self):
+        return self.edit.text().strip() or None
+
+
+def ask_secret_value(parent, title_text, text, accept):
+    """The value of a secret typed into a password field (the dialog's own text says which secret), or None when the
+    human cancelled or typed nothing. The question goes into the log, the answer's word only - never the value."""
+    if AUTO_SECRET is not NotImplemented:
+        SHOWN.append((title_text, text, None))
+        log_answer(parent, title_text, text, accept if AUTO_SECRET else tr("Cancel"))
+        return AUTO_SECRET or None
+    dialog = SecretValueDialog(parent, title_text, text, accept)
+    value = None
+    if exec_dropped(dialog) == QDialog.DialogCode.Accepted:
+        value = dialog.value()
+    dialog.edit.clear()
+    log_answer(parent, title_text, text, accept if value else tr("Cancel"))
+    return value
+
+
+def ask_password(parent, title_text, text, accept):
+    """A password typed into a hidden field, exactly as typed (the dialog's text says which), or None when the human
+    cancelled or typed nothing. The question goes into the log, the answer's word only - never the password."""
+    if AUTO_SECRET is not NotImplemented:
+        SHOWN.append((title_text, text, None))
+        log_answer(parent, title_text, text, accept if AUTO_SECRET else tr("Cancel"))
+        return AUTO_SECRET or None
+    dialog = SecretValueDialog(parent, title_text, text, accept)
+    dialog.setObjectName("password_dialog")
+    dialog.edit.setAccessibleName(tr("Password"))
+    dialog.edit.setPlaceholderText(tr("the password (it is never shown or logged)"))
+    value = None
+    if exec_dropped(dialog) == QDialog.DialogCode.Accepted:
+        value = dialog.edit.text() or None
+    dialog.edit.clear()
+    log_answer(parent, title_text, text, accept if value else tr("Cancel"))
+    return value
 
 
 AUTO_CHOICE = None  # tests: the key choose() answers while AUTO_ANSWER is set (None: the first choice, or none)
@@ -1419,6 +2107,27 @@ def mark_secret(edit, secret=True):
     if toggle is not None:
         toggle.setEnabled(bool(secret))
     apply_echo(edit)
+
+
+def dry_run_answer(asked, now):
+    """(title suffix, note) for a dry run's answer: ASKED and NOW are (what was asked: "board" or "form", its state,
+    host, time) when it was asked and when it answered. ("", "") while both are the same; else the answer is for what
+    was asked then - said above it, with the host and the time (R2-20: it was shown as the plan of what is shown)."""
+    from .files import printable
+    kind, state, host, when = asked
+    _kind, state_now, host_now, _when = now
+    if host != host_now:
+        note = tr("Another host was chosen while the dry run ran: this answer is from {host} (asked at {time}), not "
+                  "from {now}. Run Dry run again for {now}.", host=printable(host), time=when, now=printable(host_now))
+    elif state != state_now and kind == "board":
+        note = tr("The board changed while the dry run ran: this answer is for the board as it was at {time} on "
+                  "{host}. Run Dry run again for the board as it is now.", time=when, host=printable(host))
+    elif state != state_now:
+        note = tr("The form changed while the dry run ran: this answer is for the options as they were at {time} on "
+                  "{host}. Run Dry run again for the form as it is now.", time=when, host=printable(host))
+    else:
+        return "", ""
+    return " – " + tr("out of date"), note
 
 
 def show_text(parent, title_text, text, modal=True):
@@ -2219,7 +2928,14 @@ LISTED = 12  # names a question about several names in full (the rest: "and N mo
 # -- context menus: what the buttons beside a list offer, where the item is --
 
 def button_text(button):
-    """A button's text as a menu entry: its mnemonic marks (&) taken out, a doubled one kept as one &."""
+    """A button's text as a menu entry: its mnemonic marks (&) taken out, a doubled one kept as one &. An icon-only
+    button: its label (button_icons.IconButton: the text it shows when texts are on), else (nav_button) its accessible
+    name."""
+    label = getattr(button, "menu_text", None)
+    if not button.text() and isinstance(label, str) and label:
+        return label
+    if not button.text() and button.accessibleName():
+        return button.accessibleName()
     return button.text().replace("&&", "\0").replace("&", "").replace("\0", "&").strip()
 
 
@@ -3211,10 +3927,14 @@ class NavDelegate(QStyledItemDelegate):
 # -- layout --
 
 class FlowLayout(QLayout):
-    """Lays out widgets in rows that wrap when the window is narrow (button rows, toolbars)."""
+    """Lays out widgets in rows that wrap when the window is narrow (button rows, toolbars). An item that wraps itself
+    (one of its own, StartControls) and is wider than the row gets the row's width and the height it needs there.
+    LINE: its size hint is all in one row (the room it takes where there is enough) - for a flow that is an item of
+    another, which places it at its hint; without, its hint is its least size (a page's rows ask no more than that).
+    Likewise any item that can be narrower than its hint (a row of a field that shrinks) when the row is narrower."""
 
-    def __init__(self, parent=None, spacing=6):
-        self.items, self.heights, self.minimum = [], {}, None
+    def __init__(self, parent=None, spacing=6, line=False):
+        self.items, self.heights, self.minimum, self.line = [], {}, None, line
         super().__init__(parent)
         self.gap = spacing
         self.setContentsMargins(0, 0, 0, 0)
@@ -3265,6 +3985,12 @@ class FlowLayout(QLayout):
         self._layout(rect, apply=True)
 
     def sizeHint(self):  # noqa: N802
+        if self.line:
+            hints = [item.sizeHint() for item in self.items
+                     if item.widget() is None or not item.widget().isHidden()]
+            if hints:
+                return QSize(sum(h.width() for h in hints) + self.gap * (len(hints) - 1),
+                             max(h.height() for h in hints)).expandedTo(self.minimumSize())
         return self.minimumSize()
 
     def minimumSize(self):  # noqa: N802
@@ -3285,6 +4011,11 @@ class FlowLayout(QLayout):
             if item.widget() is not None and item.widget().isHidden():
                 continue
             hint = item.sizeHint()
+            if hint.width() > rect.width() and item.minimumSize().width() < hint.width():
+                # Wider than the row, and it can be narrower (it wraps itself, a field shrinks): the row's width, and
+                # the height it needs there.
+                width = max(rect.width(), item.minimumSize().width())
+                hint = QSize(width, item.heightForWidth(width) if item.hasHeightForWidth() else hint.height())
             if x + hint.width() > rect.right() + 1 and line > 0:
                 self._place(row, y, line, apply)
                 x, y, line, row = rect.x(), y + line + self.gap, 0, []
@@ -3299,6 +4030,65 @@ class FlowLayout(QLayout):
         if apply:
             for item, x, hint in row:
                 item.setGeometry(QRect(x, y + (line - hint.height()) // 2, hint.width(), hint.height()))
+
+
+class TwoLineToolButton(QToolButton):
+    """A tool button whose text goes onto two lines when the room is narrower than its one line (in a flow row: the
+    Board's "Security score: 100 of 100", wider than the rest of its row in a large font). Its size hint is the one
+    line; its least width the two lines'; the text it shows follows the width it has (show_for)."""
+    wraps = True  # tests/test_layout.py: measured by its height for its width
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.whole = ""
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)  # (a tool button's is Fixed)
+
+    def setText(self, text):  # noqa: N802
+        self.whole = str(text)
+        self.show_for(self.width() if self.isVisible() else None)
+
+    def text(self):
+        return self.whole
+
+    def broken(self):
+        """The text on two lines: after its first ": ", else at the space nearest its middle (the same text if none)."""
+        text = self.whole
+        if ": " in text:
+            return text.replace(": ", ":\n", 1)
+        spaces = [i for i, c in enumerate(text) if c == " "]
+        if not spaces:
+            return text
+        middle = min(spaces, key=lambda i: abs(i - len(text) // 2))
+        return text[:middle] + "\n" + text[middle + 1:]
+
+    def hint_for(self, text):
+        """Its size hint with TEXT shown: Qt's for the text shown now, less that text's size, plus TEXT's (no setText
+        here: Qt asks for hints while it lays out, and a change of text would ask for another layout)."""
+        base, metrics = super().sizeHint(), self.fontMetrics()
+        shown = metrics.size(Qt.TextFlag.TextShowMnemonic, super().text())
+        other = metrics.size(Qt.TextFlag.TextShowMnemonic, text)
+        return QSize(base.width() - shown.width() + other.width(), base.height() - shown.height() + other.height())
+
+    def sizeHint(self):  # noqa: N802
+        return self.hint_for(self.whole)
+
+    def minimumSizeHint(self):  # noqa: N802
+        return self.hint_for(self.broken())
+
+    def hasHeightForWidth(self):  # noqa: N802
+        return True
+
+    def heightForWidth(self, width):  # noqa: N802
+        return self.hint_for(self.whole if width >= self.sizeHint().width() - 2 else self.broken()).height()
+
+    def show_for(self, width):
+        text = self.whole if width is None or width >= self.sizeHint().width() - 2 else self.broken()
+        if super().text() != text:
+            QToolButton.setText(self, text)
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self.show_for(event.size().width())
 
 
 def compact_combo(combo, chars=24):
@@ -3351,6 +4141,20 @@ def flow(*widgets):
     return holder
 
 
+def together(*widgets, spacing=6):
+    """WIDGETS side by side as one item of a flow row: when the row wraps they move to the next row together (Undo
+    and Redo, zoom out and in) - never the first at the end of one row and the second at the start of the next."""
+    holder = QWidget()
+    layout = QHBoxLayout(holder)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(spacing)
+    for widget in widgets:
+        if widget is not None:
+            layout.addWidget(widget)
+    holder.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    return holder
+
+
 def card():
     frame = QFrame()
     frame.setProperty("role", "card")
@@ -3381,8 +4185,9 @@ class StartControls(QWidget):
     def __init__(self, start, sai=None, settings=None, parent=None):
         super().__init__(parent)
         self.start_function, self.sai = start, sai
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        # One row where there is room; when narrow they wrap (Board review 2, R2-19: as one row they set the Board's
+        # least width, 1049 px with the properties docked - past a 1024 px screen), "as session" with its name.
+        layout = FlowLayout(self, line=True)
         self.where = QComboBox()
         self.where.setAccessibleName(tr("Where it starts"))
         for key, title in START_WHERE:
@@ -3403,7 +4208,9 @@ class StartControls(QWidget):
         self.button = QPushButton(tr("Start"))
         self.button.setProperty("role", "primary")  # the main action of its page
         self.button.clicked.connect(lambda _=False: self.start())
-        for widget in (self.button, self.where, self.as_session, self.name):
+        named = together(self.as_session, self.name)  # (its field shrinks when even that row is too narrow)
+        named.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        for widget in (self.button, self.where, named):
             layout.addWidget(widget)
         self.new_name()
 
@@ -3428,9 +4235,26 @@ class StartControls(QWidget):
                 inform(self, tr("Session"), tr("Give the session a name first."))
                 return False
         started = self.start_function(embedded, session)
-        if started and session and not self.name.text().strip():
-            self.new_name()  # the next one gets another
+        if started and session and not self.name.text().strip() and session == self.suggestion:
+            self.new_name()  # the next one gets another (unless the page said so already: used)
         return started
+
+    def used(self, session):
+        """A start under SESSION went to its terminal - at once, or after a check or a preparation it had waited for
+        (start() saw only "not started yet" then, and the codename stayed for the next start: of another agent too,
+        which met the session of this one). The codename is used up: the next start gets another. A typed name stays."""
+        if session and session == self.suggestion and not self.name.text().strip():
+            self.new_name()
+
+    def take_name(self, name):
+        """NAME is the session's name from now on (another name for one that is taken): in the field when a name was
+        typed there, else as the codename offered."""
+        if self.name.text().strip():
+            self.name.setText(name)
+            return
+        self.suggestion = name
+        self.name.setPlaceholderText(name)
+        self.name.setToolTip(safe_tooltip(tr("Empty: the session is called {name}", name=name)))
 
 
 # -- every extra window: an [x] at its top right and Esc to close it -------------------------------------------------
@@ -3802,6 +4626,8 @@ class WindowCloseKeys(QObject):
         if kind in (event.Type.Resize, event.Type.Show):
             if kind == event.Type.Show:
                 make_room_for_corner(watched)  # (a window given its [x] before its layout was set)
+                if not isinstance(watched, QDialog) and not event.spontaneous():
+                    window_rule(watched)  # (a dialog follows dialog_rule as it is shown)
             corner = watched.findChild(CloseCorner, "closeCorner", Qt.FindChildOption.FindDirectChildrenOnly)
             if corner is not None:
                 corner.place()

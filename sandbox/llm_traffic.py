@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -29,12 +30,14 @@ import re
 import sys
 import threading
 import time
+import zlib
 
 HERE = Path(__file__).resolve().parent
 LOADING = threading.RLock()
 _modules = {}
 
-FILE = re.compile(r"llm-traffic-(\d{8}-\d{6})-([A-Za-z0-9._-]{1,128}?)\.jsonl(?:\.(\d{1,3}))?")
+# .gz: compressed by sandbox-ai gc once its run ended (read as it is)
+FILE = re.compile(r"llm-traffic-(\d{8}-\d{6})-([A-Za-z0-9._-]{1,128}?)\.jsonl(?:\.(\d{1,3}))?(?:\.gz)?")
 LINE_LIMIT = (64 << 20) + (2 << 20)   # a record longer than this is skipped (the limit of one is 64 MiB)
 READ_BUDGET = 1 << 30                 # bytes read for one listing at most (the newest kept)
 TAIL_CHUNK = 4 << 20
@@ -57,9 +60,14 @@ def module(name):
 
 def safe(value, newlines=False):
     """Text of the log for a terminal: what the model or the agent wrote may hold control characters (escape
-    sequences); each is shown escaped, newlines and tabs kept with NEWLINES."""
+    sequences); each is shown escaped, newlines and tabs kept with NEWLINES. A text with nothing to escape (nearly
+    all of them) is known as such in one look: character by character in Python, the megabytes of a transcript were
+    two thirds of the command's time."""
+    text = str(value)
+    if (text.replace("\n", "").replace("\t", "") if newlines else text).isprintable():
+        return text
     return "".join(c if c.isprintable() or (newlines and c in "\n\t") else
-                   f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}" for c in str(value))
+                   f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}" for c in text)
 
 
 # -- files and runs ------------------------------------------------------------------------------------------------
@@ -93,6 +101,13 @@ def run_files(directory):
     return found
 
 
+def lifetime(path):
+    """(run, TIME) of the log PATH's name - one proxy's life: its requests are numbered from 1, and a request written
+    as a delta continues one of the same life only -, or None for another name."""
+    match = FILE.fullmatch(Path(path).name)
+    return (match.group(2), match.group(1)) if match else None
+
+
 def started_text(stamp):
     """2026-11-13 10:00:01 of a file name's 20261113-100001 (UTC)."""
     if not re.fullmatch(r"\d{8}-\d{6}", str(stamp)):
@@ -100,10 +115,16 @@ def started_text(stamp):
     return f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}"
 
 
+def opened(path):
+    """PATH to read from its start: a compressed log (NAME.gz) decompressed as it is read."""
+    tail = module("jsonltail")
+    return tail.open_compressed(path) if tail.compressed(path) else open(path, "rb")
+
+
 def first_record(path):
     """The first record of PATH (its run's facts: session, mode), or None."""
     try:
-        with open(path, "rb") as stream:
+        with opened(path) as stream:
             line = stream.readline(LINE_LIMIT)
         record = json.loads(line)
     except (OSError, ValueError, RecursionError):
@@ -217,9 +238,11 @@ def paths_of(directory, runs):
     return [path for run in runs if run in files for path in files[run]["paths"]]
 
 
-def read_records(paths, grep=None, budget=READ_BUDGET):
-    """The records of PATHS in order (a damaged or overlong line skipped): at most BUDGET bytes, the newest kept
-    (the oldest files are skipped first). GREP: only lines that hold this text (case does not count)."""
+def read_records(paths, grep=None, budget=READ_BUDGET, expander=None):
+    """The records of PATHS in order (a damaged or overlong line skipped), each whole (EXPANDER: an Expander - a record
+    written as a delta put together again): at most BUDGET bytes, the newest kept (the oldest files are skipped
+    first). GREP: only lines that hold this text (case does not count)."""
+    expander = expander if expander is not None else Expander(finder(paths))
     sizes = []
     for path in paths:
         try:
@@ -232,11 +255,12 @@ def read_records(paths, grep=None, budget=READ_BUDGET):
         skip += 1
     needle = grep.lower().encode("utf-8") if grep else None
     for path in paths[skip:]:
+        expander.enter(lifetime(path))
         try:
-            stream = open(path, "rb")
+            stream = opened(path)
         except OSError:
             continue
-        with stream:
+        with stream, contextlib.suppress(EOFError, zlib.error):  # a damaged compressed log: what was read
             while True:
                 line = stream.readline(LINE_LIMIT)
                 if not line:
@@ -247,17 +271,62 @@ def read_records(paths, grep=None, budget=READ_BUDGET):
                             line = stream.readline(LINE_LIMIT)
                     continue
                 if needle is not None and needle not in line.lower():
+                    expander.note(line)  # (parsed only for a delta after it that needs it)
                     continue
                 record = parse(line)
                 if record is not None:
-                    yield record
+                    yield expander.expand(record, line=line)
 
 
-def tail_records(paths, count):
-    """The last COUNT records of PATHS, oldest first, read from the end."""
+def tail_records(paths, count, expander=None):
+    """The last COUNT records of PATHS, oldest first, read from the end, each whole (EXPANDER: an Expander): the
+    records those written as deltas continue are read too (older ones, as far back as they go), not returned. A
+    request continues one of its own log only (lifetime: PATHS may hold several runs, a session's - each numbers its
+    requests from 1; before, a request of an earlier run was put together with the later run's request of that
+    number)."""
     tail = module("jsonltail")
-    found = []
+    found, numbers, needed, extra, life = [], set(), set(), [0], [None]
+
+    def take(record):
+        """Keep RECORD if it is one of the last COUNT or one they need; whether to read on."""
+        number = record.get("n")
+        if len(found) < count or number in needed:
+            found.append((life[0], record))
+            numbers.add(number)
+            delta = record.get("delta")
+            if isinstance(delta, dict) and isinstance(delta.get("of"), int) and delta["of"] not in numbers:
+                needed.add(delta["of"])
+        missing = needed - numbers
+        if len(found) >= count and missing and isinstance(number, int) and number < min(missing):
+            return False  # past them (records are written in order): not in the log any more
+        return len(found) < count or bool(missing)
+
+    going = True
     for path in reversed(paths):
+        if lifetime(path) != life[0] or not found:  # another run's log: its numbers are its own
+            if len(found) >= count:
+                break  # (what the last ones still miss is in no other log)
+            life[0], going = lifetime(path), True
+            numbers.clear()
+            needed.clear()
+        if not going:
+            continue
+        if tail.compressed(path):  # read from its start: only the newest lines are kept
+            lines, _, _ = tail.compressed_tail(path, READ_BUDGET, max(0, count - len(found)), LINE_LIMIT)
+            older = None
+            while True:
+                for line in reversed(lines):
+                    record = parse(line)
+                    if record is not None and not take(record):
+                        going = False
+                        break
+                if not going or older is not None or not needed - numbers:
+                    break
+                # a delta among them continues a record before those lines: the part again, more of it (a log of
+                # whole records never reads it twice)
+                older, _, _ = tail.compressed_tail(path, FIND_BYTES, None, LINE_LIMIT)
+                lines = older[:max(0, len(older) - len(lines))]
+            continue
         try:
             fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
         except OSError:
@@ -265,17 +334,219 @@ def tail_records(paths, count):
         try:
             end = tail.complete_end(fd, os.fstat(fd).st_size, TAIL_CHUNK)
             for line in tail.lines_from_end(fd, end, TAIL_CHUNK, LINE_LIMIT):
-                record = parse(line)
-                if record is not None:
-                    found.append(record)
-                    if len(found) >= count:
+                if len(found) >= count:  # (only the records the last ones continue: those lines alone parsed)
+                    extra[0] += len(line)
+                    number = record_number(line)
+                    if extra[0] > FIND_BYTES or (number is not None and needed - numbers and
+                                                 number < min(needed - numbers)):
+                        going = False
                         break
+                    if number is not None and number not in needed:
+                        continue
+                record = parse(line)
+                if record is not None and not take(record):
+                    going = False
+                    break
         finally:
             os.close(fd)
-        if len(found) >= count:
-            break
     found.reverse()
-    return found
+    expander = expander if expander is not None else Expander(finder(paths))
+    whole = []
+    for scope, record in found:
+        expander.enter(scope)
+        whole.append(expander.expand(record))
+    return whole[-count:] if count else []
+
+
+# -- records written as deltas (runtime.TrafficDeltas): put together again ------------------------------------------
+
+BASES_KEPT = 32  # records an Expander keeps whole for those that continue them (the writer refers to its last 16)
+FIND_BYTES = 256 << 20  # bytes of the run's parts read to find a record a delta continues
+
+
+class Expander:
+    """Each record of the LLM traffic log whole, as it was before it was written as a delta: a record with "delta"
+    ({"of": the request it continues, "key", "kept", "same", "digests", "order", "items"}) gets back what it left out -
+    the first "kept" items of that request's messages (input), those "items" names after them (laid_out), its fields
+    named in "same", its first "digests" digests -
+    from the records read before it (the last BASES_KEPT), else from LOOKUP(n) (a record of the run's parts, whole or
+    a delta itself). One whose request cannot be found keeps only what was new, with a first item that says how many
+    are missing, and "delta": {..., "missing": True}. A whole record is kept as its line until a delta needs it (a log
+    of whole records - before 0.1.98's review 2 - costs no more memory than before); one put together shares the items
+    of the one it continues."""
+
+    def __init__(self, lookup=None):
+        self.known, self.lookup, self.depth, self.scope = collections.OrderedDict(), lookup, 0, None
+
+    def enter(self, scope):
+        """The records that follow are of the log SCOPE (lifetime(path)): another one than before forgets the records
+        kept - requests are numbered per log, and one written as a delta continues a request of its own log only."""
+        if scope != self.scope:
+            self.known.clear()
+            self.scope = scope
+
+    def keep(self, number, entry):
+        self.known[number] = entry
+        self.known.move_to_end(number)
+        while len(self.known) > BASES_KEPT:
+            self.known.popitem(last=False)
+
+    def note(self, line):
+        """LINE, a line of the log read but not parsed (--grep): kept for a delta after it that needs it."""
+        number = record_number(line)
+        if number is not None:
+            self.keep(number, line)
+
+    def remember(self, record, line=None):
+        number = record.get("n")
+        if not isinstance(number, int) or isinstance(number, bool) or not isinstance(record.get("request"), dict):
+            return
+        if line is not None and "delta" not in record:
+            self.keep(number, line)  # (parsed again only for a delta that continues it)
+        else:
+            self.keep(number, (record["request"], record.get("digests") if isinstance(record.get("digests"), list)
+                               else []))
+
+    def base(self, number):
+        if number in self.known:
+            entry = self.known[number]
+            if not isinstance(entry, bytes):
+                return entry
+            found = parse(entry)
+            if found is None or found.get("n") != number:
+                return None
+            whole = self.expand(found, remember=False)
+            if whole.get("delta", {}).get("missing") or not isinstance(whole.get("request"), dict):
+                return None
+            entry = (whole["request"], whole.get("digests") if isinstance(whole.get("digests"), list) else [])
+            self.known[number] = entry
+            return entry
+        if self.lookup is None or self.depth > 2 * BASES_KEPT + 64:  # (a chain is at most runtime.LLM_TRAFFIC_CHAIN)
+            return None
+        found = self.lookup(number, self.scope)
+        if not isinstance(found, dict) or found.get("n") != number:
+            return None
+        self.depth += 1
+        try:
+            whole = self.expand(found, remember=False)
+        finally:
+            self.depth -= 1
+        if whole.get("delta", {}).get("missing") or not isinstance(whole.get("request"), dict):
+            return None
+        return whole["request"], whole.get("digests") if isinstance(whole.get("digests"), list) else []
+
+    def expand(self, record, remember=True, line=None):
+        """RECORD whole (a new dict if it was a delta); remembered for the records after it (LINE: the line it was
+        read from)."""
+        delta = record.get("delta")
+        if isinstance(delta, dict) and isinstance(record.get("request"), dict):
+            record = self.joined(record, delta)
+            line = None
+        if remember:
+            self.remember(record, line)
+        return record
+
+    def joined(self, record, delta):
+        key = delta.get("key") if delta.get("key") in ("messages", "input") else "messages"
+        kept = delta.get("kept") if isinstance(delta.get("kept"), int) and delta["kept"] >= 0 else 0
+        same = [name for name in delta.get("same") or [] if isinstance(name, str)]
+        prefix = delta.get("digests") if isinstance(delta.get("digests"), int) and delta["digests"] >= 0 else 0
+        own = record["request"]
+        items = own.get(key) if isinstance(own.get(key), list) else []
+        digests = record.get("digests") if isinstance(record.get("digests"), list) else []
+        number = record.get("n")
+        earlier = not isinstance(number, int) or (isinstance(delta.get("of"), int) and delta["of"] < number)
+        found = self.base(delta.get("of")) if earlier else None  # (never a later request: another log's)
+        if found is None:
+            request = dict(own)
+            request[key] = ([{"sandbox_ai_omitted": f"{kept} earlier items: the request #{delta.get('of')} this one "
+                                                    "continues is not in what was read of the log"}] if kept else []) \
+                + items
+            return {**record, "request": request, "delta": {**delta, "missing": True}}
+        base, base_digests = found
+        request = {}
+        order = [name for name in delta.get("order") or [] if isinstance(name, str)] or list(own)
+        for name in order + [name for name in own if name not in order]:
+            if name == key:
+                earlier = base.get(key) if isinstance(base.get(key), list) else []
+                request[key] = earlier[:kept] + self.laid_out(delta.get("items"), earlier, items, record)
+            elif name in same and name not in own:
+                if name in base:
+                    request[name] = base[name]
+            elif name in own:
+                request[name] = own[name]
+        whole = {}
+        for name, value in record.items():
+            if name == "delta":
+                continue
+            whole[name] = base_digests[:prefix] + digests if name == "digests" else request if name == "request" \
+                else value
+        return whole
+
+
+    @staticmethod
+    def laid_out(layout, earlier, items, record):
+        """What follows a delta's first items: ITEMS (those written in RECORD) and those of EARLIER (the request it
+        continues) LAYOUT names - each entry a number of ITEMS or [where, how many] of EARLIER. ITEMS alone without a
+        layout, with one that does not fit (damaged), and for a record cut to its limit (its older items left out:
+        "truncated" says so)."""
+        if not isinstance(layout, list):
+            return items
+        built, taken = [], 0
+        for entry in layout:
+            if isinstance(entry, int) and not isinstance(entry, bool) and entry >= 0:
+                built += items[taken:taken + entry]
+                taken += entry
+            elif isinstance(entry, list) and len(entry) == 2 and all(
+                    isinstance(part, int) and not isinstance(part, bool) and part >= 0 for part in entry) and \
+                    sum(entry) <= len(earlier):
+                built += earlier[entry[0]:sum(entry)]
+            else:
+                return items
+        return built if taken == len(items) else items
+
+
+def record_number(line):
+    """The request number a line of the log begins with ({"version":1,"n":N,...: how the proxy writes them}), or
+    None."""
+    match = re.match(rb'\{"version":1,"n":(\d+),', line)
+    return int(match.group(1)) if match else None
+
+
+def finder(paths, budget=FIND_BYTES):
+    """LOOKUP for an Expander: the record with a number in the run's PATHS (oldest part first; SCOPE: only those of
+    that log, lifetime), read from the part it must be in (the last whose first record is not after it) - at most
+    BUDGET bytes of it."""
+    firsts = {}
+
+    def first_number(path):
+        if path not in firsts:
+            record = first_record(path)
+            firsts[path] = record.get("n") if isinstance(record, dict) and isinstance(record.get("n"), int) else None
+        return firsts[path]
+
+    def lookup(number, scope=None):
+        candidates = [path for path in paths if (scope is None or lifetime(path) == scope)
+                      and (first_number(path) or 0) <= number]
+        for path in reversed(candidates[-2:]):
+            try:
+                stream = opened(path)
+            except OSError:
+                continue
+            read = 0
+            with stream, contextlib.suppress(EOFError, zlib.error, OSError):
+                while read < budget:
+                    line = stream.readline(LINE_LIMIT)
+                    if not line:
+                        break
+                    read += len(line)
+                    found = record_number(line)
+                    if found == number:
+                        return parse(line)
+                    if found is not None and found > number:
+                        break
+        return None
+    return lookup
 
 
 class Thread:
@@ -707,7 +978,7 @@ class Follow:
     def __init__(self, directory, runs):
         self.directory, self.runs = Path(directory), list(runs)
         self.fd, self.inode, self.position, self.pending = None, None, 0, b""
-        self.run = runs[-1] if runs else None
+        self.run, self.path = runs[-1] if runs else None, None
 
     def current(self):
         files = run_files(self.directory)
@@ -725,6 +996,7 @@ class Follow:
             self.fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
         except OSError:
             return
+        self.path = path
         self.inode = os.fstat(self.fd).st_ino
         self.position = module("jsonltail").complete_end(self.fd, os.fstat(self.fd).st_size)
 
@@ -739,6 +1011,7 @@ class Follow:
                 self.fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
             except OSError:
                 return found
+            self.path = path
             self.inode, self.position = os.fstat(self.fd).st_ino, 0
         while True:
             data = os.pread(self.fd, 1 << 20, self.position)
@@ -867,17 +1140,18 @@ def cli(argv, out=None):
         follow.mark()  # before the listing: what is written meanwhile comes once (records counted by run and n)
     paths = paths_of(directory, runs)
     thread = Thread()
+    expander = Expander(finder(paths))  # (records written as deltas put together, also those --follow reads)
     if a.tail:
         # the requests before the last N too, for what is new in the first of them
-        records = tail_records(paths, a.tail + LOOK_BACK) if not a.grep else \
-            list(collections.deque(read_records(paths, a.grep), maxlen=a.tail + LOOK_BACK))
+        records = tail_records(paths, a.tail + LOOK_BACK, expander) if not a.grep else \
+            list(collections.deque(read_records(paths, a.grep, expander=expander), maxlen=a.tail + LOOK_BACK))
         for record in records[:-a.tail]:
             thread.new_from(record)
         records = records[-a.tail:]
     else:
         # One record at a time, never the whole log in memory: a run's log of up to a GiB of conversations took five
         # times that as Python objects - for each request the app shows (--request N --json).
-        records = read_records(paths, a.grep)
+        records = read_records(paths, a.grep, expander=expander)
     seen = {}  # run: the highest request number read
     found = {"any": False, "request": False}
 
@@ -903,7 +1177,10 @@ def cli(argv, out=None):
     if follow is not None:
         try:
             while True:
-                new = [r for r in follow.read() if number(r) > seen.get(r.get("run"), 0)]
+                read = follow.read()
+                if follow.path is not None:
+                    expander.enter(lifetime(follow.path))  # (the log followed: the last one listed)
+                new = [expander.expand(r) for r in read if number(r) > seen.get(r.get("run"), 0)]
                 for record in new:
                     seen[record.get("run")] = max(seen.get(record.get("run"), 0), number(record))
                 if a.grep:

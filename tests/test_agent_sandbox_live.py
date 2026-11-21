@@ -463,6 +463,104 @@ print('LOG_SCENARIO_OK')
     assert (logs.stat().st_mode & 0o777) == 0o700
 
 
+ISOLATION_SCRIPT = r'''
+import ctypes, errno, json, os, socket, subprocess, sys
+libc = ctypes.CDLL(None, use_errno=True)
+found = {}
+def answer(name, call):
+    ctypes.set_errno(0)
+    try:
+        found[name] = "ok" if call() != -1 else errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno())
+    except OSError as exc:
+        found[name] = errno.errorcode.get(exc.errno, exc.errno)
+def sock(*args):
+    def make():
+        socket.socket(*args).close()
+        return 0
+    return make
+answer("io_uring", lambda: libc.syscall(ctypes.c_long(425), ctypes.c_long(0), ctypes.c_long(0)))
+answer("unknown", lambda: libc.syscall(ctypes.c_long(499)))
+answer("vsock", sock(40, socket.SOCK_STREAM))
+answer("alg", sock(38, socket.SOCK_SEQPACKET))
+answer("packet", sock(17, socket.SOCK_RAW))
+answer("netlink_generic", sock(16, socket.SOCK_RAW, 16))
+answer("netlink_route", sock(16, socket.SOCK_RAW, 0))
+answer("unix", sock(socket.AF_UNIX, socket.SOCK_STREAM))
+answer("inet", sock(socket.AF_INET, socket.SOCK_STREAM))
+found["unshare"] = subprocess.run(["unshare", "-U", "true"], capture_output=True).returncode
+found["thread_and_child"] = subprocess.run([sys.executable, "-I", "-c", "import threading; t = threading.Thread(target=print, args=('T',)); t.start(); t.join()"], capture_output=True, text=True).stdout.strip()
+flags = {}
+for line in open("/proc/self/mountinfo"):
+    fields = line.split(" ")
+    flags[fields[4]] = fields[5].split(",")
+found["flags"] = {point: flags.get(point) for point in ("/work", "/root")}
+status = dict(line.split(":\t", 1) for line in open("/proc/self/status").read().splitlines() if ":\t" in line)
+found["status"] = {key: status.get(key) for key in ("CapEff", "CapBnd", "NoNewPrivs", "Seccomp", "Seccomp_filters")}
+try:
+    os.listdir("/root/.config/firejail")
+    found["firejail_folder"] = "readable"
+except OSError as exc:
+    found["firejail_folder"] = errno.errorcode.get(exc.errno, exc.errno)
+try:
+    open("/sandbox/log/isolation.json").read()
+    found["manifest"] = "readable"
+except OSError as exc:
+    found["manifest"] = errno.errorcode.get(exc.errno, exc.errno)
+print("ISOLATION " + json.dumps(found))
+'''
+
+
+def test_real_isolation_filters_mount_flags_sealed_folder_and_manifest(request, backend, tmp_path):
+    """Security review B, against a real sandbox: sandbox-ai's own system call filters hold beside Firejail's (no
+    io_uring, no new namespace, no socket family outside the list, an unknown call is no call), the host's folders
+    are nosuid and nodev as the agent sees them, Firejail's folder in its HOME is out of its reach, and the run's
+    manifest - which it cannot read - says what the supervisor found. Must pass before a release: none of it could
+    be started where the change was made (no Podman there)."""
+    work, logs = tmp_path / "work", tmp_path / "logs"
+    work.mkdir()
+    stdout, stderr = launch(request.config, backend, "codex", work,
+                            ["--no-auth", "--offline", "--log-dir", str(logs), "--binary", "/usr/bin/python3"],
+                            ["-I", "-c", ISOLATION_SCRIPT])
+    found = json.loads(next(line for line in stdout.splitlines() if line.startswith("ISOLATION "))[10:])
+    assert found["io_uring"] == "EPERM" and found["unknown"] == "ENOSYS", found
+    for family in ("vsock", "alg", "packet"):
+        assert found[family] == "EAFNOSUPPORT", found
+    assert found["netlink_generic"] == "EPROTONOSUPPORT" and found["netlink_route"] == "ok", found
+    assert found["unix"] == "ok" and found["inet"] == "ok" and found["thread_and_child"] == "T", found
+    assert found["unshare"] != 0, found
+    for point in ("/work", "/root"):
+        assert "nosuid" in found["flags"][point] and "nodev" in found["flags"][point], found
+    assert int(found["status"]["CapEff"], 16) == 0 and int(found["status"]["CapBnd"], 16) == 0
+    assert found["status"]["NoNewPrivs"] == "1" and found["status"]["Seccomp"] == "2"
+    assert int(found["status"]["Seccomp_filters"]) >= 4, found  # the container's, Firejail's, the sandbox's
+    assert found["firejail_folder"] in ("EACCES", "ENOENT", "EPERM"), found
+    assert found["manifest"] != "readable", found
+    manifest = json.loads((logs / "isolation.json").read_text())
+    assert manifest["filters"]["container"]["profile"] == "container", manifest["filters"]
+    assert manifest["filters"]["sandbox"]["new_namespaces"] == "refused"
+    assert "--restrict-namespaces" in manifest["filters"]["firejail"]
+    assert manifest["firejail"]["config_sealed"] is True and manifest["firejail"]["version"]
+    assert manifest["host_folders"]["/work"] == ["nosuid", "nodev"]
+    for name in ("CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd"):
+        assert int(manifest["proxy"][name], 16) == 0, manifest["proxy"]
+    assert manifest["proxy"]["NoNewPrivs"] == "1" and manifest["proxy"]["Seccomp"] == "2"
+    assert str(tmp_path) not in json.dumps(manifest)  # no path of the host
+    assert "does not hold" not in stderr
+
+
+def test_real_strict_mode_starts_with_every_part_of_its_isolation(request, backend, tmp_path):
+    """--mode high: the same, where nothing starts without each part (the container's filter, the mounts' flags,
+    the sealed folder, a proxy without a bounding set)."""
+    work, logs = tmp_path / "work", tmp_path / "logs"
+    work.mkdir()
+    stdout, stderr = launch(request.config, backend, "codex", work,
+                            ["--no-auth", "--mode", "high", "--log-dir", str(logs), "--binary", "/usr/bin/python3"],
+                            ["-I", "-c", "print('STRICT_OK')"])
+    assert "STRICT_OK" in stdout
+    manifest = json.loads((logs / "isolation.json").read_text())
+    assert manifest["strict"] is True and manifest["filters"]["container"] and manifest["disk"]["act"] == "stop"
+
+
 @pytest.mark.agent_provider
 @pytest.mark.parametrize("agent", ["codex", "claude"])
 def test_practical_dangerously_skip_permissions_runs_tools_without_prompt(request, backend, agent, tmp_path):
@@ -663,6 +761,52 @@ def test_real_session_pause_resume_stop_restart(request, backend, tmp_path):
         assert restarted.returncode == 0, restarted.stderr
         time.sleep(2)
         assert state() == "running" and count() > stopped_at
+    finally:
+        session_cli("stop", name, env=env)
+    assert session_cli("delete", name, "--yes", env=env).returncode == 0
+
+
+def test_real_session_relays_cannot_be_replaced_from_inside_and_untrusted_is_confined(request, backend, tmp_path):
+    """Security review SAI-14, SAI-18 in a real sandbox (Podman or Bubblewrap, Firejail inside): the terminal relays'
+    sockets lie in tmux/relay, which no program of the sandbox can write, `sandbox-ai shell` runs through them, and a
+    command run with --untrusted cannot read a (made-up) agent login in HOME nor write HOME."""
+    import time
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")}
+    name = "live-" + uuid.uuid4().hex[:8]
+    work = tmp_path / "work"
+    command = [str(ROOT / "sandbox-ai"), "codex", "--backend", backend, "--workspace", str(work), "--offline", "--no-auth",
+               "--session", name, "--binary", "/usr/bin/python3", "--", "-I", "-c", "import time; time.sleep(600)"]
+    if backend == "podman" and request.config.getoption("--agent-image"):
+        command[1:1] = ["--image", request.config.getoption("--agent-image")]
+
+    def shell(*words):
+        return subprocess.run([str(ROOT / "sandbox-ai"), "shell", name, "-n", "--", *words], capture_output=True,
+                              text=True, env=env, stdin=subprocess.DEVNULL, timeout=120)
+    started = subprocess.run(command, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=180)
+    try:
+        assert started.returncode == 0, started.stderr
+        relay = tmp_path / "state/sandbox-ai/sessions" / name / "tmux" / "relay"
+        assert (relay / "attach.sock").is_socket() and (relay / "shell.sock").is_socket()
+        assert not (relay.parent / "attach.sock").exists() and not (relay / "guard.sock").exists()
+        assert shell("echo", "through the sealed relay").stdout == "through the sealed relay\n"
+        # From inside: the folder is read-only and a mount point - nothing can be put under a relay's name.
+        attempt = shell("sh", "-c", "cd /sandbox/tmux && for step in 'rm relay/shell.sock' 'mv relay gone' "
+                                    "'touch relay/new' 'ln -s /tmp relay/link' 'rm -rf relay' "
+                                    "'mkdir relay/sub'; do "
+                                    "sh -c \"$step\" 2>/dev/null && echo DONE:\"$step\"; done; echo end")
+        assert attempt.stdout == "end\n", attempt.stdout + attempt.stderr
+        assert sorted(entry.name for entry in relay.iterdir()) == ["attach.sock", "shell.sock"]
+        assert shell("echo", "still there").stdout == "still there\n"
+        # --untrusted: a made-up agent login in the session's HOME, unreadable for the confined command.
+        made = shell("sh", "-c", "mkdir -p ~/.codex && echo fixture-not-a-credential > ~/.codex/auth.json && echo made")
+        assert made.stdout == "made\n", made.stderr
+        confined = shell("python3", "-I", "/sandbox/runtime.py", "--untrusted", "--", "sh", "-c",
+                         "cat ~/.codex/auth.json; echo x > ~/.bashrc; cat /sandbox/session/config.json; "
+                         "echo ok > /work/out && cat /work/out")
+        assert "fixture-not-a-credential" not in confined.stdout + confined.stderr
+        assert confined.stdout.strip().splitlines()[-1] == "ok" and '"command"' not in confined.stdout
+        assert (work / "out").read_text() == "ok\n"
+        time.sleep(1)
     finally:
         session_cli("stop", name, env=env)
     assert session_cli("delete", name, "--yes", env=env).returncode == 0

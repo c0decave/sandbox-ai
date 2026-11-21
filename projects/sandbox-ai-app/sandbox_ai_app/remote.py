@@ -28,6 +28,9 @@ system into a sandbox's folder counts as the agent's, and so does what comes fro
 agent's - RemoteRoot.agents, one of sandbox-ai's hosts - wherever it goes); a local one goes out under a temporary
 name renamed into place when complete (posix-rename@openssh.com to replace, else a rename that refuses an existing
 name), what the copy created is removed unless it completes. A move copies first and removes the source when the copy is complete.
+From one remote system to another (or between two folders of one) a copy goes through this machine (relay): fetched
+into a staging folder of this machine with every rule of a download, then sent on with every rule of an upload; the
+staging folder is removed in any case. A move within one connection is a rename.
 
 SFTP tells no inode number and no time finer than a second, so a file another program rewrote with as many bytes within
 that second has the same size, time and bits: the editor's identity of a remote file carries the SHA-256 of what was
@@ -63,6 +66,8 @@ CONNECT_TIMEOUT = 20  # s: ssh's ConnectTimeout
 CHUNK = 32 << 10  # bytes per READ or WRITE request (every SFTP server takes this much)
 WINDOW = 16  # requests on their way at once while a file is read or written
 READLINKS = 2000  # links of one listing whose targets are read
+WALK_WINDOW = 32  # requests on their way at once while a search walks a remote folder (TreeScan)
+WALK_SLICE = 0.5  # s a search holds the session before the requests of others go first
 # Bytes of a file a move from a remote system reads again before it removes it (its SHA-256 compared with what was
 # fetched): SFTP tells no time finer than a second - a file rewritten with as many bytes within that second looked
 # unchanged. Larger files are taken by their size, time and bits (reading each twice would double a move).
@@ -87,6 +92,18 @@ READ_FLAG, WRITE_FLAG, APPEND_FLAG, CREAT_FLAG, TRUNC_FLAG, EXCL_FLAG = 0x01, 0x
 SIZE_ATTR, UIDGID_ATTR, PERMISSIONS_ATTR, TIMES_ATTR = 0x01, 0x02, 0x04, 0x08
 ERRNO = {NO_SUCH_FILE: errno.ENOENT, PERMISSION_DENIED: errno.EACCES, FAILURE: errno.EIO,
          UNSUPPORTED: errno.EOPNOTSUPP}
+
+
+def fd_ready(fd, writing, timeout):
+    """FD is ready for reading (WRITING: for writing) within TIMEOUT seconds; a hang-up or an error counts as ready
+    (the next read or write says which). poll(), not select(): select() refuses descriptors of 1024 and above
+    (ValueError), which an app that has had many terminals, hosts and copies open reaches - every SFTP connection
+    then failed at once."""
+    if not hasattr(select, "poll"):  # (no poll on this Python: select's own limit applies)
+        return bool(select.select([] if writing else [fd], [fd] if writing else [], [], timeout)[1 if writing else 0])
+    poller = select.poll()
+    poller.register(fd, select.POLLOUT if writing else select.POLLIN | select.POLLPRI)
+    return bool(poller.poll(max(0, int(timeout * 1000))))
 
 
 class RemoteError(OSError):
@@ -514,8 +531,7 @@ class Sftp:
                 self.close()
                 raise ConnectionLost(tr("{host} did not answer within {seconds} s; the connection was ended.",
                                         host=printable(self.target.text()), seconds=self.timeout))
-            ready = select.select([] if writing else [fd], [fd] if writing else [], [], min(left, POLL))
-            if ready[1 if writing else 0]:
+            if fd_ready(fd, writing, min(left, POLL)):
                 return
 
     def send(self, kind, payload):
@@ -881,6 +897,258 @@ class Sftp:
                 if failed is not None:
                     raise failed
         return offset
+
+
+# -- a search's walk: many requests on their way at once --
+
+class TreeScan:
+    """The walk of a search (file_search.py) below the remote folder TOP: SEARCH is told every entry (seen, found),
+    every folder read (folder), what could not be read (unreadable_folder, unreadable_file), every folder not entered
+    (not_entered_folder: "deep"), and the text of each file it asks for (content).
+
+    Up to WINDOW requests are on their way at once - the LSTAT of each folder a listing names (a link a server lists
+    with its target's attributes is never entered), the OPENDIR and READDIR of many folders, the LSTAT, OPEN and READ
+    of many files whose text is looked for -, so a tree takes about as many round trips as it is deep, not one or more
+    per folder. The answers are matched by their ids. The session's lock is held for WALK_SLICE s at a time: then the
+    answers on their way are read, the requests that follow from them kept, and the requests of other threads (a
+    pane's listing) go first (let_others). Every handle opened is closed again, also when the search stops early
+    (a limit, Cancel) or one of SEARCH's own steps fails (then the answers still on their way are read first, so the
+    session stays in step). Nothing is written, nothing runs there. (most: the most requests that were on their way
+    at once - the tests.)"""
+
+    def __init__(self, sftp, top, search, window=None):
+        import collections
+        self.sftp, self.search, self.window = sftp, search, window or WALK_WINDOW
+        self.pending = {}  # {request id: (what, context)}
+        self.folders = collections.deque([(top, "", 0)])  # (path, below the start, depth): folders to open
+        self.checks = collections.deque()  # (path, relative, name, depth): what a listing gave as a folder
+        self.reads = collections.deque()  # (path, relative, bytes): files whose text is looked for
+        self.held = collections.deque()  # requests that follow from an answer, kept for the next slice
+        self.handles = set()  # the handles open
+        self.idle = {}  # {handle: READDIR answers in a row that brought no name}
+        self.most = 0
+
+    def run(self):
+        sftp, search = self.sftp, self.search
+        try:
+            while not search.check() and self.more():
+                sftp.let_others()
+                with sftp.lock:
+                    ends = time.monotonic() + WALK_SLICE
+                    self.fill()
+                    while self.pending:
+                        filling = time.monotonic() < ends and not search.check()
+                        self.answer(filling)
+                        if filling:
+                            self.fill()
+        finally:
+            self.close_all()
+
+    def more(self):
+        return bool(self.folders or self.checks or self.reads or self.held)
+
+    def ask(self, kind, payload, what, *context):
+        sftp = self.sftp
+        ident = sftp.next_id
+        sftp.next_id = (ident + 1) & 0xFFFFFFFF
+        sftp.send(kind, struct.pack(">I", ident) + payload)
+        self.pending[ident] = (what, context)
+        self.most = max(self.most, len(self.pending))
+
+    def follow(self, filling, kind, payload, what, *context):
+        """A request that follows from an answer (the next READDIR or READ, a CLOSE): sent now while the slice lasts,
+        else kept for the next one; none once the search stopped (its handle is closed at the end: close_all)."""
+        if self.search.halted:
+            return
+        if filling and len(self.pending) < self.window:
+            self.ask(kind, payload, what, *context)
+        else:
+            self.held.append((kind, payload, what, context))
+
+    def fill(self):
+        """New requests while there is room: those kept first, then files to read, folders to look at, to open."""
+        search = self.search
+        while len(self.pending) < self.window and not search.halted:
+            if self.held:
+                kind, payload, what, context = self.held.popleft()
+                self.ask(kind, payload, what, *context)
+                continue
+            if self.reads:
+                path, relative, want = self.reads.popleft()
+                kind, what, context, unreadable = LSTAT, "file", (path, relative, want), search.unreadable_file
+            elif self.checks:
+                path, relative, name, depth = self.checks.popleft()
+                kind, what, context, unreadable = LSTAT, "check", (path, relative, name, depth), search.unreadable_folder
+            elif self.folders:
+                path, relative, depth = self.folders.popleft()
+                kind, what, context, unreadable = OPENDIR, "opendir", (path, relative, depth), search.unreadable_folder
+            else:
+                return
+            try:
+                payload = pack_string(check_name(path))
+            except Refused as exc:  # (a name with a line break: never sent - said, not searched)
+                unreadable(relative, exc)
+                continue
+            self.ask(kind, payload, what, *context)
+
+    def answer(self, filling, draining=False):
+        """Read one answer and act on it (DRAINING, or once the search stopped: only the handles it brings are kept,
+        to be closed)."""
+        sftp = self.sftp
+        kind, data = sftp.receive()
+        found = self.pending.pop(struct.unpack(">I", data[:4])[0], None) if len(data) >= 4 else None
+        if found is None:
+            sftp.close()
+            raise ConnectionLost(tr("The remote system sent a damaged answer."))
+        what, context = found
+        payload = data[4:]
+        if draining or self.search.halted:
+            if kind == HANDLE:
+                self.handles.add(Reader(payload).string())
+            if what == "close":
+                self.handles.discard(context[0])
+            return
+        getattr(self, "on_" + what)(filling, kind, payload, *context)
+
+    def failure(self, kind, payload):
+        """The error of a STATUS answer (anything else where it is expected: a damaged session, ended)."""
+        if kind != STATUS:
+            self.sftp.close()
+            raise ConnectionLost(tr("The remote system sent a damaged answer."))
+        return Sftp.fail(payload)
+
+    def gone(self, kind, payload):
+        """Whether the answer says the entry is gone (removed since it was listed: nothing to say)."""
+        return kind == STATUS and Reader(payload).u32() == NO_SUCH_FILE
+
+    def shut(self, filling, handle):
+        self.idle.pop(handle, None)
+        if self.search.halted:
+            return
+        self.follow(filling, CLOSE, pack_string(handle), "close", handle)
+
+    def entry(self, path, relative, name, attrs):
+        search = self.search
+        if search.seen(relative, name, stat.S_ISLNK(attrs.mode)):
+            want = search.found(relative, attrs)
+            if want:
+                self.reads.append((path, relative, want))
+
+    # -- the answers --
+
+    def on_close(self, filling, kind, payload, handle):
+        self.handles.discard(handle)
+
+    def on_check(self, filling, kind, payload, path, relative, name, depth):
+        if kind != ATTRS:
+            if not self.gone(kind, payload):
+                self.search.unreadable_folder(relative, self.failure(kind, payload))
+            return
+        attrs = Reader(payload).attrs()
+        self.entry(path, relative, name, attrs)  # (its own attributes: a link a server listed as a folder is a link)
+        if stat.S_ISDIR(attrs.mode) and not self.search.halted:
+            if depth > self.search.max_depth:
+                self.search.not_entered_folder(relative, "deep")
+            else:
+                self.folders.append((path, relative, depth))
+
+    def on_opendir(self, filling, kind, payload, path, relative, depth):
+        if kind != HANDLE:
+            if not self.gone(kind, payload) or not relative:
+                self.search.unreadable_folder(relative, self.failure(kind, payload))
+            return
+        handle = Reader(payload).string()
+        self.handles.add(handle)
+        self.search.folder()
+        self.follow(filling, READDIR, pack_string(handle), "readdir", handle, path, relative, depth)
+
+    def on_readdir(self, filling, kind, payload, handle, path, relative, depth):
+        if kind == STATUS and Reader(payload).u32() == EOF:
+            return self.shut(filling, handle)
+        if kind != NAME:
+            self.search.unreadable_folder(relative, self.failure(kind, payload))
+            return self.shut(filling, handle)
+        reader, named = Reader(payload), 0
+        for _ in range(reader.u32()):
+            name, _long, attrs = reader.text(), reader.string(), reader.attrs()
+            # (one name of the folder, or nothing - as listdir takes them: never "..", a path or a NUL)
+            if not name or name in (".", "..") or "/" in name or "\0" in name:
+                continue
+            named += 1
+            child, below = join(path, name), f"{relative}/{name}" if relative else name
+            if stat.S_ISDIR(attrs.mode):
+                self.checks.append((child, below, name, depth + 1))
+            else:
+                self.entry(child, below, name, attrs)
+            if self.search.halted:
+                return None
+        self.idle[handle] = 0 if named else self.idle.get(handle, 0) + 1
+        if self.idle[handle] > IDLE_ANSWERS:  # (never EOF: a listing that never ends)
+            self.search.unreadable_folder(relative, tr("The remote system sent a damaged answer."))
+            return self.shut(filling, handle)
+        return self.follow(filling, READDIR, pack_string(handle), "readdir", handle, path, relative, depth)
+
+    def on_file(self, filling, kind, payload, path, relative, want):
+        if kind != ATTRS:
+            if not self.gone(kind, payload):
+                self.search.unreadable_file(relative, self.failure(kind, payload))
+            return
+        attrs = Reader(payload).attrs()
+        if not stat.S_ISREG(attrs.mode):
+            self.search.content(relative, attrs, None)  # (a link the listing gave as its target: never read)
+            return
+        want = min(want, attrs.size) if attrs.size else 0
+        if not want:
+            self.search.content(relative, attrs, b"")
+            return
+        self.follow(filling, OPEN, pack_string(path) + struct.pack(">I", READ_FLAG) + pack_attrs(), "open", path,
+                    relative, attrs, want)
+
+    def on_open(self, filling, kind, payload, path, relative, attrs, want):
+        if kind != HANDLE:
+            if not self.gone(kind, payload):
+                self.search.unreadable_file(relative, self.failure(kind, payload))
+            return
+        handle = Reader(payload).string()
+        self.handles.add(handle)
+        self.read_on(filling, handle, relative, attrs, want, [], 0)
+
+    def read_on(self, filling, handle, relative, attrs, want, chunks, offset):
+        length = min(CHUNK, want - offset)
+        self.follow(filling, READ, pack_string(handle) + struct.pack(">QI", offset, length), "read", handle, relative,
+                    attrs, want, chunks, offset)
+
+    def on_read(self, filling, kind, payload, handle, relative, attrs, want, chunks, offset):
+        if kind == DATA:
+            chunk = Reader(payload).string()[:want - offset]
+            if chunk:
+                chunks.append(chunk)
+                offset += len(chunk)
+                # (a short answer is no end: asked again from where it stopped - only EOF or the size read end it)
+                if offset < want and b"\0" not in chunk:
+                    return self.read_on(filling, handle, relative, attrs, want, chunks, offset)
+        elif not (kind == STATUS and Reader(payload).u32() == EOF):
+            self.search.unreadable_file(relative, self.failure(kind, payload))
+            return self.shut(filling, handle)
+        self.shut(filling, handle)
+        return self.search.content(relative, attrs, b"".join(chunks))
+
+    def close_all(self):
+        """The answers still on their way read, every handle still open closed (the session stays in step)."""
+        sftp = self.sftp
+        if not sftp.alive or sftp.interrupted.is_set():
+            return
+        try:
+            with sftp.lock:
+                while self.pending:
+                    self.answer(False, draining=True)
+                for handle in list(self.handles):
+                    self.ask(CLOSE, pack_string(handle), "close", handle)
+                while self.pending:
+                    self.answer(False, draining=True)
+        except (OSError, ValueError) as exc:
+            applog.log("WARNING", "remote", f"SFTP to {sftp.target.text()}: a search's handles not closed: "
+                                            f"{applog.error_text(exc)}")
 
 
 # -- the root --
@@ -1462,8 +1730,9 @@ def copy_entry(source, relative, target, target_dir="", overwrite=False, untrust
     takes: the source is a sandbox's): nothing copied is executable, risky files are named. AGENTS: the sandboxes'
     folders (files.copy_entry: one met in a local folder copied out is copied as UNTRUSTED)."""
     if is_remote(source) and is_remote(target):
-        raise Refused(tr("Copies from one remote folder to another are not made here; move works within one "
-                         "remote system."))
+        # (another remote system, or another folder of the same one: through this machine)
+        return relay(source, relative, target, target_dir, overwrite, bool(untrusted), name, limit, entries,
+                     cancelled, progress)
     if is_remote(source):
         # (what comes into a sandbox's folder counts as the agent's: the caller says so for a host folder in one)
         return download(source, relative, target, target_dir, overwrite, bool(untrusted) or target.sandbox, name,
@@ -1482,11 +1751,13 @@ def move_entry(source, relative, target, target_dir="", overwrite=False, untrust
     # As files.move_entry: the source goes only when the copy is complete - nothing skipped (a link, a special file),
     # nothing changed while it was copied, not cancelled - and then only what was copied unchanged (what was added
     # or changed meanwhile stays). The whole source was deleted: a link in a folder moved, never copied, was lost.
-    if is_remote(source) and is_remote(target):
-        raise Refused(tr("Copies from one remote folder to another are not made here; move works within one "
-                         "remote system."))
     seen = {"files": {}, "folders": set(), "changed": []}
-    if is_remote(source):
+    if is_remote(source) and is_remote(target):
+        # (from one remote system to another: through this machine; the source goes as after a download - only what
+        # was fetched unchanged)
+        result = relay(source, relative, target, target_dir, overwrite, bool(untrusted) or bool(target_untrusted),
+                       None, limit, entries, cancelled, progress, seen)
+    elif is_remote(source):
         # (what comes into a sandbox's folder counts as the agent's)
         # (an agent's - one of sandbox-ai's hosts: UNTRUSTED - wherever it goes; in a sandbox's folder whatever comes)
         result = download(source, relative, target, target_dir, overwrite,
@@ -1583,6 +1854,45 @@ def _move_renamed(root, old, info, new, shown, overwrite, budget, result, depth,
         result.bytes += attrs_size(info)
     result.paths.append(shown)
     return []
+
+
+def relay(source, relative, target, target_dir, overwrite, untrusted, name, limit, entries, cancelled, progress,
+          seen=None):
+    """The remote RELATIVE of SOURCE into the folder TARGET_DIR of another remote system TARGET (or another folder of
+    the same one) - through this machine: fetched into a staging folder of its own here (download: links and special
+    files skipped, within the budget; UNTRUSTED - an agent's: nothing executable, files that tools run named), then
+    sent on from there (upload: under temporary names renamed into place; what it created is removed unless it
+    completes). The staging folder (0700, in the system's temporary folder) is removed in any case, and at exit.
+    PROGRESS counts what came here. SEEN (a move): what was fetched unchanged (download), for remove_fetched."""
+    import tempfile
+    source_name = parts(relative)[-1] if parts(relative) else ""
+    name = single_name(check_name(name or source_name))
+    if not overwrite and target.exists(target_dir, [name]):  # (before anything is fetched)
+        raise Refused(tr("{name} already exists there.", name=printable(name)))
+    # (by its real path: the folder above is opened without following a link - TMPDIR may be one, as /tmp on macOS)
+    staging = os.path.realpath(tempfile.mkdtemp(prefix="sandbox-ai-app-relay-"))
+    parent, key = os.open(os.path.dirname(staging), files.DIRECTORY), None
+    try:
+        try:
+            key = files._register_partial(parent, os.path.basename(staging), folder=True)
+            stage = files.Root(staging, sandbox=False)
+            fetched = download(source, relative, stage, "", False, untrusted, None, limit, entries, cancelled, progress,
+                               seen)
+            result = upload(stage, single_name(source_name), target, target_dir, overwrite, untrusted, name, limit,
+                            entries, cancelled, None)
+            result.skipped = fetched.skipped + result.skipped
+            result.changed = fetched.changed + result.changed
+            result.executable = list(dict.fromkeys(fetched.executable + result.executable))
+            return result
+        finally:
+            try:
+                files._remove(parent, os.path.basename(staging))
+            except OSError:
+                pass
+            if key is not None:
+                files._forget_partial(key)
+    finally:
+        os.close(parent)
 
 
 def download(source, relative, target, target_dir, overwrite, untrusted, name, limit, entries, cancelled, progress,
@@ -1894,3 +2204,71 @@ def ssh_command(target, known_hosts=None, config=None, ssh="ssh"):
         cleaned.append(args[index])
         index += 1
     return [ssh, *cleaned, "--", target.host]
+
+
+# -- folders of a host, looked at and made there (an MCP server's folders before `mcp add` on that host) --
+
+def host_path(root, path):
+    """PATH of the remote system of ROOT as an absolute clean path ("~/x" below its HOME, as sandbox-ai there expands
+    it), or None for one that is no absolute path."""
+    import posixpath
+    path = str(path or "")
+    if path == "~" or path.startswith("~/"):
+        path = posixpath.join(root.home, path[2:])
+    if not path.startswith("/") or any(c in path for c in "\0\n\r"):
+        return None
+    return posixpath.normpath(path) if not path.startswith("//") else "/" + path.lstrip("/")
+
+
+def folder_states(root, paths):
+    """{path: "folder" | "missing" | "link" | "file" | "relative"} of PATHS on the remote system of ROOT (a RemoteRoot),
+    each walked from "/" with LSTAT (a link on the way is named, never followed); nothing is changed there."""
+    import posixpath
+    states = {}
+    for path in paths:
+        clean = host_path(root, path)
+        if clean is None:
+            states[path] = "relative"
+            continue
+        state, walked = "folder", "/"
+        for part in [p for p in clean.split("/") if p]:
+            walked = posixpath.join(walked, part)
+            try:
+                info = root.sftp.lstat(walked)
+            except FileNotFoundError:
+                state = "missing"
+                break
+            if stat.S_ISLNK(info.mode):
+                state = "link"
+                break
+            if not stat.S_ISDIR(info.mode):
+                state = "file"
+                break
+        states[path] = state
+    return states
+
+
+def make_folders(root, paths):
+    """Make each of PATHS on the remote system of ROOT with the folders above it that are not there (0700: only you),
+    walked from "/" with LSTAT - never through a link, never over a file (Refused, named). [the folders made]."""
+    import posixpath
+    made = []
+    for path in paths:
+        clean = host_path(root, path)
+        if clean is None:
+            raise Refused(tr("Not an absolute path: {path}", path=printable(path)))
+        walked = "/"
+        for part in [p for p in clean.split("/") if p]:
+            walked = posixpath.join(walked, part)
+            try:
+                info = root.sftp.lstat(walked)
+            except FileNotFoundError:
+                root.sftp.mkdir(walked, 0o700)
+                made.append(walked)
+                continue
+            if stat.S_ISLNK(info.mode):
+                raise Refused(tr("{name} is a symbolic link to {target}; it is not followed.",
+                                 name=printable(walked), target=printable(root.target_of(walked))))
+            if not stat.S_ISDIR(info.mode):
+                raise Refused(tr("{name} exists there and is not a folder.", name=printable(walked)))
+    return made

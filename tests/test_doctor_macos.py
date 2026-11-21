@@ -47,7 +47,7 @@ def test_on_macos_the_linux_checks_are_left_out(monkeypatch):
         monkeypatch.setattr(d, name, lambda *a, name=name, **k: called.append(name) or ("ok", name, "", ""))
     d.checks("podman")
     linux_only = {"check_userns", "check_user_session", "check_proxy_nat", "check_pasta", "check_subids",
-                  "check_newuidmap", "check_bwrap_tools", "check_tiocsti"}
+                  "check_newuidmap", "check_bwrap_tools", "check_tiocsti", "check_landlock"}
     assert "check_machine" in called and "check_podman" in called and not linux_only & set(called)
     called.clear()
     monkeypatch.setattr(d.sys, "platform", "linux")

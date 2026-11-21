@@ -159,41 +159,52 @@ def describe(name, identity, out):
         out(f"  publish  {login['kind']:<9} {login['host']:<26} secret {login['secret']}")
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def main(argv, out=print):
     p = argparse.ArgumentParser(prog="sandbox-ai identities", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
+                                formatter_class=help_style, allow_abbrev=False,
                                 epilog="\n\n".join(__doc__.split("\n\n")[1:3]))
     commands = p.add_subparsers(dest="command", required=True)
-    for command in ("add", "set"):
-        sub = commands.add_parser(command)
+    for command, text in (("add", "a new identity"), ("set", "change an identity")):
+        sub = commands.add_parser(command, help=text)
         sub.add_argument("identity")
-        sub.add_argument("--name")
-        sub.add_argument("--email")
-        sub.add_argument("--description")
-    login = commands.add_parser("login")
+        sub.add_argument("--name", help="the author name of its commits")
+        sub.add_argument("--email", help="the author e-mail address of its commits")
+        sub.add_argument("--description", help="a note about this identity, shown in the list")
+    login = commands.add_parser("login", help="a Git server's login for an identity")
     login.add_argument("identity")
     login.add_argument("url")
-    login.add_argument("--secret", required=True)
-    login.add_argument("--user", default="x-access-token")
-    logout = commands.add_parser("logout")
+    login.add_argument("--secret", required=True, help="the secret (sandbox-ai secrets) holding the access token")
+    login.add_argument("--user", default="x-access-token", help="the user name sent with the token (default: x-access-token)")
+    logout = commands.add_parser("logout", help="forget an identity's Git login")
     logout.add_argument("identity")
     logout.add_argument("url")
-    publish = commands.add_parser("publish")
+    publish = commands.add_parser("publish", help="a package registry's login for an identity")
     publish.add_argument("identity")
     publish.add_argument("kind", choices=sorted(module("publish_logins").KINDS))
-    publish.add_argument("--secret", required=True)
-    publish.add_argument("--url")
-    unpublish = commands.add_parser("unpublish")
+    publish.add_argument("--secret", required=True, help="the secret (sandbox-ai secrets) holding the access token")
+    publish.add_argument("--url", help="the server's URL (default: the service's public one)")
+    unpublish = commands.add_parser("unpublish", help="forget an identity's publish login")
     unpublish.add_argument("identity")
     unpublish.add_argument("kind", choices=sorted(module("publish_logins").KINDS))
-    listing = commands.add_parser("list")
-    listing.add_argument("--json", action="store_true")
-    shown = commands.add_parser("show")
+    listing = commands.add_parser("list", help="the identities")
+    listing.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
+    shown = commands.add_parser("show", help="one identity with its logins")
     shown.add_argument("identity")
-    shown.add_argument("--json", action="store_true")
-    checked = commands.add_parser("check")
+    shown.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
+    checked = commands.add_parser("check", help="whether the logins' secrets are there")
     checked.add_argument("identity", nargs="?")
-    removed = commands.add_parser("remove")
+    removed = commands.add_parser("remove", help="forget an identity")
     removed.add_argument("identity")
     args = p.parse_args(argv)
     try:

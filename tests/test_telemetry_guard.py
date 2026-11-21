@@ -55,9 +55,11 @@ def message(name):
 def test_the_message_is_the_one_the_user_reads():
     assert [guard.message(agent) for agent in guard.AGENTS] == [
         message("Claude Code's"), message("Codex's"), message("OpenCode's"), message("Qwen Code's"),
-        message("Goose's"), message("DeepSeek Harness'")]
+        message("Goose's"), message("DeepSeek Harness'"), message("OpenCode 2's"), message("Pi's"),
+        message("Letta Code's"), message("OpenHands'"), message("nanobot's")]
     assert guard.KINDS == {"claude": "exec", "codex": "node", "opencode": "exec", "qwen": "node", "goose": "exec",
-                           "dsh": "node"}
+                           "dsh": "node", "opencode2": "exec", "pi": "node", "letta": "node", "openhands": "python",
+                           "nanobot": "python"}
 
 
 def test_the_guard_pins_what_the_launcher_sets():
@@ -67,7 +69,8 @@ def test_the_guard_pins_what_the_launcher_sets():
     for agent in guard.AGENTS:
         pins = guard.pinned(agent)
         assert {name: pins.get(name) for name in s.TELEMETRY_ENV[agent]["off"]} == s.TELEMETRY_ENV[agent]["off"], agent
-    for agent, module in (("qwen", "qwen"), ("goose", "goose"), ("dsh", "dsh")):
+    for agent, module in (("qwen", "qwen"), ("goose", "goose"), ("dsh", "dsh"), ("opencode2", "opencode2"),
+                          ("pi", "pi"), ("letta", "letta"), ("openhands", "openhands"), ("nanobot", "nanobot")):
         own = load(f"telemetry_guard_{module}", f"sandbox/{module}.py").TELEMETRY_ENV
         assert {name: guard.pinned(agent).get(name) for name in own} == own, agent
     qwen = load("telemetry_guard_qwen_base", "sandbox/qwen.py")
@@ -99,6 +102,18 @@ ENVIRONMENTS = [
     ("goose", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318"),
     ("goose", {"OTEL_SDK_DISABLED": "false"}, "OTEL_SDK_DISABLED=false"),
     ("goose", {"GOOSE_MODEL": "m", "PATH": "/bin"}, None),
+    # Goose 1.57.0 has a Langfuse tracing layer (crates/goose/src/tracing/langfuse_layer.rs: measured with the
+    # release binary, POST /api/public/ingestion to LANGFUSE_URL once the keys are set - also its INIT_PROJECT ones;
+    # nothing with empty keys): the keys are pinned empty and anything else of Langfuse is refused, as nanobot's.
+    ("goose", {"LANGFUSE_PUBLIC_KEY": "pk-lf-1"}, "LANGFUSE_PUBLIC_KEY=pk-lf-1"),
+    ("goose", {"LANGFUSE_SECRET_KEY": "sk-lf-1"}, "LANGFUSE_SECRET_KEY=sk-lf-1"),
+    ("goose", {"LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "pk-lf-1"}, "LANGFUSE_INIT_PROJECT_PUBLIC_KEY=pk-lf-1"),
+    ("goose", {"LANGFUSE_INIT_PROJECT_SECRET_KEY": "sk-lf-1"}, "LANGFUSE_INIT_PROJECT_SECRET_KEY=sk-lf-1"),
+    ("goose", {"LANGFUSE_URL": "http://127.0.0.1:3000"}, "LANGFUSE_URL=http://127.0.0.1:3000"),
+    ("goose", {"LANGFUSE_HOST": "https://cloud.langfuse.com"}, "LANGFUSE_HOST=https://cloud.langfuse.com"),
+    ("goose", {"LANGFUSE_BASE_URL": "https://cloud.langfuse.com"}, "LANGFUSE_BASE_URL=https://cloud.langfuse.com"),
+    ("goose", {"LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": "", "LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "",
+               "LANGFUSE_INIT_PROJECT_SECRET_KEY": ""}, None),
     ("dsh", {"DSH_TELEMETRY_DISABLED": "0"}, "DSH_TELEMETRY_DISABLED=0"),
     ("dsh", {"DSH_TELEMETRY_OTLP_URL": "http://x/v1/logs"}, "DSH_TELEMETRY_OTLP_URL=http://x/v1/logs"),
     ("dsh", {"DSH_PRODUCT_ANALYTICS_OTLP_URL": "http://x"}, "DSH_PRODUCT_ANALYTICS_OTLP_URL=http://x"),
@@ -117,6 +132,42 @@ ENVIRONMENTS = [
     ("opencode", {"OPENCODE_TEST_MANAGED_CONFIG_DIR": "/tmp/x"}, "OPENCODE_TEST_MANAGED_CONFIG_DIR=/tmp/x"),
     ("opencode", {"OTEL_EXPORTER_OTLP_HEADERS": "a=b"}, "OTEL_EXPORTER_OTLP_HEADERS=a=b"),
     ("opencode", {"OPENCODE_CONFIG_CONTENT": "{}", "OPENCODE_DISABLE_AUTOUPDATE": "1"}, None),
+    # The agents of 0.1.97 (their own TELEMETRY_ENV: opencode2.py, pi.py, letta.py, openhands.py, nanobot.py).
+    ("opencode2", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://x"}, "OTEL_EXPORTER_OTLP_ENDPOINT=http://x"),
+    ("opencode2", {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://x"}, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://x"),
+    ("opencode2", {"OPENCODE_TEST_MANAGED_CONFIG_DIR": "/tmp/x"}, "OPENCODE_TEST_MANAGED_CONFIG_DIR=/tmp/x"),
+    ("opencode2", {"BUN_ENABLE_CRASH_REPORTING": "1"}, "BUN_ENABLE_CRASH_REPORTING=1"),
+    ("opencode2", {"OPENCODE_CONFIG_CONTENT": "{}"}, None),  # --opencode2-enable updates: no OPENCODE_DISABLE_...
+    ("pi", {"PI_TELEMETRY": "1"}, "PI_TELEMETRY=1"),
+    ("pi", {"PI_OFFLINE": "0"}, "PI_OFFLINE=0"),
+    ("pi", {"PI_OFFLINE": "false"}, "PI_OFFLINE=false"),
+    ("pi", {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1"}, None),
+    ("pi", {"PI_SKIP_VERSION_CHECK": "1"}, None),  # --pi-enable model-catalog: no PI_OFFLINE, its report still off
+    # Analysis round 3 (hostile input): Pi 1.4.0 is offline only for PI_OFFLINE 1, true or yes in any case
+    # (isOfflineModeEnabled, isTruthyEnvFlag: no trim); "OFF", "No", "on", "2" or " 1" turned it off past the guard.
+    ("pi", {"PI_OFFLINE": "OFF"}, "PI_OFFLINE=OFF"), ("pi", {"PI_OFFLINE": "No"}, "PI_OFFLINE=No"),
+    ("pi", {"PI_OFFLINE": "on"}, "PI_OFFLINE=on"), ("pi", {"PI_OFFLINE": "2"}, "PI_OFFLINE=2"),
+    ("pi", {"PI_OFFLINE": " 1"}, "PI_OFFLINE= 1"), ("pi", {"PI_OFFLINE": " "}, None),  # (blank: unset, allowed)
+    ("pi", {"PI_OFFLINE": "TRUE"}, None), ("pi", {"PI_OFFLINE": "Yes"}, None), ("pi", {"PI_OFFLINE": "true"}, None),
+    ("letta", {"LETTA_CODE_TELEM": "1"}, "LETTA_CODE_TELEM=1"),
+    ("letta", {"SCARF_ANALYTICS": "true"}, "SCARF_ANALYTICS=true"),
+    ("letta", {"DO_NOT_TRACK": "0"}, "DO_NOT_TRACK=0"),
+    ("letta", {"LETTA_BASE_URL": "http://127.0.0.1:9", "DISABLE_AUTOUPDATER": "1"}, None),
+    ("openhands", {"OH_TELEMETRY_CONSENT": "granted"}, "OH_TELEMETRY_CONSENT=granted"),
+    ("openhands", {"OH_TELEMETRY_EXPORTER": "posthog"}, "OH_TELEMETRY_EXPORTER=posthog"),
+    ("openhands", {"ANONYMIZED_TELEMETRY": "true"}, "ANONYMIZED_TELEMETRY=true"),
+    ("openhands", {"BROWSER_USE_CLOUD_SYNC": "true"}, "BROWSER_USE_CLOUD_SYNC=true"),
+    ("openhands", {"AGENT_CANVAS_DISABLE_TELEMETRY": "0"}, "AGENT_CANVAS_DISABLE_TELEMETRY=0"),
+    ("openhands", {"VITE_DO_NOT_TRACK": "0"}, "VITE_DO_NOT_TRACK=0"),
+    ("openhands", {"LMNR_PROJECT_API_KEY": "lmnr-key"}, "LMNR_PROJECT_API_KEY=lmnr-key"),
+    ("openhands", {"LMNR_BASE_URL": "http://x"}, "LMNR_BASE_URL=http://x"),  # Laminar's, any of them
+    ("openhands", {"OTEL_ENDPOINT": "http://x"}, "OTEL_ENDPOINT=http://x"),
+    ("openhands", {"OH_CONVERSATION_RUNTIME": "local", "LMNR_PROJECT_API_KEY": ""}, None),
+    ("nanobot", {"LANGFUSE_SECRET_KEY": "sk-lf-1"}, "LANGFUSE_SECRET_KEY=sk-lf-1"),
+    ("nanobot", {"LANGFUSE_PUBLIC_KEY": "pk-lf-1"}, "LANGFUSE_PUBLIC_KEY=pk-lf-1"),
+    ("nanobot", {"LANGFUSE_TRACING_ENABLED": "true"}, "LANGFUSE_TRACING_ENABLED=true"),
+    ("nanobot", {"LANGFUSE_HOST": "https://cloud.langfuse.com"}, "LANGFUSE_HOST=https://cloud.langfuse.com"),
+    ("nanobot", {"LANGFUSE_SECRET_KEY": "", "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_TRACING_ENABLED": "false"}, None),
 ]
 
 # (agent, arguments, what is refused or None)
@@ -139,6 +190,8 @@ ARGUMENTS = [
     ("codex", ["exec", "--", "-c", "analytics.enabled=true"], None),
     ("goose", ["session"], None), ("claude", ["-p", "hi"], None), ("opencode", ["run", "hi"], None),
     ("dsh", ["headless", "x"], None),
+    ("opencode2", ["run", "hi"], None), ("pi", ["-p", "hi"], None), ("letta", ["-p", "hi"], None),
+    ("openhands", ["task", "--text=hi"], None), ("nanobot", ["agent", "-m", "hi"], None),
 ]
 
 
@@ -348,7 +401,8 @@ def test_the_shim_runs_the_guard_and_becomes_the_agent(tmp_path):
 
 @pytest.mark.parametrize("name, agents", [
     ("claude", ["claude"]), ("codex", ["codex"]), ("opencode", ["opencode"]), ("qwen", ["qwen"]),
-    ("goose", ["goose"]), ("dsh", ["dsh"]), ("team", ["claude", "codex", "opencode"])])
+    ("goose", ["goose"]), ("dsh", ["dsh"]), ("team", ["claude", "codex", "opencode"]), ("opencode2", ["opencode2"]),
+    ("pi", ["pi"]), ("letta", ["letta"]), ("openhands", ["openhands"]), ("nanobot", ["nanobot"])])
 def test_every_agent_image_guards_its_commands(name, agents):
     """sandbox-ai build AGENT: the guard copied in and --install run after the agent is installed, before the image's
     own check of its command (which then runs through the guard)."""
@@ -356,7 +410,7 @@ def test_every_agent_image_guards_its_commands(name, agents):
     copy = "COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py\n"
     run = f"RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install {' '.join(agents)}\n"
     assert copy in text and run in text and text.index(copy) < text.index(run)
-    installed = max(text.find(marker) for marker in ("npm install --global", "npm ci", "install -m 0755 goose"))
+    installed = max(text.find(marker) for marker in ("npm install --global", "npm ci", "install -m 0755", "uv pip install"))
     assert 0 < installed < text.index(run)
     checks = [line for line in text.splitlines() if "--version" in line and line.startswith("RUN")]
     assert checks and all(text.index(line) > text.index(run) for line in checks[-1:])
@@ -458,6 +512,13 @@ def mounts_of(host):
     (["claude", "--with", "codex"], "localhost/team-sandbox:latest",
      {"/etc/claude-code": "claude-code/managed-settings.json", "/etc/codex": "codex/managed_config.toml",
       "/etc/opencode": "opencode/opencode.json"}),
+    (["opencode2"], "localhost/opencode2-sandbox:latest", {}),
+    (["pi"], "localhost/pi-sandbox:latest", {}),
+    (["letta"], "localhost/letta-sandbox:latest", {}),
+    (["openhands"], "localhost/openhands-sandbox:latest",
+     {"/opt/openhands/venv/lib/python3.12/site-packages/sandbox-ai-telemetry-off.pth": "telemetry-guard/openhands.pth"}),
+    (["nanobot"], "localhost/nanobot-sandbox:latest",
+     {"/opt/nanobot/venv/lib/python3.12/site-packages/sandbox-ai-telemetry-off.pth": "telemetry-guard/nanobot.pth"}),
 ])
 def test_e2e_every_agent_sandbox_gets_the_guard_read_only(tmp_path, args, image, managed):
     """`sandbox-ai AGENT` (a shell with --binary, a team): the guard's files are mounted read-only over the image's
@@ -473,7 +534,7 @@ def test_e2e_every_agent_sandbox_gets_the_guard_read_only(tmp_path, args, image,
     mounts, session = mounts_of(host), tmp_path / "kept/session"
     for target, name in ((guard.GUARD_PY, "telemetry-guard/telemetry_guard.py"),
                          (guard.GUARD_JS, "telemetry-guard/telemetry-guard.mjs"), *managed.items()):
-        assert target in mounts and mounts[target].endswith(",ro,nodev"), mounts.get(target)
+        assert target in mounts and mounts[target].endswith(",ro,nodev,nosuid"), mounts.get(target)
         assert f"/{name.split('/')[0]}" in mounts[target].split(",dst=")[0], mounts[target]
         assert (session / name).exists(), name
     assert (session / "telemetry-guard/telemetry_guard.py").read_text() == (ROOT / "sandbox/telemetry_guard.py").read_text()
@@ -491,6 +552,18 @@ def test_e2e_every_agent_sandbox_gets_the_guard_read_only(tmp_path, args, image,
                                  env={"PATH": "/usr/bin:/bin", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"})
         assert refused.returncode == 2 and refused.stderr.startswith(guard.message(agent)), refused.stderr
         ran = subprocess.run([sys.executable, "-IS", str(kept), agent], capture_output=True, text=True,
+                             env={"PATH": "/usr/bin:/bin"})
+        assert ran.returncode == 0 and ran.stdout == "ran\n", ran.stderr
+    elif guard.KINDS[agent] == "python":  # the session's .pth, as the agent's Python reads it at every start
+        site = tmp_path / "site"
+        site.mkdir()
+        (site / "guard.pth").write_text((session / f"telemetry-guard/{agent}.pth").read_text().replace(
+            guard.GUARD_PY, str(session / "telemetry-guard/telemetry_guard.py")))
+        program = f"import site; site.addsitedir({str(site)!r}); print('ran')"
+        refused = subprocess.run([sys.executable, "-I", "-c", program], capture_output=True, text=True,
+                                 env={"PATH": "/usr/bin:/bin", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"})
+        assert refused.returncode == 2 and refused.stderr.startswith(guard.message(agent)), refused.stderr
+        ran = subprocess.run([sys.executable, "-I", "-c", program], capture_output=True, text=True,
                              env={"PATH": "/usr/bin:/bin"})
         assert ran.returncode == 0 and ran.stdout == "ran\n", ran.stderr
     elif NODE:
@@ -512,6 +585,224 @@ def test_e2e_the_launcher_leaves_out_what_the_guard_would_refuse(tmp_path):
     assert done.returncode == 0, done.stderr
     assert "OTEL_EXPORTER_OTLP_ENDPOINT is not passed (telemetry is always off)" in done.stderr
     assert "collector:4318" not in json.dumps(host.calls())
+
+
+# --- the agents of 0.1.97: OpenCode 2, Pi, Letta Code (commands), OpenHands and nanobot (their Python) -------------
+#
+# Merging 0.1.96's guard into the branch of 0.1.97: its five new agents had the launcher's pins only, so from their
+# shell `OTEL_EXPORTER_OTLP_ENDPOINT=... opencode2` (or `opencode`, the same binary), `PI_TELEMETRY=1 pi`, `PI_OFFLINE=0
+# pi`, `LETTA_CODE_TELEM=1 letta`, `OH_TELEMETRY_CONSENT=granted openhands`, `LANGFUSE_SECRET_KEY=... nanobot` or
+# `LANGFUSE_HOST=... /opt/nanobot/venv/bin/python -m nanobot` ran with telemetry on (or its pins taken away).
+
+def test_the_newer_agents_are_guarded_each_in_its_form():
+    assert {agent: guard.KINDS[agent] for agent in ("opencode2", "pi", "letta", "openhands", "nanobot")} == {
+        "opencode2": "exec", "pi": "node", "letta": "node", "openhands": "python", "nanobot": "python"}
+    assert guard.ALIASES == {"opencode2": ("opencode",)}  # its image's `opencode` is the same binary
+    assert guard.ENTRIES["pi"] == "/opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+    assert guard.SITE_PACKAGES == {"openhands": "/opt/openhands/venv/lib/python3.12/site-packages",
+                                   "nanobot": "/opt/nanobot/venv/lib/python3.12/site-packages"}
+    # What its start sets, each pinned again (not PI_OFFLINE: --pi-enable leaves it out; it may only stay on).
+    assert guard.AGENT_PINS["pi"] == {"PI_TELEMETRY": "0"} and "PI_OFFLINE" in guard.REFUSED_ENV["pi"]
+    assert guard.AGENT_PINS["letta"] == {"LETTA_CODE_TELEM": "0", "SCARF_ANALYTICS": "false"}
+    assert guard.AGENT_PINS["nanobot"]["LANGFUSE_SECRET_KEY"] == "" == guard.AGENT_PINS["nanobot"]["LANGFUSE_PUBLIC_KEY"]
+    assert "OPENCODE_TEST_MANAGED_CONFIG_DIR" in guard.REFUSED_ENV["opencode2"]
+    for name in ("OH_TELEMETRY_EXPORTER", "OH_TELEMETRY_CONSENT", "OH_TELEMETRY_CONSENT_MODE", "ANONYMIZED_TELEMETRY",
+                 "BROWSER_USE_CLOUD_SYNC", "AGENT_CANVAS_DISABLE_TELEMETRY", "VITE_DO_NOT_TRACK"):
+        assert name in guard.AGENT_PINS["openhands"], name
+
+
+def test_the_launchers_start_of_each_newer_agent_passes_its_guard():
+    """The environment the launcher gives each new agent (its module's variables, with every feature on as well) is
+    never one its guard refuses."""
+    s = load("telemetry_guard_newer_launcher", "sandbox/agent_sandbox.py")
+    for args in (["opencode2"], ["opencode2", "--opencode2-enable", "updates,models-catalog"], ["pi"],
+                 ["pi", "--pi-enable", "model-catalog,updates"], ["letta"], ["openhands"], ["nanobot"]):
+        a = s.parse_args(args)
+        env = s.agent_environment(a)
+        assert guard.refused(a.agent, [], env) is None, (args, guard.refused(a.agent, [], env))
+        assert {name: env.get(name) for name in guard.AGENT_PINS[a.agent]} == guard.AGENT_PINS[a.agent], args
+
+
+def test_the_python_guard_refuses_in_the_agents_python_and_pins_the_rest(capsys):
+    exits = []
+    environ = {"PATH": "/bin", "LANGFUSE_HOST": "https://cloud.langfuse.com"}
+    guard.python_guard("nanobot", environ=environ, exit=exits.append)
+    assert exits == [2] and capsys.readouterr().err == (
+        f"{guard.message('nanobot')} (LANGFUSE_HOST=https://cloud.langfuse.com is refused: telemetry is always "
+        "off)\n")
+    environ = {"PATH": "/bin", "LANGFUSE_SECRET_KEY": "", "OTEL_EXPORTER_OTLP_ENDPOINT": " ", "OH_X": "1"}
+    guard.python_guard("nanobot", environ=environ, exit=exits.append)
+    assert exits == [2] and environ["PATH"] == "/bin" and "OTEL_EXPORTER_OTLP_ENDPOINT" not in environ
+    assert {name: environ[name] for name in guard.pinned("nanobot")} == guard.pinned("nanobot")
+    assert guard.pth_line("openhands") == (
+        "import importlib.util as _sai; _sai_spec = _sai.spec_from_file_location('sandbox_ai_telemetry_guard', "
+        f"{guard.GUARD_PY!r}); _sai_guard = _sai.module_from_spec(_sai_spec); _sai_spec.loader.exec_module(_sai_guard); "
+        "_sai_guard.python_guard('openhands')\n")
+
+
+@pytest.mark.parametrize("agent, refused_env", [
+    ("openhands", {"OH_TELEMETRY_CONSENT": "granted"}), ("openhands", {"BROWSER_USE_CLOUD_SYNC": "true"}),
+    ("nanobot", {"LANGFUSE_SECRET_KEY": "sk-lf-1"}), ("nanobot", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://x"})])
+def test_every_process_of_the_agents_python_runs_the_guard(tmp_path, agent, refused_env):
+    """--install AGENT writes the .pth into the venv's site-packages: the agent, its server, a script run with its
+    Python - each process refuses what would turn telemetry on and has the opt-outs (its children inherit them)."""
+    site, guard_dir = tmp_path / "site-packages", tmp_path / "lib/sandbox-ai"
+    guard_dir.mkdir(parents=True)
+    (guard_dir / "telemetry_guard.py").write_text((ROOT / "sandbox/telemetry_guard.py").read_text())
+    pth = guard.install(agent, guard_dir=guard_dir, site_dir=site)
+    guard.install(agent, guard_dir=guard_dir, site_dir=site)  # a second build step: nothing twice
+    assert pth == site / guard.PTH and pth.read_text() == guard.pth_line(agent, str(guard_dir / "telemetry_guard.py"))
+    program = f"import site, os, json; site.addsitedir({str(site)!r}); print(json.dumps(dict(os.environ)))"
+    ran = subprocess.run([sys.executable, "-I", "-c", program], capture_output=True, text=True,
+                         env={"PATH": "/usr/bin:/bin"}, timeout=60)
+    assert ran.returncode == 0, ran.stderr
+    seen = json.loads(ran.stdout)
+    assert {name: seen[name] for name in guard.pinned(agent)} == guard.pinned(agent)
+    refused = subprocess.run([sys.executable, "-I", "-c", program], capture_output=True, text=True,
+                             env={"PATH": "/usr/bin:/bin", **refused_env}, timeout=60)
+    what = "=".join(next(iter(refused_env.items())))
+    assert refused.returncode == 2 and refused.stdout == ""
+    assert refused.stderr.startswith(f"{guard.message(agent)} ({what} is refused: "), refused.stderr
+
+
+def test_install_guards_opencode2_and_the_opencode_of_its_image(tmp_path):
+    """Its image: /usr/local/bin/opencode is the binary and opencode2 a link to it - both names become the shim, the
+    binary moves to REAL_DIR/opencode2."""
+    bin_dir, guard_dir = tmp_path / "bin", tmp_path / "lib/sandbox-ai"
+    bin_dir.mkdir()
+    (bin_dir / "opencode").write_text("#!/bin/sh\necho opencode2 \"$@\"\n")
+    (bin_dir / "opencode").chmod(0o755)
+    (bin_dir / "opencode2").symlink_to("opencode")
+    real = guard.install("opencode2", command_dir=bin_dir, guard_dir=guard_dir)
+    guard.install("opencode2", command_dir=bin_dir, guard_dir=guard_dir)
+    assert real == guard_dir / "real/opencode2" and not real.is_symlink()
+    assert real.read_text() == "#!/bin/sh\necho opencode2 \"$@\"\n"
+    for name in ("opencode2", "opencode"):
+        shim = bin_dir / name
+        assert not shim.is_symlink() and shim.stat().st_mode & 0o777 == 0o755
+        assert shim.read_text() == guard.shim("opencode2", str(guard_dir / "telemetry_guard.py")), name
+
+
+@pytest.mark.skipif(not Path(guard.PYTHON).exists(), reason="Debian's python3")
+def test_opencode2s_shim_refuses_otlp_and_becomes_the_binary(tmp_path):
+    bin_dir, guard_dir = tmp_path / "bin", tmp_path / "lib/sandbox-ai"
+    bin_dir.mkdir()
+    guard_dir.mkdir(parents=True)
+    (bin_dir / "opencode").write_text('#!/bin/sh\necho "ran $* BUN=$BUN_ENABLE_CRASH_REPORTING"\n')
+    (bin_dir / "opencode").chmod(0o755)
+    (bin_dir / "opencode2").symlink_to("opencode")
+    (guard_dir / "telemetry_guard.py").write_text((ROOT / "sandbox/telemetry_guard.py").read_text().replace(
+        'REAL_DIR = GUARD_DIR + "/real"', f'REAL_DIR = "{guard_dir}/real"', 1))
+    guard.install("opencode2", command_dir=bin_dir, guard_dir=guard_dir)
+    for name in ("opencode2", "opencode"):
+        done = subprocess.run([str(bin_dir / name), "run", "x"], capture_output=True, text=True, timeout=60,
+                              env={"PATH": "/usr/bin:/bin"})
+        assert done.returncode == 0 and done.stdout == "ran run x BUN=0\n", done.stderr
+        done = subprocess.run([str(bin_dir / name), "run", "x"], capture_output=True, text=True, timeout=60,
+                              env={"PATH": "/usr/bin:/bin", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"})
+        assert done.returncode == 2 and done.stdout == ""
+        assert done.stderr.startswith(f"{guard.message('opencode2')} (OTEL_EXPORTER_OTLP_ENDPOINT="), done.stderr
+
+
+def test_install_guards_pis_entry_behind_its_wrapper_and_refuses_a_commonjs_one(tmp_path):
+    """Pi's command is the image's own sh wrapper (sandbox-ai's extension): the guard goes into the bundle it runs.
+    The import works only in an ES module: a CommonJS entry fails the image's build instead of a broken pi (one
+    without a "type" Node detects by its import; the image's check of pi after --install proves it)."""
+    package = tmp_path / "opt/pi/node_modules/@earendil-works/pi-coding-agent"
+    (package / "dist/bundle").mkdir(parents=True)
+    (package / "package.json").write_text('{"name": "@earendil-works/pi-coding-agent", "type": "module"}')
+    entry = package / "dist/bundle/cli.js"
+    entry.write_text("#!/usr/bin/env node\nconsole.log('pi');\n")
+    bin_dir, guard_dir = tmp_path / "bin", tmp_path / "lib/sandbox-ai"
+    bin_dir.mkdir()
+    (bin_dir / "pi").write_text(f'#!/bin/sh\nexec node "{entry}" "$@"\n')
+    assert guard.install("pi", command_dir=bin_dir, guard_dir=guard_dir, entry=entry) == entry
+    line = guard.import_line("pi", str(guard_dir / "telemetry-guard.mjs"))
+    assert entry.read_text() == f"#!/usr/bin/env node\n{line}\nconsole.log('pi');\n"
+    assert (bin_dir / "pi").read_text() == f'#!/bin/sh\nexec node "{entry}" "$@"\n'  # the wrapper as it was
+    (package / "package.json").write_text('{"name": "@earendil-works/pi-coding-agent", "type": "commonjs"}')
+    entry.write_text("#!/usr/bin/env node\nconsole.log('pi');\n")
+    with pytest.raises(SystemExit, match="not an ES module"):
+        guard.install("pi", command_dir=bin_dir, guard_dir=guard_dir, entry=entry)
+    assert "telemetry-guard" not in entry.read_text()
+
+
+@pytest.mark.skipif(not NODE, reason="node")
+@pytest.mark.parametrize("agent, environ, what", [
+    ("pi", {"PI_TELEMETRY": "1"}, "PI_TELEMETRY=1"), ("pi", {"PI_OFFLINE": "0"}, "PI_OFFLINE=0"),
+    ("letta", {"LETTA_CODE_TELEM": "1"}, "LETTA_CODE_TELEM=1"),
+    ("letta", {"SCARF_ANALYTICS": "true"}, "SCARF_ANALYTICS=true")])
+def test_a_guarded_pi_or_letta_entry_refuses_and_pins(tmp_path, agent, environ, what):
+    """--install on a module entry as the images have it: run with node, what would turn telemetry on is refused."""
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "package.json").write_text('{"type": "module"}')
+    entry = package / "cli.js"
+    entry.write_text("#!/usr/bin/env node\nconsole.log(JSON.stringify(process.env));\n")
+    bin_dir, guard_dir = tmp_path / "bin", tmp_path / "lib/sandbox-ai"
+    bin_dir.mkdir()
+    guard.install(agent, command_dir=bin_dir, guard_dir=guard_dir, entry=entry)
+    done = subprocess.run([NODE, str(entry)], capture_output=True, text=True, timeout=60,
+                          env={"PATH": os.environ["PATH"], **environ})
+    assert done.returncode == 2 and done.stderr.startswith(f"{guard.message(agent)} ({what} is refused: ")
+    done = subprocess.run([NODE, str(entry)], capture_output=True, text=True, timeout=60,
+                          env={"PATH": os.environ["PATH"]})
+    assert done.returncode == 0, done.stderr
+    assert {name: json.loads(done.stdout)[name] for name in guard.pinned(agent)} == guard.pinned(agent)
+
+
+def test_openhands_own_command_runs_the_guard_before_the_canvas(tmp_path, monkeypatch, capsys):
+    """`openhands` (and the Canvas' uvx, the same file) runs under Debian's python3, not the venv: it calls the guard
+    itself before it starts anything (the Canvas reads AGENT_CANVAS_DISABLE_TELEMETRY and VITE_DO_NOT_TRACK)."""
+    cli = load("telemetry_guard_openhands_cli", "sandbox/openhands_cli.py")
+    kept = tmp_path / "telemetry_guard.py"
+    kept.write_text((ROOT / "sandbox/telemetry_guard.py").read_text())
+    monkeypatch.setattr(cli, "GUARD_PY", str(kept))
+    monkeypatch.setattr(cli, "canvas_main", lambda args: 0)
+    monkeypatch.setattr(cli.os, "_exit", lambda status: (_ for _ in ()).throw(SystemExit(status)))
+    monkeypatch.setenv("AGENT_CANVAS_DISABLE_TELEMETRY", "0")
+    with pytest.raises(SystemExit) as ended:
+        cli.main(["openhands"])
+    assert ended.value.code == 2 and capsys.readouterr().err.startswith(
+        f"{guard.message('openhands')} (AGENT_CANVAS_DISABLE_TELEMETRY=0 is refused: ")
+    monkeypatch.delenv("AGENT_CANVAS_DISABLE_TELEMETRY")
+    saved = dict(os.environ)
+    try:
+        assert cli.main(["openhands"]) == 0 and os.environ["OH_TELEMETRY_CONSENT"] == "denied"
+    finally:  # (the guard pins this process's environment: the next tests get it back as it was)
+        os.environ.clear()
+        os.environ.update(saved)
+    monkeypatch.setattr(cli, "GUARD_PY", str(tmp_path / "none.py"))  # not in this image (a test, an older one)
+    assert cli.main(["openhands"]) == 0
+    assert os.environ.get("OH_TELEMETRY_CONSENT") == saved.get("OH_TELEMETRY_CONSENT")  # nothing pinned without it
+
+
+def test_the_launcher_gives_the_python_agents_their_pth(s):
+    a = s.parse_args(["nanobot"])
+    assert s.telemetry_guarded(a) == ["nanobot"]
+    files = s.telemetry_guard_files(a, {})
+    assert files["telemetry-guard/nanobot.pth"] == guard.pth_line("nanobot")
+    mounts = dict((target, source) for source, target in s.telemetry_guard_mounts(a, "/S"))
+    assert mounts[f"{guard.SITE_PACKAGES['nanobot']}/{guard.PTH}"] == Path("/S/telemetry-guard/nanobot.pth")
+    assert mounts[guard.GUARD_PY] == Path("/S/telemetry-guard/telemetry_guard.py")
+    assert s.telemetry_plan(s.parse_args(["openhands"]))["guarded"] == {"openhands": {
+        "command": "/usr/local/bin/openhands", "python": f"{guard.SITE_PACKAGES['openhands']}/{guard.PTH}"}}
+    assert s.telemetry_plan(s.parse_args(["opencode2"]))["guarded"] == {"opencode2": {
+        "command": "/usr/local/bin/opencode2", "also": ["/usr/local/bin/opencode"]}}
+    assert [s.telemetry_guarded(s.parse_args([agent])) for agent in ("pi", "letta", "opencode2", "openhands")] == [
+        ["pi"], ["letta"], ["opencode2"], ["openhands"]]
+
+
+def test_e2e_the_launcher_leaves_out_a_langfuse_key_for_nanobot(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from live_fakes import Host
+    host = Host(tmp_path / "host")
+    host.add_image("localhost/nanobot-sandbox:latest")
+    done = host.run("nanobot", "--no-tmux", "--no-auth", "--env", "LANGFUSE_HOST",
+                    env={"FAKE_PODMAN_RUN": "0:0", "LANGFUSE_HOST": "https://cloud.langfuse.com"})
+    assert done.returncode == 0, done.stderr
+    assert "LANGFUSE_HOST is not passed (telemetry is always off)" in done.stderr
+    assert "cloud.langfuse.com" not in json.dumps(host.calls())
 
 
 # --- with the agents themselves (opt-in: their pinned versions, installed outside the repository) ---------------------
@@ -770,3 +1061,70 @@ def test_with_goose_an_otlp_endpoint_of_its_own_exports_nothing(tmp_path, collec
         done = run([*guarded, "--version"], **extra)
         assert done.returncode == 2 and done.stderr.startswith(guard.message("goose")), done.stderr
     assert run([*guarded, "--version"]).stdout.strip() == "1.57.0"
+
+
+def test_goose_starts_with_its_langfuse_keys_pinned_empty_and_its_guard_accepts_them():
+    """The launcher gives Goose empty Langfuse keys (its tracing layer starts with them), which its guard accepts;
+    the AGENT_NAMES pattern covers every other LANGFUSE_ variable."""
+    s = load("telemetry_guard_goose_langfuse", "sandbox/agent_sandbox.py")
+    env = s.agent_environment(s.parse_args(["goose"]))
+    keys = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_INIT_PROJECT_PUBLIC_KEY",
+            "LANGFUSE_INIT_PROJECT_SECRET_KEY")
+    assert {name: env.get(name) for name in keys} == dict.fromkeys(keys, "")
+    assert guard.refused("goose", [], env) is None
+    assert {name: guard.AGENT_PINS["goose"].get(name) for name in keys} == dict.fromkeys(keys, "")
+    assert guard.AGENT_NAMES["goose"] == r"^LANGFUSE_" and guard.telemetry_name("LANGFUSE_URL", "goose")
+    assert not guard.telemetry_name("LANGFUSE_URL", "pi")
+
+
+@pytest.mark.skipif(not GOOSE, reason="SANDBOX_AI_TEST_GOOSE: Goose 1.57.0's binary")
+def test_with_goose_langfuse_keys_start_its_tracing_and_the_guard_refuses_them(tmp_path):
+    """Goose itself: with LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and LANGFUSE_URL it posts its traces to
+    LANGFUSE_URL/api/public/ingestion (batches every few seconds: its model's answer is held back here so that the
+    run outlasts one) - with the keys empty nothing. Through the guard the keys and the URL are refused."""
+    import socket
+    import threading
+    import time
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(20)
+    url, paths = f"http://127.0.0.1:{server.getsockname()[1]}", []
+
+    def handle(connection):
+        request = connection.recv(65536)
+        paths.append(request.split(b" ")[1] if request else b"")
+        if b"ingestion" not in paths[-1]:
+            time.sleep(7)
+        try:
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+        except OSError:
+            pass
+        connection.close()
+
+    def serve():
+        server.settimeout(120)
+        try:
+            while True:
+                threading.Thread(target=handle, args=(server.accept()[0],), daemon=True).start()
+        except OSError:
+            pass
+    threading.Thread(target=serve, daemon=True).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "GOOSE_DISABLE_KEYRING": "1", "GOOSE_TELEMETRY_OFF": "1",
+           "GOOSE_PROVIDER": "openai", "GOOSE_MODEL": "m", "OPENAI_API_KEY": "x", "OPENAI_HOST": url}
+    run = lambda command, **extra: subprocess.run(command, capture_output=True, text=True, timeout=120,  # noqa: E731
+                                                  env={**env, **extra}, stdin=subprocess.DEVNULL)
+    run([GOOSE, "run", "--no-session", "-t", "hi"], LANGFUSE_PUBLIC_KEY="pk-x", LANGFUSE_SECRET_KEY="sk-x",
+        LANGFUSE_URL=url)
+    time.sleep(1)
+    assert b"/api/public/ingestion" in paths, "Goose no longer traces to Langfuse with its keys"
+    guarded = exec_guard(tmp_path, "goose", GOOSE)
+    for extra in ({"LANGFUSE_PUBLIC_KEY": "pk-x"}, {"LANGFUSE_SECRET_KEY": "sk-x"}, {"LANGFUSE_URL": url},
+                  {"LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "pk-x"}):
+        done = run([*guarded, "--version"], **extra)
+        assert done.returncode == 2 and done.stderr.startswith(guard.message("goose")), (extra, done.stderr)
+    paths.clear()
+    run([*guarded, "run", "--no-session", "-t", "hi"], LANGFUSE_PUBLIC_KEY="", LANGFUSE_SECRET_KEY="")
+    time.sleep(1)
+    assert b"/api/public/ingestion" not in paths

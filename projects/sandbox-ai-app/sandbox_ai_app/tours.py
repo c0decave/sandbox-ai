@@ -165,7 +165,19 @@ AREA_TOURS = {
               "zeigt, was mit ihm geschah; Aufräumen… entfernt Übriggebliebenes, nachdem es dies gezeigt hat, und "
               "nur das."),
              ("Look at the history of a start.", "Sehen Sie sich den Verlauf eines Starts an.")),
-        step("devices_label", ("While it runs", "Während sie läuft"),
+        step("session_label", ("Session", "Sitzung"),
+             ("The icons above the list act on the selected start; pointing at one shows its name and what it does "
+              "(Settings › Show button texts puts the texts beside them). This row is the session's own: attach in a "
+              "window or in the app, a shell, pause, resume, delete, resume with more, copy or move to a host, "
+              "export, checkpoints, its memory and session files. The right-click menu of a row has them too.",
+              "Die Symbole über der Liste wirken auf den gewählten Start; Zeigen auf eines zeigt seinen Namen und "
+              "was es tut (Einstellungen › Beschriftungen der Schaltflächen neben den Symbolen zeigen stellt die Texte "
+              "daneben). Diese Reihe gehört der Sitzung: im Fenster oder in der App verbinden, eine Shell, "
+              "pausieren, fortsetzen, löschen, mit mehr fortsetzen, auf einen Host kopieren oder verschieben, "
+              "exportieren, Checkpoints, ihr Gedächtnis und ihre Sitzungsdateien. Das Kontextmenü einer Zeile hat "
+              "sie auch."),
+             ("Point at the icons to read their names.", "Zeigen Sie auf die Symbole, um ihre Namen zu lesen.")),
+        step("run_label", ("While it runs", "Während sie läuft"),
              ("For a running start: allow or revoke destinations, devices and limits until it ends; Add workspace… "
               "mounts a folder or a single file of its host (with a name of its own); Add MCP server… gives it a "
               "server or a helper agent now, without a restart, and keeps it for its later starts, offering the "
@@ -190,6 +202,14 @@ AREA_TOURS = {
               "Stoppt die gewählte Sandbox; ihr Launcher räumt auf. Eine Sitzung lässt sich auch pausieren und "
               "fortsetzen."),
              ("Stop a run you no longer need.", "Stoppen Sie einen Lauf, den Sie nicht mehr brauchen.")),
+        step("schedules_box", ("Schedules", "Zeitpläne"),
+             ("The tab Schedules lists the scheduled runs of this machine or a host: an agent started on a "
+              "timetable or a trigger, with a report of each run. Add…, Run now, Pause, History… and the timer that "
+              "starts them are there.",
+              "Der Tab Zeitpläne listet die geplanten Läufe dieses Rechners oder eines Hosts: ein Agent, nach "
+              "Zeitplan oder Auslöser gestartet, mit einem Bericht jedes Laufs. Hinzufügen…, Jetzt ausführen, "
+              "Pausieren, Verlauf… und der Timer, der sie startet, sind dort."),
+             ("Add a nightly review of your project.", "Fügen Sie eine nächtliche Durchsicht Ihres Projekts hinzu.")),
     ),
     "approvals": (
         step("open", ("Open questions", "Offene Fragen"),
@@ -207,20 +227,24 @@ AREA_TOURS = {
               "Die Fragen dieses Rechners und jedes Hosts stehen zusammen; hier beschränken Sie sie auf diesen "
               "Rechner oder einen Host."),
              ("Choose This machine.", "Wählen Sie Dieser Rechner.")),
-        step("scope", ("For how long", "Für wie lange"),
-             ("How long an allow lasts: once, for the run, or always (kept for the project). The security mode "
-              "decides what is offered.",
-              "Wie lange ein Erlauben gilt: einmal, für den Lauf oder immer (für das Projekt gemerkt). Der "
-              "Sicherheitsmodus bestimmt, was angeboten wird."),
-             ("Choose once while you are unsure.", "Wählen Sie einmal, solange Sie unsicher sind.")),
+        step("allow_run_button", ("For how long", "Für wie lange"),
+             ("One button per scope: Allow once (Ctrl+Return), Always allow - every same request of this run "
+              "(Ctrl+Shift+Return) - and Always, also for later sessions - remembered for the project (Ctrl+Shift+A). "
+              "The security mode decides what is offered; a button that is off says why.",
+              "Eine Schaltfläche je Geltung: Einmal erlauben (Strg+Eingabe), Immer erlauben - jede gleiche Anfrage "
+              "dieses Laufs (Strg+Umschalt+Eingabe) - und Immer, auch für Folgesitzungen - für das Projekt gemerkt "
+              "(Strg+Umschalt+A). Der Sicherheitsmodus bestimmt, was angeboten wird; eine abgeschaltete Schaltfläche "
+              "sagt, warum."),
+             ("Allow once while you are unsure.", "Erlauben Sie einmal, solange Sie unsicher sind.")),
         step("allow_button", ("Allow, deny, block", "Erlauben, ablehnen, sperren"),
-             ("Allow (Ctrl+Return) lets it through; for another host's page it reads Open here and allow and opens "
+             ("Allow once lets it through this time; for another host's page it reads Open here and allow and opens "
               "the page in your browser here. Deny for this run (Ctrl+Shift+D) refuses it until the run ends, Deny "
-              "once only this time, Block always… (Ctrl+Shift+K) at every later start too, after asking.",
-              "Erlauben (Strg+Eingabe) lässt es durch; für eine Seite eines anderen Hosts heißt es Hier öffnen und "
+              "once only this time, Block always (Ctrl+Shift+K) at every later start too - each at once, Undo takes it "
+              "back for a few seconds.",
+              "Einmal erlauben lässt es dieses Mal durch; für eine Seite eines anderen Hosts heißt es Hier öffnen und "
               "erlauben und öffnet die Seite hier in Ihrem Browser. Für diesen Lauf ablehnen (Strg+Umschalt+D) weist "
-              "es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… (Strg+Umschalt+K) nach "
-              "einer Rückfrage auch bei jedem späteren Start."),
+              "es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren (Strg+Umschalt+K) auch "
+              "bei jedem späteren Start - jedes sofort, Rückgängig nimmt es einige Sekunden lang zurück."),
              ("Answer the next question here.", "Beantworten Sie die nächste Frage hier.")),
         step("always", ("What you allowed always", "Was Sie immer erlaubt haben"),
              ("Your standing answers, of this machine or of a host you choose below. Forget one and it is asked "
@@ -318,6 +342,22 @@ AREA_TOURS = {
              ("Tokens, requests and tool calls per run and per agent, from a project's logs.",
               "Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro Agent, aus den Protokollen eines Projekts."),
              ("Pick a project and compare two runs.", "Wählen Sie ein Projekt und vergleichen Sie zwei Läufe.")),
+    ),
+    "monitor": (
+        step("tree", ("What runs, by project", "Was läuft, nach Projekt"),
+             ("Each running sandbox with its CPU, memory of its limit, disk IO, network and processes, grouped by "
+              "project, the heaviest first.",
+              "Jede laufende Sandbox mit CPU, Speicher ihrer Grenze, Platten-IO, Netzwerk und Prozessen, nach "
+              "Projekt gruppiert, die schwerste zuerst."),
+             ("Sort by Memory.", "Sortieren Sie nach Speicher.")),
+        step("chart", ("History", "Verlauf"),
+             ("CPUs and memory over the window chosen, of the run or project selected, else of the host.",
+              "CPUs und Speicher über den gewählten Zeitraum, des gewählten Laufs oder Projekts, sonst des Hosts."),
+             ("Choose 7 days.", "Wählen Sie 7 Tage.")),
+        step("warnings", ("Warnings", "Warnungen"),
+             ("What needs a look, and what helps: a higher limit, or stopping an idle run.",
+              "Was einen Blick braucht, und was hilft: eine höhere Grenze oder einen untätigen Lauf stoppen."),
+             ("Select a warning.", "Wählen Sie eine Warnung.")),
     ),
     "files": (
         step("roots", ("Whose files", "Wessen Dateien"),
@@ -742,16 +782,19 @@ TASK_TOURS = {tour.id: tour for tour in (
               "Die Frage zeigt die Sandbox, den Host und wie lange sie noch wartet. Ohne Antwort rechtzeitig wird "
               "sie abgelehnt."),
              ("Select the question.", "Wählen Sie die Frage."), "page:approvals"),
-        task("approvals", "scope", ("For how long", "Für wie lange"),
-             ("Once, for the run, or always for the project. Choose once while you are unsure.",
-              "Einmal, für den Lauf oder immer für das Projekt. Wählen Sie einmal, solange Sie unsicher sind."),
-             ("Choose for the run.", "Wählen Sie für den Lauf.")),
+        task("approvals", "allow_run_button", ("For how long", "Für wie lange"),
+             ("One button per scope: Allow once, Always allow (every same request of this run) or Always, also for "
+              "later sessions (remembered for the project). Allow once while you are unsure.",
+              "Eine Schaltfläche je Geltung: Einmal erlauben, Immer erlauben (jede gleiche Anfrage dieses Laufs) oder "
+              "Immer, auch für Folgesitzungen (für das Projekt gemerkt). Erlauben Sie einmal, solange Sie unsicher "
+              "sind."),
+             ("Click Always allow.", "Klicken Sie auf Immer erlauben.")),
         task("approvals", "allow_button", ("Answer", "Antworten"),
-             ("Allow lets it through. Deny for this run refuses it until the run ends, Deny once only this "
-              "request, Block always… at every later start too.",
-              "Erlauben lässt es durch. Für diesen Lauf ablehnen weist es bis zum Ende des Laufs ab, Einmal ablehnen "
-              "nur diese Anfrage, Immer sperren… auch bei jedem späteren Start."),
-             ("Allow it.", "Erlauben Sie es.")),
+             ("Allow once lets it through this time. Deny for this run refuses it until the run ends, Deny once only "
+              "this request, Block always at every later start too.",
+              "Einmal erlauben lässt es dieses Mal durch. Für diesen Lauf ablehnen weist es bis zum Ende des Laufs ab, "
+              "Einmal ablehnen nur diese Anfrage, Immer sperren auch bei jedem späteren Start."),
+             ("Answer the next question.", "Beantworten Sie die nächste Frage.")),
         task("sandboxes", "table", ("Change a running sandbox", "Eine laufende Sandbox ändern"),
              ("Without waiting for a question: select a running sandbox; While it runs allows or revokes a host "
               "until it ends (sandbox-ai net allow).",

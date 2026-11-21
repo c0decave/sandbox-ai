@@ -100,9 +100,11 @@ def test_add_mcp_server_to_a_running_start_here_and_restart_the_agent(ui, sai, m
     monkeypatch.setattr(ui.LiveMcpDialog, "exec", choose)
     sai.answers[("mcp", "attach")] = attached("maybe")
     page.add_mcp()
-    assert seen[0] == ["fetch (running)", "web (stopped)", "Claude Code as a helper", "Codex as a helper",
-                       "OpenCode as a helper", "Hermes Agent as a helper", "DeepSeek Harness as a helper",
-                       "Qwen Code as a helper", "Goose as a helper"]  # every agent the launcher takes as --helper
+    assert seen[0] == ["fetch (running)", "web (stopped)", "From another host…", "Claude Code as a helper", "Codex as a helper",
+                       "OpenCode as a helper", "OpenCode 2 as a helper", "Hermes Agent as a helper", "DeepSeek Harness as a helper",
+                       "Qwen Code as a helper", "Goose as a helper",
+                       "OpenHands as a helper", "nanobot as a helper",
+                       "Letta Code as a helper", "Pi as a helper"]  # every agent the launcher takes as --helper
     assert ran(sai, "local", "mcp", "attach") == ("local", "mcp", "attach", "fetch", "api", "--live", "--json")
     assert [action for action, *_ in ui.asked] == ["mcp-attach", "start-restart"]
     assert "reaches the MCP server now. As said there." in ui.asked[1][1], "sandbox-ai's message, as it is"
@@ -188,12 +190,18 @@ def test_the_workspace_dialog_takes_a_file_or_a_folder_and_a_name(ui, sai, monke
         assert not ok.isEnabled() and dialog.problem.isVisibleTo(dialog), bad
     dialog.name_edit.setText("notes.txt")
     assert ok.isEnabled() and not dialog.problem.isVisibleTo(dialog)
-    monkeypatch.setattr(ui, "choose_file", lambda parent, title, key="file": "/home/me/notes.txt")
+    from sandbox_ai_app import remote_chooser
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, title, mode="folder", *a, **k:
+                        "/home/me/notes.txt" if (host, mode) == ("local", "file") else "")
     next(b for b in dialog.browse_buttons if b.text() == "File…").click()
     assert dialog.directory() == "/home/me/notes.txt"
     dialog.deleteLater()
     remote = ui.WorkspaceDialog(None, "api", host="ct1")
-    assert remote.browse_buttons == [] and "on ct1" in remote.windowTitle()
+    assert len(remote.browse_buttons) == 2 and "on ct1" in remote.windowTitle(), "ct1's folders listed (over SSH)"
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, title, mode="folder", *a, **k:
+                        "/srv/notes.txt" if (host, mode) == ("ct1", "file") else "")
+    next(b for b in remote.browse_buttons if b.text() == "File…").click()
+    assert remote.directory() == "/srv/notes.txt"
     remote.deleteLater()
     # Added with its name, read-only: the list says file or folder and that it is named.
     instance = backend.Instance("session", "remote:ct1:api", "api", host="ct1", state="running", agent="claude")
@@ -206,7 +214,8 @@ def test_the_workspace_dialog_takes_a_file_or_a_folder_and_a_name(ui, sai, monke
         return QtWidgets.QDialog.DialogCode.Accepted
     monkeypatch.setattr(ui.WorkspaceDialog, "exec", fill)
     page.add_workspace()
-    assert ran(sai, "ct1", "workspace") == ("ct1", "workspace", "add", "api", "/srv/notes.txt", "--ro", "--name=notes")
+    assert ran(sai, "ct1", "workspace", "add") == ("ct1", "workspace", "add", "api", "/srv/notes.txt", "--ro",
+                                                   "--name=notes")
     assert ui.asked == [], "read-only: nothing to confirm"
     assert ui.workspace_label({"sandbox": "/workspaces/notes", "host": "/srv/notes.txt", "kind": "file", "named": True,
                                "mode": "ro"}) == "/workspaces/notes ← /srv/notes.txt (file, named, read-only)"
@@ -237,7 +246,9 @@ def test_the_connections_page_reads_a_hosts_log(ui, sai, monkeypatch):
     assert ran(sai, "ct1", "logs") == ("ct1", "logs", "--project=/srv/project", "--json")
     title, text, _ = widgets.SHOWN[-1]
     assert title == "Logs on ct1" and "Requests: 3" in text and "not allowed" in text
-    monkeypatch.setattr(ui.QInputDialog, "getText", lambda *a, **k: ("/srv/sandbox-ai/logs/p", True))
+    from sandbox_ai_app import remote_chooser
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, *a, **k:
+                        "/srv/sandbox-ai/logs/p" if host == "ct1" else "")
     page.browse()
     assert page.directory.currentData() == ["--log-dir", "/srv/sandbox-ai/logs/p"]
     assert ran(sai, "ct1", "activity")[2:4] == ("--log-dir", "/srv/sandbox-ai/logs/p")

@@ -42,6 +42,16 @@ DSH_COMBOS = [("dsh", backend) for backend in BACKENDS]
 QWEN_COMBOS = [("qwen", backend) for backend in BACKENDS]
 # Goose (not live-tested yet): its own scenarios (GOOSE).
 GOOSE_COMBOS = [("goose", backend) for backend in BACKENDS]
+# OpenHands (not live-tested yet): its own scenarios (OPENHANDS).
+OPENHANDS_COMBOS = [("openhands", backend) for backend in BACKENDS]
+# nanobot (not live-tested yet): its own scenarios (NANOBOT).
+NANOBOT_COMBOS = [("nanobot", backend) for backend in BACKENDS]
+# Letta Code (not live-tested yet): its own scenarios (LETTA).
+LETTA_COMBOS = [("letta", backend) for backend in BACKENDS]
+# OpenCode 2 (not live-tested yet): its own scenarios (OPENCODE2).
+OPENCODE2_COMBOS = [("opencode2", backend) for backend in BACKENDS]
+# Pi (not live-tested yet): its own scenarios (PI).
+PI_COMBOS = [("pi", backend) for backend in BACKENDS]
 # The launcher loads its helper modules afresh for every call; once is enough here (they read the environment
 # when called, not when loaded), and keeps the matrix fast. (Not the parser: parse_args extends its list defaults.)
 def thread_name(target):
@@ -104,10 +114,23 @@ class Matrix:
         assert s.launch(self.argv(*options, "--dry-run", agent_args=agent_args)) == 0
         return json.loads(self.capsys.readouterr().out)
 
-    def refused(self, *options, match):
-        """A start with OPTIONS stops with a ValueError matching MATCH before the backend runs."""
+    def refused(self, *options, match, agent_args=()):
+        """A start with OPTIONS (and the agent's AGENT_ARGS) stops with a ValueError matching MATCH before the
+        backend runs."""
         with pytest.raises(ValueError, match=match):
-            self.run(*options)
+            self.run(*options, agent_args=agent_args)
+
+    def warned(self, *options, match):
+        """A dry run of a start with OPTIONS is given (you decide what a sandbox gets) and warns with a text matching
+        MATCH (the launcher's warner: standard error and launcher.log). The warnings."""
+        said, real = [], s.warner
+        s.warner = lambda warn=None: warn or said.append
+        try:
+            self.plan(*options)
+        finally:
+            s.warner = real
+        assert any(re.search(match, text) for text in said), (options, said)
+        return said
 
     def run(self, *options, agent_args=()):
         """A whole start through main(); the backend is a recorder. Returns what the sandbox would get."""
@@ -127,10 +150,13 @@ class Matrix:
             seen.hermes = {str(p.relative_to(session / "hermes")): p.read_text()
                            for p in (session / "hermes").rglob("*") if p.is_file()}
             # DSH's patch (session/dsh, at /etc/dsh), Qwen Code's system settings (session/qwen, at /etc/qwen-code),
-            # Goose's system configuration (session/goose, at /etc/goose).
+            # Goose's system configuration (session/goose, at /etc/goose), the settings OpenHands' start applies
+            # (session/openhands, at /etc/openhands), sandbox-ai's settings for nanobot
+            # (session/nanobot, at /etc/nanobot), Letta Code's start (session/letta, at
+            # /etc/letta), sandbox-ai's extension for Pi (session/pi, at /etc/pi).
             seen.managed = {agent: {str(p.relative_to(session / agent)): p.read_text()
                                     for p in (session / agent).rglob("*") if p.is_file()}
-                            for agent in ("dsh", "qwen", "goose")}
+                            for agent in ("dsh", "qwen", "goose", "openhands", "nanobot", "letta", "opencode2", "pi")}
             # --nested-containers: the engines' configuration inside (session/containers).
             seen.containers = {p.name: p.read_text() for p in (session / "containers").glob("*")}
             seen.firewall = seen.files["firewall.nft"]
@@ -255,6 +281,41 @@ def qm(request, tmp_path, monkeypatch, capsys):
 @pytest.fixture(params=GOOSE_COMBOS, ids=[f"{agent}-{backend}" for agent, backend in GOOSE_COMBOS])
 def gm(request, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # the gateway's bot token and API keys, kept as files
+    monkeypatch.setenv("GOOSE_FAKE_BOT", "123456:not-a-bot-token")
+    return make_matrix(*request.param, tmp_path, monkeypatch, capsys)
+
+
+@pytest.fixture(params=OPENHANDS_COMBOS, ids=[f"{agent}-{backend}" for agent, backend in OPENHANDS_COMBOS])
+def om(request, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # API keys, kept as files
+    monkeypatch.setenv("GOOSE_FAKE_BOT", "sk-ant-not-a-key")
+    return make_matrix(*request.param, tmp_path, monkeypatch, capsys)
+
+
+@pytest.fixture(params=NANOBOT_COMBOS, ids=[f"{agent}-{backend}" for agent, backend in NANOBOT_COMBOS])
+def nm(request, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # the Telegram channel's bot token and API keys, kept as files
+    monkeypatch.setenv("NANOBOT_FAKE_BOT", "123456:not-a-bot-token")
+    return make_matrix(*request.param, tmp_path, monkeypatch, capsys)
+
+
+@pytest.fixture(params=LETTA_COMBOS, ids=[f"{agent}-{backend}" for agent, backend in LETTA_COMBOS])
+def lm(request, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # API keys, kept as files
+    monkeypatch.setenv("GOOSE_FAKE_BOT", "123456:not-a-bot-token")
+    return make_matrix(*request.param, tmp_path, monkeypatch, capsys)
+
+
+@pytest.fixture(params=OPENCODE2_COMBOS, ids=[f"{agent}-{backend}" for agent, backend in OPENCODE2_COMBOS])
+def om2(request, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # API keys, kept as files
+    monkeypatch.setenv("GOOSE_FAKE_BOT", "sk-ant-not-a-key")
+    return make_matrix(*request.param, tmp_path, monkeypatch, capsys)
+
+
+@pytest.fixture(params=PI_COMBOS, ids=[f"{agent}-{backend}" for agent, backend in PI_COMBOS])
+def pm(request, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # API keys, kept as files
     monkeypatch.setenv("GOOSE_FAKE_BOT", "123456:not-a-bot-token")
     return make_matrix(*request.param, tmp_path, monkeypatch, capsys)
 
@@ -479,7 +540,9 @@ def offline_conflicts(m):
 
 @network
 def invalid_values(m):
-    m.refused("--allow-host", "exa mple.org", match="Invalid hostname")
+    m.refused("--allow-host", "exa!mple.org", match="Invalid hostname")
+    # several items in one value (commas, spaces): one bad item refuses the option and is named
+    m.refused("--allow-host", "pypi.org exa!mple.org", match="exa!mple.org")
     m.refused("--allow-tcp", "192.0.2.1", match="--allow-tcp expects IP:PORT")
     m.refused("--nameserver", "fe80::1%eth0", match="scope ID")
 
@@ -560,6 +623,9 @@ def privacy_check_modes(m):
 # --- approvals (--ask) -------------------------------------------------------------------------------------
 
 APPROVALS, approvals = scenarios()
+# Threads of every start that ask nothing: the memory watch, the safeguards, the system monitor's sampler
+# (monitor.Recorder.loop) and the workspaces' start checkpoint (checkpoints.Pending.checkpoint).
+ASKS_NOTHING = ("watch_memory", "safeguards", "loop", "checkpoint")
 
 
 @approvals
@@ -577,7 +643,7 @@ def ask_off(m):
     # No approval watchers; the threads are the canaries' (on by default) and the activity timeline's (the default
     # log directory is used).
     # (the memory watch runs as always: it asks nothing)
-    threads = [name for name in m.threads if name not in ("watch_memory", "safeguards")]
+    threads = [name for name in m.threads if name not in ASKS_NOTHING]
     assert run.config["ask"] is False and "BROWSER" not in run.env and threads == ["follow", "collect"]
     assert run.proxy is not None  # the proxy still runs; it just refuses instead of asking
     assert str(s.BROWSER_DIR) not in run.joined
@@ -587,7 +653,7 @@ def ask_off(m):
 def no_questions_without_the_proxy(m):
     for options in (["--no-proxy"], ["--offline"]):
         run = m.run(*options)
-        assert run.config["ask"] is False and set(m.threads) - {"watch_memory", "safeguards"} == {"follow"}, options  # the canaries' only
+        assert run.config["ask"] is False and set(m.threads) - set(ASKS_NOTHING) == {"follow"}, options  # the canaries' only
 
 
 @approvals
@@ -714,7 +780,7 @@ def a_start_option_wins_over_git_logins_for_its_server(m):
 def a_login_whose_secret_is_missing_is_left_out_and_said(m):
     git_login(m, "https://git.example.org", secret="NOT_KEPT", token=None)
     run = m.run("--allow-host", "git.example.org")
-    assert run.proxy["git_tokens"] == [] and "no usable secret NOT_KEPT" in run.err
+    assert run.proxy["git_tokens"] == [] and "no secret NOT_KEPT" in run.err
 
 
 @git
@@ -924,10 +990,9 @@ def opencode_npm_plugins(m):
         assert json.loads(run.env["OPENCODE_CONFIG_CONTENT"])["plugin"] == ["opencode-demo@1.0.0"]
         assert "--allow-host registry.npmjs.org" in run.err
         assert set(json.loads((m.run("--kit", "npm", "--no-plugins").env).get("OPENCODE_CONFIG_CONTENT", "{}"))) <= set(s.OPENCODE_TELEMETRY_CONFIG)  # only --telemetry off's settings
-    elif m.agent == "codex":
-        assert "not supported for Codex yet" in run.err
     else:
-        # For Claude it reads as NAME@MARKETPLACE, of a marketplace nobody declares: skipped, said so.
+        # For Claude and Codex (Claude's format, the same store) it reads as NAME@MARKETPLACE, of a marketplace nobody
+        # declares: skipped, said so.
         assert "plugin opencode-demo@1.0.0 skipped: no kit declares marketplace 1.0.0" in run.err
 
 
@@ -959,9 +1024,9 @@ def kit_dir_and_unknown_kit(m):
     assert "review" in plan["kits"]["entries"]["skills"]
     m.refused("--kit", "nope", match="--kit nope: .* does not exist")
     m.refused("--kit-dir", str(m.work), match="has no .* directory")
-    # A kit inside the workspace could be changed by the agent.
+    # A kit inside the workspace could be changed by the agent: given (you decide), said.
     (m.work / m.agent / "skills").mkdir(parents=True)
-    m.refused("--kit-dir", str(m.work), match="Kit .*kit-dir")
+    m.warned("--kit-dir", str(m.work), match="kit-dir .*agent can change")
 
 
 # --- --state-dir and sessions ------------------------------------------------------------------------------
@@ -981,7 +1046,7 @@ def state_dir_keeps_the_home(m):
 
 @state
 def state_dir_refusals(m):
-    m.refused("--state-dir", str(m.work / "home"), match="--state-dir")
+    m.warned("--state-dir", str(m.work / "home"), match="--state-dir .*agent can change")  # you decide: said
     m.refused("--session", "web", "--state-dir", str(m.tmp / "s"), match="--session manages its own state")
     link = m.tmp / "link"
     (m.tmp / "real").mkdir(mode=0o700)
@@ -1408,7 +1473,7 @@ def gui_vnc(m):
     assert plan["gui"]["vnc"] is True  # implies --gui
     run = m.run("--gui-vnc", str(vnc))
     assert m.mount(vnc, s.VNC_DIR) in run.joined and stat.S_IMODE(vnc.stat().st_mode) == 0o700
-    m.refused("--gui-vnc", str(m.work / "vnc"), match="--gui-vnc must lie outside the workspace")
+    m.warned("--gui-vnc", str(m.work / "vnc"), match="--gui-vnc .*VNC socket")  # you decide: given, said
 
 
 @display
@@ -1468,10 +1533,10 @@ def default_log_dir_only_for_the_proxy(m):
 
 
 @logs
-def log_dir_refusals(m):
-    m.refused("--log-dir", str(m.work / "logs"), match="--log-dir must lie outside the workspace")
-    m.refused("--state-dir", str(m.tmp / "state"), "--log-dir", str(m.tmp / "state/logs"),
-              match="--log-dir must lie outside the workspace, mounts and --state-dir")
+def log_dir_refusals(m):  # you decide: given, and what the agent can do with the log is said
+    m.warned("--log-dir", str(m.work / "logs"), match="--log-dir .*connection log")
+    m.warned("--state-dir", str(m.tmp / "state"), "--log-dir", str(m.tmp / "state/logs"),
+             match="--log-dir .* a workspace, mount or --state-dir: the agent can read and rewrite")
 
 
 # --- MCP servers ----------------------------------------------------------------------------------------------
@@ -1708,24 +1773,24 @@ def workspaces_and_mounts(m):
 
 @agent_options
 def package_outside_agent_trees(m):
-    """Review finding (HIGH): started from sandbox-ai.pyz or the AppImage, the package file and its unpacked copy
-    must not be in a workspace, an rw mount or --state-dir (the agent would rewrite what runs next on the host)."""
+    """Review finding (HIGH): started from sandbox-ai.pyz or the AppImage, the package file and its unpacked copy in a
+    workspace, an rw mount or --state-dir let the agent rewrite what runs next on the host: you decide - given, said."""
     package = m.work / "sandbox-ai.pyz"
     package.write_bytes(b"#!/bin/sh\n")
     copy = s.HERE.parent  # the launcher's own tree stands for the copy (it must hold the launcher)
     m.monkeypatch.setenv("SANDBOX_AI_PACKAGE", str(package))
     m.monkeypatch.setenv("SANDBOX_AI_PACKAGE_COPY", str(copy))
-    m.refused(match="contains .*sandbox-ai.pyz")
+    m.warned(match="contains .*sandbox-ai.pyz")
     elsewhere = m.tmp / "bin"
     package.rename(elsewhere / "sandbox-ai.pyz")
     m.monkeypatch.setenv("SANDBOX_AI_PACKAGE", str(elsewhere / "sandbox-ai.pyz"))
     assert m.plan()["workspace"] == str(m.work)
-    m.refused("--mount", f"{elsewhere}:/opt/tools:rw", match="--mount .* contains .*sandbox-ai.pyz")
-    m.refused("--state-dir", str(copy / "state"), match="--state-dir .* lies in .*the copy sandbox-ai runs in")
-    cache = m.tmp / "host" / ".cache" / "sandbox-ai"  # where the copies live: no sandbox gets it (review finding)
+    m.warned("--mount", f"{elsewhere}:/opt/tools:rw", match="--mount .* contains .*sandbox-ai.pyz")
+    m.warned("--state-dir", str(copy / "state"), match="--state-dir .* lies in .*the copy sandbox-ai runs in")
+    cache = m.tmp / "host" / ".cache" / "sandbox-ai"  # where the copies live (review finding): said
     (cache / "pyz").mkdir(parents=True)
-    m.refused("--mount", f"{cache}:/mnt/c:rw", match=r"\.cache/sandbox-ai")
-    m.refused("--mount", f"{cache / 'pyz'}:/mnt/c:rw", match=r"lies in .*\.cache/sandbox-ai")
+    m.warned("--mount", f"{cache}:/mnt/c:rw", match=r"\.cache/sandbox-ai")
+    m.warned("--mount", f"{cache / 'pyz'}:/mnt/c:rw", match=r"lies in .*\.cache/sandbox-ai")
 
 
 @agent_options
@@ -1738,10 +1803,17 @@ def environment_variables(m):
     m.refused("--env", "MATRIX_UNSET", match="Host variable is not set")
 
 
+def own_command(command):
+    """The agent's own command of a sandbox's COMMAND: without what sandbox-ai runs before it at a start (/bin/sh -c
+    LINES AGENT ARGS: with_start_prelude - Codex's device sign-in where the sandbox has no login)."""
+    return command[3:] if command[:2] == ["/bin/sh", "-c"] and command[2].rstrip().endswith('exec "$0" "$@"') \
+        else command
+
+
 @agent_options
 def dangerously_skip_permissions(m):
     run = m.run("-D")
-    assert run.config["command"][1:1 + len(s.DANGER_ARGS[m.agent])] == s.DANGER_ARGS[m.agent]
+    assert own_command(run.config["command"])[1:1 + len(s.DANGER_ARGS[m.agent])] == s.DANGER_ARGS[m.agent]
     assert all(run.env[k] == v for k, v in s.DANGER_ENV[m.agent].items())
     if m.agent == "codex":
         # The bypass replaces Codex's own sandbox switch.
@@ -1749,7 +1821,12 @@ def dangerously_skip_permissions(m):
         assert "danger-full-access" not in run.config["command"]
     plain = m.run()
     assert not any(flag in plain.config["command"] for flag in s.DANGER_ARGS[m.agent])
-    assert (plain.config["command"][1:3] == ["--sandbox", "danger-full-access"]) == (m.agent == "codex")
+    assert (own_command(plain.config["command"])[1:3] == ["--sandbox", "danger-full-access"]) == (m.agent == "codex")
+    # An interactive Codex start with nothing else configured for its login: its device sign-in first, where the
+    # sandbox then has none; every other agent's command is the agent's own.
+    assert (plain.config["command"][:2] == ["/bin/sh", "-c"] and "login --device-auth" in plain.config["command"][2]) \
+        == (m.agent == "codex")
+    assert own_command(m.run("--no-auth").config["command"]) == m.run("--no-auth").config["command"]
 
 
 @agent_options
@@ -1770,12 +1847,12 @@ def image_binary_and_runtime(m):
     run = m.run("--image", "localhost/custom:1")
     other = next(agent for agent in AGENTS if agent != m.agent)
     if m.backend == "podman":
-        assert "localhost/custom:1" in run.command and run.config["command"][0] == m.agent
+        assert "localhost/custom:1" in run.command and own_command(run.config["command"])[0] == m.agent
         assert m.run("--binary", "/opt/agent/bin/x").config["command"][0] == "/opt/agent/bin/x"
         m.refused("--runtime", "/opt", match="--runtime applies only to bwrap")
     else:
         # bwrap runs the host's executable, found on PATH and resolved.
-        assert run.config["command"][0] == str(m.tmp / "bin" / m.agent)
+        assert own_command(run.config["command"])[0] == str(m.tmp / "bin" / m.agent)
         assert m.run("--binary", other).config["command"][0] == str(m.tmp / "bin" / other)
 
 
@@ -2470,9 +2547,14 @@ def vpn_keys_never_reach_a_sandbox_through_a_mount(m):
     for options in (["--mount", f"{host}/.config:/mnt/cfg:ro"], ["--mount", f"{host}/.local/share/sandbox-ai:/opt/x:ro"],
                     ["--copy", f"{host}/.local/share/sandbox-ai/secrets/VPN_CORP_KEY:.key"],
                     ["--git-token-file", f"https://git.example.org={host}/.local/share/sandbox-ai/secrets/VPN_CORP_KEY"]):
-        # A read-only mount of sandbox-ai's own folders is refused as such first (security finding H1); the VPN
-        # check refuses the rest (and those too, behind it).
-        m.refused(*options, match="where the VPN profiles keep their keys|sandbox-ai's own folder")
+        # You decide what a sandbox gets: given, and the warning says the agent can read the VPN's keys there (or
+        # sandbox-ai's own folder, security finding H1). The dry run makes nothing.
+        said = []
+        m.monkeypatch.setattr(s, "warner", lambda warn=None: warn or said.append)
+        m.monkeypatch.setattr(m.vpn.launcher(), "warner", lambda warn=None: warn or said.append)
+        m.plan(*options)
+        assert any(re.search("where the VPN profiles keep their keys|sandbox-ai's own folder", text)
+                   for text in said), (options, said)
     assert key not in json.dumps(m.plan())  # the profile alone changes nothing for a start without --vpn
 
 
@@ -2513,8 +2595,10 @@ def preset_mcp(preset):
 
 def register_preset_servers(m):
     """The catalog servers the presets name, as `sandbox-ai mcp add` would define them: those with a folder of their
-    own (engram, memory: /data) as image servers with it, so that a preset's --mcp-mount can change it; and the images
-    the presets' services name, as `sandbox-ai images pull --as NAME` records them."""
+    own (engram, memory: /data; the file-analysis servers: /work, read-only, and smali and frida an /out as well) as
+    image servers with it, so that a
+    preset's --mcp-mount can change it; and the images the presets' services name, as `sandbox-ai images pull --as
+    NAME` records them."""
     names = {name for preset in PRESETS.catalog().values() for name in preset_mcp(preset)}
     path = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "mcp.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2525,12 +2609,30 @@ def register_preset_servers(m):
             folder.mkdir(exist_ok=True)
             servers[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64, "network": "none",
                              "mounts": [{"target": "/data", "host": str(folder), "mode": "rw"}]}
+        elif name == "axross":   # its folder, axross's connections and the ssh folder, as the preset points them
+            mounts = []
+            for target in ("/work", "/axross", "/ssh"):
+                folder = m.tmp / f"axross{target.replace('/', '-')}"
+                folder.mkdir(exist_ok=True)
+                mounts.append({"target": target, "host": str(folder), "mode": "ro"})
+            servers[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64, "network": "none",
+                             "mounts": mounts}
+        elif name in ("binwalk", "capa", "radare2", "floss", "yara", "jadx", "cfr", "smali", "frida"):
+            folder = m.tmp / f"files-{name}"
+            folder.mkdir(exist_ok=True)
+            mounts = [{"target": "/work", "host": str(folder), "mode": "ro"}]
+            if name in ("smali", "frida"):   # they write what they make into a folder of their own
+                out = m.tmp / f"out-{name}"
+                out.mkdir(exist_ok=True)
+                mounts.append({"target": "/out", "host": str(out), "mode": "rw"})
+            servers[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64,
+                             "network": "full" if name == "frida" else "none", "mounts": mounts}
         else:
             servers[name] = {"command": ["python3", "-c", "pass"], "description": f"stand-in for {name}"}
     path.write_text(json.dumps(servers))
     images = {name: {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + digit * 64,
                      "id": "sha256:" + digit * 64, "user": user}
-              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"))}
+              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"), ("showcase-web", "4", "101:101"))}
     (path.parent / "user-images.json").write_text(json.dumps({"version": 1, "images": images}))
 
 
@@ -2548,9 +2650,10 @@ def every_builtin_preset_starts(m, dev):
             continue  # a registered VPN profile or LLM server: test_presets_all.py registers them and starts these
         if m.backend == "bwrap" and ("--allow-host-port" in preset.get("options", [])
                                      or "--service" in preset.get("options", [])
-                                     or "--browser" in preset.get("options", [])):
-            # pasta forwards the host's ports, a service and the sandbox's browser are containers of the pod: Podman
-            # only, as the start option says (the preset's note too).
+                                     or "--browser" in preset.get("options", [])
+                                     or "--cairn" in preset.get("options", [])):
+            # pasta forwards the host's ports, a service, the sandbox's browser and Cairn's board are containers of the
+            # pod: Podman only, as the start option says (the preset's note too).
             m.refused("--preset", preset["id"], *preset_values(m, preset, dev), match="needs the Podman backend")
             continue
         plan = m.plan("--preset", preset["id"], *preset_values(m, preset, dev))
@@ -2567,8 +2670,9 @@ def a_preset_is_what_its_options_would_be_and_the_command_line_wins(m, dev):
     samples = m.tmp / "samples"
     samples.mkdir()
     by_preset = m.plan("--preset", "software-analysis", "--preset-value", f"samples={samples}")
-    by_hand = m.plan("--mount", f"{samples}:/mnt/samples:ro", *[t for name in ("capa", "floss", "radare2", "yara",
-                                                                              "binwalk") for t in ("--mcp", name)])
+    servers = ("capa", "floss", "radare2", "yara", "binwalk", "jadx", "cfr")
+    by_hand = m.plan("--mount", f"{samples}:/mnt/samples:ro", *[t for name in servers for t in ("--mcp", name)],
+                     *[t for name in servers for t in ("--mcp-mount", f"{name}:/work={samples}:ro")])
     assert by_preset["mcp"] == by_hand["mcp"] and by_preset.get("mounts") == by_hand.get("mounts")
     # Later options win: the preset's 1g memory gives way to the command line's 4g.
     assert m.plan("--preset", "chaos-monkey", "--memory", "4g")["limits"]["memory"] == "4g"
@@ -2639,7 +2743,8 @@ def a_presets_short_forms_are_refused_as_the_long_ones(m, dev):
 @presets_scenario
 def an_extra_preset_directory_is_used_but_never_one_the_agent_writes(m, dev):
     """defaults.json's preset_dirs: a preset there starts; yours still win over it; a directory inside the
-    workspace (where the agent writes) gives no preset to start with."""
+    workspace (where the agent writes) is yours to choose: its preset starts, with the warning that the agent can
+    change it."""
     def preset(directory, ident, memory):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"{ident}.json").write_text(json.dumps({"format": "sandbox-ai preset", "version": 1, "id": ident,
@@ -2658,7 +2763,7 @@ def an_extra_preset_directory_is_used_but_never_one_the_agent_writes(m, dev):
         inside = m.work / "presets"
         preset(inside, "planted", "1g")
         defaults.write_text(json.dumps({"version": 1, "preset_dirs": [str(inside)]}))
-        m.refused("--preset", "planted", match="The preset planted \(extra\) .* lies inside")
+        m.warned("--preset", "planted", match=r"The preset planted \(extra\) .* lies inside .*agent can change")
         defaults.write_text(json.dumps({"version": 1, "preset_dirs": ["relative/dir"]}))
         m.refused("--preset", "team-tool", match="preset_dirs is a list of at most")
     finally:
@@ -2745,10 +2850,12 @@ def hermes_features_open_only_their_hosts(hm):
 
 @hermes_scenario
 def hermes_refuses_what_it_cannot_do_here(hm):
-    hm.refused("--with", "claude", match="not in the team image")
+    assert hm.plan("--with", "claude")["companions"] == ["claude"]  # a layer of the team image since 0.1.98
     rules = hm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
-    hm.refused("--rules", str(rules), match="not enforced for Hermes yet")
-    hm.refused("--mode", "paranoid", "--no-keep", match="not enforced for Hermes yet")  # the mode's tool rules
+    run = hm.run("--rules", str(rules))  # rules for its own tools: shell hooks in its managed configuration
+    assert hermes_config(run)["hooks"]["pre_tool_call"][0]["command"].endswith("--internal-hook hermes PreToolUse")
+    assert "sandbox-ai-hooks.json" in run.hermes and run.config["hooks"]["agent"] == "hermes"
+    hm.refused("--rules", str(rules), agent_args=["--safe-mode"], match="registers no shell hook")
     # A feature that opens a host widens the security mode high like --allow-host; kanban opens none.
     hm.refused("--mode", "high", "--hermes-enable", "gateway:telegram", match="widens the security mode high")
     assert hm.plan("--mode", "high", "--hermes-enable", "kanban")["hermes"]["gateway"]
@@ -2812,7 +2919,7 @@ def hermes_model_effort_and_skip_permissions(hm):
 
 @hermes_scenario
 def hermes_presets_start(hm):
-    """The three Hermes presets: each a dry run and a whole start with the values a user would give."""
+    """The Hermes presets: each a dry run and a whole start with the values a user would give."""
     register_preset_servers(hm)
     endpoint = {"kind": "ollama", "url": "http://127.0.0.1:11434", "model": "qwen3-coder"}
     store = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "llm.json"
@@ -2923,7 +3030,7 @@ def qwen_features_open_only_their_hosts(qm):
     plan = qm.plan("--qwen-enable", "updates,model-catalog")
     assert plan["https_hosts"] == [*s.PROVIDERS["qwen"], "registry.npmjs.org", "models.dev"]
     assert [entry["feature"] for entry in plan["qwen"]["enabled"]] == ["updates", "model-catalog"]
-    assert plan["qwen"]["off"] == ["extensions"] and "github.com" not in plan["https_hosts"]
+    assert plan["qwen"]["off"] == ["extensions", "extension-hooks"] and "github.com" not in plan["https_hosts"]
     run = qm.run("--qwen-enable", "updates", "--qwen-enable", "model-catalog")
     assert qwen_settings(run)["general"] == {"enableAutoUpdate": True}
     assert "QWEN_CODE_MODELS_DEV_REFRESH" not in run.env
@@ -2937,10 +3044,18 @@ def qwen_features_open_only_their_hosts(qm):
 def qwen_refuses_what_it_cannot_do_here(qm):
     """Rules for its own tools (so the mode paranoid), its own sandbox, --qwen-enable for another agent; a real start
     needs no opt-in (a note: not live-tested yet)."""
-    qm.refused("--with", "claude", match="not in the team image")
+    assert qm.plan("--with", "claude")["companions"] == ["claude"]  # a layer of the team image since 0.1.98
     rules = qm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
-    qm.refused("--rules", str(rules), match="not enforced for Qwen Code yet")
-    qm.refused("--mode", "paranoid", "--no-keep", match="not enforced for Qwen Code yet")
+    run = qm.run("--rules", str(rules))  # rules for its own tools: its hooks in its system settings
+    assert qwen_settings(run)["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith("--internal-hook qwen "
+                                                                                        "PreToolUse")
+    assert run.config["hooks"]["agent"] == "qwen" and run.config["hook_agent"] == "qwen"
+    # while rules hold no extension loads: their hooks would run after the rule check (backlog A)
+    command = run.config["command"]
+    assert command[command.index("--extensions") + 1] == "none", command
+    assert "--extensions" not in qm.run("--rules", str(rules), "--qwen-enable", "extension-hooks").config["command"]
+    assert "--extensions" not in qm.run().config["command"], "no rules: extensions load"
+    qm.refused("--rules", str(rules), agent_args=["--bare"], match="loads no hook at all")
     for args in (["--sandbox", "docker"], ["-s"], ["--sandbox=podman"], ["-ys"], ["--sandbox-image", "x"]):
         with pytest.raises(ValueError, match="own sandbox"):
             qm.run(agent_args=args)
@@ -3024,7 +3139,8 @@ def qwen_with_a_local_model(qm):
     assert settings["security"] == {"auth": {"selectedType": "openai"}} and settings["model"]["name"] == "qwen3:8b"
     entry = settings["modelProviders"]["openai"][0]
     assert entry["id"] == "qwen3:8b" and entry["baseUrl"] == url and entry["envKey"] == "OPENAI_API_KEY"
-    assert settings["model"]["skipLoopDetection"] is False
+    assert settings["model"]["skipLoopDetection"] is True, "Qwen Code's heuristics halt a local model's reasoning"
+    assert settings["tools"] == {"sandbox": False, "exclude": ["read_mcp_resource"]}, "a local model's MCP trap"
     assert settings["model"]["maxSessionTurns"] == QWEN_MODULE.MAX_SESSION_TURNS, "the guard's steps only when set"
     # A slow local model: an hour idle and per request in the entry (it wins over model.generationConfig), the same in
     # the variables (llm.agent_wait); no memory extraction after every turn.
@@ -3132,9 +3248,12 @@ def dsh_starts_its_chat_with_the_patch(dm):
 
 @dsh_scenario
 def dsh_refuses_what_it_cannot_do_here(dm):
-    dm.refused("--with", "claude", match="not in the team image")
+    assert dm.plan("--with", "claude")["companions"] == ["claude"]  # a layer of the team image since 0.1.98
     rules = dm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
-    dm.refused("--rules", str(rules), match="not enforced for DeepSeek Harness yet")
+    run = dm.run("--rules", str(rules))  # rules for its own tools: sandbox-ai's plugin, inserted by the patch
+    assert {"id": "sandbox-ai-hooks", "name": DSH_MODULE.HOOKS_PLUGIN, "config": {}} in [
+        entry for row in dsh_patch(run) for entry in row.get("insert", [])]
+    assert run.managed["dsh"]["sandbox-ai-hooks.mjs"] == DSH_MODULE.HOOKS_SCRIPT
     for args, why in ((["desktop"], "not in a sandbox"), (["plugin", "--profile", "web", "add", "x"], "not in a sandbox"),
                       (["web", "--patch", "mine.yml"], "--patch in DSH's arguments")):
         with pytest.raises(ValueError, match=why):
@@ -3281,7 +3400,11 @@ def goose_runs_its_scheduler_and_gateway_in_the_background(gm):
 def goose_refuses_what_it_cannot_do_here(gm):
     """Rules for its own tools (the mode paranoid), --goose-enable for another agent, a subcommand of a feature that
     is off, goose serve on another address; a real start needs no opt-in (a note: not live-tested yet)."""
-    gm.refused("--mode", "paranoid", match="not enforced for Goose")
+    rules = gm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
+    run = gm.run("--rules", str(rules))  # rules for its own tools: sandbox-ai's plugin in /etc/goose
+    hooks = json.loads(run.managed["goose"]["sandbox-ai-hooks/hooks/hooks.json"])["hooks"]
+    assert hooks["PreToolUse"][0]["hooks"][0]["command"].endswith("--internal-hook goose PreToolUse")
+    assert run.config["hooks"]["agent"] == "goose"
     for args, why in ((["update"], "needs --goose-enable updates"), (["local-models", "search", "x"], "local-inference"),
                       (["gateway", "start", "telegram"], "gateway:telegram"),
                       (["serve", "--host", "0.0.0.0"], "loopback only"),
@@ -3397,6 +3520,715 @@ def goose_at_openrouter(gm):
     assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
 
 
+# --- OpenHands (experimental): its settings, its variables, its features, telemetry, local models ------------------
+
+OPENHANDS, openhands_scenario = scenarios()
+OPENHANDS_MODULE = s.load_openhands_module()
+
+
+def openhands_settings(run):
+    return json.loads(run.managed["openhands"]["settings.json"])
+
+
+@openhands_scenario
+def openhands_starts_its_canvas_with_its_settings(om):
+    """A plain start: no provider host of its own, the settings its start applies read-only at /etc/openhands (the
+    approvals on, the consent denied), the variables that pin the reviewed release, the local runtime and its
+    telemetry, and the Canvas on the sandbox's loopback as the command."""
+    plan = om.plan()
+    assert plan["https_hosts"] == [] and plan["image"] == "localhost/openhands-sandbox:latest"
+    assert plan["openhands"]["experimental"] and plan["openhands"]["enabled"] == []
+    assert set(plan["openhands"]["off"]) == set(OPENHANDS_MODULE.FEATURES)
+    assert plan["openhands"]["web_ui"] == "http://127.0.0.1:8000/" and plan["openhands"]["runtime"] == "local"
+    run = om.run()
+    settings = openhands_settings(run)
+    assert settings["conversation_settings_diff"] == {"confirmation_mode": True, "security_analyzer": "llm"}
+    assert settings["misc_settings_diff"]["telemetry"] == {"consent": "denied", "managed": True}
+    assert settings["agent_settings_diff"] == {}
+    assert run.env["OH_CONVERSATION_RUNTIME"] == "local" and run.env["DO_NOT_TRACK"] == "1"
+    assert run.env["OH_AGENT_SERVER_VERSION"] == OPENHANDS_MODULE.SERVER_VERSION
+    assert "SANDBOX_AI_OPENHANDS_AUTOMATIONS" not in run.env
+    assert ("dst=/etc/openhands,ro" if om.backend == "podman" else "/openhands /etc/openhands") in run.joined
+    command = run.config["command"]
+    assert command[0].endswith("openhands") and command[1:] == ["--host", "127.0.0.1", "--port", "8000"]
+    assert "note: OpenHands: not live-tested yet" in run.err
+    task = om.run(agent_args=["task", "--text=fix the tests"])
+    assert task.config["command"][1:] == ["task", "--text=fix the tests"]
+
+
+@openhands_scenario
+def openhands_features_open_only_their_hosts(om):
+    """--openhands-enable: model-catalog opens only raw.githubusercontent.com, automations opens nothing and starts
+    the automation backend (a variable for the image's uvx); the rest off."""
+    plan = om.plan("--openhands-enable", "automations,model-catalog")
+    assert plan["https_hosts"] == ["raw.githubusercontent.com"]
+    assert [entry["feature"] for entry in plan["openhands"]["enabled"]] == ["automations", "model-catalog"]
+    run = om.run("--openhands-enable", "automations")
+    assert run.env["SANDBOX_AI_OPENHANDS_AUTOMATIONS"] == "1" and run.env["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
+    assert om.plan("--openhands-enable", "automations")["https_hosts"] == []
+    om.refused("--openhands-enable", "docker", match="not an OpenHands feature")
+    om.refused("--openhands-enable", "model-catalog", "--offline", match="needs the network")
+    om.refused("--openhands-enable", "model-catalog", "--mode", "high", match="widens the security mode high")
+
+
+@openhands_scenario
+def openhands_refuses_what_it_cannot_do_here(om):
+    """Rules for its own tools (the mode paranoid), --openhands-enable for another agent, the Canvas' public mode or
+    another address, another automation source; a real start needs no opt-in (a note: not live-tested yet)."""
+    om.refused("--mode", "paranoid", match="cannot be enforced for OpenHands: its agent server 1.58.1 takes hooks only with each conversation")
+    for args, why in ((["--public"], "no public mode"), (["--host", "0.0.0.0"], "loopback only"),
+                      (["--automation-ref", "main"], "reviewed release only")):
+        with pytest.raises(ValueError, match=why):
+            om.run(agent_args=args)
+    om.run(agent_args=["task", "--text=--public is not an option here"])  # a task's text is no option
+    assert om.plan()["openhands"]["experimental"]
+    assert om.run().err.count("not live-tested yet") == 1
+
+
+@openhands_scenario
+def openhands_telemetry_is_never_switchable(om):
+    """The user's rule: OpenHands' telemetry is always off. With every feature on and --telemetry on the plan opens
+    no telemetry host; the variables, the consent and the proxy's refusal hold; what would open or hide them is
+    refused."""
+    every = ",".join(OPENHANDS_MODULE.FEATURES)
+    plan = om.plan("--openhands-enable", every, "--telemetry", "on")
+    for host in plan["https_hosts"]:
+        assert not any(OPENHANDS_MODULE.host_matches_any(host, telemetry)
+                       for telemetry in OPENHANDS_MODULE.TELEMETRY_HOSTS)
+    assert plan["openhands"]["telemetry"]["switchable"] is False
+    assert plan["openhands"]["telemetry"]["blocked_hosts"] == list(OPENHANDS_MODULE.TELEMETRY_HOSTS)
+    run = om.run("--openhands-enable", every, "--telemetry", "on")
+    for key, value in OPENHANDS_MODULE.TELEMETRY_ENV.items():
+        assert run.env[key] == value
+    assert openhands_settings(run)["misc_settings_diff"]["telemetry"]["consent"] == "denied"
+    assert sorted(goose_denied(run, "telemetry-openhands-")) == sorted(OPENHANDS_MODULE.rule_hosts())
+    om.refused("--allow-host", "us.i.posthog.com", match="telemetry is always off")
+    om.refused("--allow-host", "z.openhands.dev", match="telemetry is always off")
+    om.refused("--allow-domain", "openhands.dev", match="telemetry is always off")
+    om.refused("--no-inspect", "api.lmnr.ai", match="telemetry")
+    om.refused("--egress-all-allow", "--no-proxy", match="telemetry is always off")
+
+
+@openhands_scenario
+def openhands_gets_the_mcp_servers_in_its_settings(om):
+    run = om.run("--mcp", "demo")
+    settings = openhands_settings(run)
+    server = settings["agent_settings_diff"]["mcp_config"]["demo"]
+    assert server["transport"] == "stdio" and server["command"] == "python3"
+    assert server["args"] == s.mcp_bridge_args("demo") and settings["sandbox_ai"] == {"mcp": ["demo"]}
+
+
+@openhands_scenario
+def openhands_model_effort_skip_permissions_and_api_keys(om):
+    """--model and --effort in its settings (no option of the Canvas), -D its confirmation mode off, an Anthropic
+    key's start with LiteLLM's anthropic/ model and the placeholder as the LLM's key."""
+    run = om.run("--model", "claude-sonnet-4-5", "--effort", "high", "--dangerously-skip-permissions")
+    settings = openhands_settings(run)
+    assert settings["agent_settings_diff"]["llm"] == {"model": "claude-sonnet-4-5", "reasoning_effort": "high"}
+    assert settings["conversation_settings_diff"]["confirmation_mode"] is False
+    assert "--model" not in run.config["command"]
+    om.refused("--effort", "max", match="--effort for openhands is one of")
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    run = om.run("--api-key", "api.anthropic.com=ANTHROPIC_API_KEY", "--model", "claude-opus-5-5")
+    llm_settings = openhands_settings(run)["agent_settings_diff"]["llm"]
+    assert llm_settings["model"] == "anthropic/claude-opus-5-5"
+    assert llm_settings["api_key"] == run.env["ANTHROPIC_API_KEY"] != os.environ["GOOSE_FAKE_BOT"], \
+        "a placeholder, the key on the wire only"
+
+
+@openhands_scenario
+def openhands_with_a_local_model(om):
+    """--llm: LiteLLM's OpenAI provider at the server's /v1 URL with the model, the placeholder as key, the loop
+    guard's turn limit and instructions, all in the settings its start applies; nothing in the HOME."""
+    if om.backend == "bwrap":
+        llm_endpoint(om, url="http://10.0.0.5:11434")
+    else:
+        llm_endpoint(om, url="http://127.0.0.1:11434")
+    plan = om.plan("--llm", "gpu")
+    assert plan["llm"]["config"] == OPENHANDS_MODULE.SETTINGS and plan["llm"]["api"] == "openai-chat"
+    run = om.run("--llm", "gpu")
+    settings = openhands_settings(run)
+    llm_settings = settings["agent_settings_diff"]["llm"]
+    assert llm_settings["model"] == "openai/qwen3:8b" and llm_settings["base_url"] == plan["llm"]["agent_url"]
+    assert llm_settings["api_key"] == PLACEHOLDER
+    assert settings["conversation_settings_diff"]["max_iterations"] > 0
+    assert settings["agent_settings_diff"]["agent_context"]["system_message_suffix"] == \
+        s.load_llm_module().LOOP_TEXT
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
+    off = openhands_settings(om.run("--llm", "gpu", "--llm-param", "loop_guard=off"))
+    assert "max_iterations" not in off["conversation_settings_diff"]
+    assert "agent_context" not in off["agent_settings_diff"]
+
+
+@openhands_scenario
+def openhands_presets_start(om):
+    """Coding with OpenHands (Anthropic's API by its key, PyPI, npm, GitHub, its UI on the loopback) and OpenHands with
+    a local model (only the server, the loop guard on): a start and a dry run."""
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    plan = om.plan("--preset", "coding-openhands")
+    assert "pypi.org" in plan["https_hosts"] and plan["openhands"]["web_ui"]
+    assert "api.anthropic.com" in plan["https_hosts"]
+    assert openhands_settings(om.run("--preset", "coding-openhands"))["conversation_settings_diff"]["confirmation_mode"]
+    if om.backend == "bwrap":
+        return  # the host's loopback: Podman only (the start says so)
+    endpoint = {"kind": "lmstudio", "url": "http://127.0.0.1:1234", "model": "qwen/qwen3-coder-30b"}
+    store = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "llm.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"version": 1, "endpoints": {"ollama": endpoint}}))
+    plan = om.plan("--preset", "openhands-local-llm")
+    assert plan["https_hosts"] == [] and plan["llm"]["config"] == OPENHANDS_MODULE.SETTINGS
+
+
+@openhands_scenario
+def openhands_at_openrouter(om):
+    """--llm at OpenRouter: LiteLLM's OpenAI provider at https://openrouter.ai/api/v1; only OpenRouter is open,
+    the key on the wire only."""
+    llm_endpoint(om, name="openrouter", kind="openai-compatible", url="https://openrouter.ai/api/v1",
+                 model="anthropic/claude-sonnet-5.5")
+    plan = om.plan("--llm", "openrouter", "--no-provider-defaults")
+    assert plan["https_hosts"] == ["openrouter.ai"] and plan["llm"]["agent_url"] == "https://openrouter.ai/api/v1"
+    run = om.run("--llm", "openrouter", "--no-provider-defaults")
+    llm_settings = openhands_settings(run)["agent_settings_diff"]["llm"]
+    assert llm_settings["base_url"] == "https://openrouter.ai/api/v1"
+    assert llm_settings["model"] == "openai/anthropic/claude-sonnet-5.5"
+    assert run.proxy["llm"][0]["placeholder"] == PLACEHOLDER and run.proxy["llm"][0]["key"] == LLM_KEY
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
+
+
+# --- nanobot (experimental): sandbox-ai's settings for it, its features, telemetry, local models -----------------------
+
+NANOBOT, nanobot_scenario = scenarios()
+NANOBOT_MODULE = s.load_nanobot_module()
+
+
+def nanobot_settings(run):
+    return json.loads(run.managed["nanobot"]["sandbox-ai.json"])
+
+
+@nanobot_scenario
+def nanobot_starts_with_its_settings(nm):
+    """A plain start: no provider host of its own, sandbox-ai's settings and the script that lays them over nanobot's
+    file read-only at /etc/nanobot (its own bwrap sandbox off, its servers on the loopback, no scheduled turns), the
+    telemetry variables set, nanobot itself as the command, its update check refused quietly by the proxy."""
+    plan = nm.plan()
+    assert plan["https_hosts"] == [] and plan["image"] == "localhost/nanobot-sandbox:latest"
+    assert plan["nanobot"]["experimental"] and plan["nanobot"]["enabled"] == []
+    assert set(plan["nanobot"]["off"]) == set(NANOBOT_MODULE.FEATURES)
+    assert plan["nanobot"]["version"] == NANOBOT_MODULE.VERSION and plan["nanobot"]["own_sandbox"] == "off"
+    run = nm.run()
+    settings = nanobot_settings(run)
+    assert settings["tools"]["exec"]["sandbox"] == "" and settings["gateway"]["host"] == "127.0.0.1"
+    assert settings["gateway"]["heartbeat"]["enabled"] is False
+    assert settings["agents"]["defaults"]["dream"]["enabled"] is False and "mcpServers" not in settings["tools"]
+    assert run.managed["nanobot"]["pin_config.py"] == NANOBOT_MODULE.PIN_SCRIPT
+    assert run.env["NANOBOT_TUI_NO_DOWNLOAD"] == "1" and run.env["LANGFUSE_SECRET_KEY"] == ""
+    assert ("dst=/etc/nanobot,ro" if nm.backend == "podman" else "/nanobot /etc/nanobot") in run.joined
+    command = run.config["command"]
+    assert command[0].endswith("nanobot") and command[1:] == []
+    denied = goose_denied(run, "nanobot-updates-")
+    assert denied == ["raw.githubusercontent.com", "pypi.org"], "its update check: refused quietly"
+    assert "note: nanobot: not live-tested yet" in run.err
+
+
+@nanobot_scenario
+def nanobot_features_open_only_their_hosts(nm):
+    """--nanobot-enable: each feature's hosts pinned like --allow-host and its settings, the rest off."""
+    plan = nm.plan("--nanobot-enable", "web-search,web-reader")
+    assert plan["https_hosts"] == [*NANOBOT_MODULE.FEATURES["web-search"]["hosts"],
+                                   *NANOBOT_MODULE.FEATURES["web-reader"]["hosts"]]
+    assert [entry["feature"] for entry in plan["nanobot"]["enabled"]] == ["web-search", "web-reader"]
+    assert "api.telegram.org" not in plan["https_hosts"] and "pypi.org" not in plan["https_hosts"]
+    run = nm.run("--nanobot-enable", "updates,scheduler")
+    assert not goose_denied(run, "nanobot-updates-"), "opened: no longer refused"
+    settings = nanobot_settings(run)
+    assert settings["gateway"]["heartbeat"]["enabled"] is True and settings["agents"]["defaults"]["dream"]["enabled"]
+    nm.refused("--nanobot-enable", "docker", match="not a nanobot feature")
+    nm.refused("--nanobot-enable", "updates", "--offline", match="needs the network")
+    nm.refused("--nanobot-enable", "updates", "--mode", "high", match="widens the security mode high")
+
+
+@nanobot_scenario
+def nanobot_telegram_channel_gets_its_token_from_a_secret(nm):
+    s.load_secret_store_module().main(["set", "nanobot_telegram", "--from-env", "NANOBOT_FAKE_BOT"],
+                                      out=lambda line: None)
+    plan = nm.plan("--nanobot-enable", "gateway:telegram")
+    assert plan["https_hosts"] == ["api.telegram.org"]
+    run = nm.run("--nanobot-enable", "gateway:telegram")
+    assert nanobot_settings(run)["channels"]["telegram"] == {"enabled": True, "token": "${TELEGRAM_BOT_TOKEN}"}
+    assert run.env["TELEGRAM_BOT_TOKEN"] == os.environ["NANOBOT_FAKE_BOT"], "the secret, as --secret-env gives it"
+    assert os.environ["NANOBOT_FAKE_BOT"] not in json.dumps(run.managed), "never in a file"
+
+
+@nanobot_scenario
+def nanobot_refuses_what_it_cannot_do_here(nm):
+    """Rules for its own tools (the mode paranoid), a subcommand of a feature that is off, a server on another
+    address, another configuration file; a real start needs no opt-in (a note: not live-tested yet)."""
+    nm.refused("--mode", "paranoid", match="cannot be enforced for nanobot: version 0.4.0 has hooks only for Python programs")
+    for args, why in ((["update"], "needs --nanobot-enable updates"), (["gateway", "--background"], "scheduler"),
+                      (["serve", "--host", "0.0.0.0"], "loopback only"), (["--config", "/work/x.json"], "laid over")):
+        with pytest.raises(ValueError, match=why):
+            nm.run(agent_args=args)
+    nm.run(agent_args=["agent", "-m", "update the readme"])  # a word of the task is no subcommand
+    nm.run("--nanobot-enable", "updates", agent_args=["update", "--check"])
+    assert nm.run(agent_args=["webui"]).config["command"][1:] == ["webui", "--no-open"]
+    assert nm.run().err.count("not live-tested yet") == 1
+
+
+@nanobot_scenario
+def nanobot_telemetry_is_never_switchable(nm):
+    """The user's rule: nanobot's telemetry is always off. With every feature on and --telemetry on the plan opens no
+    telemetry host; the variables and the proxy's refusal hold; what would open or hide them is refused."""
+    s.load_secret_store_module().main(["set", "nanobot_telegram", "--from-env", "NANOBOT_FAKE_BOT"],
+                                      out=lambda line: None)
+    every = ",".join(NANOBOT_MODULE.FEATURES)
+    plan = nm.plan("--nanobot-enable", every, "--telemetry", "on")
+    for host in plan["https_hosts"]:
+        assert not any(NANOBOT_MODULE.host_matches_any(host, telemetry) for telemetry in NANOBOT_MODULE.TELEMETRY_HOSTS)
+    assert plan["nanobot"]["telemetry"]["switchable"] is False
+    assert plan["nanobot"]["telemetry"]["blocked_hosts"] == list(NANOBOT_MODULE.TELEMETRY_HOSTS)
+    run = nm.run("--nanobot-enable", every, "--telemetry", "on")
+    for key, value in NANOBOT_MODULE.TELEMETRY_ENV.items():
+        assert run.env[key] == value
+    assert sorted(goose_denied(run, "telemetry-nanobot-")) == sorted(NANOBOT_MODULE.rule_hosts())
+    nm.refused("--allow-host", "cloud.langfuse.com", match="telemetry is always off")
+    nm.refused("--allow-host", "*.sentry.io", match="telemetry is always off")
+    nm.refused("--no-inspect", "us.i.posthog.com", match="telemetry")
+    nm.refused("--egress-all-allow", "--no-proxy", match="telemetry is always off")
+
+
+@nanobot_scenario
+def nanobot_gets_the_mcp_servers_through_the_bridge(nm):
+    run = nm.run("--mcp", "demo")
+    server = nanobot_settings(run)["tools"]["mcpServers"]["demo"]
+    assert server["type"] == "stdio" and server["command"] == "python3" and server["args"] == s.mcp_bridge_args("demo")
+    assert "--mcp-config" not in run.config["command"]
+
+
+@nanobot_scenario
+def nanobot_model_effort_and_api_keys(nm):
+    """--model and --effort as settings (nanobot has no such options), -D changes nothing (it asks nothing), an
+    Anthropic key's start with the provider anthropic and the placeholder as its key."""
+    run = nm.run("--model", "claude-sonnet-4-5", "--effort", "high", "--dangerously-skip-permissions")
+    defaults = nanobot_settings(run)["agents"]["defaults"]
+    assert defaults["model"] == "claude-sonnet-4-5" and defaults["reasoningEffort"] == "high"
+    assert "--model" not in run.config["command"] and run.config["command"][1:] == []
+    nm.refused("--effort", "minimal", match="--effort for nanobot is one of")
+    nm.run("--model", "x", agent_args=["agent", "-m", "hi"])  # its -m is a message, not a second model
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "NANOBOT_FAKE_BOT"],
+                                      out=lambda line: None)
+    run = nm.run("--api-key", "api.anthropic.com=ANTHROPIC_API_KEY")
+    settings = nanobot_settings(run)
+    assert settings["agents"]["defaults"]["provider"] == "anthropic"
+    assert settings["providers"]["anthropic"]["apiKey"] == run.env["ANTHROPIC_API_KEY"]
+    assert os.environ["NANOBOT_FAKE_BOT"] not in json.dumps(run.managed) + json.dumps(run.env)
+
+
+@nanobot_scenario
+def nanobot_with_a_local_model(nm):
+    """--llm: nanobot's custom provider at the server's /v1 URL with the model, the placeholder as key, the loop
+    guard's step limit; nothing in variables or the HOME."""
+    if nm.backend == "bwrap":
+        llm_endpoint(nm, url="http://10.0.0.5:11434")
+    else:
+        llm_endpoint(nm, url="http://127.0.0.1:11434")
+    plan = nm.plan("--llm", "gpu")
+    assert plan["llm"]["config"] == NANOBOT_MODULE.SETTINGS and plan["llm"]["api"] == "openai-chat"
+    run = nm.run("--llm", "gpu")
+    settings = nanobot_settings(run)
+    assert settings["providers"]["custom"] == {"apiBase": plan["llm"]["agent_url"], "apiKey": PLACEHOLDER}
+    assert settings["agents"]["defaults"]["provider"] == "custom"
+    assert settings["agents"]["defaults"]["model"] == "qwen3:8b"
+    assert settings["agents"]["defaults"]["maxToolIterations"] > 0
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
+    off = nm.run("--llm", "gpu", "--llm-param", "loop_guard=off")
+    assert "maxToolIterations" not in nanobot_settings(off)["agents"]["defaults"]
+
+
+@nanobot_scenario
+def nanobot_presets_start(nm):
+    """Coding with nanobot (Anthropic's API by its key, PyPI, npm, GitHub) and nanobot with a local model (only the
+    server, the loop guard on): a dry run and a whole start each."""
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "NANOBOT_FAKE_BOT"],
+                                      out=lambda line: None)
+    plan = nm.plan("--preset", "coding-nanobot")
+    assert "api.anthropic.com" in plan["https_hosts"] and "pypi.org" in plan["https_hosts"]
+    assert nanobot_settings(nm.run("--preset", "coding-nanobot"))["agents"]["defaults"]["provider"] == "anthropic"
+    if nm.backend == "bwrap":
+        return  # the host's loopback: Podman only (the start says so)
+    endpoint = {"kind": "lmstudio", "url": "http://127.0.0.1:1234", "model": "qwen/qwen3-coder-30b"}
+    store = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "llm.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"version": 1, "endpoints": {"ollama": endpoint}}))
+    plan = nm.plan("--preset", "nanobot-local-llm")
+    assert plan["https_hosts"] == [] and plan["llm"]["config"] == NANOBOT_MODULE.SETTINGS
+    settings = nanobot_settings(nm.run("--preset", "nanobot-local-llm"))
+    assert settings["providers"]["custom"]["apiBase"] == "http://127.0.0.1:1234/v1"
+    assert settings["agents"]["defaults"]["model"] == "qwen/qwen3-coder-30b"
+
+
+@nanobot_scenario
+def nanobot_at_openrouter(nm):
+    """--llm at OpenRouter: nanobot's custom provider at https://openrouter.ai/api/v1; only OpenRouter's /api is open,
+    the key on the wire only."""
+    llm_endpoint(nm, name="openrouter", kind="openai-compatible", url="https://openrouter.ai/api/v1",
+                 model="anthropic/claude-sonnet-5.5")
+    plan = nm.plan("--llm", "openrouter", "--no-provider-defaults")
+    assert plan["https_hosts"] == ["openrouter.ai"] and plan["llm"]["agent_url"] == "https://openrouter.ai/api/v1"
+    run = nm.run("--llm", "openrouter", "--no-provider-defaults")
+    assert nanobot_settings(run)["providers"]["custom"]["apiBase"] == "https://openrouter.ai/api/v1"
+    assert run.proxy["llm"][0]["placeholder"] == PLACEHOLDER and run.proxy["llm"][0]["key"] == LLM_KEY
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
+
+
+@pytest.mark.parametrize("scenario", list(NANOBOT))
+def test_nanobot(scenario, nm):
+    NANOBOT[scenario](nm)
+
+
+# --- Letta Code (experimental): its variables, its start script, its features, telemetry, local models ------------
+
+LETTA, letta_scenario = scenarios()
+LETTA_MODULE = s.load_letta_module()
+
+
+def letta_start(run):
+    return json.loads(run.managed["letta"]["sandbox-ai-start.json"])
+
+
+@letta_scenario
+def letta_starts_local_with_its_start_script(lm):
+    """A plain start: no provider host of its own, the local backend with Letta Cloud's address closed, the update
+    check and its own sandbox off, the telemetry variables set, sandbox-ai's start script read-only at /etc/letta
+    becoming Letta Code, the proxy's telemetry rules."""
+    plan = lm.plan()
+    assert plan["https_hosts"] == [] and plan["image"] == "localhost/letta-sandbox:latest"
+    assert plan["letta"]["experimental"] and plan["letta"]["enabled"] == [] and plan["letta"]["backend"] == "local"
+    assert set(plan["letta"]["off"]) == set(LETTA_MODULE.FEATURES) and plan["letta"]["version"] == LETTA_MODULE.VERSION
+    run = lm.run()
+    assert run.env["LETTA_LOCAL_BACKEND_EXPERIMENTAL"] == "1" and run.env["LETTA_BASE_URL"] == "http://127.0.0.1:9"
+    assert run.env["DISABLE_AUTOUPDATER"] == "1" and run.env["LETTA_FS_SANDBOX"] == "0"
+    assert run.env["LETTA_CODE_TELEM"] == "0" and run.env["DO_NOT_TRACK"] == "1"
+    assert ("dst=/etc/letta,ro" if lm.backend == "podman" else "/letta /etc/letta") in run.joined
+    assert run.managed["letta"]["sandbox-ai-start.py"] == LETTA_MODULE.START_SCRIPT
+    assert letta_start(run) == {"servers": [], "model": None, "cloud": False, "note": None, "hooks": None,
+                              "project_hooks": False}
+    command = run.config["command"]
+    assert command[:3] == ["python3", "-I", LETTA_MODULE.START] and command[3].endswith("letta") and command[4:] == []
+    assert "api.letta.com" in goose_denied(run, "telemetry-letta-path-")
+    assert "note: Letta Code: not live-tested yet" in run.err
+
+
+@letta_scenario
+def letta_features_open_only_their_hosts(lm):
+    """--letta-enable: each feature's hosts pinned like --allow-host and its variables no longer set; Letta Cloud
+    opens only its two hosts."""
+    plan = lm.plan("--letta-enable", "cloud")
+    assert plan["https_hosts"] == ["api.letta.com", "app.letta.com"] and plan["letta"]["backend"] == "cloud"
+    run = lm.run("--letta-enable", "cloud", "--letta-enable", "updates")
+    assert "LETTA_LOCAL_BACKEND_EXPERIMENTAL" not in run.env and "LETTA_BASE_URL" not in run.env
+    assert "DISABLE_AUTOUPDATER" not in run.env and letta_start(run)["cloud"] is True
+    plan = lm.plan("--letta-enable", "skills-install")
+    assert "clawhub.ai" in plan["https_hosts"] and "api.letta.com" not in plan["https_hosts"]
+    lm.refused("--letta-enable", "channels", match="not a Letta Code feature")
+    lm.refused("--letta-enable", "updates", "--offline", match="needs the network")
+    lm.refused("--letta-enable", "cloud", "--mode", "high", match="widens the security mode high")
+
+
+@letta_scenario
+def letta_refuses_what_it_cannot_do_here(lm):
+    """Rules for its own tools (the mode paranoid), --letta-enable for another agent, an argument of a feature that
+    is off, channels and an App Server off the loopback; a real start needs no opt-in (a note: not live-tested
+    yet)."""
+    rules = lm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
+    run = lm.run("--rules", str(rules))  # rules for its own tools: hooks its start lays into the user's settings
+    pre = letta_start(run)["hooks"]["PreToolUse"]
+    assert pre[-1]["hooks"][0]["command"].endswith("--internal-hook letta PreToolUse") and \
+        pre[-1]["hooks"][0]["timeout"] == s.HOOK_AGENT_TIMEOUT * 1000 and run.config["hooks"]["agent"] == "letta"
+    assert letta_start(lm.run())["hooks"] is None
+    for args, why in ((["update"], "needs --letta-enable updates"), (["--backend", "cloud"], "--letta-enable cloud"),
+                      (["install", "x"], "skills-install"), (["server", "--channels", "telegram"], "npm"),
+                      (["server", "--listen", "ws://0.0.0.0:4500"], "loopback only")):
+        with pytest.raises(ValueError, match=why):
+            lm.run(agent_args=args)
+    lm.run(agent_args=["-p", "--", "update the readme"])  # a word of the task is no subcommand
+    lm.run("--letta-enable", "cloud", agent_args=["--backend", "cloud"])
+    assert lm.plan()["letta"]["experimental"]
+    assert lm.run().err.count("not live-tested yet") == 1
+
+
+@letta_scenario
+def letta_telemetry_is_never_switchable(lm):
+    """The user's rule: Letta Code's telemetry is always off. With every feature on and --telemetry on the plan opens
+    no telemetry host; the variables and the proxy's refusals (also of its paths on api.letta.com, opened for Letta
+    Cloud) hold; what would open or hide them is refused."""
+    every = ",".join(LETTA_MODULE.FEATURES)
+    plan = lm.plan("--letta-enable", every, "--telemetry", "on")
+    for host in plan["https_hosts"]:
+        assert not any(LETTA_MODULE.host_matches_any(host, telemetry) for telemetry in LETTA_MODULE.TELEMETRY_HOSTS)
+    assert plan["letta"]["telemetry"]["switchable"] is False
+    assert plan["letta"]["telemetry"]["blocked_hosts"] == list(LETTA_MODULE.TELEMETRY_HOSTS)
+    run = lm.run("--letta-enable", every, "--telemetry", "on")
+    for key, value in LETTA_MODULE.TELEMETRY_ENV.items():
+        assert run.env[key] == value
+    rules = [rule for source in run.proxy["rules"] if source["name"] == "telemetry" for rule in source["http"]
+             if rule["id"].startswith("telemetry-letta-")]
+    listed = lambda value: value if isinstance(value, list) else [value]  # noqa: E731
+    assert {(host, path) for rule in rules for host in listed(rule["host"]) for path in listed(rule["path"])} >= {
+        ("api.letta.com", "/v1/metadata/telemetry/**"), ("*.scarf.sh", "/**")}
+    assert all(rule["decision"] == "deny" for rule in rules)
+    lm.refused("--allow-host", "static.scarf.sh", match="telemetry is always off")
+    lm.refused("--allow-domain", "scarf.sh", match="telemetry is always off")
+    lm.refused("--no-inspect", "api.letta.com", match="telemetry")
+    lm.refused("--egress-all-allow", "--no-proxy", match="telemetry is always off")
+
+
+@letta_scenario
+def letta_gets_the_mcp_servers_through_its_start_script(lm):
+    run = lm.run("--mcp", "demo")
+    assert letta_start(run)["servers"] == [{"name": "demo", "command": "python3", "args": s.mcp_bridge_args("demo")}]
+    assert "--mcp-config" not in run.config["command"]
+
+
+@letta_scenario
+def letta_model_skip_permissions_and_api_keys(lm):
+    """--model as Letta Code's own (and the model of the agent its start script creates), -D its --yolo, an Anthropic
+    key as a placeholder; no --effort."""
+    run = lm.run("--model", "anthropic/claude-sonnet-4-5", "--dangerously-skip-permissions")
+    command = run.config["command"]
+    assert command[4:] == ["--yolo", "--model", "anthropic/claude-sonnet-4-5"] or \
+        set(command[4:]) == {"--yolo", "--model", "anthropic/claude-sonnet-4-5"}
+    assert letta_start(run)["model"] == "anthropic/claude-sonnet-4-5"
+    lm.refused("--effort", "high", match="--effort")
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    run = lm.run("--api-key", "api.anthropic.com=ANTHROPIC_API_KEY")
+    assert run.env["ANTHROPIC_API_KEY"] != os.environ["GOOSE_FAKE_BOT"], "a placeholder, the key on the wire only"
+
+
+@letta_scenario
+def letta_with_a_local_model(lm):
+    """--llm: Letta Code's OpenAI-compatible provider llama-cpp at the server's /v1 URL by variables, the
+    placeholder as key, --model llama-cpp/MODEL (also for the agent its start script creates); nothing in the HOME."""
+    if lm.backend == "bwrap":
+        llm_endpoint(lm, url="http://10.0.0.5:11434")
+    else:
+        llm_endpoint(lm, url="http://127.0.0.1:11434")
+    plan = lm.plan("--llm", "gpu")
+    assert plan["llm"]["config"].startswith("environment") and plan["llm"]["api"] == "openai-chat"
+    run = lm.run("--llm", "gpu")
+    assert run.env["LLAMA_CPP_BASE_URL"] == plan["llm"]["agent_url"] and run.env["LLAMA_CPP_API_KEY"] == PLACEHOLDER
+    command = run.config["command"]
+    assert command[command.index("--model") + 1] == "llama-cpp/qwen3:8b"
+    assert letta_start(run)["model"] == "llama-cpp/qwen3:8b"
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
+
+
+@letta_scenario
+def letta_presets_start(lm):
+    """Coding with Letta Code (Anthropic's API by its key, PyPI, npm, GitHub) and Letta Code with a local model (only
+    the server): a dry run and a whole start each."""
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    plan = lm.plan("--preset", "coding-letta")
+    assert "api.anthropic.com" in plan["https_hosts"] and "pypi.org" in plan["https_hosts"]
+    assert "api.letta.com" not in plan["https_hosts"]
+    assert letta_start(lm.run("--preset", "coding-letta"))["model"].startswith("anthropic/")
+    if lm.backend == "bwrap":
+        return  # the host's loopback: Podman only (the start says so)
+    endpoint = {"kind": "lmstudio", "url": "http://127.0.0.1:1234", "model": "qwen/qwen3-coder-30b"}
+    store = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "llm.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"version": 1, "endpoints": {"ollama": endpoint}}))
+    plan = lm.plan("--preset", "letta-local-llm")
+    assert plan["https_hosts"] == [] and plan["llm"]["config"].startswith("environment")
+    run = lm.run("--preset", "letta-local-llm")
+    assert run.env["LLAMA_CPP_BASE_URL"] == "http://127.0.0.1:1234/v1"
+    assert letta_start(run)["model"] == "llama-cpp/qwen/qwen3-coder-30b"
+
+
+# --- Pi (experimental): its variables, sandbox-ai's extension, its features, telemetry, local models, login -------
+
+PI, pi_scenario = scenarios()
+PI_MODULE = s.load_pi_module()
+
+
+def pi_extension(run):
+    return json.loads(run.managed["pi"]["sandbox-ai.json"])
+
+
+@pi_scenario
+def pi_starts_with_sandbox_ai_s_extension(pm):
+    """A plain start: no provider host of its own, PI_OFFLINE and no version check, the telemetry variable set,
+    sandbox-ai's extension and its settings read-only at /etc/pi, Pi itself as the command (the image's pi loads
+    the extension), the proxy's telemetry rules and the refusal of gists."""
+    plan = pm.plan()
+    assert plan["https_hosts"] == [] and plan["image"] == "localhost/pi-sandbox:latest"
+    assert plan["pi"]["experimental"] and plan["pi"]["enabled"] == [] and plan["pi"]["approvals"] is False
+    assert set(plan["pi"]["off"]) == set(PI_MODULE.FEATURES) and plan["pi"]["version"] == PI_MODULE.VERSION
+    run = pm.run()
+    assert run.env["PI_OFFLINE"] == "1" and run.env["PI_SKIP_VERSION_CHECK"] == "1" and run.env["PI_TELEMETRY"] == "0"
+    assert ("dst=/etc/pi,ro" if pm.backend == "podman" else "/pi /etc/pi") in run.joined
+    assert run.managed["pi"]["sandbox-ai.js"] == PI_MODULE.EXTENSION_SCRIPT
+    assert pi_extension(run) == {"servers": []}
+    command = run.config["command"]
+    assert command[0].endswith("pi") and command[1:] == []
+    denied = goose_denied(run, "telemetry-pi-path-")
+    assert "pi.dev" in denied and "radius.pi.dev" in denied and "api.github.com" in goose_denied(run, "pi-share")
+    assert "note: Pi: not live-tested yet" in run.err
+
+
+@pi_scenario
+def pi_features_open_only_their_hosts(pm):
+    """--pi-enable: each feature's hosts pinned like --allow-host and its variables no longer set; share lifts the
+    refusal of gists."""
+    plan = pm.plan("--pi-enable", "model-catalog")
+    assert plan["https_hosts"] == ["pi.dev"] and plan["pi"]["enabled"] == [{"feature": "model-catalog",
+                                                                             "hosts": ["pi.dev"]}]
+    run = pm.run("--pi-enable", "model-catalog", "--pi-enable", "updates")
+    assert "PI_OFFLINE" not in run.env and "PI_SKIP_VERSION_CHECK" not in run.env and run.env["PI_TELEMETRY"] == "0"
+    plan = pm.plan("--pi-enable", "packages")
+    assert "registry.npmjs.org" in plan["https_hosts"] and "pi.dev" not in plan["https_hosts"]
+    assert pm.plan("-px", "share")["https_hosts"] == ["api.github.com"]
+    run = pm.run("-px", "share")
+    assert goose_denied(run, "pi-share") == [] and "pi.dev" in goose_denied(run, "telemetry-pi-path-")
+    pm.refused("--pi-enable", "radius", match="not a Pi feature")
+    pm.refused("--pi-enable", "updates", "--offline", match="needs the network")
+    pm.refused("--pi-enable", "packages", "--mode", "high", match="widens the security mode high")
+
+
+@pi_scenario
+def pi_refuses_what_it_cannot_do_here(pm):
+    """An argument of a feature that is off, Pi updating itself; rules for its own tools hold through sandbox-ai's
+    extension (the mode paranoid starts); a real start needs no opt-in (a note: not live-tested yet)."""
+    rules = pm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
+    run = pm.run("--rules", str(rules))
+    assert pi_extension(run)["hooks"] == {"rules": True, "modules": []} and run.config["hooks"]["agent"] == "pi"
+    for args, why in ((["update"], "read-only"), (["install", "npm:@x/y"], "--pi-enable packages"),
+                      (["-e", "npm:@x/y"], "--pi-enable packages"), (["update", "--models"], "model-catalog")):
+        with pytest.raises(ValueError, match=why):
+            pm.run(agent_args=args)
+    pm.run(agent_args=["-p", "--", "update the readme"])  # a word of the task is no subcommand
+    pm.run("--pi-enable", "packages", agent_args=["install", "npm:@x/y"])
+    assert pm.plan("--with", "codex")["companions"] == ["codex"]  # a layer of the team image since 0.1.98
+    assert pm.plan()["pi"]["experimental"]
+    assert pm.run().err.count("not live-tested yet") == 1
+
+
+@pi_scenario
+def pi_telemetry_is_never_switchable(pm):
+    """The user's rule: Pi's telemetry is always off. With every feature on and --telemetry on the variable and the
+    proxy's refusals of its paths (also on pi.dev, opened by model-catalog and updates) hold; what would hide them is
+    refused."""
+    every = ",".join(PI_MODULE.FEATURES)
+    plan = pm.plan("--pi-enable", every, "--telemetry", "on")
+    assert plan["pi"]["telemetry"]["switchable"] is False
+    assert "radius.pi.dev" not in plan["https_hosts"]
+    run = pm.run("--pi-enable", every, "--telemetry", "on")
+    for key, value in PI_MODULE.TELEMETRY_ENV.items():
+        assert run.env[key] == value
+    rules = [rule for source in run.proxy["rules"] if source["name"] == "telemetry" for rule in source["http"]
+             if rule["id"].startswith("telemetry-pi-")]
+    listed = lambda value: value if isinstance(value, list) else [value]  # noqa: E731
+    assert {(host, path) for rule in rules for host in listed(rule["host"]) for path in listed(rule["path"])} >= {
+        ("pi.dev", "/api/report-install/**"), ("radius.pi.dev", "/v1/bug-reports/**")}
+    assert all(rule["decision"] == "deny" for rule in rules)
+    pm.refused("--no-inspect", "pi.dev", match="telemetry")
+    pm.refused("--no-inspect", "radius.pi.dev", match="telemetry")
+    pm.refused("--egress-all-allow", "--no-proxy", match="telemetry is always off")
+
+
+@pi_scenario
+def pi_gets_the_mcp_servers_through_its_extension(pm):
+    run = pm.run("--mcp", "demo")
+    servers = pi_extension(run)["servers"]
+    assert [server["name"] for server in servers] == ["demo"]
+    assert servers[0]["config"]["args"] == s.mcp_bridge_args("demo") and servers[0]["config"]["exposure"] == "direct"
+    assert servers[0]["config"]["timeout"] >= 60 and "--mcp-config" not in run.config["command"]
+
+
+@pi_scenario
+def pi_model_effort_skip_permissions_and_api_keys(pm):
+    """--model as Pi's own, --effort as its --thinking, -D adds nothing (Pi asks before nothing), an Anthropic key as
+    a placeholder."""
+    run = pm.run("--model", "anthropic/claude-sonnet-4-5", "--effort", "high", "--dangerously-skip-permissions")
+    command = run.config["command"]
+    assert command[1:] == ["--model", "anthropic/claude-sonnet-4-5", "--thinking", "high"]
+    pm.refused("--effort", "huge", match="--effort for pi is one of")
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    run = pm.run("--api-key", "api.anthropic.com=ANTHROPIC_API_KEY")
+    assert run.env["ANTHROPIC_API_KEY"] != os.environ["GOOSE_FAKE_BOT"], "a placeholder, the key on the wire only"
+
+
+@pi_scenario
+def pi_with_a_local_model(pm):
+    """--llm: the provider sandbox-ai's extension registers (OpenAI chat completions at the server's /v1 URL, the
+    placeholder as key, the model's context window), --model sandbox-ai/MODEL, the loop guard's instructions and
+    turn limit; nothing in the HOME."""
+    if pm.backend == "bwrap":
+        llm_endpoint(pm, url="http://10.0.0.5:11434", contexts={"qwen3:8b": 32768})
+    else:
+        llm_endpoint(pm, url="http://127.0.0.1:11434", contexts={"qwen3:8b": 32768})
+    plan = pm.plan("--llm", "gpu", "--llm-param", "loop_guard=on")
+    assert plan["llm"]["config"].startswith("/etc/pi/sandbox-ai.json") and plan["llm"]["api"] == "openai-chat"
+    run = pm.run("--llm", "gpu", "--llm-param", "loop_guard=on")
+    command = run.config["command"]
+    assert command[command.index("--model") + 1] == "sandbox-ai/qwen3:8b"
+    extension = pi_extension(run)
+    provider = extension["provider"]
+    assert provider["id"] == "sandbox-ai" and provider["config"]["baseUrl"] == plan["llm"]["agent_url"]
+    assert provider["config"]["apiKey"] == PLACEHOLDER and provider["config"]["api"] == "openai-completions"
+    assert provider["config"]["models"][0]["id"] == "qwen3:8b"
+    assert provider["config"]["models"][0]["contextWindow"] == 32768, "the model's real context window"
+    assert extension["instructions"] and extension["steps"] > 0, "the loop guard"
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.managed)
+    assert not any(path.startswith(".pi/") and path.endswith("models.json") for path in run.home_files)
+
+
+@pi_scenario
+def pi_login_is_its_auth_json(pm):
+    """Pi's /login: its auth.json (OpenCode's form), from sandbox-ai's own store (sandbox-ai login pi) or a file of
+    the human's, into the sandbox's HOME at ~/.pi/agent/auth.json; a file of another form is no login of Pi's."""
+    assert s.AUTH_TARGETS["pi"] == ".pi/agent/auth.json" and "pi" not in s.NO_LOGIN_AGENTS
+    document = json.dumps({"anthropic": {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}})
+    login = pm.private_file("pi-auth.json", document)
+    assert pm.plan("--auth-file", str(login))["auth_mode"] == "file"
+    assert pm.run("--auth-file", str(login)).auth == (document, 0o600)
+    target = s.auth_store("pi") / s.AUTH_TARGETS["pi"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(document)
+    target.chmod(0o600)
+    assert s.store_login("pi") and s.store_sources("pi") == [(target, ".pi/agent/auth.json")]
+    assert not s.login_document_ok("pi", {"anthropic": {"token": "x"}})
+
+
+@pi_scenario
+def pi_presets_start(pm):
+    """Pi (default), Coding with Pi (Anthropic's API by its key, PyPI, npm, GitHub) and Pi with a local model (only
+    the server): a dry run and a whole start each."""
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    assert pm.plan("--preset", "default-pi")["https_hosts"] == ["api.anthropic.com"]
+    plan = pm.plan("--preset", "coding-pi")
+    assert "api.anthropic.com" in plan["https_hosts"] and "pypi.org" in plan["https_hosts"]
+    assert "pi.dev" not in plan["https_hosts"]
+    command = pm.run("--preset", "coding-pi").config["command"]
+    assert command[command.index("--model") + 1].startswith("anthropic/")
+    if pm.backend == "bwrap":
+        return  # the host's loopback: Podman only (the start says so)
+    endpoint = {"kind": "lmstudio", "url": "http://127.0.0.1:1234", "model": "qwen/qwen3-coder-30b"}
+    store = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "llm.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"version": 1, "endpoints": {"ollama": endpoint}}))
+    plan = pm.plan("--preset", "pi-local-llm")
+    assert plan["https_hosts"] == []
+    run = pm.run("--preset", "pi-local-llm")
+    assert pi_extension(run)["provider"]["config"]["baseUrl"] == "http://127.0.0.1:1234/v1"
+    assert run.config["command"][run.config["command"].index("--model") + 1] == "sandbox-ai/qwen/qwen3-coder-30b"
+
+
 @pytest.mark.parametrize("scenario", list(QWEN))
 def test_qwen(scenario, qm):
     QWEN[scenario](qm)
@@ -3410,6 +4242,199 @@ def test_dsh(scenario, dm):
 @pytest.mark.parametrize("scenario", list(GOOSE))
 def test_goose(scenario, gm):
     GOOSE[scenario](gm)
+
+
+@pytest.mark.parametrize("scenario", list(OPENHANDS))
+def test_openhands(scenario, om):
+    OPENHANDS[scenario](om)
+
+
+@pytest.mark.parametrize("scenario", list(LETTA))
+def test_letta(scenario, lm):
+    LETTA[scenario](lm)
+
+
+# --- OpenCode 2 (experimental): its variables, its configuration layer, its features, telemetry, local models -------
+
+OPENCODE2, opencode2_scenario = scenarios()
+OPENCODE2_MODULE = s.load_opencode2_module()
+
+
+def opencode2_content(run):
+    """OPENCODE_CONFIG_CONTENT of the start: the layer above every file of OpenCode 2's."""
+    return json.loads(run.env["OPENCODE_CONFIG_CONTENT"])
+
+
+@opencode2_scenario
+def opencode2_starts_quiet_with_its_layer(om2):
+    """A plain start: OpenCode's own provider host (opencode.ai, as for OpenCode 1), the image of its own, no update
+    check and no catalog download, the telemetry variables set, its configuration layer with the update switches, its
+    shared background service off in the HOME, opencode2 itself as the command; the proxy refuses bun.report,
+    opentunnel.xyz and the update check's path."""
+    plan = om2.plan()
+    assert plan["https_hosts"] == ["opencode.ai"] and plan["image"] == "localhost/opencode2-sandbox:latest"
+    assert plan["opencode2"]["experimental"] and plan["opencode2"]["enabled"] == []
+    assert set(plan["opencode2"]["off"]) == set(OPENCODE2_MODULE.FEATURES)
+    assert plan["opencode2"]["version"] == OPENCODE2_MODULE.VERSION and plan["opencode2"]["background_service"] is False
+    run = om2.run()
+    assert run.env["OPENCODE_DISABLE_AUTOUPDATE"] == "1" and run.env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
+    for key, value in OPENCODE2_MODULE.TELEMETRY_ENV.items():
+        assert run.env[key] == value
+    assert "OPENCODE_PERMISSION" not in run.env and "OPENCODE_CONFIG" not in run.env
+    assert opencode2_content(run) == {"update": "disable", "autoupdate": False}
+    assert json.loads(run.home_text[OPENCODE2_MODULE.SERVICE_FILE]) == {"disabled": True}
+    command = run.config["command"]
+    assert command[0].endswith("opencode2") and command[1:] == []
+    denied = goose_denied(run)
+    assert "bun.report" in denied and "opentunnel.xyz" in denied and "opencode.ai" in denied
+    assert run.err.count("not live-tested yet") == 1
+
+
+@opencode2_scenario
+def opencode2_features_open_only_their_hosts(om2):
+    """--opencode2-enable: each feature's hosts pinned like --allow-host and its variables no longer set; the update
+    check's path is no longer refused with updates; widening is a weakening option."""
+    plan = om2.plan("--opencode2-enable", "models-catalog")
+    assert plan["https_hosts"] == ["opencode.ai", "models.opencode.ai"]
+    run = om2.run("--opencode2-enable", "models-catalog,updates")
+    assert "OPENCODE_DISABLE_MODELS_FETCH" not in run.env and "OPENCODE_DISABLE_AUTOUPDATE" not in run.env
+    assert opencode2_content(run) == {"update": "notify"}
+    assert not [rule for source in run.proxy["rules"] if source["name"] == "telemetry" for rule in source["http"]
+                if rule["id"].startswith("opencode2-updates-")]
+    plan = om2.plan("--opencode2-enable", "plugins", "--opencode2-enable", "web-search")
+    assert "registry.npmjs.org" in plan["https_hosts"] and "mcp.exa.ai" in plan["https_hosts"]
+    om2.run("--opencode2-enable", "plugins", agent_args=["plugin", "add", "opencode-acme-plugin"])
+    om2.refused("--opencode2-enable", "telemetry", match="not an OpenCode 2 feature")
+    om2.refused("--opencode2-enable", "updates", "--offline", match="needs the network")
+    om2.refused("--opencode2-enable", "plugins", "--mode", "high", match="widens the security mode high")
+
+
+@opencode2_scenario
+def opencode2_refuses_what_it_cannot_do_here(om2):
+    """OpenCode 1's options, an argument that installs OpenCode or a plugin without its feature, remote pairing and a
+    server off the loopback; rules for its own tools hold through sandbox-ai's V2 plugin (the mode paranoid starts);
+    a real start needs no opt-in (a note: not live-tested yet)."""
+    run = om2.run("--mode", "paranoid", "--no-keep")
+    assert json.loads(run.env["OPENCODE_CONFIG_CONTENT"])["plugins"] == ["/etc/opencode2/sandbox-ai-hooks"]
+    assert run.managed["opencode2"]["sandbox-ai-hooks/server.js"] and run.config["hooks"]["agent"] == "opencode2"
+    for args, why in ((["upgrade"], "new review"), (["uninstall"], "read-only"),
+                      (["plugin", "add", "x"], "--opencode2-enable plugins"), (["pair", "--remote", "--yes"], "internet"),
+                      (["serve", "--hostname", "0.0.0.0"], "loopback only")):
+        with pytest.raises(ValueError, match=why):
+            om2.run(agent_args=args)
+    om2.run(agent_args=["run", "--", "upgrade the readme"])  # a word of the task is no subcommand
+    om2.run(agent_args=["serve", "--hostname", "127.0.0.1", "--port", "4096"])
+    om2.run(agent_args=["plugin", "list"])
+    local = om2.private_file("opencode.jsonc", "{}")
+    om2.refused("--local-config", str(local), match="requires OpenCode")
+
+
+@opencode2_scenario
+def opencode2_telemetry_is_never_switchable(om2):
+    """The user's rule: OpenCode 2's telemetry is always off. With every feature on and --telemetry on the plan opens
+    no telemetry host; the variables and the proxy's refusals hold; what would open or hide them is refused."""
+    every = ",".join(OPENCODE2_MODULE.FEATURES)
+    plan = om2.plan("--opencode2-enable", every, "--telemetry", "on")
+    for host in plan["https_hosts"]:
+        assert not OPENCODE2_MODULE.telemetry_hosts_in([host]), host
+    assert plan["opencode2"]["telemetry"]["switchable"] is False
+    assert plan["opencode2"]["telemetry"]["blocked_hosts"] == list(OPENCODE2_MODULE.TELEMETRY_HOSTS)
+    run = om2.run("--opencode2-enable", every, "--telemetry", "on")
+    for key, value in OPENCODE2_MODULE.TELEMETRY_ENV.items():
+        assert run.env[key] == value
+    assert {"bun.report", "opentunnel.xyz"} <= set(goose_denied(run, "telemetry-opencode2-") +
+                                                   goose_denied(run, "opencode2-never-"))
+    om2.refused("--allow-host", "bun.report", match="telemetry is always off")
+    om2.refused("--allow-domain", "bun.report", match="telemetry is always off")
+    om2.refused("--allow-host", "opentunnel.xyz", match="telemetry is always off")
+    om2.refused("--no-inspect", "bun.report", match="telemetry")
+    om2.refused("--egress-all-allow", "--no-proxy", match="telemetry is always off")
+    om2.monkeypatch.setenv("DO_NOT_TRACK", "0")
+    om2.monkeypatch.setenv("OTEL_SDK_DISABLED", "false")
+    run = om2.run("--env", "DO_NOT_TRACK", "--env", "OTEL_SDK_DISABLED")
+    assert run.env["DO_NOT_TRACK"] == "1" and run.env["OTEL_SDK_DISABLED"] == "true", "--env never undoes them"
+
+
+@opencode2_scenario
+def opencode2_gets_the_mcp_servers_as_direct_tools(om2):
+    run = om2.run("--mcp", "demo")
+    servers = opencode2_content(run)["mcp"]["servers"]
+    assert list(servers) == ["demo"] and servers["demo"]["codemode"] is False
+    assert servers["demo"]["command"] == ["python3", *s.mcp_bridge_args("demo")]
+    assert servers["demo"]["timeout"]["execution"] == s.mcp_tool_timeouts(run.a)["demo"] * 1000
+    assert "--mcp-config" not in run.config["command"]
+
+
+@opencode2_scenario
+def opencode2_model_skip_permissions_and_api_keys(om2):
+    """--model in its configuration layer (its TUI has no model option), -D an allow-all rule there (it has no
+    OPENCODE_PERMISSION), an Anthropic key as a placeholder; no --effort."""
+    run = om2.run("--model", "anthropic/claude-sonnet-4-5", "--dangerously-skip-permissions")
+    content = opencode2_content(run)
+    assert content["model"] == "anthropic/claude-sonnet-4-5"
+    assert content["permissions"] == [{"action": "*", "resource": "*", "effect": "allow"}]
+    assert run.config["command"][1:] == [] and "OPENCODE_PERMISSION" not in run.env
+    om2.refused("--effort", "high", match="--effort")
+    s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "GOOSE_FAKE_BOT"],
+                                      out=lambda line: None)
+    run = om2.run("--api-key", "api.anthropic.com=ANTHROPIC_API_KEY")
+    assert run.env["ANTHROPIC_API_KEY"] != os.environ["GOOSE_FAKE_BOT"], "a placeholder, the key on the wire only"
+
+
+@opencode2_scenario
+def opencode2_with_a_local_model(om2):
+    """--llm: OpenCode 1's provider file (the v1 shape OpenCode 2 reads) without compaction.prune, read-only in
+    /etc/opencode2 through OPENCODE_CONFIG with the loop guard's instructions beside it; the model in its configuration
+    layer, which no project file overrides; nothing in the HOME."""
+    if om2.backend == "bwrap":
+        llm_endpoint(om2, url="http://10.0.0.5:11434")
+    else:
+        llm_endpoint(om2, url="http://127.0.0.1:11434")
+    plan = om2.plan("--llm", "gpu", "--llm-param", "loop_guard=on")
+    assert plan["llm"]["config"] == "/etc/opencode2/sandbox-ai-llm.json" and plan["llm"]["api"] == "openai-chat"
+    run = om2.run("--llm", "gpu", "--llm-param", "loop_guard=on", "--dangerously-skip-permissions")
+    assert run.env["OPENCODE_CONFIG"] == OPENCODE2_MODULE.LLM_CONFIG == "/etc/opencode2/sandbox-ai-llm.json"
+    assert "OPENCODE_PERMISSION" not in run.env
+    assert ("dst=/etc/opencode2,ro" if om2.backend == "podman" else "/opencode2 /etc/opencode2") in run.joined
+    assert opencode2_content(run)["model"] == "llm-gpu/qwen3:8b"
+    config = json.loads(run.managed["opencode2"]["sandbox-ai-llm.json"])
+    assert config["model"] == "llm-gpu/qwen3:8b" and config["provider"]["llm-gpu"]["npm"] == "@ai-sdk/openai-compatible"
+    assert "prune" not in config.get("compaction", {}) and config["instructions"] == [OPENCODE2_MODULE.LOOP_FILE]
+    assert run.managed["opencode2"]["sandbox-ai-loop-guard.md"].strip()
+    assert json.loads(run.managed["opencode2"]["sandbox-ai-layer.json"]) == opencode2_content(run)
+    assert not [path for path in run.home_files if "sandbox-ai-llm" in path or "loop-guard" in path]
+    assert LLM_KEY not in json.dumps(run.config) + json.dumps(run.home_text)
+
+
+@opencode2_scenario
+def opencode2_presets_start(om2):
+    """OpenCode 2 (default), Coding with OpenCode 2 (PyPI, npm, GitHub) and OpenCode 2 with a local model (only the
+    server): a dry run and a whole start each."""
+    plan = om2.plan("--preset", "default-opencode2")
+    assert plan["https_hosts"] == ["opencode.ai"]
+    plan = om2.plan("--preset", "coding-opencode2")
+    assert {"opencode.ai", "pypi.org", "registry.npmjs.org", "github.com"} <= set(plan["https_hosts"])
+    om2.run("--preset", "coding-opencode2")
+    if om2.backend == "bwrap":
+        return  # the host's loopback: Podman only (the start says so)
+    endpoint = {"kind": "lmstudio", "url": "http://127.0.0.1:1234", "model": "qwen/qwen3-coder-30b"}
+    store = Path(os.environ["HOME"]) / ".config" / "sandbox-ai" / "llm.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"version": 1, "endpoints": {"ollama": endpoint}}))
+    plan = om2.plan("--preset", "opencode2-local-llm")
+    assert plan["https_hosts"] == [] and plan["llm"]["config"] == "/etc/opencode2/sandbox-ai-llm.json"
+    run = om2.run("--preset", "opencode2-local-llm")
+    assert opencode2_content(run)["model"] == "llm-ollama/qwen/qwen3-coder-30b"
+
+
+@pytest.mark.parametrize("scenario", list(OPENCODE2))
+def test_opencode2(scenario, om2):
+    OPENCODE2[scenario](om2)
+
+
+@pytest.mark.parametrize("scenario", list(PI))
+def test_pi(scenario, pm):
+    PI[scenario](pm)
 
 
 test_network = table_test(NETWORK)
@@ -3431,3 +4456,14 @@ test_workspaces_and_agent_options = table_test(AGENT)
 test_llm_servers = table_test(LLM)
 test_vpn = table_test(VPN)
 test_presets = table_test(PRESETS_TABLE)
+
+
+def test_a_launcher_holds_no_descriptor_of_a_run_it_ended(m):
+    """Review 3 (robustness): every start took its run's supervisor.lock and never closed it - a launcher that goes
+    on after a run (a team's, this suite's: ~950 descriptors) ran into select()'s limit of 1024. Once the run's
+    directory is gone, its lock is let go of and its descriptor closed; repeated starts open none for good."""
+    m.run()  # (the first start loads what is loaded once)
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(3):
+        m.run()
+    assert len(os.listdir("/proc/self/fd")) <= before

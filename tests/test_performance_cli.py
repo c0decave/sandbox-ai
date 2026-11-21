@@ -164,17 +164,20 @@ def test_exit_status_and_errors_are_the_scripts(isolated, tmp_path):
     assert result.returncode != 0 and result.stderr
     usage = subprocess.run([sys.executable, "-I", str(MAIN), "ps", "--help"], capture_output=True, text=True,
                            env=isolated, timeout=120)
-    assert usage.returncode == 0 and usage.stdout.startswith("usage: sandbox-ai ps ")
+    assert usage.returncode == 0 and usage.stdout.startswith("Usage:  sandbox-ai ps ")
 
 
-def fastest(argv, env):
-    """The fastest of ROUNDS runs of ARGV, in seconds (the least disturbed by whatever else this machine does)."""
-    took = []
+def fastest(argvs, env):
+    """The fastest of ROUNDS runs of each of ARGVS, in seconds, with their medians: [(fastest, median)]. The runs
+    take turns (A B A B ...), so that a busy moment of this machine (the full suites beside it) falls on both alike
+    instead of on whichever ran then."""
+    took = [[] for _ in argvs]
     for _ in range(ROUNDS):
-        begin = time.perf_counter()
-        subprocess.run(argv, capture_output=True, env=env, timeout=120, check=True)
-        took.append(time.perf_counter() - begin)
-    return min(took), statistics.median(took)
+        for argv, times in zip(argvs, took):
+            begin = time.perf_counter()
+            subprocess.run(argv, capture_output=True, env=env, timeout=120, check=True)
+            times.append(time.perf_counter() - begin)
+    return [(min(times), statistics.median(times)) for times in took]
 
 
 @pytest.mark.parametrize("command", [["list", "--json"], ["approvals", "list", "--json"], ["net", "list"]])
@@ -184,8 +187,9 @@ def test_a_command_through_main_costs_no_more_than_its_script_alone(isolated, co
     starts, the script compiled each time); here it is 0.8-0.9 times. Bound: 1.1 times."""
     script, *prefix = load_main().PYTHON_COMMANDS[command[0]]
     subprocess.run([sys.executable, "-I", str(MAIN), *command], capture_output=True, env=isolated, timeout=120)
-    via_main, via_main_median = fastest([sys.executable, "-I", str(MAIN), *command], isolated)
-    alone, alone_median = fastest([sys.executable, "-I", str(MAIN.parent / script), *prefix, *command[1:]], isolated)
+    (via_main, via_main_median), (alone, alone_median) = fastest(
+        [[sys.executable, "-I", str(MAIN), *command],
+         [sys.executable, "-I", str(MAIN.parent / script), *prefix, *command[1:]]], isolated)
     assert via_main < alone * 1.1, (f"through main.py {via_main * 1000:.0f} ms (median {via_main_median * 1000:.0f}), "
                                      f"the script alone {alone * 1000:.0f} ms (median {alone_median * 1000:.0f})")
 

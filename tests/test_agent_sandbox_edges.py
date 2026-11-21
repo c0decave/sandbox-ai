@@ -205,6 +205,48 @@ def test_an_attach_ends_quietly_when_the_relay_goes_while_keys_are_sent(tmp_path
             os.close(fd)
 
 
+def test_an_attach_shows_what_the_relay_said_when_it_went_before_the_window_size(tmp_path, monkeypatch):
+    """Flaky live test (test_live_regressions::test_attach_while_starting, ~1 in 20 on two busy CPUs): a relay that
+    said its last words and went (the agent ended at once) before the client sent its window size - the first send
+    failed with BrokenPipeError outside the attach's loop: nothing it said was shown or kept (sessions.after_attach
+    reads tmux's "no sessions" from it), the attach ended with an error. What came is shown, the attach ends."""
+    import socket
+    import threading
+    path = tmp_path / "attach.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(1)
+    gone = threading.Event()
+
+    def serve():
+        connection, _ = server.accept()
+        connection.sendall(b"last words\r\n")
+        connection.close()
+        gone.set()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    connect = s.RUNTIME.connect_relay
+
+    def connected_then_the_relay_goes(client, socket_path):
+        connect(client, socket_path)
+        assert gone.wait(5)  # the relay said its words and went before the client says its size
+    monkeypatch.setattr(s.RUNTIME, "connect_relay", connected_then_the_relay_goes)
+    stdin_r, stdin_w = os.pipe()
+    out_r, out_w = os.pipe()
+    said = bytearray()
+    try:
+        assert s.attach_client(str(path), stdin_r, out_w, said=said) == 0
+        os.close(out_w)
+        out_w = None
+        assert os.read(out_r, 4096) == b"last words\r\n"
+        assert bytes(said) == b"last words\r\n"
+    finally:
+        server.close()
+        for fd in (stdin_r, stdin_w, out_r, out_w):
+            if fd is not None:
+                os.close(fd)
+
+
 def test_a_pod_removal_that_hangs_does_not_hold_the_launcher(tmp_path, monkeypatch, capsys):
     """Bug hunt: the removal of the run's pod at its end ran without a time limit while Ctrl-C and SIGTERM are held
     (signals_deferred, and podman inherits the mask): a podman that hangs held the launcher until a kill -9. It is
@@ -221,7 +263,7 @@ def test_a_pod_removal_that_hangs_does_not_hold_the_launcher(tmp_path, monkeypat
     monkeypatch.setattr(s.subprocess, "Popen", Mock())
     monkeypatch.setattr(s, "wait_child", Mock(return_value=3))
     assert s.run_pod(args, tmp_path, tmp_path) == 3
-    command, kwargs = calls[-1]
+    command, kwargs = next(call for call in reversed(calls) if call[0][1:3] == ["pod", "rm"])
     assert command[1:4] == ["pod", "rm", "--force"] and kwargs["timeout"] == s.POD_REMOVE_SECONDS
     assert f"remove it with: podman pod rm --force {command[-1]}" in capsys.readouterr().err
 

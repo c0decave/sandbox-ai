@@ -364,7 +364,7 @@ def test_buttons_follow_the_kind_and_say_why_not(window, env, sleepers, monkeypa
     page.show_ended.setChecked(True)  # a stopped session is listed with "Ended" only
     read_now(page)
     page.table.selectRow(widgets.find_row(page.table, "run:claude-abc"))
-    live_mcp = [page.run_named[key] for key in ("add-mcp", "remove-mcp")]
+    live_mcp = [page.run_named[key] for key in ("add-mcp", "remove-mcp", "add-kits", "remove-kits")]
     browser = page.run_named["browser"]  # a start without --browser: nothing to show
     assert not browser.isEnabled() and "no browser of its own" in browser.toolTip()
     assert all(b.isEnabled() for b in page.run_buttons if b not in live_mcp and b is not browser)
@@ -432,7 +432,7 @@ def test_a_foreground_start_has_nothing_to_attach_to(window, env, sleepers):
     page.table.selectRow(widgets.find_row(page.table, "session:work"))
     if page.current().state != "running":
         pytest.skip("this sandbox-ai does not see the fake supervisor as running")
-    for action in ("attach", "attach-app"):
+    for action in ("attach", "attach-app", "shell"):
         assert not page.session_buttons[action].isEnabled()
         assert "--no-tmux" in page.session_buttons[action].toolTip()
     assert page.session_buttons["pause"].isEnabled()  # the rest as for any running session

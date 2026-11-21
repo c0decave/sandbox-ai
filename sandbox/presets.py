@@ -123,7 +123,7 @@ CATEGORIES = tuple(CATEGORY_INFO)
 DEFAULT_CATEGORY = "other"
 # The categories of earlier versions, still taken (your presets, an extra directory's) and listed where they point.
 LEGACY_CATEGORIES = {"simple": "other", "analysis": "security", "media": "fun"}
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 KEYS = {"format", "version", "id", "title", "description", "category", "agents", "options", "mcp", "rules",
         "values", "prompt", "notes", "needs", "translations"}
 # The languages a preset may give its title and description in besides English ("translations": {"de": {"title":
@@ -132,7 +132,7 @@ TRANSLATED = ("de",)
 TRANSLATED_KEYS = ("title", "description")
 # What a preset may not set: what copies a login in (a preset is meant to be passed on), what only a start decides,
 # and what is chosen another way (the security mode: --mode on the command line or the project's "mode").
-REFUSED = ("--copy-auth", "--auth-file", "--import-codex-auth", "--git-credentials", "--git-token-file",
+REFUSED = ("--copy-auth", "--auth-file", "--auth-from-session", "--import-codex-auth", "--git-credentials", "--git-token-file",
            "--workspace", "--config", "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name",
            "--mcp-socket-dir", "--mcp-approvals-dir", "--helper-of", "--start-id", "--name", "--rules", "--preset",
            # (the launcher's own word to an MCP server's sandbox: the run whose tunnel it borrows - vpn.validate_lent)
@@ -602,11 +602,28 @@ def prompt_args(preset, agent, values=None):
     if agent == "goose":
         # Goose runs the task and stays interactive (goose run --interactive); the text is the option's own value.
         return ["run", "--interactive", "--text=" + text]
+    if agent == "openhands":
+        # The Canvas has no prompt option: the task runs without the UI (one task, its answer in the window).
+        return ["task", "--text=" + text]
+    if agent == "nanobot":
+        # nanobot's terminal client takes no first task: the task runs as one message (nanobot agent --message=...,
+        # its answer in the window), in nanobot's own workspace, so the text says where the project is (as
+        # agent_mcp.NANOBOT_PROJECT_NOTE).
+        return ["agent", "--message=(sandbox-ai: the project is /work; work there - your tools' relative paths start "
+                "in your own workspace.)\n\n" + text]
+    if agent == "letta":
+        # Letta Code's terminal UI takes no first task: it runs headless (one task, its answer in the window; a
+        # restart goes on interactively in the same conversation); after "--" a text that starts with "-" stays it.
+        return ["-p", "--", text]
+    if agent == "pi":
+        # Pi's terminal UI starts with the task as its first message and stays interactive; after "--" a text that
+        # starts with "-" stays it, and one that starts with "@" (Pi reads @PATH as a file) gets a space first.
+        return ["--", " " + text if text.startswith("@") else text]
     if agent == "dsh":
         # DSH has no prompt for its web UI: the task runs headless (one task, its answer in the window); a text that
         # starts with "-" gets a space first, so DSH never reads it as an option.
         return ["headless", " " + text if text.startswith("-") else text]
-    return ["--prompt", text] if agent == "opencode" else [text]
+    return ["--prompt", text] if agent in ("opencode", "opencode2") else [text]
 
 
 def option_values(preset, values, flag):
@@ -868,12 +885,13 @@ def vpn_bypasses(options, given=()):
     return found
 
 
-def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, private=None):
+def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, private=None, code_env=None):
     """ARGV (the launcher's: AGENT options... [-- agent args]) with --preset NAME and --preset-value KEY=VALUE
     replaced by the preset's options, placed right after the agent so that the command line wins; and its first
     task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset. What
     the preset leaves out (a default folder that is not there) goes to NOTES. PRIVATE(flag, path): why a host path
-    a --copy or --mount names is private (the launcher's private_source), else None."""
+    a --copy or --mount names is private (the launcher's private_source), else None. CODE_ENV(options, given): the
+    --mcp-env values among OPTIONS that change what code runs in an MCP server's sandbox (mcp.code_env_in)."""
     if not argv or not any(token == "--preset" or token.startswith("--preset=") for token in argv):
         return (argv, None) if with_mode else argv
     head, tail = list(argv), []
@@ -940,6 +958,14 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, pr
         if past:
             raise ValueError(f"preset {name}: {', '.join(past)} is not allowed in a preset that is not yours: it lets "
                              "the run past its VPN or Tor, from your own address; give it yourself if you mean it")
+    # A variable that changes what code runs in an MCP server's sandbox (LD_PRELOAD, NODE_OPTIONS, PYTHONSTARTUP):
+    # the human's own is set with a warning; one from someone else's text is not (a value you give is yours).
+    if code_env is not None and preset.get("_origin") != "yours":
+        changing = code_env(options, given.values())
+        if changing:
+            raise ValueError(f"preset {name}: {', '.join(dict.fromkeys(changing))} is not allowed in a preset that is "
+                             "not yours: it changes what code runs in the MCP server's sandbox; give it yourself if "
+                             "you mean it (on the command line, with a warning)")
     # The preset's --mode is taken out: the launcher applies it only where it is stricter than what the command
     # line, the project file and your defaults choose (it never lowers a stricter one).
     options, mode = split_mode(options)
@@ -1106,26 +1132,39 @@ def dirs_main(args, out):
     return 0
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def main(argv, out=print):
     p = argparse.ArgumentParser(prog="sandbox-ai presets", description=__doc__.split("\n\nStandard library")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+                                formatter_class=help_style, allow_abbrev=False)
     commands = p.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="the built-in presets and your own, by category")
-    listing.add_argument("-j", "--json", action="store_true")
+    listing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     kinds = commands.add_parser("categories", help="the categories presets are listed under (English and German)")
-    kinds.add_argument("-j", "--json", action="store_true")
+    kinds.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     shown = commands.add_parser("show", help="what a preset sets, needs and asks for")
     shown.add_argument("name")
-    shown.add_argument("-j", "--json", action="store_true")
+    shown.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     checked = commands.add_parser("check", help="what is missing before a preset can start")
     checked.add_argument("name")
-    checked.add_argument("--value", action="append", default=[], metavar="KEY=VALUE")
-    checked.add_argument("--agent", choices=AGENTS)
-    dirs = commands.add_parser("dirs", help="the extra preset directories (defaults.json: preset_dirs)")
+    checked.add_argument("--value", action="append", default=[], metavar="KEY=VALUE", help="a value for a setting of the preset: KEY=VALUE (repeatable)")
+    checked.add_argument("--agent", choices=AGENTS, help="check for this agent (default: the preset's own)")
+    dirs = commands.add_parser("dirs", help="the extra preset directories (defaults.json: preset_dirs)",
+                               formatter_class=help_style, description="The extra preset directories "
+                                                                       "(defaults.json: preset_dirs); alone: the list.")
     dirs_commands = dirs.add_subparsers(dest="dirs_command")
     dirs_list = dirs_commands.add_parser("list", help="the directories, in order, and whether each is used")
     for listing_parser in (dirs, dirs_list):
-        listing_parser.add_argument("-j", "--json", action="store_true")
+        listing_parser.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     dirs_commands.add_parser("add", help="add a directory (after the others)").add_argument("directory")
     dirs_commands.add_parser("remove", help="remove a directory").add_argument("directory")
     args = p.parse_args(argv)

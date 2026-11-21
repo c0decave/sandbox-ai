@@ -326,9 +326,18 @@ def test_the_board_offers_vpn_profiles_and_secrets_of_its_host(qapp, wait, value
     page.inspected = page.board.first("agent").id  # as when it is selected (the inspector is built again for it)
     page.inspect(page.board.first("agent"))
 
-    def buttons():
-        return [b for b in page.inspector_holder.findChildren(NF.NameButton) if b.kind == "secret"]
-    assert wait(lambda: buttons() and all(offered(b) == ["OPENAI_KEY"] for b in buttons()))
+    # (the agent's secrets as variables and API keys: one list field of kinds since 2026-11-19, whose value field
+    # offers that host's secrets for each kind that names one - list_fields, BoardPage.value_provider)
+    from sandbox_ai_app.list_fields import ListFields
+
+    def suggested(key):
+        fields = page.inspector_holder.findChildren(ListFields)
+        if not fields or not fields[0].choose_kind(key):
+            return None
+        box = fields[0].value_box
+        return [box.itemData(i) for i in range(box.count())]
+    assert wait(lambda: suggested("--secret-env") == ["OPENAI_KEY"])
+    assert wait(lambda: suggested("--api-key") == ["HOST=OPENAI_KEY"])
     from sandbox_ai_app import guide_view
     guide = guide_view.NodeGuide(page.board.first("vpn"), (), page)
     question, field = guide.inputs["--vpn"]

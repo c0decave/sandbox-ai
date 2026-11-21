@@ -47,7 +47,9 @@ def registered(tmp_path_factory):
                 ("llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--vpn", "ts", "--model",
                  "Qwen/Qwen3-Coder")]
     commands += [("llm", "add", name, "--kind", kind, "--url", url, "--model", model) for name, kind, url, model in SERVERS]
-    commands.append(("secrets", "set", "ANTHROPIC_API_KEY", "--from-env", "SANDBOX_AI_TEST_API_KEY"))
+    # the keys the presets name (--api-key HOST=NAME): Goose, Letta and OpenHands take Anthropic's, DSH DeepSeek's
+    commands += [("secrets", "set", name, "--from-env", "SANDBOX_AI_TEST_API_KEY")
+                 for name in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")]
     for command in commands:
         status, out, err = sai.call(*command)
         assert status == 0, out + err
@@ -99,12 +101,17 @@ def registered_servers(root, board):
     for node in board.included():
         name = node.props.get("name") if node.kind == "mcp" else None
         if name and name not in own and name not in document and name in FOLDERS:
-            # A catalog server with a folder of its own (engram, memory): an image server, as `mcp add NAME --mount
-            # /data=DIR:rw` writes it, so that a preset's --mcp-mount can give it the start's folder.
-            folder = root / f"brain-{name}"
-            folder.mkdir(exist_ok=True)
+            # A catalog server with a folder of its own (engram, memory at /data; the file-analysis servers at /work):
+            # an image server, as `mcp add NAME --mount TARGET=DIR` writes it, so that a preset's --mcp-mount can give
+            # it the start's folder.
+            targets = FOLDERS[name] if isinstance(FOLDERS[name], tuple) else (FOLDERS[name],)
+            mounts = []
+            for target in targets:  # (smali and frida: the APKs at /work and their output at /out)
+                folder = root / f"folder-{name}{target.replace('/', '-')}"
+                folder.mkdir(exist_ok=True)
+                mounts.append({"target": target, "host": str(folder), "mode": "rw"})
             document[name] = {"image": f"ghcr.io/c0decave/sandbox-ai-mcp-{name}@sha256:" + "a" * 64,
-                              "network": "none", "mounts": [{"target": "/data", "host": str(folder), "mode": "rw"}]}
+                              "network": "none", "mounts": mounts}
         elif name and name not in own and name not in document and name != "demo":
             document[name] = {"command": ["python3", "-I", "-c", "pass"], "options": ["--offline"],
                               "description": "stand-in of a registered server (tests)"}
@@ -113,11 +120,15 @@ def registered_servers(root, board):
     # The images a preset's services name, as `sandbox-ai images pull REFERENCE --as NAME` records them (unchecked).
     images = {name: {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + digit * 64,
                      "id": "sha256:" + digit * 64, "user": user}
-              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"))}
+              for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"),
+                                        ("showcase-web", "4", "101:101"))}
     (path.parent / "user-images.json").write_text(_json.dumps({"version": 1, "images": images}))
 
 
-FOLDERS = ("engram", "memory")  # sandbox-ai-mcp's servers that need a folder of their own (/data)
+FOLDERS = {"engram": "/data", "memory": "/data",  # catalog servers a preset gives a folder of its own (--mcp-mount)
+           "binwalk": "/work", "capa": "/work", "radare2": "/work", "floss": "/work", "yara": "/work",
+           "jadx": "/work", "cfr": "/work", "smali": ("/work", "/out"), "frida": ("/work", "/out"),
+           "axross": ("/work", "/axross", "/ssh")}
 
 
 @pytest.mark.parametrize("agent", AGENTS)

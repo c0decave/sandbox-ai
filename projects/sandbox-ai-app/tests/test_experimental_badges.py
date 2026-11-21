@@ -16,9 +16,10 @@ pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not ba
 
 EXPERIMENTAL = {"coding-hermes": "hermes", "hermes-claude": "hermes", "hermes-kanban": "hermes",
                 "hermes-local-llm": "hermes", "coding-qwen": "qwen", "qwen-local-llm": "qwen", "coding-dsh": "dsh",
-                "dsh-local-llm": "dsh", "coding-goose": "goose", "goose-local-llm": "goose",
-                "cairn-pentest-board": "cairn", "default-hermes": "hermes", "default-qwen": "qwen",
-                "default-dsh": "dsh", "default-goose": "goose"}
+                "dsh-local-llm": "dsh", "coding-goose": "goose", "goose-local-llm": "goose", "coding-letta": "letta",
+                "letta-local-llm": "letta",
+                "coding-openhands": "openhands", "openhands-local-llm": "openhands", "coding-nanobot": "nanobot", "nanobot-local-llm": "nanobot", "cairn-pentest-board": "cairn", "cairn-local-llm": "cairn", "default-openhands": "openhands", "default-nanobot": "nanobot", "default-letta": "letta", "default-hermes": "hermes", "default-qwen": "qwen", "default-dsh": "dsh", "default-goose": "goose", "default-opencode2": "opencode2", "coding-opencode2": "opencode2", "opencode2-local-llm": "opencode2",
+                "coding-pi": "pi", "pi-local-llm": "pi", "default-pi": "pi"}
 
 
 @pytest.fixture

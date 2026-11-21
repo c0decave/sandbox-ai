@@ -40,7 +40,11 @@ LAYER_HELP = {
     "context": N_("Warn when the agents are told a larger context window than the server loaded"),
     "warn": N_("The same tool call with the same result this many times: a note tells the model so (0: off)"),
     "block": N_("The same tool call this many times: tool use is paused for that answer (0: off)"),
+    "failures": N_("The same tool failed this many times in a row (guessed arguments): a note tells the model to change "
+                   "its approach (0: off)"),
     "text": N_("One block of text repeated this many times in a row (4 KiB at least): the answer ends (0: off)"),
+    "rejected": N_("The very same request the server rejected this many times (HTTP 4xx) is not sent again: the agent "
+                   "gets sandbox-ai's error at once (0: off)"),
     "watchdog_requests": N_("Unattended runs: tool use paused after this many model requests in one turn (0: off)"),
     "watchdog_minutes": N_("Unattended runs: tool use paused after this many minutes in one turn (0: off)"),
 }

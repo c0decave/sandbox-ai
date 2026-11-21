@@ -42,6 +42,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))  # kits of whoever runs the tests
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # typed tokens are kept as secrets: here, not in a keyring
     # A ~/.git-credentials of whoever runs the tests would add a question.
     monkeypatch.setattr(w, "git_credentials_path", lambda: tmp_path / "no-home" / ".git-credentials")
 
@@ -312,15 +313,15 @@ def test_ask_git(scenario, tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CONTRACT_GH", "set")
     if scenario == "happy":
-        # Tokens typed (hidden) for github.com and for the project's origin: only file paths reach the options.
+        # Tokens typed (hidden) for github.com and for the project's origin: only the secrets' names reach the
+        # options (the tokens are kept in sandbox-ai secrets once the configuration is confirmed).
         git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
         pending = []
         prompts = Prompts(["", "enter", "y", "", ""], secrets=[GH, GITEA])
         options = w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, project, pending)
-        github, gitea = str(w.token_path("github.com")), str(w.token_path("http://localhost:3080"))
-        assert options == ["--git-identity", "--git-token-file", f"https://github.com={github}",
-                           "--git-token-file", f"http://localhost:3080={gitea}"]
-        assert pending == [(github, GH), (gitea, GITEA)]
+        assert options == ["--git-identity", "--git-token-secret", "https://github.com=GIT_TOKEN_GITHUB_COM",
+                           "--git-token-secret", "http://localhost:3080=GIT_TOKEN_LOCALHOST_3080"]
+        assert pending == [("GIT_TOKEN_GITHUB_COM", GH), ("GIT_TOKEN_LOCALHOST_3080", GITEA)]
         assert GH not in "\n".join(prompts.lines) and GITEA not in "\n".join(prompts.lines)
         # A host variable instead: suggested name, note when it is not set.
         prompts = Prompts(["n", "variable", "", "http://localhost:3080", "variable", "", ""])
@@ -708,7 +709,7 @@ def test_line_editing_off_without_terminal(monkeypatch):
     assert w.enable_line_editing() is False
 
 
-def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
+def test_run_keeps_typed_token_as_a_secret_then_launcher_plan(tmp_path, capsys):
     project = tmp_path / "proj"
     git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
     out = []
@@ -716,19 +717,36 @@ def test_run_writes_typed_token_privately_then_launcher_plan(tmp_path, capsys):
                                   "n", "y", "n", "none", "y", "enter", "", "n", "y"]),
                  out=out.append, fetch=fake_fetch({}), secret=scripted([GITEA]))
     text = path.read_text()
-    token_file = w.token_path("http://localhost:3080")
-    # The token is in a private file, not in the project configuration, and the check did not complain.
+    # The token is kept as a secret (since 0.1.98; no token file), not in the project configuration, and the check
+    # did not complain.
     assert GITEA not in text and GITEA not in "\n".join(out)
-    assert token_file.read_text() == GITEA + "\n" and token_file.stat().st_mode & 0o777 == 0o600
+    assert w.secret_store().get("GIT_TOKEN_LOCALHOST_3080") == GITEA and not w.token_store().exists()
+    assert any("Kept the token as the secret GIT_TOKEN_LOCALHOST_3080" in line for line in out)
     assert not any("would refuse" in line for line in out)
     options = json.loads(text)["options"]
     assert options[:2] == ["--profile", "development"]
-    assert ["--git-token-file", f"http://localhost:3080={token_file}"] == options[-2:]
+    assert ["--git-token-secret", "http://localhost:3080=GIT_TOKEN_LOCALHOST_3080"] == options[-2:]
     assert w.launcher().launch(["claude", "--workspace", str(project), "--dry-run"]) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["git_credentials"] == [{"url": "http://localhost:3080", "user": "x-access-token",
-                                        "file": str(token_file)}]
+                                        "secret": "GIT_TOKEN_LOCALHOST_3080"}]
     assert plan["host_ports"] == [3080] and "pypi.org" in plan["https_hosts"] and "api.openai.com" in plan["https_hosts"]
+
+
+def test_run_writes_nothing_when_the_secrets_refuse_the_token(tmp_path, monkeypatch):
+    """No primary password and nobody to set one (no terminal), plain files not chosen: the token is not kept, and
+    neither is the configuration that would name it."""
+    monkeypatch.delenv("SANDBOX_AI_SECRETS_PLAIN", raising=False)
+    project = tmp_path / "proj"
+    git_config(project, '[remote "origin"]\n\turl = http://localhost:3080/alice/sandbox-ai.git\n')
+    out = []
+    path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "development", "", "n", "n", "", "n",
+                                  "n", "y", "n", "none", "y", "enter", "", "n", "y"]),
+                 out=out.append, fetch=fake_fetch({}), secret=scripted([GITEA]))
+    text = "\n".join(out)
+    assert path is None and "Could not keep the token" in text and "sandbox-ai secrets password set" in text
+    assert not (project / ".sandbox-ai.json").exists() and GITEA not in text
+    assert GITEA.encode() not in b"".join(f.read_bytes() for f in tmp_path.rglob("*") if f.is_file())
 
 
 def test_run_cancel_writes_no_token(tmp_path):
@@ -736,7 +754,7 @@ def test_run_cancel_writes_no_token(tmp_path):
     path = w.run(prompt=scripted([str(project), "", "", "claude", "podman", "n", "default", "", "n", "n", "", "n",
                                   "n", "y", "n", "enter", "", "n", "n", "n"]),
                  out=lambda line: None, fetch=fake_fetch({}), secret=scripted([GH]))
-    assert path is None and not w.token_store().exists()
+    assert path is None and not w.token_store().exists() and w.secret_store().get("GIT_TOKEN_GITHUB_COM") is None
 
 
 def test_review_github_origin_after_github_token(tmp_path, monkeypatch):
@@ -745,7 +763,7 @@ def test_review_github_origin_after_github_token(tmp_path, monkeypatch):
     git_config(project, '[remote "origin"]\n\turl = https://github.com/owner/repo.git\n')
     prompts = Prompts(["", "enter", "https://github.com", "", "n"], secrets=[GH])
     options = w.ask_git(prompts.p, {"backend": "podman", "network": "default"}, project, [])
-    assert options.count("--git-token-file") == 1
+    assert options.count("--git-token-secret") == 1
     assert any("has a token already" in line for line in prompts.lines)
     # The origin is not offered again: the launcher accepts the result.
     assert not any("origin" in line for line in prompts.lines)

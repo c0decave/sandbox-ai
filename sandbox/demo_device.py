@@ -276,17 +276,32 @@ def stop():
     return current
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    import importlib.util
+    from pathlib import Path
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle",
+                                                      Path(__file__).resolve().parent / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def main(argv, out=print):
     p = argparse.ArgumentParser(prog="sandbox-ai demo-device", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+                                formatter_class=help_style, allow_abbrev=False)
     commands = p.add_subparsers(dest="command", required=True)
-    for name in ("start", "serve"):
-        command = commands.add_parser(name)
-        command.add_argument("--port", type=int, default=DEFAULT_PORT)
+    for name, text in (("start", "run the device in the background on 127.0.0.1:PORT"),
+                       ("serve", "run the device in the foreground (Ctrl-C ends it)")):
+        command = commands.add_parser(name, help=text)
+        command.add_argument("--port", type=int, default=DEFAULT_PORT, help="the TCP port the demo device listens on")
         if name == "serve":
             command.add_argument("--ready-fd", type=int, help=argparse.SUPPRESS)
-    commands.add_parser("status")
-    commands.add_parser("stop")
+    commands.add_parser("status", help="whether the device runs, and where")
+    commands.add_parser("stop", help="end the device")
     args = p.parse_args(argv)
     try:
         if args.command in ("start", "serve") and not 1024 <= args.port <= 65535:

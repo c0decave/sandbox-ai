@@ -131,13 +131,13 @@ def test_what_no_answer_may_allow_is_refused_at_once_with_why(run, monkeypatch):
     assert answered(run, "1-1-1") == {"decision": "deny", "scope": "run", "by": "ask-allow",
                                       "why": ap.shown(ap.DNS_ONCE, 300)}
     monkeypatch.setattr(ap, "policy_allows_host", lambda name: False)
-    ask(run, "1-1-2", kind="dns", name="other.example")
+    ask(run, "1-1-2", kind="dns", name="other.example.org")
     assert "outside the administrator's policy" in ap.auto_answer({"id": "1-1-2", "kind": "dns",
-                                                                   "name": "other.example"}, run.record)["reason"]
+                                                                   "name": "other.example.org"}, run.record)["reason"]
     monkeypatch.setattr(ap, "policy_allows_host", lambda name: True)
     monkeypatch.setattr(ap, "resolve", lambda name: ["10.0.0.5"])
-    ask(run, "1-1-3", kind="dns", name="intranet.example")
-    assert "non-public" in ap.auto_answer({"id": "1-1-3", "kind": "dns", "name": "intranet.example"},
+    ask(run, "1-1-3", kind="dns", name="intranet.example.org")
+    assert "non-public" in ap.auto_answer({"id": "1-1-3", "kind": "dns", "name": "intranet.example.org"},
                                           run.record)["reason"]
     assert answered(run, "1-1-3")["decision"] == "deny"
     assert ap.answered_reason(answered(run, "1-1-3")).startswith(ap.AUTO_REFUSED)
@@ -283,7 +283,7 @@ def test_through_the_proxy_ask_rules_pass_and_deny_rules_still_deny(tmp_path, pk
         filed = sorted(p.name for p in (directory / "approvals").glob("*.json"))
         assert len(filed) == 1, filed  # the deny rule asked nothing
         lines, original = [], ap.questions
-        monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: original(
+        monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False, **kw: original(
             {"claude-1": {"run": "claude-1", "directory": str(directory)}}, answered))
         assert ap.main(["history"], out=lines.append) == 0
         assert any(ap.AUTO_REASON in line for line in lines), lines

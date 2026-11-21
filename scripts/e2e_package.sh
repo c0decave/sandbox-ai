@@ -6,8 +6,8 @@
 #   scripts/e2e_package.sh macos-app PATH/sandbox-ai.app [--cli-only]
 #
 # Checks: --version and version --verbose (the package kind), presets list, doctor (it may report a missing
-# Podman), a dry run of claude in a fresh workspace, that `update` points to the download instead of running
-# install.sh; for the .pyz and the AppImage that the copy in the cache is made once, reused, and refused once it
+# Podman), a dry run of claude in a fresh workspace, that `update` is the package's own (it asks the release source
+# for its file - here a source that is nowhere - and never runs install.sh); for the .pyz and the AppImage that the copy in the cache is made once, reused, and refused once it
 # was changed; for the AppImage the command line by the name sandbox-ai; for the AppImage and the macOS app the
 # app's --self-test offscreen (the main window built against the sandbox-ai inside). Everything runs with private
 # XDG folders below a temporary folder (WORK, default: a new one under TMPDIR).
@@ -91,9 +91,22 @@ start=$(now)
 if out=$(cli claude --dry-run --no-config -w "$work/ws" 2>&1) && grep -q '"agent": "claude"' <<<"$out" \
    && grep -qF "\"workspace\": \"$work/ws\"" <<<"$out"; then pass "claude --dry-run ($(elapsed "$start"))"
 else fail "claude --dry-run: $(tail -n 20 <<<"$out")"; fi
-if out=$(cli update 2>&1); then fail "update ran: $out"
-elif grep -q "download the new one" <<<"$out"; then pass "update points to the download"
+# A package replaces itself with its file of a signed release (sandbox/package_update.py; tests/test_update_github.py
+# does it against a fake GitHub). Here the release source is nowhere: the update must ask it - not run install.sh,
+# not ask anything else - and leave the package as it is. Where the package's folder is not writable (the
+# containers mount it read-only) it says who can run the update instead.
+if out=$(SANDBOX_AI_SOURCE=http://127.0.0.1:9/o/r no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 cli update 2>&1); then
+  fail "update ran: $out"
+elif grep -q "sandbox-ai update: cannot reach 127.0.0.1:9" <<<"$out"; then
+  pass "update asks the release source for the package's file"
+elif grep -q "is not writable for you; run the update as someone who may write it: sudo -H " <<<"$out"; then
+  pass "update says who can run it (the package's folder is not writable here)"
+elif [[ $kind == appimage ]] && grep -q "runs from an unpacked AppImage" <<<"$out"; then
+  pass "update says what to download (this start did not name the AppImage file)"
 else fail "update: $out"; fi
+if out=$(cli version --verbose 2>&1) && grep -q "^self-update: " <<<"$out"; then
+  pass "version --verbose says whether it replaces itself ($(grep '^self-update: ' <<<"$out"))"
+else fail "version --verbose (self-update): $out"; fi
 
 # 3. The copy in the cache: one, reused, refused when changed (the .pyz and the AppImage).
 if [[ $kind != macos-app ]]; then

@@ -77,10 +77,10 @@ def test_another_host_is_read_through_ssh_without_a_python_start(env, monkeypatc
     sai = backend.SandboxAI()
     assert sai.host_questions("h1") == []
     assert not python_starts(started), started
-    assert started[-1][0] == "ssh" and started[-1][-1].endswith("approvals list --json; fi")
+    assert started[-1][0] == "ssh" and started[-1][-1].endswith("approvals list --state all --json; fi")
     assert len(calls(notes, "ssh")) == 1
     # What the command line would be, as sandbox-ai's own `hosts run` builds it.
-    assert started[-1] == sai.module("hosts").argv("h1", ["approvals", "list", "--json"])
+    assert started[-1] == sai.module("hosts").argv("h1", ["approvals", "list", "--state", "all", "--json"])
     # A host it does not know: sandbox-ai's own command answers (in its own words).
     status, _, err = sai.host_run("nowhere", "approvals", "list", "--json", timeout=60)
     assert status != 0 and "nowhere" in err and python_starts(started)
@@ -506,7 +506,9 @@ def test_the_questions_page_does_nothing_while_nothing_changes(qapp, env, monkey
         (run / "approvals" / "1-2-3.done").write_text(json.dumps({"decision": "deny", "scope": "once"}))
         page.poll()
         page.poll()
-        assert len(shown) == 3 and page.questions == {}, "answered: shown once, then nothing changes"
+        # (answered: listed under Refused, no longer counting down)
+        assert len(shown) == 3 and not [q for _, q, _ in page.questions.values() if pages.entry_state(q) == "open"], \
+            "answered: shown once, then nothing changes"
     finally:
         page.timer.stop()
         page.remote_timer.stop()

@@ -24,7 +24,7 @@ from .i18n import tr
 
 WARN = "⚠"  # marks a line that weakens the sandbox (the question is plain text: no colour there)
 ORDER = ("agent", "options", "workspaces", "agent_args", "mcp_servers", "rules", "mode", "canaries", "keep",
-         "log_debug", "name", "description")
+         "log_debug", "name", "budget", "description")
 
 
 def user_defaults(sai):
@@ -198,7 +198,8 @@ def config_path(text):
 def unshown(document):
     """The keys of a project file that no part of the board shows ({key: value}): named above the board and in the
     question, never carried along silently."""
-    return {k: v for k, v in document.items() if k in ("mode", "canaries", "keep", "log_debug", "name", "description")}
+    return {k: v for k, v in document.items()
+            if k in ("mode", "canaries", "keep", "log_debug", "name", "budget", "description")}
 
 
 def path_text(directory):

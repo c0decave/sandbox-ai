@@ -32,7 +32,8 @@ def doing(kind, name):
             "build": tr("building the image variant {name}", name=name),
             "image": tr("building the image of {name}", name=name),
             "vpn": tr("making the Tor profile {name}", name=name),
-            "mcp": tr("adding the MCP server {name}", name=name)}.get(kind, name)
+            "mcp": tr("adding the MCP server {name}", name=name),
+            "service": tr("building the service image {name}", name=name)}.get(kind, name)
 
 
 def thing(kind, name):
@@ -42,7 +43,8 @@ def thing(kind, name):
             "build": tr("image variant {name}", name=name),
             "image": tr("the image of {name}", name=name),
             "vpn": tr("Tor profile {name}", name=name),
-            "mcp": tr("MCP server {name}", name=name)}.get(kind, name)
+            "mcp": tr("MCP server {name}", name=name),
+            "service": tr("service image {name}", name=name)}.get(kind, name)
 
 
 def clock(seconds):

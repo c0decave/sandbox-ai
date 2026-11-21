@@ -110,7 +110,8 @@ def verify(data, signature, keys, ring=RELEASE, what="SHA256SUMS"):
     if namespace != namespace_wanted:
         return "bad", f"the signature is for {namespace!r}, not {namespace_wanted!r}"
     if signer not in {fingerprint(key) for _, key in keys}:
-        return "bad", f"signed by {signer}, which is not a trusted {'release' if ring is RELEASE else 'MCP'} key"
+        return "bad", (f"signed by {signer}, which is not a trusted "
+                       f"{'release' if ring is RELEASE else ring.get('label', 'MCP')} key")
     with tempfile.TemporaryDirectory() as tmp:
         allowed, sig = Path(tmp, "allowed_signers"), Path(tmp, f"{what}.sig")
         allowed.write_text(normalized(keys, ring))

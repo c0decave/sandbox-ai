@@ -1,56 +1,11 @@
 #!/usr/bin/env python3
-"""sandbox-ai: one command for everything.
+"""sandbox-ai: one command for everything - the dispatcher of the command line.
 
-  sandbox-ai claude|codex|opencode|hermes|dsh|qwen|goose [options] [-- agent arguments]   start an agent
-  sandbox-ai list|ps [-a] [--flat] [--no-color] [--json] [-H NAME]   what runs and what is kept, grouped by start
-  sandbox-ai rename OLD NEW                                          another name for a start
-  sandbox-ai attach|pause|resume|stop|delete NAME                    any start by its name (detach: Ctrl-b d)
-  sandbox-ai stop --all [--yes]                                      every start of yours on this host, asked first
-  sandbox-ai gc [--older-than DAYS] [--dry-run]                      remove leftovers and old kept starts
-  sandbox-ai session list|attach|pause|resume|stop|delete ...       the same for sessions (older form)
-  sandbox-ai session copy|move NAME HOST [--map L=R]                 a session's configuration started on another host
-  sandbox-ai mcp list|start|stop|attach|detach ... [--live]         MCP server sandboxes (attach/detach: a start's, --live: while it runs)
-  sandbox-ai login claude|codex|opencode|hermes|qwen | --status      log in inside a sandbox; kept for all sandboxes
-  sandbox-ai plugins [claude [--update] | --status | marketplaces]   install the plugins the kits declare; every marketplace
-  sandbox-ai kits [list|show|new|add-skill|add-plugin|import-marketplace|...]  see and change kits (skills, plugins)
-  sandbox-ai wizard [new|edit|trust|forget|models] ...               project setup
-  sandbox-ai build [--pin VERSION] AGENT|all|VARIANT[@AGENT]|team|cairn|vpn|tor|browser  build the images (all: every one)
-  sandbox-ai doctor [--backend podman|bwrap|both]                    check the host, settings files and kept sessions
-  sandbox-ai logs [DIR|--project PATH]                               blocked egress and file access, with suggestions
-  sandbox-ai activity [RUN|--session NAME|--project PATH] [--follow]  what the agents did: prompts, tools, files, network
-  sandbox-ai privacy-check [PATH ...]                                what the next push would publish that should stay private
-  sandbox-ai net list|show|allow|revoke|untaint|cut ...              change what a running sandbox may reach (cut: the kill switch)
-  sandbox-ai devices list|add|remove [RUN] PATH|usb:VID:PID          hand devices to a running sandbox
-  sandbox-ai workspace list|add|remove [RUN] DIR|FILE [--ro] [--name NAME]  hand a host folder or file to a running sandbox
-  sandbox-ai limits [RUN] --memory|--cpus|--pids ...                 change a running sandbox's limits
-  sandbox-ai usage [RUN|--all] [--json] [--follow]                   what a running sandbox uses: CPU, memory, processes
-  sandbox-ai approvals list|show|allow|deny|ask-again|blocked|decided|history|remembered|forget ... answer what running sandboxes ask
-  sandbox-ai rules check|show|reload ...                              check rulesets, show a start's, reload a running one's
-  sandbox-ai canaries list [RUN] | resume RUN                        decoy files of the runs, and what happened to them
-  sandbox-ai safeguards [RUN|--all] [--follow] [--json]               what the safeguards refused or ended, why, the fix
-  sandbox-ai report [NAME|--session NAME|--all] [-f md|html|pdf] [-o FILE]  one report: runs, stats, network, security
-  sandbox-ai secrets list|set|delete|backend|give|revoke ...         API keys and tokens in your keyring; give a run one
-  sandbox-ai llm add|list|show|set|params|load|unload|detect ...      LLM servers, local or remote, for --llm
-  sandbox-ai llm traffic [RUN|--session NAME] [--follow] [--full]     what an agent and its model exchanged
-  sandbox-ai vpn add|list|show|set|remove|check|rotate ...           VPN profiles for --vpn (WireGuard, OpenVPN, Mullvad, Tailscale, Tor)
-  sandbox-ai hosts list|add|set|remove|test|update|install|run ...    other machines (LXC containers) managed over SSH
-  sandbox-ai team start|list|show|post|stop|delete ...                a team of agents, one sandbox each, with a task board
-  sandbox-ai web [serve|user|vendor|cert] ...                         the web interface (HTTPS, password and TOTP)
-  sandbox-ai presets list|show|check|dirs ...                         ready setups to start an agent with (--preset NAME)
-  sandbox-ai defaults [show|set|unset] ...                            your defaults for every start (defaults.json)
-  sandbox-ai git-logins add|list|remove|check|give|revoke ...         Git logins for pushes; give a running sandbox one
-  sandbox-ai publish-logins add|list|remove|check|kinds ...           package registry logins, used by the proxy
-  sandbox-ai identities add|set|login|publish|list|show|check|remove ...  commit identities with their logins
-  sandbox-ai demo-device start|serve|status|stop ...                  a virtual device to try the device rules
-  sandbox-ai images [packages|extend|check|new|remove|history|recipe|pull|build-image|list|search|derive] ...  the agent images,
-                                                                      their extensions, your images (services, bases)
-  sandbox-ai update [--check] [--version X.Y.Z] ...                  update an installation made by install.sh (signed)
-  sandbox-ai version [--verbose]                                     version; --verbose: install place, release keys
-  sandbox-ai completion bash|zsh|fish|install                        Tab completion for your shell (install.sh sets it up)
-
-The older single commands (claude-sandbox, sandbox-session, sandbox-mcp, sandbox-wizard, sandbox-build-image,
-...) are removed: each is one of the commands above.
+`sandbox-ai --help` (help_text) lists every command once, grouped as Docker groups its own: the agents, the commands
+used every day, the management commands (each with subcommands, their help laid out by helpstyle.py), the other
+commands. The syntax of each is in its own --help.
 """
+import contextlib
 import importlib.util
 import os
 from pathlib import Path
@@ -59,21 +14,195 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sandbox.py", "codex"),
-                   "opencode": ("agent_sandbox.py", "opencode"), "hermes": ("agent_sandbox.py", "hermes"),
+                   "opencode": ("agent_sandbox.py", "opencode"), "opencode2": ("agent_sandbox.py", "opencode2"),
+                   "hermes": ("agent_sandbox.py", "hermes"),
                    "dsh": ("agent_sandbox.py", "dsh"), "qwen": ("agent_sandbox.py", "qwen"),
-                   "goose": ("agent_sandbox.py", "goose"),
-                   "session": ("sessions.py",),
+                   "goose": ("agent_sandbox.py", "goose"), "openhands": ("agent_sandbox.py", "openhands"), "nanobot": ("agent_sandbox.py", "nanobot"), "letta": ("agent_sandbox.py", "letta"), "pi": ("agent_sandbox.py", "pi"),
+                   "session": ("sessions.py",), "board": ("board_bundle.py",), "checkpoint": ("checkpoints.py",),
                    "list": ("starts.py", "list"), "ps": ("starts.py", "ps"), "rename": ("starts.py", "rename"),
-                   "attach": ("starts.py", "attach"), "pause": ("starts.py", "pause"),
+                   "attach": ("starts.py", "attach"), "shell": ("starts.py", "shell"), "pause": ("starts.py", "pause"),
                    "resume": ("starts.py", "resume"), "stop": ("starts.py", "stop"), "delete": ("starts.py", "delete"),
                    "gc": ("starts.py", "gc"),
-                   "mcp": ("mcp.py",), "wizard": ("wizard.py",), "login": ("login.py",), "plugins": ("plugins.py",), "kits": ("kitctl.py",), "doctor": ("doctor.py",), "logs": ("logs.py",),
+                   "mcp": ("mcp.py",), "bridge": ("bridge.py",), "bridge-stub": ("bridge.py", "--stub"), "wizard": ("wizard.py",), "login": ("login.py",), "plugins": ("plugins.py",), "kits": ("kitctl.py",), "doctor": ("doctor.py",), "logs": ("logs.py",),
                    "activity": ("activity.py",),
-                   "privacy-check": ("privacy.py", "check"), "net": ("net.py",),
-                   "approvals": ("approvals.py",), "canaries": ("canary.py",), "safeguards": ("safeguards.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
+                   "privacy-check": ("privacy.py", "check"), "net": ("net.py",), "notify": ("notify.py",),
+                   "approvals": ("approvals.py",), "packages": ("packages.py",), "secret-guard": ("secret_guard.py",), "canaries": ("canary.py",), "safeguards": ("safeguards.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
                    "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",),
-                   "report": ("report.py",)}
+                   "top": ("monitor.py", "top"), "stats": ("monitor.py", "stats"),
+                   "report": ("report.py",), "scan": ("lint.py",), "schedule": ("schedule.py",), "spend": ("spend.py",), "models": ("cloud_models.py",),
+                   "uninstall": ("uninstall.py",)}
+
+
+# `sandbox-ai --help`: every command of the dispatcher once (tests/test_main_help.py checks it), in Docker's groups.
+USAGE = ("Usage:  sandbox-ai [OPTIONS] COMMAND\n"
+         "        sandbox-ai AGENT [OPTIONS] [-- AGENT ARGS]")
+TAGLINE = "Coding agents in sandboxes: sealed off, watched, asked before anything leaves."
+HELP = (
+    ("Agents", (
+        ("claude", "Start Claude Code in a sandbox"),
+        ("codex", "Start Codex in a sandbox"),
+        ("opencode", "Start OpenCode in a sandbox"),
+        ("opencode2", "Start OpenCode 2 in a sandbox"),
+        ("hermes", "Start Hermes Agent in a sandbox"),
+        ("dsh", "Start DeepSeek Harness in a sandbox"),
+        ("qwen", "Start Qwen Code in a sandbox"),
+        ("goose", "Start Goose in a sandbox"),
+        ("openhands", "Start OpenHands in a sandbox"),
+        ("nanobot", "Start nanobot in a sandbox"),
+        ("letta", "Start Letta Code in a sandbox"),
+        ("pi", "Start Pi in a sandbox"))),
+    ("Common Commands", (
+        ("list, ps", "What runs and what is kept, grouped by start"),
+        ("attach", "Attach this terminal to a start (detach: Ctrl-b d)"),
+        ("shell", "Your shell in a running start, under its rules"),
+        ("pause", "Freeze a running start"),
+        ("resume", "Thaw a paused start, or start a kept one again"),
+        ("stop", "Stop a start, or every start of yours on this host"),
+        ("delete", "Remove a stopped start with its HOME"),
+        ("rename", "Give a start another name"),
+        ("logs", "Blocked egress and file access, with suggestions"),
+        ("activity", "What the agents did: prompts, tools, files, network"),
+        ("login", "Log in inside a sandbox; kept for all sandboxes"),
+        ("build", "Build the agent images and the others a start needs"))),
+    ("Management Commands", (
+        ("approvals", "Answer what running sandboxes ask"),
+        ("board", "A board or session as one file; take one in"),
+        ("bridge", "Let one running session reach another"),
+        ("canaries", "Decoy files of the runs, and what happened to them"),
+        ("checkpoint", "The workspaces as they were; undo what an agent did"),
+        ("defaults", "Your defaults for every start (defaults.json)"),
+        ("demo-device", "A virtual device to try the device rules"),
+        ("devices", "Hand devices to a running sandbox"),
+        ("git-logins", "Git logins for pushes; give a running sandbox one"),
+        ("hosts", "Other machines (LXC containers) managed over SSH"),
+        ("identities", "Commit identities with their logins"),
+        ("images", "The agent images, their extensions, your images"),
+        ("kits", "See and change kits (skills, plugins)"),
+        ("llm", "LLM servers, local or remote, for --llm; their traffic"),
+        ("mcp", "MCP server sandboxes"),
+        ("net", "Change what a running sandbox may reach; the kill switch"),
+        ("notify", "Questions and alarms to your phone: ntfy, Telegram, WhatsApp"),
+        ("packages", "The package guard: known malicious packages, your allow-list"),
+        ("presets", "Ready setups to start an agent with"),
+        ("publish-logins", "Package registry logins, used by the proxy"),
+        ("rules", "Check rulesets, show a start's, reload a running one's"),
+        ("schedule", "Start an agent on a timetable or a trigger; its reports"),
+        ("secret-guard", "Secrets in outgoing requests: what is found, your allow-list"),
+        ("secrets", "API keys and tokens in your keyring; give a run one"),
+        ("session", "Sessions: copy or move one; its memory and files, exported"),
+        ("spend", "What the model requests cost; budgets that stop a run"),
+        ("stats", "What the runs used over time, by project, run or agent"),
+        ("team", "A team of agents, one sandbox each, with a task board"),
+        ("vpn", "VPN profiles for --vpn (WireGuard, OpenVPN, Tor ...)"),
+        ("web", "The web interface (HTTPS, password and TOTP)"),
+        ("wizard", "Project setup: create, edit and trust its configuration"),
+        ("workspace", "Hand a host folder or file to a running sandbox"))),
+    ("Commands", (
+        ("completion", "Tab completion for your shell"),
+        ("doctor", "Check the host, settings files and kept sessions"),
+        ("gc", "Remove leftovers and old kept starts"),
+        ("help", "Show this help, or the help of a command"),
+        ("limits", "Change a running sandbox's limits"),
+        ("models", "The cloud models of each agent and their effort levels"),
+        ("plugins", "Install the plugins the kits declare; every marketplace"),
+        ("privacy-check", "What the next push would publish that should stay private"),
+        ("report", "One report of runs: stats, network, security"),
+        ("safeguards", "What the safeguards refused or ended, why, the fix"),
+        ("scan", "Hidden text and instructions to the model in files"),
+        ("top", "The system monitor: CPU, memory, IO, network per run"),
+        ("uninstall", "Remove this installation; --purge: also its data"),
+        ("update", "Update an installation made by install.sh (signed)"),
+        ("usage", "What a running sandbox uses: CPU, memory, processes"),
+        ("version", "Show the version; --verbose: install place, release keys"))),
+    ("Global Options", (
+        ("-h, --help", "Show this help"),
+        ("-V, --version", "Show the version"),
+        ("--color WHEN", "Colour: auto (on a terminal, the default), always, never"),
+        ("-nc, --no-color", "Without colour (also NO_COLOR=1); after a command too"))),
+)
+# Commands that reach another user's start for root (USER:NAME, --user USER; allusers.py).
+OTHER_USER_COMMANDS = ("stop", "logs", "report", "list", "ps")
+# Commands for sandbox-ai's own use, not shown: the bridge's stub in a sandbox, the shell completion's questions.
+HIDDEN = {"bridge-stub", "__complete"}
+
+
+COLOUR_CHOICES = ("auto", "always", "never")
+# Commands whose words after these run elsewhere, taken as they are: a sandbox-ai on another host (hosts run NAME ...).
+PASSED_ON = {("hosts", "run"): 1}
+
+
+def colour_options(argv):
+    """(ARGV without sandbox-ai's own colour options, the choice: "auto", "always", "never" or None). They are taken
+    before the command (--no-color, -nc, --color WHEN, --color=WHEN) and after it (--no-color, --color WHEN), up to
+    "--" - an agent's own arguments after it are never touched - and not from the words a command passes on to run
+    elsewhere (hosts run NAME ...). -nc after a command stays the command's: an agent's --no-config, list's and
+    doctor's own --no-color. A --color with a value it does not know stays too (the command says what is wrong)."""
+    argv, choice, kept, index = list(argv), None, [], 0
+    command, before_command = None, True
+    stop = argv.index("--") if "--" in argv else len(argv)
+    while index < stop:
+        word = argv[index]
+        if command is not None and (command, word) in PASSED_ON and index > 0:
+            stop = min(stop, index + 1 + PASSED_ON[(command, word)])
+            kept.append(word)
+            index += 1
+            continue
+        if word in ("--no-color", "--no-colour") or (word == "-nc" and before_command):
+            choice = "never"
+        elif word.startswith(("--color=", "--colour=")) and word.split("=", 1)[1] in COLOUR_CHOICES:
+            choice = word.split("=", 1)[1]
+        elif word in ("--color", "--colour") and index + 1 < stop and argv[index + 1] in COLOUR_CHOICES:
+            choice = argv[index + 1]
+            index += 1
+        else:
+            if before_command and not word.startswith("-"):
+                command, before_command = word, False
+            kept.append(word)
+        index += 1
+    return kept + argv[stop:], choice
+
+
+def apply_colour(choice):
+    """The colour CHOICE for this process and every program it starts (the commands' scripts, the agents' launcher,
+    build_image.sh, install.sh): never sets NO_COLOR, always FORCE_COLOR (over NO_COLOR: the option is the later
+    choice), auto or None leave the environment as it is (textout.colour_enabled decides)."""
+    if choice == "never":
+        os.environ.pop("FORCE_COLOR", None)
+        os.environ["NO_COLOR"] = "1"
+    elif choice == "always":
+        os.environ.pop("NO_COLOR", None)
+        os.environ["FORCE_COLOR"] = "1"
+
+
+def textout():
+    """textout.py (styles, colour only where it belongs): the one copy of this process."""
+    loaded = sys.modules.get("sandbox_ai_textout")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_textout", HERE / "textout.py")
+        made = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(made)
+        loaded = sys.modules.setdefault("sandbox_ai_textout", made)
+    return loaded
+
+
+def say(text):
+    """One of sandbox-ai's own messages on standard error (an error red, a warning yellow on a terminal)."""
+    print(textout().message(text, stream=sys.stderr), file=sys.stderr)
+
+
+def show_help(text):
+    """A help page on standard output, coloured on a terminal (textout.help_page)."""
+    print(textout().help_page(text, stream=sys.stdout))
+
+
+def help_text():
+    """`sandbox-ai --help`: one line per command, the names in one column."""
+    column = max(len(name) for _, rows in HELP for name, _ in rows) + 4
+    lines = [USAGE, "", TAGLINE]
+    for title, rows in HELP:
+        lines += ["", f"{title}:", *(f"  {name}".ljust(column) + text for name, text in rows)]
+    return "\n".join(lines + ["", "Run 'sandbox-ai COMMAND --help' for more information on a command."])
 
 
 # The commands with a `list` that run it when given alone (approvals does it itself: also with --json alone).
@@ -89,7 +218,7 @@ def version():
 
 
 # How a ready-made package of sandbox-ai was made (PACKAGING beside sandbox/, written by its build): it is updated
-# by downloading the new package, not by install.sh.
+# by the release's new package (updates.py, package_update.py: it replaces itself), not by install.sh.
 PACKAGES = {"pyz": "sandbox-ai.pyz", "appimage": "the AppImage (sandbox-ai-ARCH.AppImage)",
             "macos-app": "the macOS app (sandbox-ai-ARCH.dmg)"}
 
@@ -103,25 +232,11 @@ def packaging():
     return kind if kind in PACKAGES else None
 
 
-def package_update_hint(kind):
-    return (f"this sandbox-ai runs from {PACKAGES[kind]}: download the new one from the release page "
-            "(https://github.com/c0decave/sandbox-ai/releases, check it with SHA256SUMS), or install with install.sh")
-
-
-def package_update_check(kind, rest):
-    """`update --check` in a package: its version, then the newest release as install.sh --check finds it (with
-    the package's own release keys; nothing of an install.sh installation is read or written)."""
-    import subprocess
-    import tempfile
-    print(f"installed: {version()} ({PACKAGES[kind]})")
-    with tempfile.TemporaryDirectory(prefix="sandbox-ai-check.") as data:
-        result = subprocess.run([find_bash(), str(HERE.parent / "install.sh"), "--check", *rest], text=True,
-                                stdout=subprocess.PIPE, env={**os.environ, "XDG_DATA_HOME": data})
-    for line in result.stdout.splitlines():
-        if not line.startswith("installed:"):
-            print(line)
-    print(f"update: {package_update_hint(kind)}")
-    return result.returncode
+def self_update_way():
+    """How this copy is updated when install.sh did not install it (a package, a pip installation): "sandbox-ai
+    update" where it replaces itself, else the command that does (updates.manual_way)."""
+    updates = module("updates")
+    return updates.manual_way(updates.installation())
 
 
 # The agents' launcher keeps a process of its own (python -I agent_sandbox.py AGENT ...): net, the app and the
@@ -150,6 +265,27 @@ def run_script(path, args):
     return 0
 
 
+def full_said(command, call):
+    """CALL() (a command's run), a full file system (an OSError ENOSPC or EDQUOT naming its file, which the command
+    did not catch itself) said in one line - what could not be written, which file system, the fix
+    (agent_sandbox.full_text) - instead of a Python traceback: `defaults set`, `notify add`, `identities add` ...
+    caught their own errors only."""
+    import errno
+    try:
+        return call()
+    except OSError as exc:
+        if exc.errno not in (errno.ENOSPC, errno.EDQUOT) or not exc.filename:
+            raise
+        try:
+            text = module("agent_sandbox").full_text(exc)
+        except Exception:  # noqa: BLE001 - the words only: Python's own then
+            raise exc from None
+        if not text:
+            raise
+        print(f"sandbox-ai {command}: {text}", file=sys.stderr)
+        return 1
+
+
 def launch_log():
     """launchlog.py, the one copy of this process (launcher.log)."""
     loaded = sys.modules.get("sandbox_ai_launchlog")
@@ -163,7 +299,7 @@ def launch_log():
 
 # Commands that only look (the app runs several every few seconds): their lines are DEBUG, and one that fails is said
 # once until it says something else (launchlog.changed). The first word after the command decides for the others.
-LOOKING_COMMANDS = {"list", "ps", "logs", "activity", "usage", "safeguards", "doctor", "completion", "__complete",
+LOOKING_COMMANDS = {"list", "ps", "logs", "activity", "usage", "top", "stats", "safeguards", "doctor", "completion", "__complete", "models",
                     "version", "--version", "-V"}
 LOOKING_WORDS = {"list", "ls", "show", "status", "--status", "catalog", "dirs", "history", "blocked", "decided",
                  "remembered", "kinds", "traffic", "explain", "help"}
@@ -176,18 +312,27 @@ def only_looks(command, rest):
 
 
 class LastLines:
-    """Standard error while a command runs: everything written goes on to STREAM, unchanged; the last few whole
-    lines are kept (what a command that fails said last: its error, for launcher.log)."""
+    """Standard error while a command runs: everything written goes on to STREAM - on a terminal with sandbox-ai's own
+    messages marked (textout.message: an error red, a warning yellow), else unchanged; the last few whole lines are
+    kept, without colour (what a command that fails said last: its error, for launcher.log)."""
 
     def __init__(self, stream, keep=8):
         self.stream, self.keep, self.lines, self._pending = stream, keep, [], ""
+        self._colour = None  # decided at the first write (a command that says nothing loads no textout)
 
     def write(self, text):
+        shown = text
         if isinstance(text, str):
+            if not self._pending and text:  # (a text that starts a line: one of sandbox-ai's messages, marked)
+                if self._colour is None:
+                    self._colour = textout().colour_enabled(self.stream)
+                if self._colour:
+                    shown = textout().message(text, True)
             *whole, self._pending = (self._pending + text).split("\n")
             self._pending = self._pending[-2000:]
             self.lines = [*self.lines, *(line for line in whole if line.strip())][-self.keep:]
-        return self.stream.write(text)
+        self.stream.write(shown)
+        return len(text) if isinstance(text, str) else None
 
     def last(self, count, own=False):
         """The last COUNT lines said (OWN: only sandbox-ai's own messages, not a tool's output)."""
@@ -252,6 +397,18 @@ def logged_command(command, rest, call):
         log.flush()
 
 
+def install_help_style():
+    """Every --help of the command about to run laid out as Docker lays out its own (helpstyle.install), coloured on a
+    terminal: the one copy of helpstyle.py of this process, the one the commands' own parsers load."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        loaded = sys.modules.setdefault("sandbox_ai_helpstyle", loaded)
+    loaded.install()
+
+
 def module(name):
     spec = importlib.util.spec_from_file_location(f"sandbox_{name}_for_main", HERE / f"{name}.py")
     loaded = importlib.util.module_from_spec(spec)
@@ -279,11 +436,18 @@ def verbose_version():
         required = None
         print(f"policy: {exc}")
     package = packaging()
-    if package:
-        print(f"package: {package}")
-        print(f"updates: {package_update_hint(package)}")
-    elif not (HERE.parent / "install.sh").is_file():
-        print("updates: not through install.sh (pip install -U sandbox-ai)")
+    if package or not (HERE.parent / "install.sh").is_file():
+        # (hosts.installation reads these lines: "package: " and "updates: not through install.sh" say the kind,
+        # "self-update: yes" that this copy's own `sandbox-ai update` replaces it - the releases after 0.1.98)
+        way = self_update_way()
+        if package:
+            print(f"package: {package}")
+            print("updates: " + ("the signed release replaces it (sandbox-ai update)" if way == "sandbox-ai update"
+                                 else way))
+        else:
+            print("updates: not through install.sh (a pip installation: "
+                  f"{'the signed wheel of the release, sandbox-ai update' if way == 'sandbox-ai update' else way})")
+        print(f"self-update: {'yes' if way == 'sandbox-ai update' else 'no'}")
     elif trusted:
         print("updates: must be signed by one of these keys (sandbox-ai update)")
     elif required:
@@ -292,28 +456,66 @@ def verbose_version():
         print("updates: checked against SHA256SUMS only (no release key yet)")
     if required:
         print("policy: signed updates required (require_signed_updates); --allow-unsigned is refused")
+    with contextlib.suppress(Exception):  # (hosts list reads it: each host's update mode)
+        print(f"update mode: {module('updates').settings()['mode']}")
     return 0
 
 
 HOMES = ("/home/", "/root/", "/Users/", "/var/home/")
 
 
-UPDATE_HELP = """Usage: sandbox-ai update [--check] [--version X.Y.Z] [--source URL] [--force] [--allow-downgrade]
-                         [--user | --system [--prefix DIR]] [--uninstall] [install.sh's other options]
+UPDATE_HELP = """Usage:  sandbox-ai update [OPTIONS] [install.sh's other options]
+        sandbox-ai update mode [off|notify|download|auto] [--at HH:MM[-HH:MM]] [--source URL] [--json]
 
-Updates this installation to the newest signed release (install.sh, as the same kind of installation: a system
-one under its prefix, a user's own for that user).
+Update this installation to the newest signed release (install.sh, as the same kind of installation: a
+system one under its prefix, a user's own for that user). The .pyz, the AppImage, the macOS app and a
+pip installation replace themselves with their file of the release (checked the same way).
 
-  --check            show the installed and the newest version and its signature; change nothing
-  --version X.Y.Z    this release instead of the newest
-  --source URL       the repository with the releases (Gitea, Forgejo or https://github.com/OWNER/REPO)
-  --force            reinstall the same version
-  --allow-downgrade  install a release older than the installed one
-  --uninstall        remove the installation, its command links and the PATH block
-  -h, --help         this help
+Options:
+  --check            Show the installed and the newest version and its signature; change nothing
+  --apply            Install the release update mode download fetched (checked again first)
+  --install          Download the newest signed release now, check it and install it (what the app's
+                     Install now does; nothing runs in a terminal)
+  --rollback         Back to the version before (install.sh keeps the last 2 in versions/; a package
+                     keeps the one before its last update)
+  --while-running    With --apply, --install or --rollback: also while sandboxes, sessions or MCP servers
+                     run (they go on with the version they started with)
+  --scheduled        What the update timer runs: the daily check, the download, the install in the window
+  --version X.Y.Z    This release instead of the newest
+  --source URL       The repository with the releases (Gitea, Forgejo or https://github.com/OWNER/REPO)
+  --force            Reinstall the same version
+  --allow-downgrade  Install a release older than the installed one
+  --user             A user's own installation (also when root updates it)
+  --system           A system installation (under --prefix DIR)
+  --prefix DIR       The prefix of a system installation
+  --uninstall        Remove the installation, its command links and the PATH block
+  -h, --help         Show this help
 
-Other hosts: sandbox-ai hosts update NAME (their own signed update), or sandbox-ai hosts update NAME --from-here
-(this machine's copy, no release server needed)."""
+Update mode (sandbox-ai update mode --help): off, notify (the default: a check once a day, a newer
+signed release announced), download (also fetched and checked: --apply installs it), auto (also
+installed in a window while nothing runs).
+
+The package guard's copy of the known malicious packages is synced along with an update (signed, at
+most once a day; sandbox-ai packages).
+
+Other hosts: sandbox-ai hosts update NAME (their own signed update), or sandbox-ai hosts update NAME
+--from-here (this machine's copy, no release server needed); sandbox-ai hosts update NAME --mode MODE
+sets a host's own update mode.
+
+Examples:
+  sandbox-ai update --check  the installed and the newest version; nothing changes
+  sandbox-ai update          the newest signed release
+  sandbox-ai update mode auto  install new signed releases at night, while nothing runs"""
+VERSION_HELP = """Usage:  sandbox-ai version [OPTIONS]
+
+Show the installed version.
+
+Options:
+  -v, --verbose  Also where it is installed, the release keys its updates must be signed by and how it
+                 is updated
+  -h, --help     Show this help
+
+Run 'sandbox-ai --help' for all commands."""
 
 
 def installation_mode(rest, here=None, euid=None, writable=None):
@@ -365,7 +567,8 @@ def find_bash(which=shutil.which, version=bash_version):
 BUILD_VALUE_OPTIONS = {"-pu": "--podman-url", "--podman-url": "--podman-url", "-p": "--pin", "--pin": "--pin",
                        "-u": "--uv", "--uv": "--uv", "-n": "--node", "--node": "--node"}
 BUILD_FLAGS = {"-e": "--extension-only", "--extension-only": "--extension-only"}
-AGENT_IMAGES = ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENT_IMAGES = ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot",
+                "letta", "pi")
 
 
 def build_split(args):
@@ -405,7 +608,7 @@ def build_all_wanted(args):
 
 
 def build_all(args, run=None, out=None):
-    """`sandbox-ai build all`: every image sandbox-ai builds - the seven agents, the team image, Cairn (on the team
+    """`sandbox-ai build all`: every image sandbox-ai builds - the twelve agents, the team image, Cairn (its own
     image), the browser, the VPN and Tor images, and every variant of yours (sandbox-ai images) - each a build of its
     own, so one that fails stops none of the others; at the end what was built and what failed. 0 when all were.
     `sandbox-ai build claude codex team` (build_several) is the same for the targets named, in that order."""
@@ -466,78 +669,156 @@ REMOVED = {"claude-sandbox": "sandbox-ai claude", "codex-sandbox": "sandbox-ai c
 
 
 def main(argv):
+    argv, choice = colour_options(argv)
+    apply_colour(choice)
     if argv[:1] == ["help"] and argv[1:2] and argv[1] != "help":
         return main([*argv[1:2], "--help"])  # sandbox-ai help net: the help of that command
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print(__doc__.strip())
+        show_help(help_text())
         return 0 if argv else 2
     command, rest = argv[0], argv[1:]
     if command in REMOVED:
-        print(f"sandbox-ai: {command} was removed in 0.1.92; use {REMOVED[command]}", file=sys.stderr)
+        say(f"sandbox-ai: {command} was removed in 0.1.92; use {REMOVED[command]}")
         return 2
     if command in ("version", "--version", "-V"):
         if rest[:1] in (["-h"], ["--help"]):
-            print("usage: sandbox-ai version [--verbose]\n\n  the installed version; --verbose (-v): also where it is "
-                  "installed, the release keys its updates must be signed by and how it is updated")
+            show_help(VERSION_HELP)
             return 0
         if rest[:1] in (["--verbose"], ["-v"]) and len(rest) == 1:
             return verbose_version()
         if rest:
-            print(f"sandbox-ai version: unknown argument {rest[0]!r}; usage: sandbox-ai version [--verbose]",
-                  file=sys.stderr)
+            say(f"sandbox-ai version: unknown argument {rest[0]!r}; usage: sandbox-ai version [--verbose]")
             return 2
         print(f"sandbox-ai {version()}")
         return 0
     if command in LISTED_ALONE and not rest:
         rest = ["list"]  # (alone it lists, as images, kits, plugins and defaults alone do)
+    update_hint(command, rest)
+    if command in OTHER_USER_COMMANDS and any(word == "--user" or word.startswith("--user=") or ":" in word
+                                              for word in rest):
+        # Another user's start (USER:NAME, --user USER): root runs the command as that user, with root's own copy
+        # (allusers.py); one's own name is just the start here.
+        try:
+            redirected = module("allusers").redirect(command, rest)
+        except ValueError as exc:
+            say(f"sandbox-ai {command}: {exc}")
+            return 1
+        if isinstance(redirected, tuple):
+            rest = redirected[1]
+        elif redirected is not None:
+            return redirected
     if command in PYTHON_COMMANDS:
         script, *prefix = PYTHON_COMMANDS[command]
         if script in EXECUTED:  # (the launcher logs its start itself)
             os.execv(sys.executable, [sys.executable, "-I", str(executed_script(script)), *prefix, *rest])
-        return logged_command(command, rest, lambda: run_script(HERE / script, [*prefix, *rest]))
+        if any(word in ("-h", "--help") for word in rest):  # (only a help page is laid out: nothing else loads it)
+            install_help_style()
+        return logged_command(command, rest, lambda: full_said(command, lambda: run_script(HERE / script,
+                                                                                         [*prefix, *rest])))
     if command == "build":
         os.environ["SANDBOX_AI_PYTHON"] = sys.executable  # the extension layers are built by images.py
+        if any(word in ("-h", "--help") for word in rest[:rest.index("--") if "--" in rest else len(rest)]):
+            rest = ["--help"]  # (build NAME --help is build's own help: after the target the words go to podman build)
         if os.geteuid() == 0 and not rest[:1] in (["-h"], ["--help"]):
             # Rootless Podman keeps one image store per user: root's build is not seen by a user's start.
             who = os.environ.get("SUDO_USER")
-            print("sandbox-ai build: note: built as root, the image goes into root's Podman store "
-                  "(/var/lib/containers/storage); starts by another user do not see it - run sandbox-ai build as "
-                  f"the user who starts the sandboxes{' (' + who + ')' if who and who != 'root' else ''}",
-                  file=sys.stderr)
+            say("sandbox-ai build: note: built as root, the image goes into root's Podman store "
+                "(/var/lib/containers/storage); starts by another user do not see it - run sandbox-ai build as "
+                f"the user who starts the sandboxes{' (' + who + ')' if who and who != 'root' else ''}")
         if build_all_wanted(rest) or build_several(rest):
             return logged_command(command, rest, lambda: build_all(rest))
         bash(HERE / "build_image.sh", rest)  # (it logs what it was asked and how it ended itself)
     if command == "update":
         package = packaging()
-        if rest[:1] in (["-h"], ["--help"]) or "--help" in rest:
-            # the help is shown whatever this copy is; only an update itself needs install.sh's installation
-            print(UPDATE_HELP)
-            installer = HERE.parent / "install.sh"
-            if package:
-                print(f"\nThis copy: {package_update_hint(package)}")
-            elif not installer.is_file() or (HERE.parent / ".git").exists():
-                print("\nThis copy was not installed by install.sh: update a checkout with git, a pip installation "
-                      "with: pip install -U sandbox-ai")
-            return 0
-        if package and "--check" in rest:
-            return package_update_check(package, [arg for arg in rest if arg != "--check"])
-        if package:
-            print(f"sandbox-ai update: {package_update_hint(package)}", file=sys.stderr)
-            return 1
+        if rest[:1] == ["mode"] or any(word in UPDATE_MODE_WORDS for word in rest) and \
+                not any(word in ("-h", "--help") for word in rest):
+            return logged_command(command, rest, lambda: full_said(command, lambda: update_then_packages(
+                module("updates").main, rest)))
         installer = HERE.parent / "install.sh"
-        if not installer.is_file() or (HERE.parent / ".git").exists():
-            print("sandbox-ai update: this copy was not installed by install.sh; update a checkout with git, "
-                  "a pip installation with: pip install -U sandbox-ai", file=sys.stderr)
+        checkout = (HERE.parent / ".git").exists()
+        if rest[:1] in (["-h"], ["--help"]) or "--help" in rest:
+            # the help is shown whatever this copy is; only an update itself needs an installation
+            page = UPDATE_HELP
+            if package or not installer.is_file():
+                page += f"\n\nThis copy ({package or 'a pip installation'}): {self_update_way()}"
+            elif checkout:
+                page += ("\n\nThis copy was not installed by install.sh: it is a git checkout; update it with git "
+                         "(git pull), then ./install.sh --from .")
+            show_help(page + "\n\nRun 'sandbox-ai --help' for all commands.")
+            return 0
+        if checkout and not package:
+            say("sandbox-ai update: this copy was not installed by install.sh: it is a git checkout; update it with "
+                "git (git pull), then install it: ./install.sh --from .")
             return 1
+        if package or not installer.is_file():
+            # A package or a pip installation replaces itself with its file of the signed release.
+            return logged_command(command, rest, lambda: update_then_packages(module("updates").package_main, rest))
         try:
             rest = installation_mode(rest)
         except ValueError as exc:
-            print(f"sandbox-ai update: {exc}", file=sys.stderr)
+            say(f"sandbox-ai update: {exc}")
             return 1
+        source = None
+        with contextlib.suppress(Exception):
+            source = module("updates").settings()["source"]
+        if source and not any(arg == "--source" or arg.startswith("--source=") for arg in rest) \
+                and "--uninstall" not in rest:
+            rest = [*rest, "--source", source]  # (the release source update mode was given)
+        if "--check" in rest and "--uninstall" not in rest:
+            # (install.sh says it as always; what it found is kept as the last check: update mode, the app, the hint)
+            return module("updates").manual_check(rest)
+        if "--uninstall" not in rest:
+            # The package guard's copy of the known malicious packages goes along with an update (signed, one try a
+            # day at most; before install.sh takes over this process - it never fails the update).
+            with contextlib.suppress(Exception):
+                module("updates").sync_packages_along(rest, source_option(rest), say)
         bash(installer, rest)
-    print(f"sandbox-ai: unknown command {command!r}; see sandbox-ai --help", file=sys.stderr)
+    say(f"sandbox-ai: unknown command {command!r}; see sandbox-ai --help")
     return 2
 
 
+def update_then_packages(update, rest):
+    """UPDATE(REST) - `sandbox-ai update` of this copy, or its timer's run - and, when it went through, the package
+    guard's copy of the known malicious packages along with it (updates.sync_packages_along: signed, one try a day
+    at most, never a failure of the update). Not for the update mode's own commands, a --check or a --rollback:
+    they fetch nothing."""
+    status = update(rest)
+    if status == 0 and rest[:1] != ["mode"] and not {"--check", "--rollback"} & set(rest):
+        with contextlib.suppress(Exception):
+            module("updates").sync_packages_along(rest, source_option(rest), say)
+    return status
+
+
+def source_option(rest):
+    """The value of --source among an update's options REST (--source URL, --source=URL), or None."""
+    return next((rest[index + 1] for index, word in enumerate(rest[:-1]) if word == "--source"), None) or \
+        next((word.split("=", 1)[1] for word in rest if word.startswith("--source=")), None)
+
+
+UPDATE_MODE_WORDS = ("--apply", "--install", "--rollback", "--scheduled")
+
+
+def update_hint(command, rest):
+    """notify's line on the command line (updates.cli_hint: on a terminal, at most once a day). Never an error."""
+    if command in ("update", "__complete", "bridge-stub", "completion") or not (HERE / "updates.py").is_file():
+        return
+    with contextlib.suppress(Exception):
+        if not (sys.stderr.isatty() and sys.stdout.isatty()) or "--json" in rest:
+            return  # (nothing is loaded for a program or a pipe)
+        module("updates").cli_hint(command, rest)
+
+
+def ended(exc):
+    """The exit status of a command that ended with sys.exit(EXC.code): a text (sys.exit("sandbox-ai X: ...")) is
+    said as an error first - red on a terminal - and is status 1, as Python would make it."""
+    if isinstance(exc.code, str):
+        say(exc.code)
+        return 1
+    return exc.code
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except SystemExit as exc:
+        sys.exit(ended(exc))

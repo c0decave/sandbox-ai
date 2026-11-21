@@ -66,7 +66,7 @@ def test_cli(capsys):
     assert "NAME        STORE\nOPENAI_KEY  file\n" in out and "sk-test-value" not in out
     assert ss.main(["set", "BAD"], stdin=io.StringIO("\n")) == 1
     assert ss.main(["delete", "OPENAI_KEY"]) == 0 and ss.get("OPENAI_KEY") is None
-    assert ss.main(["backend"]) == 0 and capsys.readouterr().out.strip().endswith("file")
+    assert ss.main(["backend"]) == 0 and capsys.readouterr().out.strip().splitlines()[-1].startswith("file (")
 
 
 def test_launcher_secret_env_and_git_token_secret(tmp_path):
@@ -110,7 +110,7 @@ def test_without_a_usable_keyring_set_keeps_the_secret_in_the_files(tmp_path, mo
     monkeypatch.setattr(ss, "keychain_usable", lambda *a, **k: False)  # (a macOS runner's Keychain may be locked)
     lines = []
     assert ss.main(["set", "GH_PUSH"], stdin=io.StringIO("ghp_value\n"), out=lines.append) == 0
-    assert lines == ["GH_PUSH kept (file)"] and ss.get("GH_PUSH") == "ghp_value"
+    assert lines == ["GH_PUSH kept (file, not encrypted: sandbox-ai secrets password set)"] and ss.get("GH_PUSH") == "ghp_value"
 
 
 def test_a_keyring_that_refuses_says_how_to_keep_it_in_the_files(monkeypatch, capsys):

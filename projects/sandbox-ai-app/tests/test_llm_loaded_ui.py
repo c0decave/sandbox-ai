@@ -373,3 +373,45 @@ def test_end_to_end_keep_loaded_replaces_the_jit_instance(qapp, homes, monkeypat
         page.close()
     finally:
         server.shutdown()
+
+
+def test_load_a_model_shows_each_models_traffic_light(qapp, sai, monkeypatch):
+    """The traffic light (model_profiles.support) also in Load a model: each entry's icon, its words as tooltip and
+    accessible text, and the chosen model's detail panel ("no data yet" for one nothing is known about)."""
+    from PySide6.QtCore import Qt
+    from sandbox_ai_app import model_profile as MP
+    known = "qwen/qwen3-coder-next"
+    sai.answers[("local", ("llm", "models", "lm", "--json"))] = (0, json.dumps(MODELS + [{"name": known}]), "")
+    page = page_of(sai)
+    seen = []
+
+    def form(dialog):
+        try:
+            check(dialog)
+        except BaseException as exc:  # noqa: BLE001 - a slot's exception would be swallowed by Qt
+            seen.append(exc)
+        else:
+            seen.append("checked")
+        return QtWidgets.QDialog.DialogCode.Rejected
+
+    def check(dialog):
+        index = dialog.model.findData(known)
+        assert not dialog.model.itemIcon(index).isNull(), "the light's icon"
+        found = MP.support_of(sai, known)
+        assert found["light"] == "green"
+        assert MP.light_summary(found) in dialog.model.itemData(index, Qt.ItemDataRole.ToolTipRole)
+        assert MP.light_accessible(found, known) in dialog.model.itemData(index, Qt.ItemDataRole.AccessibleTextRole)
+        assert not dialog.support_area.isVisibleTo(dialog), "nothing chosen yet"
+        dialog.model.setCurrentIndex(index)
+        assert dialog.support_area.isVisibleTo(dialog)
+        assert dialog.support_panel.text().startswith(f"Support of {known}\nverified in ")
+        dialog.model.setCurrentIndex(dialog.model.findData("big-70b"))
+        assert "no data yet" in dialog.support_panel.text()
+        dialog.model.setEditText("")
+        assert not dialog.support_area.isVisibleTo(dialog)
+    monkeypatch.setattr(LLV.LoadDialog, "exec", form)
+    open_dialog(page, monkeypatch, lambda dialog: dialog.load_button.click())
+    if seen and isinstance(seen[0], BaseException):
+        raise seen[0]
+    assert seen == ["checked"]
+    page.close()

@@ -10,7 +10,7 @@ there (removed, renamed or moved meanwhile), before it saves it anew where it wa
 written back exactly as it was read (mixed line endings, a paragraph separator) opens read-only: the hex editor
 changes it byte by byte. Invisible and direction-changing characters (Trojan Source) are named above the text.
 
-The buttons read Save (Ctrl+S), Reload and Cancel: Cancel (Escape, Ctrl+W - macOS: Cmd+W) closes the window without
+The buttons read Save (Ctrl+S), Save as… (Ctrl+Shift+S: what is shown as a new file in the same folder), Reload and Cancel: Cancel (Escape, Ctrl+W - macOS: Cmd+W) closes the window without
 saving, asking first about changes not saved (the "editor-discard" question); a file only viewed has Close. The find bar (FindBar: Ctrl+F;
 replace Ctrl+H, on macOS Cmd+Option+F) finds and replaces in the text view and finds text or hex bytes in the hex
 view; Escape closes it before it cancels the window.
@@ -30,23 +30,28 @@ from __future__ import annotations
 import bisect
 import posixpath
 import re
+import stat
 import sys
+import unicodedata
 
-from PySide6.QtCore import QEvent, QRect, QUrl, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QSize, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFontMetrics, QKeySequence, QPainter, QPalette, QShortcut, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QCheckBox, QDialog, QHBoxLayout, QLineEdit, QPlainTextEdit, QPushButton, QSplitter,
+    QAbstractScrollArea, QCheckBox, QDialog, QHBoxLayout, QInputDialog, QLineEdit, QPlainTextEdit, QPushButton,
+    QSplitter,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 from shiboken6 import isValid
 
 from . import applog, files, theme
-from .files import printable
+from .files import printable, printable_text
 from .i18n import tr
 from .markdown_view import LONG_RUN, LONG_WORD, ImageSource, MarkdownView, is_markdown
-from .widgets import MONO, ask_first, background, button, confirm, plain_label, safe_tooltip, set_enabled
+from .widgets import (
+    MONO, FlowLayout, ask_first, background, button, confirm, plain_label, safe_tooltip, set_enabled, shown_as_text,
+)
 
 BYTES_PER_LINE = 16
 MATCH_LIMIT = 1000  # matches the find bar counts ("1000+" beyond)
@@ -100,6 +105,24 @@ def editor_text(edit):
     types a line separator (U+2028): shown as a line break, so saved as one (the file got the bytes E2 80 A8 and one
     long line; a file that holds one is never opened as text, split_text)."""
     return edit.document().toRawText().replace("\u2029", "\n").replace("\u2028", "\n")
+
+
+def save_as_problem(name):
+    """What is wrong with NAME as the name of the file Save as writes ("": nothing): one name in this file's folder
+    (no "/"), not "." or "..", no control or invisible characters, at most 255 bytes."""
+    name = str(name or "")
+    if not name.strip():
+        return tr("Type a name for the new file.")
+    if "/" in name:
+        return tr("A file's name has no '/': Save as writes into this file's folder.")
+    if name in (".", ".."):
+        return tr("'.' and '..' are not names of a file.")
+    if any(unicodedata.category(c) in ("Cc", "Cf") for c in name):
+        return tr("A name with control characters (a line break, a tab, NUL) or invisible ones is not used: {name}",
+                  name=printable(name))
+    if len(name.encode("utf-8", "surrogatepass")) > 255:
+        return tr("That name is too long: at most 255 bytes.")
+    return ""
 
 
 class ChangedBytes:
@@ -734,13 +757,27 @@ def open_url(url):
     QDesktopServices.openUrl(url)
 
 
+class BarLayout(FlowLayout):
+    """The editor's bar: its groups on one line where there is room (its size hint), wrapped where there is not."""
+
+    def sizeHint(self):  # noqa: N802
+        shown = [item for item in self.items if item.widget() is None or not item.widget().isHidden()]
+        width = sum(item.sizeHint().width() for item in shown) + self.gap * max(0, len(shown) - 1)
+        return QSize(width, max((item.sizeHint().height() for item in shown), default=0))
+
+
 class EditorWindow(QDialog):
     """One file of a pane in a window of its own: text, hex or rendered Markdown (MODE "auto", "text", "hex",
     "markdown"), editable unless READ_ONLY (F3: a viewer). SAVED() after it was saved (the page lists its panes again);
-    OPEN_FILE(relative, shown): a Markdown file of the same root a link of this one leads to, in a viewer of its own."""
+    OPEN_FILE(relative, shown): a Markdown file of the same root a link of this one leads to, in a viewer of its own.
+    DROPPED(mime): what files dragged onto the window do (FilesPage.editor_drop) - None: nothing of its (text dragged
+    within the text is the text's own), else (why they cannot be opened or None, OPEN(window) after the drop): each
+    file opens in an editor of its own, nothing is typed into this one."""
 
-    def __init__(self, parent, root, relative, shown, mode="auto", read_only=False, saved=None, open_file=None, top=""):
+    def __init__(self, parent, root, relative, shown, mode="auto", read_only=False, saved=None, open_file=None, top="",
+                 dropped=None):
         super().__init__(parent)
+        self.on_dropped = dropped
         self.root, self.relative, self.shown, self.mode = root, relative, shown, mode
         self.top = "/".join(part for part in top.split("/") if part)  # (images and Markdown links: below it only)
         self.viewer, self.read_only, self.on_saved, self.on_open_file = read_only, read_only, saved, open_file
@@ -789,7 +826,6 @@ class EditorWindow(QDialog):
         layout.addWidget(self.stack, 1)
         self.find_bar = FindBar(self)
         layout.addWidget(self.find_bar)
-        bottom = QHBoxLayout()
         self.as_text = button(tr("Text"), tr("Show the file as text (UTF-8)"), lambda: self.switch("text"))
         self.as_hex = button(tr("Hex"), tr("Show the file's bytes (hex editor)"), lambda: self.switch("hex"))
         self.as_markdown = button(tr("Markdown"), tr("Show the file rendered as Markdown"),
@@ -810,19 +846,37 @@ class EditorWindow(QDialog):
         self.save_button = button(tr("Save ({shortcut})", shortcut=key_text(QKeySequence.StandardKey.Save)),
                                   tr("Write the file back (asks first if it changed on disk meanwhile)"),
                                   lambda: self.save())
+        # Save as…: what is shown (the text, the Markdown's text, the hex view's bytes) as a new file in the same folder
+        # - also from a viewer (F3); the window shows the new file then.
+        self.save_as_button = button(tr("Save as…"), tr("Write what is shown as a new file in this folder ({shortcut})",
+                                                       shortcut=key_text(QKeySequence.StandardKey.SaveAs)),
+                                     lambda: self.save_as())
         self.reload_button = button(tr("Reload"), tr("Read the file again from disk"), lambda: self.reload())
         self.cancel_button = button(tr("Cancel"), "", self.cancel)
-        for widget in (self.as_text, self.as_hex, self.as_markdown, self.edit_button, self.preview_check, self.wrap):
-            bottom.addWidget(widget)
-        bottom.addWidget(self.position, 1)
-        for widget in (self.find_button, self.save_button, self.reload_button, self.cancel_button):
-            bottom.addWidget(widget)
-        layout.addLayout(bottom)
+        # The views and the position, then the actions: on one line where the window has the room, else the actions on
+        # a line of their own (German with a large font on a laptop: one line was wider than the screen).
+        self.bar = QWidget()
+        bar = BarLayout(self.bar)
+        for group in ((self.as_text, self.as_hex, self.as_markdown, self.edit_button, self.preview_check, self.wrap,
+                       self.position),
+                      (self.find_button, self.save_button, self.save_as_button, self.reload_button,
+                       self.cancel_button)):
+            holder = QWidget()
+            row = QHBoxLayout(holder)
+            row.setContentsMargins(0, 0, 0, 0)
+            for widget in group:
+                row.addWidget(widget)
+            bar.addWidget(holder)
+        layout.addWidget(self.bar)
         self.save_button.setVisible(not read_only)
         for widget in self.findChildren(QPushButton):  # Enter (in the find field, the hex view) presses no button
             widget.setAutoDefault(False)
             widget.setDefault(False)
         QShortcut(QKeySequence(QKeySequence.StandardKey.Save), self, activated=self.save)
+        if not QKeySequence.keyBindings(QKeySequence.StandardKey.SaveAs):  # (no system key for it: Ctrl+Shift+S)
+            QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.save_as)
+        else:
+            QShortcut(QKeySequence(QKeySequence.StandardKey.SaveAs), self, activated=self.save_as)
         QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self, activated=lambda: self.find_bar.open())
         QShortcut(QKeySequence(REPLACE_KEY), self, activated=lambda: self.find_bar.open(replace=True))
         for standard, steps in ((QKeySequence.StandardKey.ZoomIn, 1), (QKeySequence.StandardKey.ZoomOut, -1)):
@@ -842,8 +896,47 @@ class EditorWindow(QDialog):
             keys.setdefault(QKeySequence(extra).toString(), QKeySequence(extra))
             for key in keys.values():
                 QShortcut(key, self, activated=lambda backward=backward: self.find_bar.search(backward=backward))
+        if dropped is not None:
+            # (every part that may get a drag - the text, the hex view, the renderings - and the window around them: a
+            # drag one of them does not take goes on to the next one out)
+            self.setAcceptDrops(True)
+            for area in self.findChildren(QAbstractScrollArea):
+                for widget in (area, area.viewport()):
+                    widget.setAcceptDrops(True)
+                    widget.installEventFilter(self)
+            self.installEventFilter(self)
         self.title()
         self.load()
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop) and \
+                self.on_dropped is not None:
+            return self.dragged_over(event)
+        return super().eventFilter(watched, event)
+
+    def dragged_over(self, event):
+        """A drag over the window: files open in editors of their own once dropped (on_dropped); one that cannot be
+        dropped is not taken (the "no" cursor) and the window says why. False: text, the widget's own."""
+        found = self.on_dropped(event.mimeData())
+        if found is None:
+            return False
+        why, opener = found
+        kind = event.type()
+        if why:
+            if kind != QEvent.Type.DragEnter:
+                self.say(tr("Cannot drop here: {why}", why=why), True)
+            if kind == QEvent.Type.DragEnter:
+                event.accept()  # (the moves over it follow: each is refused)
+            else:
+                event.ignore()
+            return True
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if kind == QEvent.Type.Drop:
+            # (after the drop has ended: what it opens may ask, and a question inside a drop handler holds up the
+            # program the drag came from)
+            QTimer.singleShot(0, self, lambda: opener(self))
+        return True
 
     # -- reading --
 
@@ -1173,11 +1266,96 @@ class EditorWindow(QDialog):
                    work=True, done=lambda result, error: self.saved(result, error, data, replace, in_place))
         return True
 
+    def save_as(self):
+        """Save as…: what is shown written as a new file of a name asked for, in this file's folder (through the pane's
+        Root: never through a link, O_EXCL-like - an existing name is asked about first); the window shows that file
+        then. Not for a file shown only in part (a big one: its first part only)."""
+        if self.loading or self.saving:
+            return False
+        if self.truncated:
+            self.say(tr("Only the first part of {name} is shown: Save as would write only that part.",
+                        name=printable(self.name)), True)
+            return False
+        data = self.contents()
+        folder = self.relative.rpartition("/")[0]
+        name, ok = QInputDialog.getText(self, tr("Save as"), shown_as_text(tr(
+            "Name of the new file in the folder of {name}:", name=printable(self.name))), text=self.name)
+        if not ok:
+            return False
+        problem = save_as_problem(name)
+        if problem:
+            self.say(problem, True)
+            return False
+        relative = f"{folder}/{name}" if folder else name
+        if relative == self.relative:
+            return self.save()
+        root, mode = self.root, getattr(self, "file_mode", None)
+        self.busy(True)
+
+        def looked(found, error):
+            if not isValid(self):
+                return False
+            if error is not None and not isinstance(error, FileNotFoundError):
+                self.busy(False)
+                self.say(tr("Not saved: {error}", error=printable_text(str(error))), True)
+                return False
+            if error is None and found is not None:
+                if stat.S_ISLNK(found.st_mode) or not stat.S_ISREG(found.st_mode):
+                    self.busy(False)
+                    self.say(tr("{name} is there already and is no plain file (a link, a folder): not written.",
+                                name=printable(name)), True)
+                    return False
+                if not confirm(self, tr("Replace {name}?", name=printable(name)), tr(
+                        "{name} exists in this folder. Replace it with what is shown here?", name=printable(name)),
+                        tr("Replace")):
+                    if isValid(self):
+                        self.busy(False)
+                        self.say(tr("Not saved: {name} exists.", name=printable(name)), True)
+                    return False
+            applog.log("INFO", "files", f"editor: saving {self.place()} as {printable(name)} "
+                                        f"({files.size_text(len(data))})")
+            background(lambda: root.write_file(relative, data, None, mode=mode), owner=self, work=True,
+                       done=lambda result, err: self.saved_as(result, err, data, relative, name))
+            return True
+
+        def look():
+            try:
+                return root.lstat(relative)
+            except FileNotFoundError:
+                return None
+        background(look, owner=self, timeout=60, done=looked)
+        return True
+
+    def saved_as(self, result, error, data, relative, name):
+        if not isValid(self):
+            return False
+        self.busy(False)
+        if error is not None:
+            applog.log("WARNING", "files", f"editor: {self.place()} not saved as {printable(name)}: "
+                                           f"{applog.error_text(error)}")
+            self.say(tr("Not saved: {error}", error=printable_text(str(error))), True)
+            return False
+        # The window is the new file's now (its folder, its path shown); the file it showed stays as it was.
+        self.shown = posixpath.join(posixpath.dirname(str(self.shown)), name)
+        self.relative, self.name, self.identity, self.original = relative, name, result, data
+        self.where.setText(printable(self.shown))
+        if self.hex.data() == data:
+            self.hex.edited = ChangedBytes()
+            self.hex.viewport().update()
+        self.text.document().setModified(False)
+        self.dirty = False
+        self.say(tr("Saved as {name} ({size}).", name=printable(name), size=files.size_text(len(data))))
+        self.title()
+        if self.on_saved is not None:
+            self.on_saved()
+        return True
+
     def busy(self, saving):
         """SAVING: a save runs or asks - Save (Ctrl+S) and Reload wait for it (the window is one of its own: its
         question blocks neither)."""
         self.saving = saving
         set_enabled(self.save_button, not saving and not self.read_only and not self.loading)
+        set_enabled(self.save_as_button, not saving and not self.loading)
         set_enabled(self.reload_button, not saving)
 
     def saved(self, result, error, data, replaced=False, in_place=False):

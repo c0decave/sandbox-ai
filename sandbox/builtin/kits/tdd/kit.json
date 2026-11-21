@@ -5,10 +5,15 @@
   "claude",
   "codex",
   "opencode",
+  "opencode2",
   "hermes",
   "dsh",
   "qwen",
-  "goose"
+  "goose",
+  "openhands",
+  "nanobot",
+  "letta",
+  "pi"
  ],
  "default": "off",
  "upstream": {

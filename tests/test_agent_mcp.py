@@ -19,6 +19,8 @@ FAKE = {
     "codex": "import sys\nargs = sys.argv[1:]\nout = args[args.index('--output-last-message') + 1]\n"
              "open(out, 'w').write('codex did: ' + args[-1])\nprint('[progress lines]')\n",
     "opencode": "import sys\nprint('opencode did: ' + sys.argv[-1])\n",
+    # opencode2 run -- TASK prints the answer alone (OpenCode 2's one-shot run).
+    "opencode2": "import sys\nprint('opencode2 did: ' + sys.argv[-1])\n",
     # hermes -z prints the final answer alone.
     "hermes": "import sys\nprint('hermes did: ' + sys.argv[-1].partition('--oneshot=')[2])\n",
     # qwen --prompt=TASK prints the answer; dsh headless - reads the task on standard input.
@@ -26,6 +28,15 @@ FAKE = {
     "dsh": "import os, sys\nprint('dsh did: ' + sys.stdin.read() + os.environ.get('DSH_PERMISSION_MODE', ''))\n",
     # goose run --quiet --text=TASK prints the answer alone.
     "goose": "import sys\nprint('goose did: ' + sys.argv[-1].partition('--text=')[2])\n",
+    # openhands task --text=TASK prints the agent's last answer.
+    "openhands": "import sys\nprint('openhands did: ' + sys.argv[-1].partition('--text=')[2])\n",
+    # nanobot agent --message=TASK prints the notes of its first start, its header line, then the answer.
+    "nanobot": "import sys\ntask = sys.argv[-1].partition('--message=')[2].rpartition('\\n\\n')[2]\n"
+               "print('  Created AGENTS.md\\n\\n\\N{CAT} nanobot\\nnanobot did: ' + task)\n",
+    # letta -p ... -- TASK prints the answer alone.
+    "letta": "import sys\nprint('letta did: ' + sys.argv[-1])\n",
+    # pi -p ... -- TASK prints the answer alone.
+    "pi": "import sys\nprint('pi did: ' + sys.argv[-1].lstrip())\n",
 }
 
 
@@ -66,9 +77,23 @@ def test_ask_runs_the_agents_non_interactive_mode_in_work(agents, agent):
     if agent == "goose":  # the value of --text=, never an option of its own
         assert cwd == str(agents / "work") and argv == ["run", "--quiet", "--text=-rf the tests"]
         return
+    if agent == "openhands":  # the value of --text=, never an option of its own
+        assert cwd == str(agents / "work") and argv == ["task", "--text=-rf the tests"]
+        return
+    if agent == "nanobot":  # the value of --message=, after the note where the project is; a session per task
+        assert cwd == str(agents / "work") and argv[:3] == ["agent", "--no-markdown", "--session"]
+        assert argv[3].startswith("sandbox-ai-helper-") and len(argv) == 5
+        assert argv[4] == "--message=" + am.NANOBOT_PROJECT_NOTE + "-rf the tests"
+        return
+    if agent == "letta":  # one headless task in a new conversation, the prompt after "--"
+        assert cwd == str(agents / "work") and argv == ["-p", "--new", "--", "-rf the tests"]
+        return
+    if agent == "pi":  # one task in print mode, the prompt after "--"
+        assert cwd == str(agents / "work") and argv == ["-p", "--", "-rf the tests"]
+        return
     assert cwd == str(agents / "work") and argv[-2:] == ["--", "-rf the tests"], "the prompt is never an option"
     expected = {"claude": ["-p", "--output-format", "json"], "codex": ["exec", "--skip-git-repo-check"],
-                "opencode": ["run"]}[agent]
+                "opencode": ["run"], "opencode2": ["run"]}[agent]
     assert argv[:len(expected)] == expected and not set(argv) & {*am.SKIP["claude"], *am.SKIP["codex"]}
     if agent == "codex":
         assert argv[2:4] == ["--sandbox", "danger-full-access"], "its own sandbox cannot work inside sandbox-ai's"
@@ -94,6 +119,14 @@ def test_continue_and_skip_permissions_reach_the_agent(agents):
         == "dsh did: moredanger-full-access", "DSH's switch is a variable"
     assert am.Helper("dsh", cwd=str(agents / "work"), lock=agents / "lock").ask("more") == "dsh did: more"
     assert called(agents)[1:] == ["headless", "--patch", am.DSH_PATCH, "-"]
+    # nanobot: a session of its own per task, the same one again for "continue"; its answer without the notes of its
+    # first start and its header line.
+    nanobot = am.Helper("nanobot", cwd=str(agents / "work"), lock=agents / "lock")
+    assert nanobot.ask("first") == "nanobot did: first"
+    first = called(agents)[4]
+    assert nanobot.ask("more", resume=True) == "nanobot did: more" and called(agents)[4] == first
+    nanobot.ask("other")
+    assert called(agents)[4] != first and called(agents)[4].startswith("sandbox-ai-helper-")
 
 
 def test_a_failed_or_endless_task_is_an_error(agents, tmp_path):

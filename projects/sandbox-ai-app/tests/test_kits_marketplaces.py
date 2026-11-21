@@ -31,8 +31,9 @@ def wait(qapp, window):
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
 
-CODEX_ABOUT = ("sandbox-ai's kits give Codex no plugins yet: Codex's marketplaces and plugins are shown as Codex has "
-               "them on this machine; one in Claude's format can be imported for Claude")
+CODEX_ABOUT = ("Codex's own marketplaces, as Codex has them on this machine: a kit gives Codex plugins of the "
+               "marketplaces in Claude's format (sandbox-ai's own, those the kits declare) from sandbox-ai's plugin "
+               "store (add one --agent codex); one of these in Claude's format can be imported")
 OPENCODE_ABOUT = "OpenCode has no marketplaces: its plugins are npm packages"
 
 
@@ -197,7 +198,7 @@ def test_the_browser_lists_kits_marketplaces_and_every_state(browser):
     pick(page, "codex:cx", "tool@cx")
     assert CODEX_ABOUT in page.plugins_note.text()
     assert not any(b.isEnabled() for b in page.plugin_buttons)
-    assert "give Codex no plugins yet" in page.plugin_add_button.toolTip()
+    assert "kits give Codex plugins of the marketplaces in Claude's format" in page.plugin_add_button.toolTip()
     # OpenCode: npm plugins, its about and its modules
     pick(page, kits_page.OPENCODE)
     assert page.plugins_title.text() == "OpenCode's npm plugins"
@@ -294,6 +295,38 @@ def test_plugins_are_added_enabled_disabled_and_removed(browser, monkeypatch):
     assert page.market_kit.currentData() == "default:default", "the kit chosen stays after the page read again"
 
 
+def test_codex_and_opencode2_plugins_are_chosen_with_for(browser, monkeypatch):
+    """The browser's For: whose plugins in the kit the actions change (one store, the marketplaces in Claude's
+    format); each plugin shows its state in that agent's kits (agent_kits), and the kit command gets --agent."""
+    page = browser
+    markets = copy.deepcopy(MARKETS)
+    own = markets["marketplaces"][0]
+    own["agent_kits"] = {"codex": [], "opencode2": []}
+    own["plugins"].append(plugin("superpowers@sandbox-ai", [], agent_kits={"codex": [on("mine")], "opencode2": []}))
+    monkeypatch.setattr(page.sai, "marketplaces", lambda: copy.deepcopy(markets))
+    page.refresh()
+    assert page.wait(lambda: page.market.rowCount() == 6 and not widgets.busy(page)
+                     and not widgets.busy(page.market_split), 10)
+    assert [page.market_agent.itemData(i) for i in range(page.market_agent.count())] == ["claude", "codex",
+                                                                                          "opencode2"]
+    pick(page, "claude:sandbox-ai", "superpowers@sandbox-ai")
+    assert cells(page.plugins, "superpowers@sandbox-ai")[1] == "–", "Claude's kits do not name it"
+    page.market_agent.setCurrentIndex(page.market_agent.findData("codex"))
+    pick(page, "claude:sandbox-ai", "superpowers@sandbox-ai")
+    assert cells(page.plugins, "superpowers@sandbox-ai")[1] == "on" and "on in mine" in \
+        cells(page.plugins, "superpowers@sandbox-ai")[2]
+    assert not page.plugin_add_button.isEnabled(), "in mine for Codex already"
+    assert act(page, page.plugin_action, "disable-plugin") == ("disable-plugin", "mine", "superpowers@sandbox-ai",
+                                                               "--agent=codex")
+    page.market_agent.setCurrentIndex(page.market_agent.findData("opencode2"))
+    pick(page, "claude:sandbox-ai", "superpowers@sandbox-ai")
+    assert act(page, page.plugin_action, "add-plugin") == ("add-plugin", "mine", "superpowers@sandbox-ai",
+                                                           "--agent=opencode2", "--source=sandbox-ai")
+    # Codex's own marketplaces stay as Codex has them.
+    pick(page, "codex:cx", "tool@cx")
+    assert "kits give Codex plugins of the marketplaces in Claude's format" in page.plugin_add_button.toolTip()
+
+
 def test_opencodes_npm_plugins_switch_the_same_way(browser):
     page = browser
     pick(page, kits_page.OPENCODE, "opencode-foo@1.0")
@@ -346,6 +379,9 @@ def test_marketplaces_are_added_imported_and_removed(browser, monkeypatch):
     class Dialog:
         def __init__(self, parent):
             self.name, self.source = QtWidgets.QLineEdit("team2"), QtWidgets.QLineEdit("https://git.example.org/p.git")
+
+        def keep_draft(self, key):  # (the real dialog keeps what was typed: drafts.py)
+            return self
 
         def exec(self):
             return QtWidgets.QDialog.DialogCode.Accepted

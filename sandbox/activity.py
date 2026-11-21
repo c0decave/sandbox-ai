@@ -43,8 +43,9 @@ import time
 HERE = Path(__file__).resolve().parent
 ACTIVITY_FILE = "activity.jsonl"
 SCHEMA = 1
-KINDS = ("prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens")
-ACTIVITY_LIMIT = 256 << 20   # activity.jsonl per log directory; then one note and no more records
+KINDS = ("prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens", "bridge",
+         "resources")
+ACTIVITY_LIMIT = 256 << 20   # activity.jsonl per log directory; then its older part goes to activity.jsonl.TIME
 TEXT_LIMIT = 2000            # characters of a prompt, a reply or a command kept
 VALUE_LIMIT = 500            # characters of any other text in the details
 SUMMARY_LIMIT = 240
@@ -59,6 +60,7 @@ INTERVAL = 2.0               # seconds between two polls while the sandbox runs
 FINAL_SECONDS = 20           # the last read after the run, at most
 RUNNING_AFTER = 5.0          # a tool call still open after this many seconds is shown as running
 REPEAT_WINDOW = 60.0         # repeated network events are counted and shown at most once a minute
+REPEAT_TARGETS = 4096        # destinations whose repeats are counted at a time (Connections: the quietest go first)
 GROUP_FILES = 5              # more file events than this in one folder and poll become one record
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -282,26 +284,42 @@ def counter():
 
 
 def append(path, records, limit=ACTIVITY_LIMIT):
-    """Append RECORDS to the activity log PATH (never through a link); False once it holds LIMIT bytes."""
+    """Append RECORDS to the activity log PATH (never through a link). A log that holds LIMIT bytes is renamed to
+    PATH.TIME first - the timeline goes on in a new one, what every reader reads; sandbox-ai gc compresses the older
+    part (it stopped there before: a run of days had no timeline after its first 256 MiB). True when written."""
     if not records:
         return True
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise OSError(f"{path} is not a regular file")
-        if info.st_size >= limit:
-            return False
-        data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records).encode("utf-8", "replace")
-        if info.st_size + len(data) > limit:
-            note = {**records[-1], "kind": "session", "summary": f"activity log full ({limit >> 20} MiB); "
-                    "no more events recorded", "details": {"event": "log-full"}, "id": "log-full"}
-            note.pop("update", None)
-            data = (json.dumps(note, ensure_ascii=False) + "\n").encode()
-        os.write(fd, data)
-        return info.st_size + len(data) < limit
-    finally:
-        os.close(fd)
+    data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records).encode("utf-8", "replace")
+    path = Path(path)
+    for _ in range(2):
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError(f"{path} is not a regular file")
+            if info.st_size + len(data) <= limit or not info.st_size:
+                # a line cut by a writer that was killed mid-record is ended first: else this batch's first record
+                # joined it, and both were lost to every reader
+                cut = info.st_size and os.pread(fd, 1, info.st_size - 1) not in (b"\n", b"")
+                os.write(fd, b"\n" + data if cut else data)
+                return True
+        finally:
+            os.close(fd)
+        older = path.with_name(f"{path.name}.{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}")
+        if older.exists() or older.with_name(older.name + ".gz").exists():
+            return False  # rotated within this second already (another run): this batch is not kept
+        with contextlib.suppress(FileNotFoundError):
+            current = os.stat(path, follow_symlinks=False)
+            if current.st_ino == info.st_ino:  # (not one another writer made meanwhile)
+                try:  # never over a part of that second (a rename replaces; the look above is another step)
+                    os.link(path, older, follow_symlinks=False)
+                except FileExistsError:
+                    return False
+                except (OSError, NotImplementedError):
+                    os.rename(path, older)  # (a file system without links)
+                else:
+                    os.unlink(path)
+    return False
 
 
 # -- reading what the agent wrote, safely --
@@ -1686,10 +1704,12 @@ def opencode_source(home, from_start=False):
 
 class LogFile:
     """One JSONL log of the log directory, followed from where it ended when the run started (several
-    runs may share processes.jsonl or files.jsonl) or, with FROM_START, from its beginning."""
+    runs may share processes.jsonl or files.jsonl) or, with FROM_START, from its beginning. A log rotated during the
+    run (renamed away, or emptied in place: runtime.rotate_logs) is read again from its start; the offsets of each
+    part after the first are given as "PART.OFFSET" (the timeline's keys stay apart)."""
 
     def __init__(self, directory, name, from_start=False):
-        self.directory, self.name, self.follow = Path(directory), name, Follow()
+        self.directory, self.name, self.follow, self.part = Path(directory), name, Follow(), 0
         if not from_start:
             try:
                 info = os.stat(self.directory / name, follow_symlinks=False)
@@ -1706,11 +1726,15 @@ class LogFile:
                 lines = new_lines(self.directory, self.name, self.follow, budget[0], final)
             except OSError:
                 break
+            restarted = before[0] is not None and (self.follow.inode != before[0] or self.follow.offset < before[1]
+                                                   or (lines and lines[0][0] < before[1]))
+            if restarted:
+                self.part += 1
             budget[0] -= max(1, self.follow.offset - before[1]) if self.follow.inode == before[0] else 1
             for offset, line in lines:
                 record = json_object(line)
                 if record is not None:
-                    found.append((offset, record))
+                    found.append((offset if not self.part else f"{self.part}.{offset}", record))
             if (self.follow.inode, self.follow.offset) == before:
                 break
         return found
@@ -1722,7 +1746,8 @@ FILE_ACTIONS = {"write": "modified", "create": "created", "delete": "deleted", "
 OWN_FILES = ("/root/.claude/", "/root/.claude.json", "/root/.codex/", "/root/.local/share/opencode/",
              "/root/.local/state/", "/root/.cache/", "/root/.npm/", "/root/.config/opencode/", "/root/.bun/",
              "/root/.local/share/claude/", "/root/.hermes/", "/root/.dsh/", "/root/.qwen/",
-             "/root/.config/goose/", "/root/.local/share/goose/", "/tmp/claude-", "/tmp/.X", "/tmp/tmux-")
+             "/root/.config/goose/", "/root/.local/share/goose/", "/root/.openhands/", "/root/.nanobot/", "/root/.letta/", "/root/.pi/",
+             "/tmp/claude-", "/tmp/.X", "/tmp/tmux-")
 
 
 class FileChanges:
@@ -1892,15 +1917,29 @@ class Connections:
             events.append(raw("network", summary + attributed, at, details, key=f"proxy:{offset}", source=self.source))
         for key, entry in list(self.repeats.items()):
             if entry["count"] and (final or now - entry["since"] >= REPEAT_WINDOW):
-                verdict, _, target = key
-                methods = ", ".join(f"{m} {n}" for m, n in sorted(entry["methods"].items()))
-                events.append(raw("network", f"{verdict}: {entry['count']} more {'request' if methods else 'connection'}"
-                                             f"(s) to {one_line(target, 200)}" + (f" ({methods})" if methods else ""),
-                                  stamp(now), {"verdict": verdict, "event": entry["event"], "target": target,
-                                               "count": entry["count"], "methods": entry["methods"], "repeats": True},
-                                  source=self.source))
+                events.append(self.repeated(key, entry, now))
                 entry.update(count=0, since=now, methods={})
+        if len(self.repeats) > REPEAT_TARGETS:
+            # The destinations a run can name are endless (an agent trying address after address): one entry each,
+            # kept for the whole run and looked at in every poll, made the launcher's memory and its polls grow
+            # without end. Those quiet the longest are forgotten - what was counted for them is said first -; one
+            # that comes back is shown as a new destination.
+            quietest = sorted(self.repeats, key=lambda k: self.repeats[k]["since"])
+            for key in quietest[:len(self.repeats) - REPEAT_TARGETS]:
+                entry = self.repeats.pop(key)
+                if entry["count"]:
+                    events.append(self.repeated(key, entry, now))
         return events
+
+    def repeated(self, key, entry, now):
+        """The event of what was counted for KEY (ENTRY of repeats) since it was last said."""
+        verdict, _, target = key
+        methods = ", ".join(f"{m} {n}" for m, n in sorted(entry["methods"].items()))
+        return raw("network", f"{verdict}: {entry['count']} more {'request' if methods else 'connection'}"
+                              f"(s) to {one_line(target, 200)}" + (f" ({methods})" if methods else ""),
+                   stamp(now), {"verdict": verdict, "event": entry["event"], "target": target,
+                                "count": entry["count"], "methods": entry["methods"], "repeats": True},
+                   source=self.source)
 
 
 class Approvals:
@@ -1915,10 +1954,13 @@ class Approvals:
     def poll(self, budget, now, final=False):
         if self.directory is None:
             return []
-        found = regular_files(self.directory, [], lambda r: r.endswith((".json", ".done")), lambda r: False,
-                              limit=2000)
+        found = regular_files(self.directory, [], lambda r: r.endswith((".json", ".done", ".callback")),
+                              lambda r: False, limit=2000)
         events = []
         for name in sorted(found):
+            if name.endswith(".callback"):  # a login's callback relayed into the sandbox (oauth_relay.py), or not
+                events += self.callback(name)
+                continue
             ident = name[:-5]
             if not name.endswith(".json") or ident in self.done or not re.fullmatch(r"[0-9-]{1,40}", ident):
                 continue
@@ -1949,6 +1991,31 @@ class Approvals:
                                **{k: question[k] for k in ("destination", "host", "name", "url", "refs") if k in question}},
                               key=f"approval:{ident}", source=self.source))
         return events
+
+
+    def callback(self, name):
+        """The event of approvals/ID.callback (oauth_relay.py: what became of a browser question's login callback),
+        once it is there."""
+        key = f"callback:{name[:-len('.callback')]}"
+        if key in self.done or not re.fullmatch(r"[0-9-]{1,40}\.callback", name):
+            return []
+        record = json_object(read_small(self.directory, name, 1 << 16) or b"")
+        if record is None:
+            return []
+        self.done.add(key)
+        port = record.get("port") if isinstance(record.get("port"), int) else "?"
+        target = f"http://127.0.0.1:{port}{one_line(str(record.get('path') or '/'), 200)}"
+        outcome = one_line(str(record.get("outcome") or "?"), 40)
+        summary = f"login callback relayed into the sandbox: {one_line(str(record.get('method') or 'GET'), 10)} " \
+                  f"{target}" + (f" -> {record['status']}" if isinstance(record.get("status"), int) else "") \
+            if outcome == "relayed" else f"login callback not relayed ({outcome}): {target}" + \
+            (f" ({one_line(str(record['why']), 200)})" if record.get("why") else "")
+        return [raw("network", summary, when(record.get("time")),
+                    {"verdict": "allowed" if outcome == "relayed" else "denied", "event": "oauth-callback",
+                     "target": target, "question": one_line(str(record.get("question") or ""), 40),
+                     "outcome": outcome, **({"status": record["status"]} if isinstance(record.get("status"), int)
+                                            else {})},
+                    key=key, source=self.source)]
 
 
 # -- the collector --
@@ -2108,12 +2175,23 @@ def finish(collector, status=None):
 
 
 SESSION_EVENTS = {"pause": "paused", "resume": "resumed", "attach": "terminal attached", "detach": "terminal detached",
-                  "stop": "stop requested"}
+                  "stop": "stop requested", "shell": "shell opened by the human", "shell-end": "shell closed"}
 
 
-def session_event(name, event, runs_dir=None):
-    """Note EVENT (pause, resume, attach, detach, stop) of the running session NAME in its activity log
-    (found through the run registry RUNS_DIR); True if written. Never raises."""
+def session_summary(name, event, command=None, status=None):
+    """The timeline's line of EVENT of the session NAME: a shell's COMMAND and exit STATUS said."""
+    text = f"session {name} {SESSION_EVENTS.get(event, event)}"
+    if event == "shell" and command:
+        text = f"session {name}: the human ran in its sandbox: {shlex.join(command)}"
+    elif event == "shell-end" and status is not None:
+        text += f" (exit status {status})"
+    return text
+
+
+def session_event(name, event, runs_dir=None, command=None, status=None):
+    """Note EVENT (pause, resume, attach, detach, stop, shell, shell-end) of the running session NAME in its activity
+    log (found through the run registry RUNS_DIR); True if written. A shell's COMMAND (sandbox-ai shell NAME --
+    COMMAND; none: an interactive shell) and its exit STATUS go into the details. Never raises."""
     try:
         try:
             sessions = module("sessions")
@@ -2125,8 +2203,13 @@ def session_event(name, event, runs_dir=None):
         log_dir = record.get("log_dir") if isinstance(record, dict) else None
         if not isinstance(log_dir, str) or not log_dir:
             return False
-        event_record = finalize(raw("session", f"session {name} {SESSION_EVENTS.get(event, event)}",
-                                    stamp(time.time()), {"event": event}, source="sandbox-ai"),
+        details = {"event": event}
+        if event == "shell":
+            details.update({"command": shlex.join(command) if command else "", "by": "human"})
+        if event == "shell-end" and status is not None:
+            details["exit_code"] = status
+        event_record = finalize(raw("session", session_summary(name, event, command, status),
+                                    stamp(time.time()), details, source="sandbox-ai"),
                                 run, name, record.get("agent"), Redactor())
         return append(Path(log_dir) / ACTIVITY_FILE, [event_record])
     except Exception:  # noqa: BLE001 - a session command must not fail over its timeline
@@ -2219,10 +2302,226 @@ def each_record(path):
         os.close(fd)
 
 
+def older_parts(directory, name=ACTIVITY_FILE):
+    """The older parts of the timeline NAME in DIRECTORY, oldest first: renamed away at its limit (append: NAME.TIME),
+    compressed by gc (NAME.TIME.gz); a part there both ways once (the raw one: gc removes it once compressed)."""
+    pattern = re.compile(re.escape(name) + r"\.(\d{8}-\d{6})(\.gz)?")
+    found = {}
+    try:
+        with os.scandir(directory) as listing:
+            for entry in listing:
+                match = pattern.fullmatch(entry.name)
+                with contextlib.suppress(OSError):
+                    if match and entry.is_file(follow_symlinks=False) and (match.group(1) not in found
+                                                                          or not match.group(2)):
+                        found[match.group(1)] = Path(entry.path)
+    except OSError:
+        return []
+    return [found[stamp] for stamp in sorted(found)]
+
+
+def started_of(part):
+    """About when the older part PART begins: the time of its first record, else of its name (its end)."""
+    for record in part_records(part):
+        if isinstance(record.get("time"), str):
+            return record["time"]
+        break
+    return Path(part).name.split(".")[2] if Path(part).name.count(".") >= 2 else "?"
+
+
+def part_stream(path):
+    """An older part PATH (compressed or not) as a stream of its bytes (never through a link); OSError when it cannot
+    be opened."""
+    if str(path).endswith(".gz"):
+        return module("jsonltail").open_compressed(path)
+    fd = os.open(path, FILE_FLAGS)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        os.set_blocking(fd, True)
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def part_records(path, needle=None):
+    """The records of an older part PATH of the timeline, from its start (a damaged or cut part: up to there). NEEDLE
+    (bytes: run_needle): only the lines that hold it are parsed, looked for a MiB at a time - a run's records out of a
+    part of 256 MiB in one pass (the part was read twice before, once to see whether it names the run, and every line
+    of it parsed)."""
+    try:
+        stream = part_stream(path)
+    except OSError:
+        return
+    with stream:
+        try:
+            if needle is None:
+                for line in stream:
+                    if not line.endswith(b"\n"):
+                        break
+                    record = activity_record(line)
+                    if record is not None:
+                        yield record
+                return
+            rest = b""
+            while True:
+                data = stream.read(1 << 20)
+                if not data:
+                    return
+                end = data.rfind(b"\n")
+                if end < 0:
+                    rest = rest + data if len(rest) < READ_LIMIT else b""  # (a line longer than any record: dropped)
+                    continue
+                block, rest = rest + data[:end + 1], data[end + 1:]
+                if needle not in block:
+                    continue
+                for line in block.split(b"\n"):
+                    if needle in line:
+                        record = activity_record(line)
+                        if record is not None:
+                            yield record
+        except (OSError, EOFError, ValueError):
+            return
+
+
+# Which runs each older part of the timeline names, remembered beside them (PARTS_INDEX, {"parts": {TIME of the
+# part's name: [run]}}): a run's records were looked for in every part - 30 days of a busy project are 1.9 GB in
+# seven parts, 11 s for a run of three weeks ago (measured). A part never changes once it is renamed away, so what it
+# names is found once (part_names, 0.9 s for a part of 256 MiB) and the next look reads only the parts that hold the
+# run. Never the source of anything: a missing, damaged or unwritable file is made again or done without.
+PARTS_INDEX = ".activity-parts.json"
+TAIL_BACK = 32 << 20  # a current timeline smaller than this just rotated: a tail it does not fill reads the part before
+RUN_NAMED = re.compile(rb'"run": "([A-Za-z0-9._-]{1,128})"')
+PART_RUNS = 4096  # runs remembered of one part at most (more: the part is read for every run)
+
+
+def part_names(path):
+    """The runs the older part PATH names (a set), or None when it cannot be read whole or names more than PART_RUNS."""
+    found, rest = set(), b""
+    try:
+        with part_stream(path) as stream:
+            while True:
+                data = stream.read(1 << 20)
+                if not data:
+                    break
+                found.update(RUN_NAMED.findall(rest + data))
+                rest = data[-200:]
+                if len(found) > PART_RUNS:
+                    return None
+    except (OSError, EOFError, ValueError):
+        return None
+    return {name.decode("ascii") for name in found}
+
+
+def parts_with(directory, parts, run):
+    """Those of PARTS (older parts of the timeline in DIRECTORY) that name RUN, by PARTS_INDEX - which is completed
+    for the parts it does not know yet and written back (best effort: a folder that cannot be written is read as
+    before, every time). A part whose names cannot be told stays in."""
+    def key(part):
+        match = re.fullmatch(re.escape(ACTIVITY_FILE) + r"\.(\d{8}-\d{6})(?:\.gz)?", Path(part).name)
+        return match.group(1) if match else None
+    index = Path(directory) / PARTS_INDEX
+    known = {}
+    try:
+        fd = os.open(index, FILE_FLAGS)
+        with os.fdopen(fd, "rb") as stream:
+            loaded = json.loads(stream.read(16 << 20))
+        if isinstance(loaded, dict) and isinstance(loaded.get("parts"), dict):
+            known = {stamp: runs for stamp, runs in loaded["parts"].items()
+                     if isinstance(stamp, str) and isinstance(runs, list) and all(isinstance(r, str) for r in runs)}
+    except (OSError, ValueError, RecursionError):
+        known = {}
+    chosen, new = [], False
+    for part in parts:
+        stamp = key(part)
+        if stamp is not None and stamp not in known:
+            names = part_names(part)
+            if names is not None:
+                known[stamp], new = sorted(names), True
+        if stamp is None or stamp not in known or run in known[stamp]:
+            chosen.append(part)
+    if new:
+        present = {key(part) for part in older_parts(directory)}
+        temporary = index.with_name(f"{index.name}.{os.getpid()}.tmp")
+        with contextlib.suppress(OSError):
+            before = os.stat(directory)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    json.dump({"version": 1, "parts": {stamp: runs for stamp, runs in sorted(known.items())
+                                                       if stamp in present}}, stream)
+                # (as old as the newest part: reading a timeline never makes its folder look written - the folders
+                # nothing was written into for long are what gc --logs-older-than removes)
+                when = max((part_written(part) for part in parts), default=0)
+                os.utime(temporary, (when, when))
+                os.replace(temporary, index)
+                os.utime(directory, ns=(before.st_atime_ns, before.st_mtime_ns))
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary)
+                raise
+    return chosen
+
+
+def part_written(path):
+    """When the older part PATH was last written (its newest record: the compression keeps the time), 0 if unknown."""
+    try:
+        return os.stat(path, follow_symlinks=False).st_mtime
+    except OSError:
+        return 0
+
+
+def older_records(parts, keep=None, needle=None, tail=0):
+    """The records KEEP wants of the timeline's older PARTS (oldest first), in time order: all of them, one part held
+    at a time (a generator); with TAIL only the last TAIL, read from the newest part back as far as needed (a
+    list)."""
+    def of(part):
+        return (record for record in part_records(part, needle) if keep is None or keep(record))
+    if not tail:
+        return (record for part in parts for record in sorted(of(part), key=lambda r: str(r.get("time"))))
+    found = []
+    for part in reversed(parts):
+        if len(found) >= tail:
+            break
+        newest = sorted(deque(of(part), maxlen=tail - len(found)), key=lambda r: str(r.get("time")))
+        found = newest + found
+    return found
+
+
+def part_holds(path, needle, chunk=1 << 20):
+    """Whether the older part PATH (compressed or not) holds the bytes NEEDLE: read as a stream, never all at once."""
+    try:
+        stream = part_stream(path)
+    except OSError:
+        return False
+    with stream:
+        tail = b""
+        try:
+            while True:
+                data = stream.read(chunk)
+                if not data:
+                    return False
+                if needle in tail + data:
+                    return True
+                tail = (tail + data)[-len(needle):]
+        except (OSError, EOFError, ValueError):
+            return False
+
+
+def run_needle(run):
+    """How a record of RUN names it in the timeline's lines."""
+    return b'"run": ' + json.dumps(run).encode()
+
+
 def runs_in(path):
-    """[{run, session, agent, first, last, events, kinds, status}] of the runs in activity.jsonl PATH."""
+    """[{run, session, agent, first, last, events, kinds, status}] of the runs in activity.jsonl PATH and its older
+    parts (rotated at its limit)."""
     runs = {}
-    for record in each_record(path):
+    path = Path(path)
+    records = (record for source in [*(part_records(part) for part in older_parts(path.parent, path.name)),
+                                     each_record(path)] for record in source)
+    for record in records:
         run = record.get("run") or "-"
         entry = runs.setdefault(run, {"run": run, "session": record.get("session"), "agent": record.get("agent"),
                                       "first": record.get("time"), "last": record.get("time"), "events": 0,
@@ -2255,7 +2554,8 @@ def running_record(run):
 
 def find_run(run):
     """The log directory whose activity.jsonl holds RUN: the running sandbox's, else one of the default
-    log directories (searched); None if none does."""
+    log directories (searched: their current timelines first, then their older parts, the newest first); None if none
+    does."""
     record = running_record(run)
     if record and isinstance(record.get("log_dir"), str):
         return Path(record["log_dir"])
@@ -2265,6 +2565,18 @@ def find_run(run):
                              key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return None
+    found = in_current(directories, needle)
+    if found is not None:
+        return found
+    for directory in directories:  # a run whose records were rotated out of the current timeline
+        if any(part_holds(part, run_needle(run)) for part in reversed(parts_with(directory, older_parts(directory),
+                                                                                  run))):
+            return directory
+    return None
+
+
+def in_current(directories, needle):
+    """The first of DIRECTORIES whose current activity.jsonl names the run NEEDLE (its JSON), or None."""
     for directory in directories:
         try:
             fd = os.open(directory / ACTIVITY_FILE, FILE_FLAGS)
@@ -2571,17 +2883,47 @@ def cli(argv, out=None):
     if a.runs:
         print_runs(runs_in(path), out, a.json)
         return 0
-    if not path.exists() and not a.follow:
+    # The older parts (the timeline rotated at its limit: 256 MiB, four days of a busy project) are read for a run -
+    # its records wherever they are -, for --since (those written since then) and for a tail the current file does
+    # not fill while it is still small (TAIL_BACK: just after a rotation it is nearly empty): then the newest older
+    # part too, never further back - a tail with a filter that matches little must not read a month (nor, with a
+    # current file of its usual size, another 256 MiB: 8 s for a --grep that finds nothing). Without any of them the
+    # current file is shown, and that there are older parts is said. Before, only a run's were read: --since 7d
+    # silently showed four days.
+    parts = older_parts(directory)
+    if since is not None:
+        parts = [part for part in parts if part_written(part) >= since]
+    if run:
+        parts = parts_with(directory, parts, run)
+    try:
+        small = os.stat(path, follow_symlinks=False).st_size < TAIL_BACK
+    except OSError:
+        small = True
+    wanted = parts if run or since is not None else parts[-1:] if a.tail and small else []
+    if not path.exists() and not wanted and not a.follow:
         print(f"sandbox-ai activity: nothing recorded in {safe(directory)} yet (the timeline is written while a "
               "sandbox with a log directory runs)", file=sys.stderr)
         return 1
+    if parts and not wanted and not a.tail:
+        print(f"sandbox-ai activity: the current timeline is shown; {len(parts)} older parts of it "
+              f"(since {safe(started_of(parts[0]))}) are read with --since TIME, --tail N or for a run",
+              file=sys.stderr)
     keep = matcher(run, session, kinds, since, a.grep)
+    needle = run_needle(run) if run else None
     position = Follow()
     records = read_records(path, keep, a.tail, position)
     records.sort(key=lambda r: str(r.get("time")))
+    shown_any = False
+    if a.tail:
+        if len(records) < a.tail and wanted:
+            records = older_records(wanted, keep, needle, a.tail - len(records)) + records
+    else:
+        for record in older_records(wanted, keep, needle):
+            show(record)
+            shown_any = True
     for record in records:
         show(record)
-    if not records and not a.json and not a.follow:
+    if not records and not shown_any and not a.json and not a.follow:
         out(module("textout").style("no events" + (" match" if kinds or since or a.grep else ""), "muted"))
     if a.follow:
         # From where the listing stopped; without a file yet, from its start once it appears.

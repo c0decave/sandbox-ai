@@ -1,4 +1,4 @@
-"""Live approvals: a question nobody answered is no decision (refused, a short pause, then asked again), the
+"""Live approvals: a question nobody answered is no decision (its try fails, the question stays open for the next), the
 supervisor's control op "decide" (list, allow, deny, forget a run's remembered decision; held to the security mode's
 and the policy's caps, the kill switch and the control socket's peers), `sandbox-ai approvals blocked|decided|
 ask-again` and allow|deny on an answered question, and "Allow always" for a request as an exception rule in a ruleset
@@ -59,32 +59,26 @@ def answer(directory, decision, scope, count=1):
 
 # --- a question nobody answered -----------------------------------------------------------------------------------
 
-def test_an_unanswered_question_is_refused_paused_and_then_asked_again(tmp_path):
-    made = broker(tmp_path, pause=0.6)
+def test_an_unanswered_question_fails_its_try_and_stays_open_for_the_next(tmp_path):
+    made = broker(tmp_path)
     first = made.ask("http", HTTP)
-    assert first["decision"] == "deny" and first["scope"] == "once" and first["reason"] == "no answer within 0.2 s"
+    assert first["decision"] == "deny" and first["scope"] == "once" and first["reason"] == rt.NOT_ANSWERED
     question = json.loads(next((tmp_path / "approvals").glob("*.json")).read_text())
     assert first["question"] == question["id"]
-    # Why, in plain words, and what to do: the ruleset and its rule, the pause, the page and the command; and that
-    # the network settings do not change what a ruleset decides.
+    # Why, in plain words, and what to do: the ruleset and its rule, that it stays open, the page and the command;
+    # and that the network settings do not change what a ruleset decides.
     assert "the ruleset --rules tor-researcher.rules.json (rule writes) asks before it" in first["why"]
-    assert "then asked again" in first["why"] and f"sandbox-ai approvals allow {question['id']} --scope run" in first["why"]
-    assert "Approvals page (Blocked)" in first["why"] and "does not change what a ruleset decides" in first["why"]
-    done = json.loads((tmp_path / "approvals" / f"{question['id']}.done").read_text())
-    assert done["reason"] == "no answer within 0.2 s" and done["question"] == question["id"]
-    # During the pause: refused at once, without a new question (the agent does not wait the timeout again).
-    started = time.monotonic()
-    again = made.ask("http", HTTP)
-    assert time.monotonic() - started < 0.15 and again["decision"] == "deny"
-    assert again["reason"].startswith(f"no answer within 0.2 s to question {question['id']}; refused without asking")
-    assert len(list((tmp_path / "approvals").glob("*.json"))) == 1
+    assert "stays open" in first["why"] and f"sandbox-ai approvals allow {question['id']}" in first["why"]
+    assert "Approvals page" in first["why"] and "does not change what a ruleset decides" in first["why"]
+    assert not (tmp_path / "approvals" / f"{question['id']}.done").exists(), "no decision: still answerable"
     assert not made.decided, "an unanswered question is no decision for the run"
     # The refusal the agent gets says the same (the proxy's text).
-    assert "then asked again" in rt.not_approved(again, HTTP["reason"])
-    # After the pause: asked again.
-    time.sleep(0.65)
-    assert made.ask("http", HTTP, wait=False) is None
-    assert len(list((tmp_path / "approvals").glob("*.json"))) == 2
+    assert "the human may still allow it; retry later" in rt.not_approved(first, HTTP["reason"])
+    # The next try is not refused at once: it waits for the same question again (no second one).
+    started = time.monotonic()
+    again = made.ask("http", HTTP)
+    assert time.monotonic() - started >= 0.15 and again["question"] == question["id"]
+    assert len(list((tmp_path / "approvals").glob("*.json"))) == 1
 
 
 def test_the_humans_decisions_keep_their_scope_and_say_how_to_take_them_back(tmp_path):
@@ -108,17 +102,6 @@ def test_the_humans_decisions_keep_their_scope_and_say_how_to_take_them_back(tmp
     assert made.ask("connect", CONNECT)["decision"] == "allow" and "why" not in made.ask("connect", CONNECT)
 
 
-def test_an_mcp_server_of_its_own_pauses_an_unanswered_question_too(tmp_path):
-    gateway = rt.McpGateway({"server": "files", "approvals": str(tmp_path), "timeout": 1}, out=open(os.devnull, "w"))
-    verdict = {"rule": "deletes", "ruleset": "rules.json", "reason": "asked"}
-    first = gateway.ask("delete_file", "{}", verdict)
-    assert first["reason"] == "no answer within 1 s"
-    started = time.monotonic()
-    again = gateway.ask("delete_file", "{}", verdict)
-    assert time.monotonic() - started < 0.15 and "refused without asking for now" in again["reason"]
-    assert not gateway.decided
-
-
 # --- the control op decide ----------------------------------------------------------------------------------------
 
 def unanswered(made, kind, details):
@@ -127,27 +110,28 @@ def unanswered(made, kind, details):
 
 
 def test_decide_lists_allows_denies_and_forgets(tmp_path):
-    made = broker(tmp_path, pause=60)
+    made = broker(tmp_path)
     ident = unanswered(made, "http", HTTP)
     listed = made.control({"op": "decide"})
-    assert listed["max_scope"] == "always" and listed["pause"] == 60
-    assert [(e["question"], e["scope"], e["decision"]) for e in listed["decided"]] == [(ident, "pause", "deny")]
-    assert listed["decided"][0]["details"]["url"] == HTTP["url"] and listed["decided"][0]["seconds_left"] > 50
-    # Allow for the run: the pause is over, the next request passes without a question.
+    assert listed["max_scope"] == "always" and listed["timeout"] == 0.2
+    assert [(e["question"], e["scope"], e["decision"]) for e in listed["decided"]] == [(ident, "timeout", None)]
+    assert listed["decided"][0]["details"]["url"] == HTTP["url"]
+    # Allow for the run: the next request passes without a question; the timed-out one is answered by it.
     result = made.control({"op": "decide", "action": "allow", "question": ident})
-    assert result["decided"]["decision"] == "allow" and result["was"]["reason"].startswith("no answer")
+    assert result["decided"]["decision"] == "allow" and result["was"] is None
     assert made.ask("http", HTTP)["decision"] == "allow"
     assert len(list(made.directory.glob("*.json"))) == 1
+    assert json.loads((made.directory / f"{ident}.done").read_text())["decision"] == "allow"
     # Deny for the run.
     made.control({"op": "decide", "action": "deny", "question": ident})
     assert made.ask("http", HTTP)["decision"] == "deny"
     assert [e["decision"] for e in made.control({"op": "decide"})["decided"]] == ["deny"]
     # Forget: asked again.
     assert made.control({"op": "decide", "action": "forget", "question": ident})["forgot"] is True
-    assert made.ask("http", HTTP)["reason"].startswith("no answer") and len(list(made.directory.glob("*.json"))) == 2
+    assert made.ask("http", HTTP)["reason"] == rt.NOT_ANSWERED and len(list(made.directory.glob("*.json"))) == 2
     second = json.loads(sorted(made.directory.glob("*.json"))[-1].read_text())["id"]
-    assert made.control({"op": "decide", "action": "forget", "question": second})["forgot"] is True
-    assert made.control({"op": "decide", "action": "forget", "question": second})["forgot"] is False
+    forgot = made.control({"op": "decide", "action": "forget", "question": second})
+    assert forgot["forgot"] is False and "still open" in forgot["notes"][0]
 
 
 def test_a_remembered_request_is_not_another_one_whose_fields_join_the_same():
@@ -335,7 +319,7 @@ def live(tmp_path, monkeypatch):
                                 "project_config": None}}
     (directory / "run.json").write_text(json.dumps(record))
     made = rt.ApprovalBroker(directory / "approvals", rt.RuntimeNetwork({}, None, lambda s: None), timeout=0.2,
-                             poll=0.02, pause=60)
+                             poll=0.02)
     stop, thread = serve(directory, made)
     yield {"directory": directory, "broker": made, "logs": logs, "record": {**record, "directory": str(directory)}}
     stop.set()
@@ -353,11 +337,16 @@ def test_approvals_allow_deny_ask_again_and_decided_on_an_answered_question(live
     made = live["broker"]
     ident = unanswered(made, "http", HTTP)
     status, lines = cli("decided", "--json")
-    assert status == 0 and json.loads("\n".join(lines))[0]["scope"] == "pause"
-    # Allowed "once" is no answer to a question that is gone: said what to do instead.
-    status, _ = cli("allow", ident)
+    assert status == 0 and json.loads("\n".join(lines))[0]["scope"] == "timeout"
+    # A question that timed out is still open: allowed once now, its request's next try passes.
+    status, lines = cli("allow", ident)
+    assert status == 0, capsys.readouterr().err
+    assert wait_for(lambda: (live["directory"] / "approvals" / f"{ident}.done").exists())
+    assert made.ask("http", HTTP)["decision"] == "allow"
+    # Answered: "once" is no answer to a question that is gone - said what to do instead.
+    status, _ = cli("allow", ident, "--scope", "once")
     assert status == 1 and "--scope run" in capsys.readouterr().err
-    status, lines = cli("allow", ident, "--scope", "run")
+    status, lines = cli("allow", ident)  # (an answered one: for the run by default)
     assert status == 0, capsys.readouterr().err
     assert lines[0].startswith("claude-1: allowed for the rest of the run: POST https://registry.npmjs.org/")
     assert made.ask("http", HTTP)["decision"] == "allow"
@@ -376,6 +365,11 @@ def test_approvals_refuses_an_allow_for_the_run_where_the_mode_approves_only_onc
     (live["directory"] / "run.json").write_text(json.dumps({**record, "mode": {"name": "paranoid",
                                                                                 "approval_scope": "once"}}))
     ident = unanswered(live["broker"], "http", HTTP)
+    # Still open (it timed out): answered, the run's mode caps the allow to once, and says so.
+    status, lines = cli("allow", ident, "--scope", "run")
+    assert status == 0 and "approves at most for once" in "\n".join(lines)
+    assert wait_for(lambda: (live["directory"] / "approvals" / f"{ident}.done").exists())
+    # Answered: no allow for the run afterwards.
     status, _ = cli("allow", ident, "--scope", "run")
     assert status == 1 and "approves at most once" in capsys.readouterr().err
 
@@ -611,11 +605,11 @@ def test_allowing_an_answered_lookup_again_opens_only_its_public_addresses(live,
     included - while an answer to the open question opens only its public ones (a name the agent controls may point
     anywhere). Now the same holds: only public addresses, none at all refused; "always" is remembered as an answered
     lookup is (approved.json, public addresses at every later start), never as the project's --allow-host."""
-    question = {"id": "1700000000-1-7", "kind": "dns", "name": "rebind.evil.example"}
+    question = {"id": "1700000000-1-7", "kind": "dns", "name": "rebind.evil.example.org"}
     calls = []
 
     def fake_main(argv, out=print, resolver=None, **kwargs):
-        calls.append((argv, resolver(["rebind.evil.example"]) if resolver else None))
+        calls.append((argv, resolver(["rebind.evil.example.org"]) if resolver else None))
         return 0
     monkeypatch.setattr(net, "main", fake_main)
     monkeypatch.setattr(ap, "redecide", lambda *args, **kwargs: None)
@@ -627,10 +621,29 @@ def test_allowing_an_answered_lookup_again_opens_only_its_public_addresses(live,
     assert calls == []
     monkeypatch.setattr(ap, "resolve", lambda name: ["192.168.1.10", "93.184.216.34"])
     assert ap.decide_again(("claude-1", live["record"], question), "allow", "run", out=lambda line: None) == 0
-    assert calls == [(["allow", "claude-1", "--allow-host", "rebind.evil.example"],
-                      {"rebind.evil.example": ["93.184.216.34"]})]
+    assert calls == [(["allow", "claude-1", "--allow-host", "rebind.evil.example.org"],
+                      {"rebind.evil.example.org": ["93.184.216.34"]})]
     calls.clear()
     assert ap.decide_again(("claude-1", live["record"], question), "allow", "always", out=lambda line: None) == 0
-    assert calls == [(["allow", "claude-1", "--allow-host", "rebind.evil.example"],
-                      {"rebind.evil.example": ["93.184.216.34"]})]
-    assert ap.approved_for(live["record"]["workspace"])["hosts"] == ["rebind.evil.example"]
+    assert calls == [(["allow", "claude-1", "--allow-host", "rebind.evil.example.org"],
+                      {"rebind.evil.example.org": ["93.184.216.34"]})]
+    assert ap.approved_for(live["record"]["workspace"])["hosts"] == ["rebind.evil.example.org"]
+
+
+def test_an_answered_question_allowed_always_is_listed_as_always(live, monkeypatch):
+    """Review 24h B: `approvals allow ID --scope always` on an answered lookup or connection keeps it for the project
+    (approved.json, the project's --allow-tcp), but the lists (approvals list --state allowed, the app's and the
+    web's Allowed tab) said scope "run" - mark_changed wrote "run" whatever was allowed."""
+    question = {"id": "1700000000-1-8", "kind": "dns", "name": "api.example.org"}
+    record = live["record"]
+    done = Path(record["directory"]) / "approvals" / f"{question['id']}.done"
+    done.parent.mkdir(parents=True, exist_ok=True)
+    done.write_text(json.dumps({"decision": "deny", "reason": "answered"}))
+    monkeypatch.setattr(net, "main", lambda argv, out=print, resolver=None, **kwargs: 0)
+    monkeypatch.setattr(ap, "redecide", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ap, "policy_allows_host", lambda name: True)
+    monkeypatch.setattr(ap, "resolve", lambda name: ["93.184.216.34"])
+    assert ap.decide_again(("claude-1", record, question), "allow", "always", out=lambda line: None) == 0
+    assert json.loads(done.read_text())["scope"] == "always"
+    assert ap.decide_again(("claude-1", record, question), "allow", "run", out=lambda line: None) == 0
+    assert json.loads(done.read_text())["scope"] == "run"

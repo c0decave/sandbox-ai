@@ -17,7 +17,7 @@ import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6 import QtCore  # noqa: E402
-from sandbox_ai_app import backend, board as B, i18n, theme, widgets  # noqa: E402
+from sandbox_ai_app import backend, board as B, i18n, pages, theme, widgets  # noqa: E402
 from conftest import read_now, settle_files  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
@@ -422,9 +422,11 @@ def test_wizard_end_to_end_to_the_board(qapp, env, monkeypatch, wait, agent, eng
         assert wizard.currentPage() is wizard.network_page
         net = wizard.network_page
         net.presets["--allow-pypi"].setChecked(True)
-        net.hosts.setPlainText("\n".join([*net.hosts.values(), "docs.example.org"]))  # added below what is there
+        # (one field of kinds since 2026-11-19, list_fields: added to what is there)
+        assert net.lists.add("docs.example.org", key="--allow-host")
         if engine == "podman":
-            net.ports.setPlainText("5432")
+            net.lists.choose_kind("--allow-host-port")
+            net.lists.value_box.setEditText("5432")  # typed, not added: Next takes it
         wizard.next()
         assert wizard.currentPage() is wizard.proxy_page
         wizard.proxy_page.rules.add_row("api.github.com", "GET,HEAD", "/**")
@@ -442,8 +444,8 @@ def test_wizard_end_to_end_to_the_board(qapp, env, monkeypatch, wait, agent, eng
         assert typed.echoMode() == QtWidgets.QLineEdit.EchoMode.Password
         typed.show_toggle.setChecked(True)
         git.identity.setChecked(True)
-        wizard.next()
-        assert wizard.currentPage() is wizard.mcp_page, git.note.text()
+        wizard.next()  # the typed token is kept in the background; the wizard goes on by itself once it is
+        assert wait_until(qapp, lambda: wizard.currentPage() is wizard.mcp_page, 60), git.note.text()
         assert git.token_edit(1).text() != typed_token, "the typed token is no longer held in the page"
         servers = wizard.mcp_page.servers
         names = [servers.item(i).data(QtCore.Qt.ItemDataRole.UserRole) for i in range(servers.count())]
@@ -480,9 +482,10 @@ def test_wizard_end_to_end_to_the_board(qapp, env, monkeypatch, wait, agent, eng
         assert not any(typed_token in text for text in seen["findings"] + [seen["command"]])
         assert not [t for t in seen["findings"] if t.startswith("✘")]
         options = document["options"]
-        token_file = next(v for v in options if v.startswith("https://gitlab.com=")).partition("=")[2]
-        assert Path(token_file).read_text().strip() == typed_token and not token_file.startswith(str(project))
-        assert oct(os.stat(token_file).st_mode & 0o777) == "0o600"
+        # a typed token is kept as a secret of sandbox-ai since 0.1.98 (never a token file): the project names it
+        kept = next(v for v in options if v.startswith("https://gitlab.com=")).partition("=")[2]
+        assert kept == "GIT_TOKEN_GITLAB_COM" and options[options.index(f"https://gitlab.com={kept}") - 1] == \
+            "--git-token-secret"
         assert document["agent"] == agent
         expected = {"--allow-pypi", "--allow-host", "docs.example.org", "--allow-http", "api.github.com GET,HEAD /**",
                     "--privacy-check", "always", "--git-token-secret", "https://github.com=GH_PUSH", "--git-identity",
@@ -555,13 +558,14 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         entry, text = tab("session:work")
         assert entry["state"] == "running" and text == f"work ({agent}, {engine})"
         assert tab(f"run:{agent}-project-c11")[0] is not None, "a run started elsewhere gets its tab"
-        assert actions() == {"attach-app": True, "pause": True, "resume": False, "stop": True, "show": True,
+        assert actions() == {"attach-app": True, "shell": True, "pause": True, "resume": False, "stop": True,
+                             "files": True, "show": True,
                              "close": True, "close-others": True}
         row = widgets.find_row(page.table, "session:work")
         page.table.selectRow(row)
         assert page.table.item(row, 0).text() == i18n.tr("Session")
         buttons = page.session_buttons
-        assert [a for a, b in buttons.items() if b.isEnabled()] == ["attach", "attach-app", "pause"]
+        assert [a for a, b in buttons.items() if b.isEnabled()] == ["attach", "attach-app", "shell", "pause"]
 
         def done(*command):
             assert wait(lambda: sai.run.argv(*command) and not widgets.busy(page), 10), command
@@ -572,6 +576,7 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         assert tab("session:work")[0]["state"] == "paused"
         assert [a for a, b in buttons.items() if b.isEnabled()] == ["resume"]
         assert actions()["resume"] and not actions()["pause"] and not actions()["attach-app"] and actions()["stop"]
+        assert not actions()["shell"]
         page.session("resume")
         done("session", "resume")
         refresh("running")
@@ -582,6 +587,9 @@ def test_session_lifecycle_and_tab_states(qapp, env, monkeypatch, wait, agent, e
         assert w.opened[-1][1] == i18n.tr("session {name}", name="work")
         page.session("attach")
         assert w.started[-1][0] == "term" and w.started[-1][4:] == ["session", "attach", "work"]
+        # Shell: a terminal tab of its own running sandbox-ai shell NAME (the agent's rules, in the sandbox).
+        page.session("shell")
+        assert w.opened[-1][0][3:] == ["shell", "work"] and w.opened[-1][1] == i18n.tr("shell: {name}", name="work")
         # Stop: asked first, then sandbox-ai session stop; the tab shows it stopped, Resume and Delete remain, until
         # it closes by itself AUTO_CLOSE_MS later (here out of reach: a loaded machine takes longer than 3 s for the
         # steps below; the close is called at the end).
@@ -633,11 +641,13 @@ QUESTIONS = {
     "mcp": ({"server": "fetch", "tool": "fetch_page", "arguments": {"url": "https://example.org"}, "rule": "ask-fetch",
              "ruleset": "research"}, ["fetch_page", "fetch"]),
 }
-# (kind, decision, scope chosen, the agent of the run): every kind once, for the run and always (a URL has no
-# scope: it is opened once), a deny and a block.
+# (kind, decision, scope chosen, the agent of the run): every kind once, for the run and always - each its own
+# button (a URL has no scope: it is opened once; a push or a tool call is allowed at most for the run, its "always"
+# button is off), a deny and a block.
 APPROVAL_MATRIX = [(kind, "allow", scope, AGENTS[i % 3])
                    for i, (kind, scope) in enumerate((k, s) for k in QUESTIONS for s in ("once", "run", "always")
-                                                     if k != "browser" or s == "once")]
+                                                     if (k != "browser" or s == "once")
+                                                     and (k not in ("push", "mcp") or s != "always"))]
 APPROVAL_MATRIX += [("push", "deny", "run", "codex"), ("dns", "block", "always", "opencode")]
 
 
@@ -667,17 +677,15 @@ def test_an_approval_of_each_kind_and_scope(window, env, monkeypatch, wait, kind
     assert notes[0][0] == i18n.tr("sandbox-ai asks: {sandbox}", sandbox=sandbox)
     assert w.nav_item("approvals").text() == i18n.tr("Approvals") + "  (1)"
     assert page.url.isHidden() == (kind != "browser")
-    assert page.scope.isEnabled() == (kind != "browser")
+    # One button per scope: a page to open is allowed once; a push or a tool call at most for the run.
+    assert page.allow_run_button.isEnabled() == (kind != "browser")
+    assert page.allow_always_button.isEnabled() == (kind in ("connect", "dns"))
     assert page.block_button.isEnabled() == (kind in ("connect", "dns"))
-    # The answer: Allow asks first (Cancel the default for "always"), Block always too; Deny takes one click.
+    # The answer: one click each, "always" too (user 2026-11-17: no second window after a click; Undo instead).
     shown = len(widgets.SHOWN)
-    page.scope.setCurrentIndex(page.scope.findData(scope))
     if decision == "allow":
-        page.answer("allow")
-        title, text, _ = widgets.SHOWN[shown]
-        assert title == i18n.tr("Allow this request?") and sandbox in text
-        assert (i18n.tr("Scope: {scope}", scope=page.scope.itemText(page.scope.findData(scope))) in text) == \
-            (kind != "browser")
+        {"once": page.allow_button, "run": page.allow_run_button, "always": page.allow_always_button}[scope].click()
+        assert len(widgets.SHOWN) == shown, "no question first"
     elif decision == "deny":
         page.answer("deny")
         assert len(widgets.SHOWN) == shown, "no question for a deny"
@@ -688,8 +696,7 @@ def test_an_approval_of_each_kind_and_scope(window, env, monkeypatch, wait, kind
     sent = {"allow": ("allow", scope), "deny": ("deny", "run"),  # Deny is for the run (Deny once: once)
             "block": ("deny", "always")}[decision]
     assert w.commands.argv("approvals") == [["approvals", sent[0], ident, "--scope", sent[1]]], "answered once"
-    assert page.message.text() == f"{run}: {decision} ({scope})"
-    assert page.scope.currentData() == "once", "a wider scope is for one answer only"
+    assert page.message.text() == pages.answered_note(*sent), "what was done, in a few words (not the question again)"
     # "Always" for a name or an address is listed per project (sandbox-ai remembered it), and can be forgotten.
     if sent[1] == "always" and kind in ("connect", "dns"):
         approvals = sai.module("approvals")
@@ -902,7 +909,8 @@ def changed_settings(env):
             "default_template": "research", "board_grid": 40, "board_confirm_remove": False, "auto_tabs": False, "guide_nodes": False,
             "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True,
             "show_flags": True, "login_links": "system", "copy_on_select": True, "paste_warn": False,
-            "terminal_osc52": "off", "short_notices": False}
+            "terminal_osc52": "off", "short_notices": False, "explanations": True,
+            "button_texts": True, "device_signin": "app"}
 
 
 def field_value(widget):
@@ -983,6 +991,7 @@ def test_every_setting_round_trips_through_a_restart(qapp, env, monkeypatch, age
         assert w.opened == [] and w.started[-1][-2:] == ["build", "all"]
         from sandbox_ai_app import help_view
         assert not help_view.buttons_shown() and not w.page_help.isVisibleTo(w), "the (?)s stay off after a restart"
+        assert widgets.explanations_shown(), "the info texts stay on after a restart"
     finally:
         close_window(w)
         i18n.set_language("en")

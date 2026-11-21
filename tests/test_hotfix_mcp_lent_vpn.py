@@ -500,8 +500,8 @@ def test_the_lent_tunnels_folder_is_among_the_private_paths_no_sandbox_may_see(h
     profile("wg", "wireguard")
     folder = v.lend_dir("codex-1a2b3c4d")
     assert any(place in folder.parents for place in v.private_paths())
-    with pytest.raises(ValueError, match="where the VPN profiles keep"):
-        v.check_paths([folder], "--mount")
+    said = v.check_paths([folder], "--mount", warn=lambda _text: None)  # you decide: given, said
+    assert said and "where the VPN profiles keep" in said[0]
     with pytest.raises(ValueError, match="not a run's name"):
         v.lend_dir("../escape")
     assert v.lend_mount("codex-1", lender=True) == ["--mount", f"type=bind,src={v.lend_dir('codex-1')}/socket,dst="

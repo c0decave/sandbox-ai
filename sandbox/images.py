@@ -9,12 +9,13 @@
                      [--fragment FILE|-] [--clear-fragment] [--show] [--json]
   sandbox-ai images check AGENT|VARIANT [--fragment FILE|-] [--json]
                                                          validate the extension, show the final Containerfile
-  sandbox-ai images recipe NAME --from AGENT [--as V]  a variant with a ready extension (media: ffmpeg,
+  sandbox-ai images recipe NAME --from AGENT [--as V]    a variant with a ready extension (media: ffmpeg,
                                                          PulseAudio, espeak-ng, Piper ... for --audio virtual and
-                                                         videos; dev: Podman
-                                                         and tools for developing sandbox-ai, with
-                                                         --nested-containers; hyperframes, playwright: the CLIs
-                                                         of the built-in kits' skills, pinned by lockfiles)
+                                                         videos; dev: Podman and tools for developing sandbox-ai,
+                                                         with --nested-containers; hyperframes, playwright: the
+                                                         CLIs of the built-in kits' skills, pinned by lockfiles;
+                                                         android: adb, apktool, smali, jadx and Frida for the
+                                                         preset android-debugging)
   sandbox-ai images new NAME --from AGENT [--empty]      a variant: localhost/AGENT-sandbox-NAME, started with
                                                          --image-variant NAME; each agent has its own (the recipe
                                                          media for claude and for dsh); where a name is a variant
@@ -23,7 +24,8 @@
   sandbox-ai images history [AGENT|VARIANT] [--json]     changes and builds of the extensions
   sandbox-ai images new NAME --from AGENT --base IMAGE   a variant built on one of your images (Debian 12) instead
                                                          of the agent's own base: the agent's layers on top of it
-  sandbox-ai images pull REFERENCE [--as NAME] [--replace]  one of your images from a registry (Docker Hub, quay.io,
+  sandbox-ai images pull REFERENCE [--as NAME] [--replace]
+                                                         one of your images from a registry (Docker Hub, quay.io,
                                                          ghcr.io, ...): pulled once, now, and pinned by its digest
   sandbox-ai images build-image NAME --file CONTAINERFILE [--context DIR] [--replace] [--trust-agent-written]
                              [--build-network]
@@ -36,6 +38,8 @@
                                                          (sandbox/service-images; showcase-web: nginx for the
                                                          showcase presets), unchecked like yours
   sandbox-ai images list [--json]                        your images, each marked UNCHECKED (nobody reviewed them)
+  sandbox-ai images templates [--json]                   sandbox-ai's own Containerfiles for services (--builtin),
+                                                         each with the images of yours built from it
   sandbox-ai images os AGENT|VARIANT|IMAGE [--json]      its distribution and the package manager of its OS packages
   sandbox-ai images search AGENT|VARIANT|IMAGE [QUERY] [--refresh] [--limit N] [--json]
                                                          search the OS packages of its distribution: the package
@@ -95,7 +99,7 @@ def launch_log():
 
 
 LOG = launch_log()
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 LABEL = "sandbox-ai.agent-version"
 HASH_LABEL = "sandbox-ai.extension-hash"
 BASE_LABEL = "sandbox-ai.base-id"
@@ -412,8 +416,8 @@ def variant_dir(name, agent):
     return own
 
 
-BUILD_TARGETS = ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose", "all", "team", "cairn", "vpn", "tor",
-                 "browser")  # what `sandbox-ai build NAME` means
+BUILD_TARGETS = ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi",
+                 "all", "team", "cairn", "vpn", "tor", "browser")  # what `sandbox-ai build NAME` means
 
 
 def build_command(name):
@@ -1331,6 +1335,77 @@ DJANGO_FRAGMENT = (
     "    && ln -s /opt/django/node_modules/.bin/tsc /usr/local/bin/tsc\n")
 
 
+ANDROID_FRAGMENT = r"""# Android debugging tools (the recipe android). Everything that is not a Debian package of this release is a
+# pinned release file with its SHA-256, fetched when the image is built and never at run time:
+#   apktool 3.0.3 (2026-07-20), with its own aapt2 2.20 and its android-framework.jar taken out of the jar
+#   baksmali and smali 3.0.10 (2026-08-24, the release artifacts of google/smali commit 7a325fc45dc0)
+#   jadx 1.5.6 (2026-07-10), the headless CLI
+#   Frida 17.25.2 (2026-11-02): the Python bindings from /opt/frida/requirements.txt (pip --require-hashes) and
+#   frida-server and frida-gadget for every Android ABI, kept as published (xz) in /opt/frida/android/<abi>
+# The same versions as the MCP servers smali and frida of sandbox-ai-mcp, so an agent sees the same tools either way.
+ADD --checksum=sha256:dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423 \
+    https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar /opt/android/apktool.jar
+ADD --checksum=sha256:37ae4a41a8886e15c20b8362fa4250f96bbdb55e1a608199ad8b5dff068b588f \
+    https://github.com/baksmali/smali/releases/download/3.0.10/baksmali-3.0.10-fat-release.jar /opt/android/baksmali.jar
+ADD --checksum=sha256:32fa0e88a6c397b3922201adf5f3e534fbaed5a663c71d0c558c3ddce0af844a \
+    https://github.com/baksmali/smali/releases/download/3.0.10/smali-3.0.10-fat-release.jar /opt/android/smali.jar
+ADD --checksum=sha256:545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974 \
+    https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip /opt/android/jadx.zip
+ADD --checksum=sha256:7fb906385e3dd99ff11dc3068ee2441cf58ecbb8cf13fbd457db62e0c03d3640 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-server-17.25.2-android-arm.xz /opt/frida/android/arm/frida-server-17.25.2-android-arm.xz
+ADD --checksum=sha256:7825e2949268f4a23d38f8aaa3690e3659fd5c730e8062d4913ea0b308b933e1 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-gadget-17.25.2-android-arm.so.xz /opt/frida/android/arm/frida-gadget-17.25.2-android-arm.so.xz
+ADD --checksum=sha256:08d7b7f02256621c9089cecd6495a5eb43861bf560a7ed86ad376e75d16a1fb6 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-server-17.25.2-android-arm64.xz /opt/frida/android/arm64/frida-server-17.25.2-android-arm64.xz
+ADD --checksum=sha256:8c527f7844932ef0b66d99b38cc7191380e52907ca43c82f2acb6b7801945798 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-gadget-17.25.2-android-arm64.so.xz /opt/frida/android/arm64/frida-gadget-17.25.2-android-arm64.so.xz
+ADD --checksum=sha256:9957c81b3c60fbb48774814ea17136efa47f0da0aaac518022d097db41b9e1ba \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-server-17.25.2-android-x86.xz /opt/frida/android/x86/frida-server-17.25.2-android-x86.xz
+ADD --checksum=sha256:bae97edf0bef867e550a1cb84775edb3461c0bf170138f587a5a668b69d5f2f6 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-gadget-17.25.2-android-x86.so.xz /opt/frida/android/x86/frida-gadget-17.25.2-android-x86.so.xz
+ADD --checksum=sha256:ee675076d25599dd55c3b080ccf61c02b44d00653a06db2b0e2a2149ef69dad1 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-server-17.25.2-android-x86_64.xz /opt/frida/android/x86_64/frida-server-17.25.2-android-x86_64.xz
+ADD --checksum=sha256:2924dd5ac38b33065223ac747712ee5c83a41d1a8a7fbbc3b292e8600e826a27 \
+    https://github.com/frida/frida/releases/download/17.25.2/frida-gadget-17.25.2-android-x86_64.so.xz /opt/frida/android/x86_64/frida-gadget-17.25.2-android-x86_64.so.xz
+# apktool's own aapt2 and framework out of its jar (apktool would unpack and chmod +x them at run time, and its
+# frame path would be written then: both happen here instead), the smali and jadx launchers, and Frida's bindings in
+# a venv of their own. apksigner is Debian's jar, started with the headless JRE (its package would pull in an X11
+# JRE through default-jre). Nothing of this is setuid, and nothing fetches anything when the agent runs.
+RUN cd /opt/android \
+    && unzip -q -j apktool.jar prebuilt/linux/aapt2 prebuilt/android-framework.jar \
+    && mkdir -p framework \
+    && mv android-framework.jar framework/1.apk \
+    && echo "df312db814c018019b2b79a993b041b738d7b76f4a8f28da25bc874a026368cc  aapt2" | sha256sum --check --strict \
+    && echo "5dd984016ed5a5eb0eef866e2c6e8cd352e1427828ec23adb18005cf5648f3d7  framework/1.apk" \
+       | sha256sum --check --strict \
+    && chmod 0755 aapt2 \
+    && unzip -q jadx.zip -d jadx \
+    && echo "fe3e12c45acf75f92369685fd02d1d7a7323385dc725680a9b98a0dac0ea554b  jadx/lib/jadx-1.5.6-all.jar" \
+       | sha256sum --check --strict \
+    && rm -f jadx.zip \
+    && printf '#!/bin/sh\nexec java -jar /opt/android/apktool.jar --frame-path /opt/android/framework --aapt /opt/android/aapt2 "$@"\n' \
+       > /usr/local/bin/apktool \
+    && printf '#!/bin/sh\nexec java -jar /opt/android/baksmali.jar "$@"\n' > /usr/local/bin/baksmali \
+    && printf '#!/bin/sh\nexec java -jar /opt/android/smali.jar "$@"\n' > /usr/local/bin/smali \
+    && printf '#!/bin/sh\nexec java -cp /usr/share/java/apksigner.jar:/usr/share/java/apksig.jar com.android.apksigner.ApkSignerTool "$@"\n' \
+       > /usr/local/bin/apksigner \
+    && chmod 0755 /usr/local/bin/apktool /usr/local/bin/baksmali /usr/local/bin/smali /usr/local/bin/apksigner \
+    && ln -s /opt/android/aapt2 /usr/local/bin/aapt2 \
+    && ln -s /opt/android/jadx/bin/jadx /usr/local/bin/jadx \
+    && ln -s /opt/android/jadx/bin/jadx-gui /usr/local/bin/jadx-gui \
+    && python3 -m venv /opt/frida/venv \
+    && /opt/frida/venv/bin/pip install --no-cache-dir --require-hashes --no-deps --only-binary :all: \
+       -r /opt/frida/requirements.txt \
+    && ln -s /opt/frida/venv/bin/python3 /usr/local/bin/frida-python \
+    && chmod -R a-x,a+r /opt/frida/android \
+    && apktool --version \
+    && baksmali --version \
+    && smali --version \
+    && jadx --version \
+    && apksigner --version \
+    && /opt/frida/venv/bin/python -c "import frida; print('frida', frida.__version__)"
+"""
+
 # Ready extensions for a purpose: `sandbox-ai images recipe NAME --from AGENT` makes the variant NAME with them.
 RECIPES = {
     "media": {"description": "sound, video and speech: ffmpeg, PulseAudio (for --audio virtual), SoX, espeak-ng, "
@@ -1367,6 +1442,19 @@ RECIPES = {
                    "files": [("playwright/package.json", "/opt/playwright/package.json", "0644"),
                              ("playwright/package-lock.json", "/opt/playwright/package-lock.json", "0644")],
                    "fragment": PLAYWRIGHT_FRAGMENT},
+    # Android debugging: the device tools of Debian's release, and the analysis tools pinned by their SHA-256 (the
+    # versions sandbox-ai-mcp's smali and frida servers use). Start the sandbox with --allow-host-port 5037 to reach
+    # an adb server on this host, and give it the device with --device where you hand one over directly.
+    "android": {"description": "for Android debugging (the preset android-debugging): adb and fastboot, aapt, "
+                               "zipalign and apksigner from Debian, apktool 3.0.3 with its own aapt2, baksmali and "
+                               "smali 3.0.10, jadx 1.5.6 and Frida 17.25.2's Python bindings - each pinned by its "
+                               "SHA-256 - with frida-server and frida-gadget for every Android ABI in "
+                               "/opt/frida/android (about 140 MB, as published); frida-tools is not included "
+                               "(sandbox/recipes/android/requirements.txt says why)",
+                "apt": ["adb", "fastboot", "aapt", "zipalign", "libapksig-java", "android-sdk-platform-tools-common",
+                        "default-jre-headless", "unzip", "xz-utils", "python3-venv", "sqlite3"],
+                "files": [("android/requirements.txt", "/opt/frida/requirements.txt", "0644")],
+                "fragment": ANDROID_FRAGMENT},
     # The development image of the showcase preset showcase-full-stack: Python, JavaScript and Django on the agent's
     # own Python 3.11 and Node.js, from sandbox-ai's lockfiles (sandbox/recipes/django), psql for the --service db.
     "django": {"description": "for Python and JavaScript web development with Django: Django 5.2.18 LTS and psycopg "
@@ -1881,17 +1969,28 @@ def show(description, out):
         out(f"  {format_finding(item)}")
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def main(argv, out=print, run=subprocess.run, stdin=None):
     parser = argparse.ArgumentParser(prog="sandbox-ai images", description=__doc__.split("\n\n")[0],
-                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     formatter_class=help_style,
                                      epilog="\n\n".join(__doc__.split("\n\n")[1:]))
-    parser.add_argument("-j", "--json", action="store_true")
-    parser.add_argument("-pu", "--podman-url")
+    parser.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    parser.add_argument("-pu", "--podman-url", help="the URL of the Podman API socket to use instead of the default")
     sub = parser.add_subparsers(dest="command", metavar="{packages,extend,check,new,remove,history,recipe,pull,"
                                                         "build-image,list,os,search,derive}")
     listing = sub.add_parser("packages", help="what an image holds")
     listing.add_argument("agent", metavar="AGENT|VARIANT")
-    listing.add_argument("-j", "--json", action="store_true", dest="json_sub")
+    listing.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
     ext = sub.add_parser("extend", help="change the extension of an agent's image or of a variant")
     ext.add_argument("target", metavar="AGENT|VARIANT")
     for kind, what in (("apt", "package of the image's distribution (Debian 12: apt-get; --add-os and --add-apt are "
@@ -1903,48 +2002,52 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
                          action="append", default=[], metavar="PKG", help=f"remove a {what}")
     ext.add_argument("--add-file", action="append", default=[], metavar="SRC:TARGET[:MODE]",
                      help="copy the host file SRC into the extension, installed at TARGET (mode 0644 by default)")
-    ext.add_argument("--remove-file", action="append", default=[], metavar="TARGET")
+    ext.add_argument("--remove-file", action="append", default=[], metavar="TARGET", help="remove the file installed at TARGET from the extension (repeatable)")
     ext.add_argument("--fragment", metavar="FILE|-", help="replace the Containerfile fragment (- reads standard input)")
-    ext.add_argument("--clear-fragment", action="store_true")
+    ext.add_argument("--clear-fragment", action="store_true", help="remove the Containerfile fragment")
     ext.add_argument("--base", metavar="IMAGE", help="a variant: build it on your image IMAGE (sandbox-ai images list) "
                                                      "instead of the agent's own base; unchecked")
     ext.add_argument("--no-base", action="store_true", help="a variant: back on the agent's own base")
     ext.add_argument("--show", action="store_true", help="show the extension (the default without changes)")
-    ext.add_argument("-j", "--json", action="store_true", dest="json_sub")
+    ext.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
     checking = sub.add_parser("check", help="validate an extension and show its final Containerfile")
     checking.add_argument("target", metavar="AGENT|VARIANT")
     checking.add_argument("--fragment", metavar="FILE|-", help="check this fragment instead of the saved one")
-    checking.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    cooked = sub.add_parser("recipe", help="a variant with a ready extension: " + "; ".join(
-        f"{key}: {value['description']}" for key, value in RECIPES.items()))
+    checking.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    cooked = sub.add_parser("recipe", help="a variant with a ready extension (images recipe --help lists them)",
+                            description="A variant with a ready extension: " + "; ".join(
+                                f"{key}: {value['description']}" for key, value in RECIPES.items()))
     cooked.add_argument("name", choices=sorted(RECIPES))
-    cooked.add_argument("--from", dest="agent", required=True, choices=AGENTS)
+    cooked.add_argument("--from", dest="agent", required=True, choices=AGENTS, help="the agent whose extension it starts from")
     cooked.add_argument("--as", dest="variant", metavar="VARIANT", help="the variant's name (default: the recipe's)")
     new = sub.add_parser("new", help="a new variant: localhost/AGENT-sandbox-NAME")
     new.add_argument("name")
-    new.add_argument("--from", dest="agent", required=True, choices=AGENTS)
+    new.add_argument("--from", dest="agent", required=True, choices=AGENTS, help="the agent whose extension it starts from")
     new.add_argument("--empty", action="store_true", help="start empty instead of from the agent's extension")
     new.add_argument("--base", metavar="IMAGE", help="build it on your image IMAGE (sandbox-ai images pull|build-image; "
                                                      "Debian 12) instead of the agent's own base; unchecked")
-    new.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    removing = sub.add_parser("remove", help="drop an extension; for a variant also its image; or forget one of your "
-                                             "images (and remove it from Podman)")
+    new.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    removing = sub.add_parser("remove", help="drop an extension or a variant, or forget one of your images",
+                              description="Drop an extension; for a variant also its image; or forget one of your "
+                                          "images (and remove it from Podman).")
     removing.add_argument("target", metavar="AGENT|VARIANT|IMAGE")
-    removing.add_argument("--keep-image", action="store_true")
+    removing.add_argument("--keep-image", action="store_true", help="forget it but leave its image in Podman")
     past = sub.add_parser("history", help="changes and builds of the extensions")
     past.add_argument("target", nargs="?", metavar="AGENT|VARIANT")
-    past.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    pulling = sub.add_parser("pull", help="pull an image from a registry once and record it, pinned by digest "
-                                          "(unchecked); for --service and a variant's --base")
+    past.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    pulling = sub.add_parser("pull", help="pull an image from a registry, pinned by digest (unchecked)",
+                             description="Pull an image from a registry once and record it, pinned by digest "
+                                         "(unchecked); for --service and a variant's --base.")
     pulling.add_argument("reference", help="e.g. docker.io/library/redis:7-alpine, quay.io/org/app@sha256:...")
     pulling.add_argument("--as", dest="name", metavar="NAME", help="its name (default: the repository's last part)")
     pulling.add_argument("--replace", action="store_true", help="pin an image of that name anew")
-    pulling.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    owned = sub.add_parser("build-image", help="build your own Containerfile as one of your images, every FROM "
-                                               "pulled once and pinned by digest (unchecked)")
+    pulling.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    owned = sub.add_parser("build-image", help="build your own Containerfile as one of your images (unchecked)",
+                           description="Build your own Containerfile as one of your images, every FROM pulled once "
+                                       "and pinned by digest (unchecked).")
     owned.add_argument("name")
     source = owned.add_mutually_exclusive_group(required=True)
-    source.add_argument("-f", "--file", metavar="CONTAINERFILE")
+    source.add_argument("-f", "--file", metavar="CONTAINERFILE", help="the Containerfile to build")
     source.add_argument("--builtin", metavar="TEMPLATE",
                         help="one of sandbox-ai's own Containerfiles (sandbox/service-images) instead, for the "
                              "showcase presets' services: showcase-web (nginx 1.28.0: a page of its own, /app/ to "
@@ -1956,38 +2059,49 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
     owned.add_argument("--build-network", action="store_true",
                        help="give its RUN steps the network: this host's own, outside the sandbox's firewall, VPN and "
                             "Tor (default: none)")
-    owned.add_argument("-j", "--json", action="store_true", dest="json_sub")
+    owned.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
     mine = sub.add_parser("list", help="your images from registries and Containerfiles, each marked unchecked")
-    mine.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    system = sub.add_parser("os", help="the distribution of an image and the package manager its OS packages "
-                                       "install with")
+    mine.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    own = sub.add_parser("templates", help="the Containerfiles for services that come with sandbox-ai (build-image "
+                                           "--builtin)",
+                         description="The Containerfiles for services that come with sandbox-ai "
+                                     "(sandbox/service-images), each with what it is and the images of yours built "
+                                     "from it (images build-image NAME --builtin TEMPLATE; the app's start builds one "
+                                     "when it needs it).")
+    own.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    system = sub.add_parser("os", help="the distribution of an image and its package manager",
+                            description="The distribution of an image and the package manager its OS packages "
+                                        "install with.")
     system.add_argument("target", metavar="AGENT|VARIANT|IMAGE")
-    system.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    finding = sub.add_parser("search", help="search the OS packages of an image's distribution (its package index, "
-                                            "read once in a throwaway container of it and cached)")
+    system.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    finding = sub.add_parser("search", help="search the OS packages of an image's distribution",
+                             description="Search the OS packages of an image's distribution (its package index, "
+                                         "read once in a throwaway container of it and cached).")
     finding.add_argument("target", metavar="AGENT|VARIANT|IMAGE")
     finding.add_argument("query", nargs="?", default="")
     finding.add_argument("--refresh", action="store_true", help="read the package index anew")
-    finding.add_argument("--limit", type=int, default=50)
-    finding.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    deriving = sub.add_parser("derive", help="one of your images with OS packages added by its own distribution's "
-                                             "manager (apk, dnf, pacman, zypper, apt-get), recorded as another "
-                                             "(unchecked)")
+    finding.add_argument("--limit", type=int, default=50, help="show at most this many packages (default 50)")
+    finding.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    deriving = sub.add_parser("derive", help="one of your images with OS packages added, as another (unchecked)",
+                              description="One of your images with OS packages added by its own distribution's "
+                                          "manager (apk, dnf, pacman, zypper, apt-get), recorded as another "
+                                          "(unchecked).")
     deriving.add_argument("name")
     deriving.add_argument("--from", dest="source", required=True, metavar="IMAGE", help="your image to start from")
-    deriving.add_argument("--add-os", "--add-apt", dest="add_os", action="append", default=[], metavar="PKG")
+    deriving.add_argument("--add-os", "--add-apt", dest="add_os", action="append", default=[], metavar="PKG", help="add an OS package, installed by the image's own package manager (repeatable)")
     deriving.add_argument("--add-npm", action="append", default=[], help=argparse.SUPPRESS)
     deriving.add_argument("--add-pip", action="append", default=[], help=argparse.SUPPRESS)
     deriving.add_argument("--replace", action="store_true", help="build an image of that name anew (NAME may be "
                                                                  "IMAGE itself)")
-    deriving.add_argument("-j", "--json", action="store_true", dest="json_sub")
-    prep = sub.add_parser("prep")  # for sandbox-ai build: a variant's base image of yours, made ready
+    deriving.add_argument("-j", "--json", action="store_true", dest="json_sub", help="print the result as JSON (for programs)")
+    # for sandbox-ai build: a variant's base image of yours, made ready
+    prep = sub.add_parser("prep", help=argparse.SUPPRESS)
     prep.add_argument("target")
-    plan = sub.add_parser("build-plan")  # for sandbox-ai build
+    plan = sub.add_parser("build-plan", help=argparse.SUPPRESS)  # for sandbox-ai build
     plan.add_argument("target")
-    layer = sub.add_parser("layer")  # for sandbox-ai build: the extension layers after the base
+    layer = sub.add_parser("layer", help=argparse.SUPPRESS)  # for sandbox-ai build: the extension layers after the base
     layer.add_argument("target")
-    layer.add_argument("--variants", action="store_true")
+    layer.add_argument("--variants", action="store_true", help="build the layers of the variants, not of the agents")
     args = parser.parse_args(argv)
     as_json = args.json or getattr(args, "json_sub", False)
     try:
@@ -2075,6 +2189,8 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
                 out(note)
             out(f"removed the extension {args.target}")
             return 0
+        if args.command == "templates":
+            return services_module().main(["templates", *(["--json"] if as_json else [])], out=out, run=run)
         if args.command in ("pull", "build-image", "list"):
             if args.podman_url:
                 raise ValueError(f"images {args.command}: your images are recorded on this machine, for its own Podman "
@@ -2160,7 +2276,7 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
                     f"{size:>7}  {extension}"
                     + (f"  on your image {image['base_image']} (UNCHECKED)" if image.get("base_image") else ""))
         try:
-            mine = services_module().read_registry()
+            mine = services_module().read_registry_parts()[0]  # (a damaged record hides none of the others)
         except ValueError:
             mine = {}
         if mine:

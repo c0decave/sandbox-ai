@@ -11,6 +11,7 @@ if the real login files changed during it.
 Standard library only.
 """
 import atexit
+import contextlib
 import hashlib
 import os
 from pathlib import Path
@@ -29,13 +30,26 @@ LOGIN_FILES = (".claude/.credentials.json", ".codex/auth.json", ".local/share/op
                ".local/share/sandbox-ai/auth")
 
 
+def remove(root):
+    """ROOT and everything in it - also the read-only folders a started .pyz unpacks into ~/.cache/sandbox-ai/pyz
+    (0500: rmtree alone left some 70 MB behind per session, in a TMPDIR on a nearly full disk)."""
+    def writable(function, path, _info):
+        with contextlib.suppress(OSError):
+            os.chmod(os.path.dirname(path), 0o700)
+            if os.path.isdir(path) and not os.path.islink(path):
+                os.chmod(path, 0o700)
+            function(path)
+    with contextlib.suppress(OSError):
+        shutil.rmtree(root, **({"onexc": writable} if sys.version_info >= (3, 12) else {"onerror": writable}))
+
+
 def ensure(environ=os.environ):
     """Point HOME and the XDG directories at a fresh temporary directory, unless that was done already (or
     conftest.py handles it: MARKER is set). The temporary directory, or None."""
     if environ.get(MARKER):
         return None
     root = Path(tempfile.mkdtemp(prefix="sandbox-ai-test-home-"))
-    atexit.register(shutil.rmtree, root, True)  # /tmp of a sandbox is memory
+    atexit.register(remove, root)  # /tmp of a sandbox is memory
     for name in MOVED:
         (root / name.lower()).mkdir()
         environ[name] = str(root / name.lower())

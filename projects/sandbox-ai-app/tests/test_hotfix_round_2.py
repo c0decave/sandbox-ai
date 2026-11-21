@@ -137,13 +137,15 @@ def test_a_start_that_waited_for_a_failed_preparation_is_not_started_and_says_wh
 
 # --- a preset's MCP server from a named catalog ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("key,entry", [("sandbox-ai:sai-firmware-iot", "hub:binwalk"),
-                                       ("sandbox-ai:sai-software-analysis", "hub:capa")])
+@pytest.mark.parametrize("key,entry", [("sandbox-ai:sai-firmware-iot", "mcp:binwalk"),
+                                       ("sandbox-ai:sai-software-analysis", "mcp:capa")])
 def test_a_presets_mcp_server_is_added_from_the_catalog_the_preset_names(board_page, user, key, entry):
     """Story: firmware-iot (software-analysis) chosen in the gallery, its MCP server added by the Board ("Add them
     from their catalogs now?" - Add). The tab "Preparing the start" ran `sandbox-ai mcp add binwalk` and failed:
     "binwalk is in several catalogs: mcp:binwalk, hub:binwalk" - the preset names hub:binwalk, the Board dropped the
-    catalog. It adds the preset's entry now, and asks for the folder that entry requires."""
+    catalog. It adds the preset's entry now. (Since the MCP review of 2026-11-17 both presets name sandbox-ai-mcp's
+    reviewed builds, mcp:binwalk and mcp:capa, and give them their folder at /work with --mcp-mount: the entry's
+    required folder is that one, not asked for.)"""
     import json
     page = board_page
     gallery(page, key, user.workspace)
@@ -151,8 +153,10 @@ def test_a_presets_mcp_server_is_added_from_the_catalog_the_preset_names(board_p
     steps = json.loads(argv[-1])
     add = next(step[1] for step in steps if "add" in step[1])
     assert add[add.index("add") + 1] == entry, add
+    # the folder the entry requires is the preset's own (its --mcp-mount ...:/work=FOLDER:ro): given, not asked for
+    assert add[add.index("--mount") + 1].startswith("/work=") and add[-1].endswith(":ro"), add
     asked = [text for title_, text, _ in widgets.SHOWN if title_.startswith("MCP server ")]
-    assert asked and "/work" in asked[0], widgets.SHOWN
+    assert not asked, widgets.SHOWN
     # The command the tab runs knows the entry (the fakes pull nothing: added without its image here).
     result = user.run(*add[add.index("mcp"):], "--no-pull")
     assert result.returncode == 0, result.stderr
@@ -161,44 +165,24 @@ def test_a_presets_mcp_server_is_added_from_the_catalog_the_preset_names(board_p
 
 # --- a preset's MCP server whose catalog entry lists the hosts it needs ------------------------------------------
 
-def test_a_server_that_needs_named_hosts_is_asked_for_the_network_and_then_added_with_it(board_page, user):
+def test_a_server_that_needs_named_hosts_is_added_with_only_them_without_a_question(board_page, user):
     """Story: research-memory chosen in the gallery, its MCP servers added by the Board. duckduckgo's catalog entry
-    names the hosts it needs (html.duckduckgo.com:443), which sandbox-ai cannot limit a server to yet: `mcp add
-    duckduckgo` refuses without --network full, so the tab "Preparing the start" always failed ("see the terminal tab
-    ... exit status 1") and nothing in the app could grant it. The Board now asks - the hosts named, the outside
-    network as the price - and adds it with --network full after a yes; a server whose entry has the network itself
-    (web-fetch) is not asked about."""
+    names the hosts it needs (html.duckduckgo.com:443). sandbox-ai could not limit a server to them, so the Board asked
+    whether to give it the whole outside network (--network full) - and a yes let it reach the LAN and the metadata
+    address too (MCP review, group B). Now `mcp add` holds such an entry to its hosts (network allowlist, the rules
+    in its namespace): nothing is asked, nothing of --network is added, and it is defined with only its hosts."""
     import json
     page = board_page
     gallery(page, "sandbox-ai:sai-research-memory", user.workspace)
-    asked = [text for title, text, _ in widgets.SHOWN if "html.duckduckgo.com:443" in text]
-    assert len(asked) == 1 and "--network full" in asked[0], widgets.SHOWN
-    assert not [text for _, text, _ in widgets.SHOWN if "web-fetch" in text and "--network full" in text]
+    assert not [text for _, text, _ in widgets.SHOWN if "html.duckduckgo.com:443" in text or "--network full" in text]
     (argv, title, ended), = page.tabs
     adds = {step[1][step[1].index("add") + 1]: step[1][step[1].index("add"):] for step in json.loads(argv[-1])}
-    assert adds["mcp:duckduckgo"][-2:] == ["--network", "full"], adds
-    assert "--network" not in adds["mcp:web-fetch"]
+    assert "--network" not in adds["mcp:duckduckgo"] and "--network" not in adds["mcp:web-fetch"], adds
     result = user.run("mcp", *adds["mcp:duckduckgo"], "--no-pull")
     assert result.returncode == 0, result.stderr
-
-
-def test_a_server_whose_network_is_declined_is_not_added_and_the_board_says_how(board_page, user, monkeypatch):
-    """No to the network: that server is not added (said, with the button that adds it), the others are."""
-    import json
-    from sandbox_ai_app import prerequisites
-    real = prerequisites.confirm
-    monkeypatch.setattr(prerequisites, "confirm", lambda parent, title, text, *a, **k:
-                        False if "html.duckduckgo.com" in text else real(parent, title, text, *a, **k))
-    page = board_page
-    gallery(page, "sandbox-ai:sai-research-memory", user.workspace)
-    (argv, title, ended), = page.tabs
-    adds = [step[1][step[1].index("add") + 1] for step in json.loads(argv[-1])]
-    assert "mcp:duckduckgo" not in adds and "mcp:web-fetch" in adds, adds
-    said = "\n".join(text for _, text, _ in widgets.SHOWN)
-    assert "duckduckgo: not added" in said, said
-
-
-# --- the tab Preparing the start stops at its first failure -------------------------------------------------------
+    defined = json.loads((user.home / ".config/sandbox-ai/mcp.json").read_text())["duckduckgo"]
+    assert defined["network"] == "allowlist" and defined["hosts"] == ["html.duckduckgo.com:443"]
+    assert "reaches only html.duckduckgo.com:443" in result.stdout
 
 def test_after_a_failed_step_the_steps_not_tried_are_said_as_not_tried(board_page, user):
     """Story: tor-research-v2's nine MCP servers added in the tab Preparing the start; the first pull failed and the

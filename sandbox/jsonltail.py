@@ -1,8 +1,11 @@
 """The newest lines of a log, read from its end: a command that shows the last N records of a JSON-lines log
 (activity.jsonl, safeguards.jsonl) reads only as far back as it needs instead of the whole file, which grows for
 as long as the log directory is used (every run of the project). Standard library only."""
+import collections
+import gzip
 import json
 import os
+import zlib
 
 CHUNK = 1 << 20        # read backwards in pieces of this size
 LINE_LIMIT = 4 << 20   # a line longer than this is skipped (never held whole)
@@ -66,3 +69,70 @@ def newest(fd, end, parse, keep=None, count=1, chunk=CHUNK):
             break
     found.reverse()
     return found
+
+
+def compressed(path):
+    """Whether PATH is a log the compaction compressed (sandbox-ai gc: NAME.gz)."""
+    return str(path).endswith(".gz")
+
+
+def open_compressed(path):
+    """The compressed log PATH as a stream of its lines (never through a link); OSError when it cannot be opened."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    try:
+        return gzip.GzipFile(fileobj=os.fdopen(fd, "rb"), mode="rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def unpacked_size(path):
+    """About how many bytes the compressed log PATH holds unpacked, without unpacking it: gzip's trailer (the size
+    modulo 4 GiB of its last member; a file of several members counts its last), else the file's size; 0 when it
+    cannot be read. For what a reader whose budget is spent leaves out."""
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            if size < 18:
+                return size
+            stream.seek(size - 4)
+            return int.from_bytes(stream.read(4), "little") or size
+    except OSError:
+        return 0
+
+
+def compressed_tail(path, keep_bytes, keep_lines=None, line_limit=LINE_LIMIT):
+    """The newest complete lines (bytes, each with its newline) of the compressed log PATH, oldest first: at most
+    KEEP_BYTES of them, and KEEP_LINES. A compressed log can only be read from its start: it is decompressed as a
+    stream, only what is kept held. (lines, bytes left out before them, overlong lines skipped); a damaged or cut
+    file gives what was read up to the damage, a missing one nothing."""
+    lines, held, skipped, long = collections.deque(), 0, 0, 0
+    try:
+        stream = open_compressed(path)
+    except OSError:
+        return [], 0, 0
+    with stream:
+        try:
+            while True:
+                line = stream.readline(line_limit + 1)
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    if len(line) <= line_limit:
+                        break  # the last line, cut: not a record
+                    long += 1
+                    while line and not line.endswith(b"\n"):  # the rest of an overlong line
+                        skipped += len(line)
+                        line = stream.readline(line_limit)
+                    skipped += len(line)
+                    continue
+                lines.append(line)
+                held += len(line)
+                while lines and (held > keep_bytes or (keep_lines is not None and len(lines) > keep_lines)):
+                    dropped = lines.popleft()
+                    held -= len(dropped)
+                    skipped += len(dropped)
+        except (OSError, EOFError, zlib.error):
+            pass
+    return list(lines), skipped, long

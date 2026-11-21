@@ -325,8 +325,11 @@ def test_layers_are_built_on_the_base_and_labelled(config, tmp_path, capsys):
     assert im.main(["new", "web", "--from", "claude"]) == 0
     assert im.main(["new", "other", "--from", "codex", "--empty"]) == 0
     status = {row["target"]: row["status"] for row in im.images(run=engine)}
-    assert status == {"claude": "outdated", "codex": "not-built", "opencode": "not-built", "hermes": "not-built",
-                      "dsh": "not-built", "qwen": "not-built", "goose": "not-built", "web": "not-built", "other": "not-built"}
+    assert status == {"claude": "outdated", "codex": "not-built", "opencode": "not-built", "opencode2": "not-built",
+                      "hermes": "not-built",
+                      "dsh": "not-built", "qwen": "not-built", "goose": "not-built", "openhands": "not-built",
+                      "nanobot": "not-built", "letta": "not-built", "pi": "not-built", "web": "not-built",
+                      "other": "not-built"}
     capsys.readouterr()
     assert im.main(["layer", "claude", "--variants"], run=engine) == 0
     builds = [call for call in engine.calls if call[1] == "build"]
@@ -697,3 +700,83 @@ def test_a_start_names_the_build_of_its_own_agents_variant(config):
     assert im.main(["recipe", "media", "--from", "claude"], out=[].append) == 0
     assert s.image_fix(a, "dsh", "localhost/dsh-sandbox-media:latest") == "sandbox-ai build --variant media@dsh"
     assert s.variant_base(a) is None  # (on the agent's own base)
+
+
+def test_the_android_recipe(config):
+    """`images recipe android` (the preset android-debugging): the device tools of Debian's release, and every
+    analysis tool as a release file pinned by its SHA-256 - apktool 3.0.3 with its own aapt2 and framework out of its
+    own jar, baksmali and smali 3.0.10, jadx 1.5.6, Frida 17.25.2's bindings from a hash-locked requirements.txt and
+    frida-server plus frida-gadget for every Android ABI; nothing is fetched or unpacked when the agent runs, and the
+    validator accepts it."""
+    lines = []
+    assert im.main(["recipe", "android", "--from", "claude"], out=lines.append) == 0
+    assert "sandbox-ai build android" in lines[-1] and "--image-variant android" in lines[-1]
+    document, fragment, files = im.load("android")
+    assert im.errors(im.check(document, fragment, files)) == []
+    for package in ("adb", "fastboot", "aapt", "zipalign", "libapksig-java", "default-jre-headless", "unzip",
+                    "xz-utils", "python3-venv"):
+        assert package in document["apt"], package
+    assert all("=" not in package for package in document["apt"])  # Debian's own versions of the release
+    assert not document["npm"] and not document["pip"]
+    assert {e["target"] for e in document["files"]} == {"/opt/frida/requirements.txt"}
+    assert files["requirements.txt"] == (im.RECIPE_FILES / "android" / "requirements.txt").read_bytes()
+
+    # Every release file: an ADD with the SHA-256 of that very file, and no other way in.
+    pinned = re.findall(r"^ADD --checksum=sha256:([0-9a-f]{64}) \\\n\s+(\S+) (\S+)$", fragment, re.M)
+    assert len(pinned) == 12, pinned
+    by_url = {url: (digest, target) for digest, url, target in pinned}
+    assert by_url["https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar"] == (
+        "dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423", "/opt/android/apktool.jar")
+    assert by_url["https://github.com/baksmali/smali/releases/download/3.0.10/baksmali-3.0.10-fat-release.jar"][0] == \
+        "37ae4a41a8886e15c20b8362fa4250f96bbdb55e1a608199ad8b5dff068b588f"
+    assert by_url["https://github.com/baksmali/smali/releases/download/3.0.10/smali-3.0.10-fat-release.jar"][0] == \
+        "32fa0e88a6c397b3922201adf5f3e534fbaed5a663c71d0c558c3ddce0af844a"
+    assert by_url["https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip"][0] == \
+        "545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974"
+    # frida-server and frida-gadget for all four Android ABIs, one version, as published (xz)
+    frida = {url.rsplit("/", 1)[1]: target for url, (_, target) in by_url.items() if "frida" in url}
+    for abi in ("arm", "arm64", "x86", "x86_64"):
+        server = f"frida-server-17.25.2-android-{abi}.xz"
+        gadget = f"frida-gadget-17.25.2-android-{abi}.so.xz"
+        assert frida[server] == f"/opt/frida/android/{abi}/{server}", abi
+        assert frida[gadget] == f"/opt/frida/android/{abi}/{gadget}", abi
+    assert len(frida) == 8
+    assert all("/releases/download/17.25.2/" in url for url in by_url if "frida/frida" in url)
+
+    # The bindings: one version, hash-locked, the same one the binaries are; pip installs nothing else.
+    requirements = (im.RECIPE_FILES / "android" / "requirements.txt").read_text()
+    pins = re.findall(r"^([a-z0-9-]+)==(\S+) \\$", requirements, re.M)
+    assert pins == [("frida", "17.25.2")], pins
+    assert len(re.findall(r"^    --hash=sha256:[0-9a-f]{64}", requirements, re.M)) == 2
+    assert "frida-tools" in requirements and "is NOT here" in requirements, "why frida-tools is left out"
+    assert "pip install --no-cache-dir --require-hashes --no-deps --only-binary :all:" in fragment
+    assert "17.25.2" in im.RECIPES["android"]["description"]
+
+    # Nothing is unpacked, made executable or fetched while the agent runs: apktool's aapt2 and framework are taken
+    # out of its jar here and checked, and every tool must run once in the build.
+    for checked in ("df312db814c018019b2b79a993b041b738d7b76f4a8f28da25bc874a026368cc  aapt2",
+                    "5dd984016ed5a5eb0eef866e2c6e8cd352e1427828ec23adb18005cf5648f3d7  framework/1.apk",
+                    "fe3e12c45acf75f92369685fd02d1d7a7323385dc725680a9b98a0dac0ea554b  jadx/lib/jadx-1.5.6-all.jar"):
+        assert checked in fragment, checked
+    assert fragment.count("sha256sum --check --strict") == 3
+    assert "--frame-path /opt/android/framework --aapt /opt/android/aapt2" in fragment
+    assert "chmod -R a-x,a+r /opt/frida/android" in fragment
+    for ran in ("apktool --version", "baksmali --version", "smali --version", "jadx --version",
+                "apksigner --version", "import frida; print('frida', frida.__version__)"):
+        assert ran in fragment, ran
+    text = im.containerfile("android", document, fragment)
+    assert "curl" not in text and "wget" not in text and "pipe-shell" not in text
+    assert "COPY --chmod=0644 files/requirements.txt /opt/frida/requirements.txt" in text
+    assert "android" in im.RECIPES and "Android" in im.RECIPES["android"]["description"]
+    with pytest.raises(ValueError, match="exists already"):
+        im.recipe("android", "claude")
+
+
+def test_the_android_recipe_warns_about_nothing_the_other_recipes_do_not(config):
+    """The android fragment is as clean as the others: no warning the validator would raise for a sandbox (no USER,
+    WORKDIR, SHELL, ENV of a watched variable, no ADD of a local archive, no script from the network)."""
+    im.recipe("android", "codex")
+    document, fragment, files = im.load("android@codex")
+    findings = im.check(document, fragment, files)
+    assert [f for f in findings if f["severity"] == "error"] == []
+    assert {f["id"] for f in findings} <= {"add-url"}, findings

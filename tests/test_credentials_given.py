@@ -3,7 +3,8 @@ net section?"): `sandbox-ai git-logins give|revoke|list --run` and `sandbox-ai s
 same code path as the older `net allow RUN --git-token-*|--api-key` (which keeps working); `net show` lists both;
 messages name the run id and its start's name; a Git login or key that cannot be written, or a network change that
 fails, leaves nothing half applied; and the proxy puts a key in as the password of a Basic login (git over HTTPS) for
-the key's host only."""
+the key's host only. A Git login goes to the run's connection proxy as a key does (2026-11-19, reviews A and B: it was
+written where the agent could read it); into the sandbox only for a run without the proxy, with --in-sandbox."""
 import base64
 import importlib.util
 import json
@@ -11,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from test_net import (KEY, TOKEN, git_ready, net, no_login_runtime, proxy_ready, rt, run_net,  # noqa: F401
-                      sandbox)
+from test_net import (IN_SANDBOX, KEY, TOKEN, git_proxy_ready, git_ready, net, no_login_runtime,  # noqa: F401
+                      proxy_ready, rt, run_net, sandbox)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,8 +56,13 @@ def secrets_store(monkeypatch, values):
                         lambda: type("S", (), {"get": staticmethod(lambda name: values.get(name))}))
 
 
-def test_git_logins_give_list_and_revoke(sandbox, monkeypatch, capsys):
-    tokens = git_ready(sandbox)
+def given_logins(path):
+    """[(host, port, user, token)] the proxy was given (its own file, written by the supervisor)."""
+    return [(e["host"], e["port"], e["user"], e["token"]) for e in json.loads(path.read_text())["git_logins"]]
+
+
+def test_git_logins_give_list_and_revoke(sandbox, tmp_path, monkeypatch, capsys):
+    tokens, inside = git_proxy_ready(sandbox, tmp_path, monkeypatch)
     named(sandbox)
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
     status, text = call(gl, "give", "codex-1234abcd", "http://localhost:3080", "--env", "GITEA_TOKEN",
@@ -65,8 +71,8 @@ def test_git_logins_give_list_and_revoke(sandbox, monkeypatch, capsys):
     assert "codex-1234abcd (my-start): Git login for http://localhost:3080 (user alice)" in text and TOKEN not in text
     assert "start with: --git-token-env http://alice@localhost:3080=GITEA_TOKEN" in text
     assert "allowed during this run" not in text  # brief: the table is net show's
-    assert json.loads(tokens.read_text())["logins"] == [{"url": "http://localhost:3080", "user": "alice",
-                                                         "token": TOKEN}]
+    assert "its connection proxy logs in with it on the wire" in text and "does not enter the sandbox" in text
+    assert given_logins(tokens) == [("localhost", 3080, "alice", TOKEN)] and not inside.exists()
     # Listed by git-logins list --run (by the start's name too) and by net show, never with the token.
     for run in ("codex-1234abcd", "my-start"):
         status, text = call(gl, "list", "--run", run)
@@ -79,17 +85,17 @@ def test_git_logins_give_list_and_revoke(sandbox, monkeypatch, capsys):
     assert "Git logins added during this run" in "\n".join(lines)
     status, text = call(gl, "revoke", "my-start", "http://localhost:3080")
     assert status == 0 and "codex-1234abcd (my-start): Git login for http://localhost:3080 taken back" in text
-    assert json.loads(tokens.read_text())["logins"] == []
+    assert given_logins(tokens) == []
     assert call(gl, "revoke", "my-start", "http://localhost:3080")[0] == 1
     assert "sandbox-ai git-logins: no Git login for http://localhost:3080" in capsys.readouterr().err
 
 
-def test_git_logins_give_from_a_secret_and_its_refusals(sandbox, monkeypatch, capsys):
-    tokens = git_ready(sandbox)
+def test_git_logins_give_from_a_secret_and_its_refusals(sandbox, tmp_path, monkeypatch, capsys):
+    tokens, _ = git_proxy_ready(sandbox, tmp_path, monkeypatch)
     secrets_store(monkeypatch, {"GH_PUSH": "ghp_" + "a" * 36})
     status, text = call(gl, "give", "codex-1234abcd", "https://github.com", "--secret", "GH_PUSH")
     assert status == 0, capsys.readouterr().err
-    assert json.loads(tokens.read_text())["logins"][0]["user"] == "x-access-token"
+    assert given_logins(tokens) == [("github.com", 443, "x-access-token", "ghp_" + "a" * 36)]
     assert "github.com" in sandbox["hosts"].read_text()  # the server allowed as at a start (its preset)
     # Exactly one source; a URL naming another user than --user; a run that does not run.
     with pytest.raises(SystemExit):
@@ -98,6 +104,30 @@ def test_git_logins_give_from_a_secret_and_its_refusals(sandbox, monkeypatch, ca
     assert "names the user bob" in capsys.readouterr().err
     assert call(gl, "give", "no-such-run", "https://github.com", "--secret", "GH_PUSH")[0] == 1
     assert "sandbox-ai git-logins: no start named no-such-run" in capsys.readouterr().err
+
+
+def test_git_logins_give_to_a_run_without_the_proxy_wants_the_humans_word(sandbox, monkeypatch, capsys):
+    """A run without the connection proxy: `git-logins give` refuses (naming the run by id and name, and why) until
+    --in-sandbox says the token may go where the agent can read it; the listing then says where it is."""
+    inside = git_ready(sandbox)
+    named(sandbox)
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    assert call(gl, "give", "my-start", "http://localhost:3080", "--env", "GITEA_TOKEN")[0] == 1
+    refusal = capsys.readouterr().err
+    assert refusal.startswith("sandbox-ai git-logins: codex-1234abcd (my-start) cannot be given the Git login for "
+                              "http://localhost:3080 through its connection proxy: it runs without the connection "
+                              "proxy")
+    assert "--in-sandbox" in refusal and "the agent can read the token" in refusal and not inside.exists()
+    status, text = call(gl, "give", "my-start", "http://localhost:3080", "--env", "GITEA_TOKEN", "--in-sandbox")
+    assert status == 0 and "IN THE SANDBOX" in text and TOKEN not in text
+    assert json.loads(inside.read_text())["logins"] == [{"url": "http://localhost:3080", "user": "x-access-token",
+                                                         "token": TOKEN}]
+    status, text = call(gl, "list", "--run", "my-start")
+    assert status == 0 and "in the sandbox" in text and TOKEN not in text
+    status, text = call(gl, "list", "--run", "my-start", "--json")
+    assert json.loads(text)["git"] == [{"url": "http://localhost:3080", "user": "x-access-token", "in_sandbox": True}]
+    assert call(gl, "revoke", "my-start", "http://localhost:3080")[0] == 0
+    assert json.loads(inside.read_text())["logins"] == []
 
 
 def test_secrets_give_list_and_revoke(sandbox, tmp_path, monkeypatch, capsys):
@@ -137,14 +167,14 @@ def test_secrets_give_list_and_revoke(sandbox, tmp_path, monkeypatch, capsys):
 
 
 def test_the_older_net_allow_form_still_gives_both(sandbox, tmp_path, monkeypatch, capsys):
-    tokens = git_ready(sandbox)
-    keys = proxy_ready(sandbox, tmp_path, monkeypatch, runtime_git_tokens=True)
+    tokens, _ = git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    keys = proxy_ready(sandbox, tmp_path, monkeypatch, runtime_git_tokens=True, proxy_git_logins=True)
     secrets_store(monkeypatch, {"OPENROUTER": KEY})
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
     status, lines = run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN", "--api-key",
                              "openrouter.ai=OR_KEY=OPENROUTER"])
     assert status == 0, capsys.readouterr().err
-    assert json.loads(tokens.read_text())["logins"] and json.loads(keys.read_text())["api_keys"]
+    assert given_logins(tokens) and json.loads(keys.read_text())["api_keys"]
     text = "\n".join(lines)
     assert "Git logins added during this run" in text and "API keys given during this run" in text
 
@@ -152,13 +182,14 @@ def test_the_older_net_allow_form_still_gives_both(sandbox, tmp_path, monkeypatc
 def test_a_network_change_that_fails_puts_the_login_and_the_key_back(sandbox, tmp_path, monkeypatch, capsys):
     """Regression (half-applied state): the login was written after the network change, and a failure in between
     left one without the other. Now the credentials go first and are put back when the network change fails."""
-    tokens = git_ready(sandbox)
-    keys = proxy_ready(sandbox, tmp_path, monkeypatch, runtime_git_tokens=True)
+    tokens, _ = git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    keys = proxy_ready(sandbox, tmp_path, monkeypatch, runtime_git_tokens=True, proxy_git_logins=True)
     secrets_store(monkeypatch, {"OPENROUTER": KEY})
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
     monkeypatch.setenv("OTHER", "glpat-" + "b" * 20)
     assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])[0] == 0
-    before = json.loads(tokens.read_text())["logins"]
+    before = given_logins(tokens)
+    listed = json.loads((sandbox["run"] / "git-logins.json").read_text())
     real_ask = net.ask
 
     def refusing(directory, request, *args, **kwargs):
@@ -170,7 +201,8 @@ def test_a_network_change_that_fails_puts_the_login_and_the_key_back(sandbox, tm
     assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER", "--api-key",
                     "openrouter.ai=OR_KEY=OPENROUTER"])[0] == 1
     assert "the firewall is gone" in capsys.readouterr().err
-    assert json.loads(tokens.read_text())["logins"] == before, "the login given before stays, the new one is gone"
+    assert given_logins(tokens) == before, "the login given before stays with the proxy, the new one is gone"
+    assert json.loads((sandbox["run"] / "git-logins.json").read_text()) == listed, "and the run's own list says so"
     assert json.loads(keys.read_text())["api_keys"] == [], "the key is taken back from the proxy"
     assert net.given_credentials(json.loads((sandbox["run"] / "run.json").read_text()) | {
         "directory": str(sandbox["run"])})["api_keys"] == []
@@ -207,9 +239,31 @@ def test_a_login_that_cannot_be_written_changes_no_network(sandbox, monkeypatch,
     def broken(record, logins):
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(net, "write_git_logins", broken)
-    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 1
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER", IN_SANDBOX])[0] == 1
     assert "No space left on device" in capsys.readouterr().err
     assert sandbox["applied"] == [] and "git.example.org" not in sandbox["hosts"].read_text()
+
+
+def test_a_login_the_proxy_got_but_the_runs_list_could_not_keep_is_taken_back(sandbox, tmp_path, monkeypatch, capsys):
+    """The supervisor got the login, then the run's own list (git-logins.json) could not be written: the proxy gets
+    the list as it was again - it never logs in with a login the run's list does not name (as with a key)."""
+    tokens, _ = git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    monkeypatch.setenv("OTHER", "glpat-" + "b" * 20)
+    real_replace = net.os.replace
+
+    def full_disk(source, target, *args, **kwargs):
+        if Path(target).name == "git-logins.json" and Path(target).parent == sandbox["run"]:
+            raise OSError(28, "No space left on device")
+        return real_replace(source, target, *args, **kwargs)
+    monkeypatch.setattr(net.os, "replace", full_disk)
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 1
+    assert "No space left on device" in capsys.readouterr().err
+    assert given_logins(tokens) == [], "the proxy holds no login the run's list does not name"
+    assert sandbox["applied"] == [] and "git.example.org" not in sandbox["hosts"].read_text()
+    assert not [path for path in sandbox["run"].iterdir() if path.name.startswith(".git-logins")], "no leftover"
+    monkeypatch.setattr(net.os, "replace", real_replace)
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 0
+    assert given_logins(tokens) == [("git.example.org", 443, "x-access-token", "glpat-" + "b" * 20)]
 
 
 def test_a_revoke_of_a_login_never_given_changes_nothing(sandbox, monkeypatch, capsys):

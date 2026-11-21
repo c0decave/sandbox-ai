@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -34,6 +35,10 @@ OPEN_REQUEST = "open.url"  # browser.OPEN_REQUEST: in MOUNT/vnc, written by the 
 OPEN_URL = re.compile(r"https?://[!-~]{1,4000}")
 # A profile kept from an earlier run (session, a folder) carries the lock of that run's browser, whose host name (the
 # pod's) differs: the browser would refuse it as "in use on another computer".
+# A page the start opens on (browser.config "start_url": Cairn's board, --cairn): a page of the pod's loopback only,
+# waited for up to START_WAIT seconds at the first start (the part that serves it may start a moment later).
+START_URL = re.compile(r"http://127\.0\.0\.1:([0-9]{1,5})/")
+START_WAIT = 60
 LOCKS = {"chromium": ("SingletonLock", "SingletonSocket", "SingletonCookie"),
          "firefox": ("lock", ".parentlock", "parent.lock")}
 
@@ -50,6 +55,28 @@ def load_runtime(path=None):
 def screen_size(screen):
     width, height, _ = str(screen).split("x")
     return int(width), int(height)
+
+
+def start_page(cfg):
+    """The page the browser starts on: the configuration's start_url when it is one of START_URL, else about:blank."""
+    url = cfg.get("start_url")
+    return url if isinstance(url, str) and START_URL.fullmatch(url) else "about:blank"
+
+
+def wait_for_start(cfg, sleep=time.sleep, clock=time.monotonic, wait=START_WAIT):
+    """Until the start page's port accepts (at most WAIT seconds); True when it does."""
+    found = START_URL.fullmatch(start_page(cfg))
+    if not found:
+        return False
+    deadline = clock() + wait
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", int(found[1])), timeout=1):
+                return True
+        except OSError:
+            if clock() > deadline:
+                return False
+            sleep(0.5)
 
 
 # Chromium's own services that call Google (or a server of their own) beyond what --disable-background-networking
@@ -147,7 +174,7 @@ def chromium_command(cfg, profile, url=None):
         argv += list(CHROMIUM_TOR)
     if cfg.get("cdp_port"):
         argv += [f"--remote-debugging-port={int(cfg['cdp_port'])}", "--remote-debugging-address=127.0.0.1"]
-    return argv + [url or "about:blank"]
+    return argv + [url or start_page(cfg)]
 
 
 def write_profile_file(path, text):
@@ -195,7 +222,7 @@ def settings(cfg, profile):
 def firefox_command(cfg, profile, url=None):
     width, height = screen_size(cfg["screen"])
     return ["firefox-esr", "--profile", str(profile), "--no-remote", "--new-instance", "-width", str(width),
-            "-height", str(height), url or "about:blank"]
+            "-height", str(height), url or start_page(cfg)]
 
 
 def command(cfg, profile, url=None):
@@ -259,6 +286,8 @@ def main(mount=MOUNT, home=HOME, runtime=None, popen=subprocess.Popen, sleep=tim
     gui = {"display": cfg["display"], "screen": cfg["screen"], "vnc": True, "private": True, "selection": True}
     display = runtime.start_gui(gui)
     restarts, browser, start_url, handing, stopped = Restarts(), None, None, [], False
+    if start_page(cfg) != "about:blank" and not wait_for_start(cfg, sleep):
+        print("sandbox-ai browser: its start page did not answer yet; reload it", file=sys.stderr)
     try:
         while not stopping:
             gone = [name for name, process in zip(("Xvfb", "x11vnc"), display) if process.poll() is not None]

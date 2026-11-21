@@ -596,11 +596,16 @@ def test_the_log_is_bounded(tmp_path, monkeypatch):
     records = [activity.finalize(activity.raw("prompt", f"p{i}"), "r", None, "claude", activity.Redactor())
                for i in range(50)]
     assert activity.append(path, records[:10], limit=2000) is True
+    # Full: the older part goes to activity.jsonl.TIME and the timeline goes on (it stopped there before: a run of
+    # days had none after its first 256 MiB); a second rotation within the same second keeps the batch out.
+    second = activity.time.gmtime(1_700_000_000)
+    monkeypatch.setattr(activity.time, "gmtime", lambda *args: second)
     while activity.append(path, records[10:20], limit=2000):
         pass
-    assert activity.append(path, records[20:], limit=2000) is False
+    older = sorted(tmp_path.glob("activity.jsonl.*"))
+    assert len(older) == 1 and path.stat().st_size <= 2000 and older[0].stat().st_size <= 2000
     lines = path.read_text().splitlines()
-    assert json.loads(lines[-1])["details"]["event"] == "log-full" and path.stat().st_size < 4000
+    assert json.loads(lines[-1])["summary"] == "p19" and "log-full" not in path.read_text()
     (tmp_path / "link.jsonl").symlink_to(tmp_path / "elsewhere.jsonl")
     with pytest.raises(OSError):
         activity.append(tmp_path / "link.jsonl", records[:1])
@@ -830,6 +835,39 @@ def test_cli_finds_runs_and_sessions(tmp_path, monkeypatch):
     assert {json.loads(line)["session"] for line in out} == {"dev"}
 
 
+def test_cli_finds_a_run_whose_timeline_was_rotated_out(tmp_path, monkeypatch):
+    """activity.jsonl rotated at its limit (renamed to activity.jsonl.TIME, gc compresses it to .TIME.gz): sandbox-ai
+    activity RUN found only runs in the current file - a run of last week was "no activity found" although its
+    report still read it. Now the older parts are searched and read too, oldest first, a run across parts whole."""
+    import gzip
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setattr(activity, "running_record", lambda run: None)
+    project = tmp_path / "project"
+    project.mkdir()
+    logs = activity.default_log_dir(project.resolve())
+    write_timeline(logs / "activity.jsonl")
+    lines = (logs / "activity.jsonl").read_text().splitlines()
+    claude, dev = [line for line in lines if '"claude-1"' in line], [line for line in lines if '"session-dev"' in line]
+    # claude-1: its first three records in a compressed part, the next one in a raw part; session-dev: current
+    (logs / "activity.jsonl.20261104-100002.gz").write_bytes(gzip.compress(("\n".join(claude[:3]) + "\n").encode()))
+    (logs / "activity.jsonl.20261104-100003").write_text("\n".join(claude[3:4]) + "\n")
+    (logs / "activity.jsonl").write_text("\n".join(claude[4:] + dev) + "\n")
+    status, out = run_cli(["claude-1", "--json"])
+    assert status == 0 and [json.loads(line)["summary"] for line in out] == [
+        json.loads(line)["summary"] for line in claude]
+    status, out = run_cli(["claude-1", "--json", "--tail", "2"])
+    assert [json.loads(line)["time"] for line in out] == [json.loads(line)["time"] for line in claude[-2:]]
+    (logs / "activity.jsonl").write_text("\n".join(dev) + "\n")  # all of claude-1 in older parts now
+    assert activity.find_run("claude-1") == logs
+    status, out = run_cli(["claude-1", "--json"])
+    assert status == 0 and len(out) == 4
+    status, out = run_cli(["--log-dir", str(logs), "--runs", "--json"])
+    assert [r["run"] for r in json.loads("\n".join(out))] == ["claude-1", "session-dev"]
+    with pytest.raises(ValueError, match="no activity of a run"):
+        run_cli(["claude-zzz"])
+
+
 def test_cli_reads_a_home_directly(tmp_path, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     home = claude_home(tmp_path)
@@ -940,7 +978,8 @@ def test_times():
 
 def test_main_lists_the_command():
     main = (ROOT / "sandbox" / "main.py").read_text()
-    assert '"activity": ("activity.py",)' in main and "sandbox-ai activity" in main
+    # Dispatched, and listed in sandbox-ai --help (its one-line entry; the syntax is in its own --help).
+    assert '"activity": ("activity.py",)' in main and '("activity", "What the agents did' in main
 
 
 def test_tags_are_found_in_linear_time_whatever_the_agent_writes():

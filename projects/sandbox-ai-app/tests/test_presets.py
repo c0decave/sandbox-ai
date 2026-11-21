@@ -316,3 +316,72 @@ def test_an_imported_preset_with_an_old_telemetry_on_is_taken_without_it(tmp_pat
     path.write_text(json.dumps(document))
     options = list(PR.import_file(sai, path).options)
     assert "on" not in options and "--telemetry=on" not in options and "strict" in options
+
+
+NAMED_FOLDERS = {
+    "format": "sandbox-ai preset", "version": 1, "id": "named-folders", "title": "Two project folders",
+    "description": "The checkout at /work, a second folder at /workspaces/public (as the private sandbox-ai-dev).",
+    "agents": ["claude"],
+    "options": ["--workspace", "{repo}", "--workspace", "{public}", "--workspace-name", "public={public}",
+                "--allow-pypi"],
+    "values": {"repo": {"label": "The checkout", "kind": "folder"},
+               "public": {"label": "The public snapshot", "kind": "folder", "optional": True}}}
+
+
+def test_a_preset_of_yours_that_names_a_workspace_is_in_the_gallery(tmp_path, monkeypatch):
+    """dev-full preset agent 2026-11-19: the gallery refused the private preset sandbox-ai-dev, "Options this
+    sandbox-ai does not know: --workspace-name public=<path:public>" - an option the launcher takes (it leaves it out
+    of its --help: `sandbox-ai workspace add --name` keeps it). Through sandbox-ai's own preset folder, as the gallery
+    reads it; its board starts with the folder named, and the launcher's check takes that start."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    folder = tmp_path / "config" / "sandbox-ai" / "presets"
+    folder.mkdir(parents=True)
+    (folder / "named-folders.json").write_text(json.dumps(NAMED_FOLDERS))
+    sai = backend.SandboxAI()
+    found, problems = PR.sandbox_ai_presets(sai)
+    assert not [p for p in problems if "named-folders" in p], problems
+    preset = next(p for p in found if p.name == "named-folders")
+    repo, public = tmp_path / "repo", tmp_path / "public"
+    repo.mkdir()
+    public.mkdir()
+    markers = {p.label: p.marker for p in preset.placeholders}
+    board = PR.build(sai, preset, values={markers["The checkout"]: str(repo), markers["The public snapshot"]: str(public)})
+    argv = B.launcher_argv(sai, board)
+    assert argv[argv.index("--workspace-name") + 1] == f"public={public}", argv
+    launcher = sai.launcher
+    launcher.validate(launcher.parse_args(["claude", *argv]))
+    # A folder wired in (not one to fill in at the use) stays refused, as for --workspace.
+    wired = {**NAMED_FOLDERS, "id": "wired-in", "options": ["--workspace", "{repo}", "--workspace", "/srv/public",
+                                                             "--workspace-name", "public=/srv/public"]}
+    with pytest.raises(ValueError, match="--workspace-name"):
+        PR.from_sandbox_ai(sai, wired)
+
+
+def test_every_option_the_launcher_takes_is_known_to_a_preset():
+    """So a new launcher option is never "unknown" in the app again: every option `sandbox-ai claude --help` lists,
+    and those the launcher takes without listing them (--workspace-name), is read as an option in a preset of the
+    app - taken, or refused by name (REFUSED: a login copied in, what belongs to one start) - never "does not
+    know"."""
+    import argparse
+    import re
+    import subprocess
+    home = os.environ.get("SANDBOX_AI_HOME") or os.path.dirname(backend.shutil.which("sandbox-ai"))
+    helped = subprocess.run([os.path.join(home, "sandbox-ai"), "claude", "--help"], capture_output=True, text=True,
+                            timeout=120).stdout
+    listed = set(re.findall(r"(?m)^  (?:-[A-Za-z0-9]+, )?(--[a-z0-9][a-z0-9-]*)", helped)) - {"--help", "--version"}
+    assert len(listed) > 100, helped[:400]
+    sai = backend.SandboxAI()
+    actions = sai.launcher.build_parser()._actions
+    hidden = {o for action in actions if action.help == argparse.SUPPRESS for o in action.option_strings}
+    assert "--workspace-name" in hidden, "(the case of 2026-11-19: taken, not listed)"
+    flags = {o for action in actions if action.nargs == 0 for o in action.option_strings}
+    unknown = []
+    for option in sorted(listed | hidden):
+        document = {"format": PR.FORMAT, "version": 1, "id": "one-option", "title": "One option",
+                    "options": [option] if option in flags else [option, "x"]}
+        try:
+            PR.from_document(sai, document)
+        except ValueError as exc:
+            if "does not know" in str(exc):
+                unknown.append(f"{option}: {exc}")
+    assert unknown == [], "\n".join(unknown)

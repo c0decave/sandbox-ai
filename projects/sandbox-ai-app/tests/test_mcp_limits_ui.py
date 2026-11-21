@@ -227,7 +227,8 @@ def test_properties_change_the_limits_and_keep_the_dialog_open_until_they_are_va
     def exec_(dialog):
         seen.append(dialog)
         ok = dialog.buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
-        assert dialog.limits.fields["memory"].text() == "1g" and dialog.network.currentText() == "full"
+        assert dialog.limits.fields["memory"].text() == "1g" and dialog.network.currentData() == "full"
+        assert dialog.network.currentText() == "internet (no LAN)", "shown for people"
         dialog.limits.fields["memory"].setText("1024")
         assert not ok.isEnabled() and "512m or 2g" in dialog.limits.reasons["memory"].text()
         dialog.try_accept()
@@ -238,12 +239,12 @@ def test_properties_change_the_limits_and_keep_the_dialog_open_until_they_are_va
         assert ok.isEnabled()
         page.sai.answers = [(1, "", "sandbox-ai mcp: MCP server pw: a VPN needs network full\n")]
         dialog.vpn.setText("anon")
-        dialog.network.setCurrentText("none")
+        dialog.network.setCurrentIndex(dialog.network.findData("none"))
         dialog.try_accept()
         assert dialog.result() != QtWidgets.QDialog.DialogCode.Accepted, "a refusal of sandbox-ai: still open"
         assert "a VPN needs network full" in dialog.error.text()
         dialog.vpn.setText("")
-        dialog.network.setCurrentText("full")
+        dialog.network.setCurrentIndex(dialog.network.findData("full"))
         page.sai.answers = [(0, "MCP server pw: cpus, memory set\n", "")]
         dialog.try_accept()
         return dialog.result()
@@ -432,3 +433,39 @@ def test_the_real_notes_of_this_machine(sai, homes):
     watch.ended(137, False)
     notes = sai.host_mcp_notes("local")
     assert "SIGKILL" in notes["playwright"]["problem"]["why"] and notes["playwright"]["below"] == {}
+
+
+# --- an MCP server's network: internet (no LAN), only its hosts, internet + LAN (warning), none ----------------------
+
+DDG = {"name": "duckduckgo", "title": "DuckDuckGo", "kind": "oci", "network": "allowlist",
+       "hosts": ["html.duckduckgo.com:443"], "image": "ghcr.io/c0decave/sandbox-ai-mcp-duckduckgo",
+       "digest": f"sha256:{'a' * 64}"}
+
+
+def test_the_add_dialog_names_the_networks_and_warns_of_the_lan(page, homes):
+    """MCP review, group B: a full server reached the LAN and 169.254.169.254. The choice says where each reaches; an
+    entry that declares its hosts is added with only them; internet + LAN shows its warning while chosen."""
+    dialog = page.ui.AddServerDialog(page, dict(DDG), "local")
+    shown = [dialog.network.itemText(i) for i in range(dialog.network.count())]
+    assert shown == ["internet (no LAN)", "only its hosts", "internet + LAN (warning)", "none"]
+    assert dialog.network.currentData() == "allowlist" and dialog.values("mcp:duckduckgo")["network"] == "allowlist"
+    warning = [label for label in dialog.findChildren(QtWidgets.QLabel) if label.text().startswith("internet + LAN:")]
+    assert len(warning) == 1 and warning[0].isHidden()
+    dialog.network.setCurrentIndex(dialog.network.findData("lan"))
+    assert not warning[0].isHidden() and dialog.values("mcp:duckduckgo")["network"] == "lan"
+    assert backend.mcp_add_args(**dialog.values("mcp:duckduckgo"))[0][-2:] == ["--network=lan", "mcp:duckduckgo"]
+    plain = page.ui.AddServerDialog(page, dict(ENTRY), "local")
+    assert plain.network.findData("allowlist") == -1, "only an entry that declares its hosts can be held to them"
+    assert backend.needs_confirm("mcp-lan"), "internet + LAN is asked first"
+
+
+def test_properties_show_where_a_server_reaches_and_what_to_change(page, homes, monkeypatch):
+    define(homes, {"ddg": {"image": f"ghcr.io/a/b@sha256:{'a' * 64}", "network": "full"}})
+    note = "MCP server ddg reaches the whole internet, while its catalog entry needs only html.duckduckgo.com:443"
+    info = {"name": "ddg", "kind": "image", "own": True, "status": "stopped", "egress_note": note,
+            "definition": {"image": f"ghcr.io/a/b@sha256:{'a' * 64}", "network": "full"}}
+    dialog = MF.ServerPropertiesDialog(page, page.sai, info, DDG)
+    assert dialog.network.currentText() == "internet (no LAN)"
+    assert any(label.text() == note for label in dialog.findChildren(QtWidgets.QLabel))
+    dialog.network.setCurrentIndex(dialog.network.findData("allowlist"))
+    assert dialog.changes()["network"] == "allowlist"

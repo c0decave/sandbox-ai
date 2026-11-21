@@ -209,9 +209,14 @@ def test_kits_of_a_host(qapp, sai, monkeypatch):
     assert asked(sai)[-1] == ("kits", "list", "--json") and page.table.rowCount() == 1
     page.table.selectRow(0)
     assert not page.use_button.isEnabled(), "the current project is on this machine"
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/skills/review", True))
+    # The skill folder: chosen from ct1's folders (remote_chooser), never typed blind or this machine's
+    from sandbox_ai_app import remote_chooser
+    hosts_asked = []
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, *a, **k: hosts_asked.append(host) or
+                        "/srv/skills/review")
     from conftest import wait_until
     page.add_skill()
+    assert hosts_asked == ["ct1"]
     # A kit change runs in the page's Task (a thread), one at a time: the next waits until it has ended.
     assert wait_until(qapp, lambda: not page.task.running, 30)
     assert ("kits", "add-skill", "--", "mine", "/srv/skills/review") in asked(sai)
@@ -284,8 +289,12 @@ def test_preset_folders_and_trusted_projects_of_a_host(qapp, sai, monkeypatch):
     dirs = settings.PresetDirs(sai)
     choose(dirs.hosts)
     assert dirs.list.count() == 1 and dirs.list.item(0).text() == "/srv/presets  (2 presets)"
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/more", True))
+    from sandbox_ai_app import remote_chooser
+    hosts_asked = []
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, *a, **k: hosts_asked.append(host) or
+                        "/srv/more")
     dirs.add()
+    assert hosts_asked == ["ct1"], "ct1's folders, never this machine's"
     assert ("presets", "dirs", "add", "--", "/srv/more") in asked(sai)
     trusted = settings.TrustedProjects(sai)
     assert "local" in [e[0] for e in sai.asked]  # this machine's list first
@@ -526,7 +535,9 @@ def test_images_changes_go_to_the_host_the_question_named(qapp, sai, monkeypatch
     page.description, page.target, page.pending_files = {"agent": "claude", "files": []}, "claude", []
     warned = []
     monkeypatch.setattr(images_page, "warn", lambda parent, title, text, **kw: warned.append(text))
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/srv/tool", True))
+    from sandbox_ai_app import remote_chooser
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, title, mode="folder", *a, **k:
+                        "/srv/tool" if (host, mode) == ("ct1", "file") else "")
     monkeypatch.setattr(images_page.FileTargetDialog, "exec", accepted)
     page.add_file()
     assert page.pending_files == [] and warned == ["Another extension is edited now: /srv/tool was not added."]

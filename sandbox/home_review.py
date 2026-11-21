@@ -57,6 +57,18 @@ WATCHED = (
     # Goose: its configuration (extensions it starts), hints, skills, recipes, tool permissions
     ".config/goose/config.yaml", ".config/goose/.goosehints", ".config/goose/AGENTS.md", ".config/goose/skills",
     ".config/goose/recipes", ".config/goose/permission.yaml",
+    # OpenHands: its settings (MCP servers it starts, the model), skills, hooks and the Canvas' keys
+    ".openhands/settings.json", ".openhands/skills", ".openhands/microagents", ".openhands/hooks.json",
+    ".openhands/agent-canvas",
+    # nanobot: its configuration (MCP servers, channels, providers), persona and instructions, skills, plugins, jobs
+    ".nanobot/config.json", ".nanobot/workspace/SOUL.md", ".nanobot/workspace/USER.md",
+    ".nanobot/workspace/AGENTS.md", ".nanobot/workspace/HEARTBEAT.md", ".nanobot/workspace/skills",
+    ".nanobot/workspace/plugins", ".nanobot/workspace/cron",
+    # Letta Code: its settings (MCP servers, hooks, permissions), mods (code that changes the harness), skills
+    ".letta/settings.json", ".letta/mods", ".letta/skills", ".letta/AGENTS.md",
+    # Pi: its settings (packages, extensions, MCP servers), extensions (code that runs in Pi), skills, prompts, models
+    ".pi/agent/settings.json", ".pi/agent/mcp.json", ".pi/agent/models.json", ".pi/agent/extensions",
+    ".pi/agent/skills", ".pi/agent/prompts", ".pi/agent/AGENTS.md",
 )
 # Python runs these at every start of an interpreter (site-packages of the user).
 PYTHON_STARTUP = re.compile(r"\.local/lib/python[0-9.]+/site-packages/(?:[^/]+\.pth|sitecustomize\.py|usercustomize\.py)")

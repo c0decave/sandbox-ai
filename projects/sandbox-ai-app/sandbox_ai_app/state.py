@@ -85,6 +85,12 @@ def looks_secret(value):
         and "/" not in value[:1]
 
 
+def sized_by_hand(widget, column):
+    """The human set the width of COLUMN of WIDGET (a table or a tree): kept from now on (tables.py)."""
+    widget.user_columns = set(getattr(widget, "user_columns", None) or ()) | {column}
+    widget.user_sized = True
+
+
 def dragging():
     """True while a mouse button is down (a column or splitter being dragged by the human)."""
     return bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
@@ -228,7 +234,12 @@ class State(QObject):
         saved = self.section("tables").get(key)
         if isinstance(saved, dict) and isinstance(saved.get("header"), str):
             # Sized by the human: known before the restore, whose sort order would have the columns fitted (tables.py).
-            widget.user_sized = bool(saved.get("sized"))
+            # Only the columns named ("columns"): a "sized" of a version before 0.1.99 named none, and was also set by a
+            # splitter or the window moving (before 0.1.79) - every width of a small window frozen for good: fitted.
+            columns = saved.get("columns")
+            widget.user_columns = {c for c in columns if isinstance(c, int) and 0 <= c < 1000} \
+                if isinstance(columns, list) and saved.get("sized") else set()
+            widget.user_sized = bool(widget.user_columns)
             header.restoreState(QByteArray.fromBase64(saved["header"].encode()))
             column, order = saved.get("sort"), saved.get("order")
             if isinstance(column, int) and 0 <= column < widget.columnCount() and order in (0, 1):
@@ -239,6 +250,9 @@ class State(QObject):
             entry = {"header": bytes(header.saveState().toBase64()).decode(),
                      "sized": bool(sized or getattr(widget, "user_sized", False)),
                      "sort": header.sortIndicatorSection(), "order": header.sortIndicatorOrder().value}
+            if entry["sized"]:
+                # only these widths are the human's (tables.py fits the others)
+                entry["columns"] = sorted(getattr(widget, "user_columns", None) or ())
             self.section("tables")[key] = entry
             self.schedule()
 
@@ -248,7 +262,7 @@ class State(QObject):
             if dragging() and not getattr(widget, "fitting", False) and \
                     header.sectionResizeMode(column) != QHeaderView.ResizeMode.Stretch and \
                     not (header.stretchLastSection() and header.visualIndex(column) == header.count() - 1):
-                widget.user_sized = True
+                sized_by_hand(widget, column)
                 remember(True)
         header.sortIndicatorChanged.connect(lambda *_: remember())
         header.sectionResized.connect(resized)
@@ -279,6 +293,16 @@ class State(QObject):
             box.setChecked(value)
         box.toggled.connect(lambda on: self.section("checks").__setitem__(key, bool(on)) or self.schedule())
         return box
+
+    def tab(self, key, tabs):
+        """Keep which tab of TABS (a QTabWidget) is shown, by its index, under "tabs-shown" (not "tabs": the
+        terminal tabs' list); it is shown again at the next start."""
+        value = self.section("tabs-shown").get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < tabs.count():
+            tabs.setCurrentIndex(value)
+        tabs.currentChanged.connect(lambda index: index >= 0 and (
+            self.section("tabs-shown").__setitem__(key, int(index)) or self.schedule()))
+        return tabs
 
     # -- folders of file dialogs --
 

@@ -38,6 +38,10 @@ s = load("agent_sandbox_tor_note_test", "agent_sandbox.py")
 v = s.load_vpn_module()
 
 AGENTS = ("claude", "codex", "opencode", "hermes", "qwen", "dsh", "goose")
+# The agents of 0.1.97 (merged after this test): OpenHands and Pi read it where they read the loop guard's text,
+# OpenCode 2 as one more instruction file, nanobot as an always-loaded skill (staged with the kits' skills: the start,
+# below and in test_newer_agents_thinking_note.py), Letta Code through a mod its start script writes.
+NEWER = ("opencode2", "openhands", "nanobot", "letta", "pi")
 
 
 @pytest.fixture
@@ -145,7 +149,51 @@ def test_every_agent_gets_the_note_where_it_reads_its_instructions(home, agent):
         assert files[f"hermes/skills/{hermes.NOTE_SKILL}/SKILL.md"].endswith(note)
 
 
-@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("agent", NEWER)
+def test_the_newer_agents_get_the_note_too(home, agent):
+    """Merging 0.1.96 into the agents of 0.1.97: a Tor start of one of them ended in a KeyError (NOTE_PLACES had none
+    of them). Each gets network.md; OpenHands it in its system message's suffix, Pi as a section of its system
+    prompt, each after the loop guard's text; the skill names network.md."""
+    a = tor_start(agent)
+    a.run_id = f"{agent}-r3"
+    note = v.agent_note(a)
+    files = session_files(a)
+    assert files[v.NOTE_FILE] == note
+    assert s.NOTE_PLACES[agent]
+    if agent == "openhands":
+        settings = json.loads(files["openhands/settings.json"])
+        assert settings["agent_settings_diff"]["agent_context"]["system_message_suffix"] == note
+    elif agent == "pi":
+        assert json.loads(files["pi/sandbox-ai.json"])["instructions"] == note
+    elif agent == "opencode2":
+        assert json.loads(s.agent_environment(a)["OPENCODE_CONFIG_CONTENT"])["instructions"] == [v.NOTE_PATH]
+    elif agent == "letta":
+        assert json.loads(files["letta/sandbox-ai-start.json"])["note"] == v.NOTE_PATH
+    skill = (ROOT / "sandbox" / "builtin" / agent / "skills" / "sandbox-ai" / "SKILL.md").read_text()
+    assert "/sandbox/session/network.md" in skill
+
+
+@pytest.mark.parametrize("agent", ["openhands", "pi"])
+def test_the_loop_guards_text_and_the_note_share_their_place(home, monkeypatch, agent):
+    llm = s.load_llm_module()
+    monkeypatch.setattr(s, "load_llm_module", lambda: llm)
+    monkeypatch.setattr(llm, "openhands_loop", lambda a: {"steps": 40, "instructions": "LOOP"})
+    monkeypatch.setattr(llm, "openhands_llm", lambda a: {"model": "openai/m"})
+    monkeypatch.setattr(llm, "pi_llm", lambda a: {"provider": None, "instructions": "LOOP", "steps": 40})
+    a = tor_start(agent)
+    a.llm = "x"
+    note = v.agent_note(a)
+    files = s.agent_files(a)
+    if agent == "openhands":
+        settings = json.loads(files["openhands/settings.json"])
+        assert settings["agent_settings_diff"]["agent_context"]["system_message_suffix"] == "LOOP\n\n" + note
+        assert settings["conversation_settings_diff"]["max_iterations"] == 40
+    else:
+        config = json.loads(files["pi/sandbox-ai.json"])
+        assert config["instructions"] == "LOOP\n\n" + note and config["steps"] == 40
+
+
+@pytest.mark.parametrize("agent", AGENTS + NEWER)
 def test_without_a_vpn_no_agent_gets_a_note(home, agent):
     a = s.parse_args([agent, "--backend", "podman"])
     a.run_id = f"{agent}-r2"
@@ -189,7 +237,7 @@ def host(tmp_path):
     return made
 
 
-@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("agent", AGENTS + NEWER)
 def test_e2e_the_dry_run_plan_shows_the_note_for_every_agent(host, agent):
     result = host.run(agent, "--vpn", "tor-test", "--dns", "--dry-run")
     assert result.returncode == 0, result.stderr

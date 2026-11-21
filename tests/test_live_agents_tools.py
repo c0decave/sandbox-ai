@@ -134,16 +134,16 @@ def test_skip_reasons_name_what_to_build(monkeypatch):
     assert "localhost/qwen-sandbox:latest" in reason and "sandbox-ai build qwen" in reason
     assert "codex" not in reason
     monkeypatch.setattr(L, "image_exists", lambda image: False)
-    assert "sandbox-ai build cairn" in L.skip_reason(["localhost/cairn-sandbox:latest"], mcp=False)
-    assert "codex" not in L.skip_reason(["localhost/cairn-sandbox:latest"], mcp=False)
+    reason = L.skip_reason(["localhost/sandbox-ai-cairn:latest", "localhost/sandbox-ai-browser:latest"], mcp=False)
+    assert "sandbox-ai build cairn && sandbox-ai build browser" in reason and "codex" not in reason
 
 
 def test_live_check_agents_builds_and_names(tmp_path, monkeypatch):
     assert lc.agent_names(None) == list(lc.AGENT_SUITES) and lc.agent_names("goose,hermes") == ["hermes", "goose"]
     with pytest.raises(SystemExit, match="not one of"):
         lc.agent_names("hermes,gpt")
-    assert lc.agent_builds(["hermes", "qwen", "cairn", "browser"]) == ["codex", "hermes", "qwen", "team", "cairn",
-                                                                        "claude", "browser"]
+    assert lc.agent_builds(["hermes", "qwen", "cairn", "browser"]) == ["codex", "hermes", "qwen", "claude", "cairn",
+                                                                        "browser"]
     for suite in lc.AGENT_SUITES.values():
         assert (ROOT / suite).is_file()
 
@@ -200,7 +200,7 @@ def test_the_wrapper_passes_the_agents_on(tmp_path):
 def test_ci_runs_one_job_per_agent():
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
     job = ci[ci.index("\n  agents-live:"):]
-    for name in ("hermes", "qwen", "dsh", "goose", "cairn"):
+    for name in ("hermes", "qwen", "dsh", "goose", "openhands", "nanobot", "cairn"):
         assert f"suite: tests/test_{name}_live.py" in job
     assert "fail-fast: false" in job and "--agent-live ${{ matrix.suite }}" in job and "grep -q SKIPPED" in job
     assert "SANDBOX_AI_EXPERIMENTAL" not in job  # nothing to enable: the agents start when chosen

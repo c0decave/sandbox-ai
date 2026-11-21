@@ -1,20 +1,25 @@
-# Cairn (oritera/Cairn, AGPL-3.0): a blackboard of Facts, Intents and Hints, its server and its dispatcher, on the
-# team image (sandbox-ai build cairn; build team first). Only the reviewed commit (docs/CAIRN_REVIEW.md,
-# sandbox/cairn.py), installed unchanged: its source from Git, checked against the reviewed commit; its Python
-# dependencies hash-pinned (Containerfile.cairn.lock, from upstream's uv.lock by scripts/cairn_lock.py) and installed
-# from pypi.org; CPython 3.12 from uv's own builds (their checksums are part of uv). Nothing is piped into a shell.
-# Its workers are the team image's claude and codex CLIs in Cairn's local execution mode, never its Docker mode.
-# uv ships as a static binary in its official image; COPY --from takes only it. Pinned: it also decides the CPython
-# build.
+# Cairn's own container of sandbox-ai (`sandbox-ai build cairn`; --cairn, sandbox/cairn.py, docs/CAIRN_REVIEW.md):
+# Cairn (oritera/Cairn, AGPL-3.0) - a blackboard of Facts, Intents and Hints, its server, web UI and dispatcher -
+# beside the agent in its pod. Only the reviewed commit, installed unchanged: its source from Git, checked against the
+# reviewed commit; its Python dependencies hash-pinned (Containerfile.cairn.lock, from upstream's uv.lock by
+# scripts/cairn_lock.py) and installed from pypi.org; CPython 3.12 from uv's own builds (their checksums are part of
+# uv). Nothing is piped into a shell. No agent is in this image: Cairn's workers are the session's agents, in the
+# agent's container, reached through sandbox-ai's relay (cairn_relay.py, mounted at every start with
+# cairn_runtime.py); never Cairn's Docker mode. `sandbox-ai build cairn` pins the Debian base by its digest
+# (DEBIAN_IMAGE=docker.io/library/debian@sha256:...) and labels the image with it.
+# uv ships as a static binary in its official image; COPY --from takes only it, in the build stage. Pinned: it also
+# decides the CPython build.
 ARG UV_VERSION=0.13.5
+ARG DEBIAN_IMAGE=docker.io/library/debian:bookworm-slim
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
-FROM localhost/team-sandbox:latest
-
+FROM ${DEBIAN_IMAGE} AS build
 # The reviewed commit of main (its local execution mode came after the last release, v0.2.1); another one fails the
 # check below.
 ARG CAIRN_COMMIT=8e7e0ea67552383851dfcabfba0c4e9c8d007878
-COPY --from=uv /uv /uvx /usr/local/bin/
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/
 # Cairn's source at the reviewed commit; only what runs (the package, its prompts and web UI), the licence and the
 # README. No .git.
 RUN git init --quiet /tmp/cairn-src \
@@ -27,9 +32,8 @@ RUN git init --quiet /tmp/cairn-src \
     && printf '%s\n' "${CAIRN_COMMIT}" > /opt/cairn/COMMIT \
     && rm -rf /tmp/cairn-src
 COPY Containerfile.cairn.lock /opt/cairn/requirements.lock
-COPY recipes/cairn/dispatch.yaml /opt/cairn/dispatch.yaml
-# CPython 3.12 (Cairn needs 3.12 or later) beside Debian's python3, which sandbox-ai's setup keeps using; the
-# dependencies exactly as locked, Cairn from its source tree on the venv's path, and the cairn command.
+# CPython 3.12 (Cairn needs 3.12 or later), the dependencies exactly as locked, Cairn from its source tree on the
+# venv's path.
 ENV UV_PYTHON_INSTALL_DIR=/opt/cairn/python UV_NO_CONFIG=1 UV_CACHE_DIR=/tmp/uv-cache
 RUN uv python install --no-bin 3.12 \
     && uv venv --python 3.12 --python-preference only-managed /opt/cairn/venv \
@@ -37,10 +41,16 @@ RUN uv python install --no-bin 3.12 \
        --index-url https://pypi.org/simple -r /opt/cairn/requirements.lock \
     && /opt/cairn/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' \
        | xargs -I{} sh -c 'echo /opt/cairn/src > "{}/cairn.pth"' \
-    && printf '#!/bin/sh\nexec /opt/cairn/venv/bin/python -c "from cairn.cli import main; main()" "$@"\n' \
+    && rm -rf /tmp/uv-cache
+
+# What runs: the Debian base, Cairn's tree (its CPython, its venv, its source); no Git, no uv, no agent.
+FROM ${DEBIAN_IMAGE}
+ARG DEBIAN_IMAGE
+COPY --from=build /opt/cairn /opt/cairn
+RUN printf '#!/bin/sh\nexec /opt/cairn/venv/bin/python -I -c "from cairn.cli import main; main()" "$@"\n' \
        > /usr/local/bin/cairn \
     && chmod 755 /usr/local/bin/cairn \
-    && rm -rf /tmp/uv-cache \
     && cairn --help >/dev/null
-ENV HOME=/root
-WORKDIR /work
+LABEL sandbox-ai.base="${DEBIAN_IMAGE}"
+ENV HOME=/tmp/home
+WORKDIR /tmp

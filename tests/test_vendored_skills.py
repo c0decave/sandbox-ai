@@ -28,7 +28,7 @@ def load(name, path):
 s = load("sandbox_for_vendored_skills", "sandbox/agent_sandbox.py")
 k = load("kits_for_vendored_skills", "sandbox/kits.py")
 kitctl = load("kitctl_for_vendored_skills", "sandbox/kitctl.py")
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 # The latest commit date a pin may have: 14 days before the release that brought these kits (0.1.94, 2026-11-12).
 NEWEST_PIN = "2026-10-29"
 

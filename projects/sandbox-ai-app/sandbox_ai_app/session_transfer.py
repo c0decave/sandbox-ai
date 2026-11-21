@@ -10,10 +10,12 @@ session-replace). The command runs in the background; what it says (the problems
 warnings) is shown in the dialog. Logins and the session's HOME are not copied."""
 from __future__ import annotations
 
+import os
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout,
-    QWidget,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import applog
@@ -133,12 +135,36 @@ class SessionTransferDialog(QDialog):
             edit.setAccessibleName(tr("{path} on the host", path=printable(path)))
             edit.setToolTip(safe_tooltip(tr("Where {path} lies on the host (the same unless changed)",
                                             path=printable(path))))
-            self.folders_form.addRow(printable(path), edit)
+            # … chooses it from the host's folders (remote_chooser: listed over SSH, its path there as it is)
+            browse = QToolButton()
+            browse.setText("…")
+            browse.setAccessibleName(tr("Choose…"))
+            browse.setToolTip(tr("Choose where it lies from the folders of the host chosen"))
+            browse.clicked.connect(lambda _=False, p=path, e=edit: self.browse(p, e))
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(edit, 1)
+            line.addWidget(browse)
+            self.folders_form.addRow(printable(path), row)
             self.edits[path] = edit
         lines = [tr("No folder or file of this machine is named.") if not self.paths else
                  tr("Folders and files: {count}", count=len(self.paths))]
         lines += [tr("Cannot go along: {problem}", problem=printable_text(problem)[:400]) for problem in self.problems]
         self.status.setText("\n".join(lines))
+
+    def browse(self, local, edit):
+        """Where LOCAL (a folder or file of this machine) lies on the host chosen: chosen from that host's folders."""
+        host = self.host.host()
+        if host is None:
+            self.status.setText(tr("Choose a host first."))
+            return
+        from . import remote_chooser as RC
+        path = RC.choose(self, host, tr("{path} on the host", path=printable(local)),
+                         "file" if os.path.isfile(local) else "folder", "transfer", start=edit.text().strip(),
+                         sai=self.sai)
+        if path:
+            edit.setText(path)
 
     def maps(self):
         """[(local, remote)] of the folders whose place on the host was changed."""

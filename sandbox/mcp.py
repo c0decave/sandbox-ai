@@ -19,7 +19,8 @@ project file's "mcp_servers", later ones overriding earlier ones:
 A server can also be a container image from an MCP catalog (sandbox-ai-mcp, axross-mcp-hub):
 `sandbox-ai mcp add NAME` checks the entry, pulls the image by digest and writes
 
-  {"NAME": {"image": "ghcr.io/...@sha256:...", "network": "none" | "full",
+  {"NAME": {"image": "ghcr.io/...@sha256:...", "network": "none" | "full" | "allowlist" | "lan",
+            "hosts": ["NAME:PORT"], "allow_private": ["CIDR"], "allow_tcp": ["ADDRESS:PORT"],
             "mounts": [{"target": "/work", "host": "/abs/path", "mode": "ro"}],
             "env": ["VARIABLE"], "memory": "512m", "cpus": 2, "pids": 128, "description": "...",
             "source": "...", "vpn": "PROFILE",
@@ -30,8 +31,10 @@ Its variables (see "variables" below): "env" required (your environment's, else 
 secret named; `mcp add/set --env NAME`, `--env NAME=VALUE`, `--env NAME@SECRET`, a start's own: --mcp-env.
 
 Such a server runs per connection as `podman run --rm -i` with no capabilities, a read-only root
-and only the network and folders the definition names; agents reach it the same way. With "vpn" (network
-full only) its containers join the network namespace of a VPN container (sandbox-ai vpn), whose kill switch
+and only the network and folders the definition names; agents reach it the same way. A network is the internet, never
+your local network ("full"), only the hosts of its catalog entry ("allowlist"), or your network too ("lan", your
+choice): nftables rules in its network namespace, loaded before it runs (mcp_egress.py). With "vpn" (a server with
+network only) its containers join the network namespace of a VPN container (sandbox-ai vpn), whose kill switch
 lets nothing out but through the tunnel; a server with a command takes --vpn PROFILE in its options. Every
 server's network is decided in server_network and proven after its start (verify_network; each connection of an
 image server by vpn.py's guard): one that would reach the network outside the VPN meant for it does not run.
@@ -70,6 +73,7 @@ import contextlib
 import fcntl
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -106,7 +110,19 @@ PROC = Path("/proc")
 READY_TIMEOUT = 120
 KEYS = {"command", "options", "agent", "workspace", "description", "tool_timeout"}
 IMAGE_KEYS = {"image", "network", "mounts", "env", "memory", "cpus", "pids", "tmp", "description", "source", "vpn",
-              "signed_by", "rootfs", "catalog", "env_optional", "env_values", "env_secrets", "tool_timeout", "pid1"}
+              "signed_by", "rootfs", "catalog", "env_optional", "env_values", "env_secrets", "tool_timeout", "pid1",
+              "hosts", "allow_private", "allow_tcp"}
+# An image server's network (mcp_egress.py: what each one reaches, enforced in its network namespace):
+#   none       nothing
+#   full       the internet, never your local network nor this host (private, carrier-grade NAT, loopback,
+#              link-local with the clouds' metadata service, IPv6 unique-local and link-local, multicast)
+#   allowlist  only "hosts" (NAME:PORT, its catalog entry's), pinned when each connection begins; no DNS of its own
+#   lan        the internet and your local network (a choice of yours, said with a warning); never the metadata service
+# "allow_private" (networks) and "allow_tcp" (ADDRESS:PORT) open a part of your network to a full or allowlist server.
+NETWORKS = ("none", "full", "allowlist", "lan")
+NETWORK_LABELS = {"none": "none", "full": "internet (no LAN)", "allowlist": "only its hosts", "lan": "internet + LAN"}
+EGRESS_LIST_LIMIT = 32  # networks or addresses a server's allow_private or allow_tcp names
+HOSTS_LIMIT = 64
 # "pid1": "server" - the server's own process is PID 1 of its container (Podman without --init) or Bubblewrap sandbox
 # (bwrap --as-pid-1) and reaps its children itself. By default catatonit (Podman's --init) or bwrap's reaper is PID 1
 # and holds the MCP connection's stdin and stdout, which every process of the server can open through /proc/1/fd: a
@@ -166,7 +182,7 @@ def forbidden():
     # Server sandboxes never get credentials, sessions, tmux or nested MCP.
     return launcher().CONFIG_FORBIDDEN + ("--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--mcp-socket-dir",
                                           "--tmux",
-                                          "--copy-auth", "--auth-file",
+                                          "--copy-auth", "--auth-file", "--auth-from-session",
                                           "--import-codex-auth", "--copy", "--probe", "--binary", "--state-dir",
                                           "--gui-wayland", "--git-token-env", "--git-token-file",
                                           "--git-credentials", "--git-token-secret", "--git-identity",
@@ -227,8 +243,7 @@ def validated_image(definition, where):
         rootfs_module().validated(definition["rootfs"], where)
         if definition.get("vpn"):
             raise ValueError(f"{where}: a VPN is for the Podman form of a server (drop rootfs or vpn)")
-    if definition.get("network", "none") not in ("none", "full"):
-        raise ValueError(f"{where}: network must be none or full")
+    check_egress(definition, where)
     mounts = definition.get("mounts", [])
     if not isinstance(mounts, list) or len(mounts) > 8:
         raise ValueError(f"{where}: mounts must be a list of at most 8 folders")
@@ -268,9 +283,122 @@ def validated_image(definition, where):
     if "vpn" in definition:
         if not isinstance(definition["vpn"], str) or not re.fullmatch(launcher().VPN_PROFILE_NAME, definition["vpn"]):
             raise ValueError(f"{where}: vpn must name a VPN profile (sandbox-ai vpn list)")
-        if definition.get("network", "none") != "full":
+        if definition.get("network", "none") == "none":
             raise ValueError(f"{where}: a VPN needs network full (without network nothing would use it)")
     return definition
+
+
+_egress = None
+
+
+def egress_module():
+    """mcp_egress.py: each connection's egress guard, and vpn_runtime.py's rules through it."""
+    global _egress
+    if _egress is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_mcp_egress", HERE / "mcp_egress.py")
+        with LOADING:
+            if _egress is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _egress = loaded
+    return _egress
+
+
+def checked_hosts(hosts, where):
+    """HOSTS (a catalog entry's ["NAME:PORT"]) as an allowlist server keeps them; ValueError otherwise."""
+    if not isinstance(hosts, list) or not hosts or len(hosts) > HOSTS_LIMIT:
+        raise ValueError(f"{where}: an allowlist server needs its hosts (NAME:PORT, its catalog entry's; at most "
+                         f"{HOSTS_LIMIT})")
+    for host in hosts:
+        if not isinstance(host, str):
+            raise ValueError(f"{where}: hosts: each is NAME:PORT")
+        try:
+            egress_module().runtime().egress_host(host)
+        except ValueError as exc:
+            raise ValueError(f"{where}: hosts: {exc}") from None
+    return list(hosts)
+
+
+def checked_allowed(key, values, where):
+    """VALUES of allow_private (networks of yours, not all addresses) or allow_tcp (ADDRESS:PORT) as a definition
+    keeps them (their text, as given); ValueError otherwise."""
+    if not isinstance(values, list) or len(values) > EGRESS_LIST_LIMIT or \
+            not all(isinstance(value, str) for value in values):
+        raise ValueError(f"{where}: {key} must be a list of at most {EGRESS_LIST_LIMIT} values")
+    rt = egress_module().runtime()
+    for value in values:
+        try:
+            if key == "allow_tcp":
+                rt.egress_endpoint(value)
+            elif ipaddress.ip_network(value, strict=False).prefixlen == 0:
+                raise ValueError(f"{value} is every address: give --network lan instead")
+        except ValueError as exc:
+            raise ValueError(f"{where}: {key}: {exc}") from None
+    return list(values)
+
+
+def check_egress(definition, where):
+    """The network of an image server DEFINITION (NETWORKS) with its hosts and the parts of your network it may
+    reach, checked; ValueError otherwise."""
+    network = definition.get("network", "none")
+    if network not in NETWORKS:
+        raise ValueError(f"{where}: network must be none, full, allowlist or lan")
+    if network == "allowlist":
+        checked_hosts(definition.get("hosts"), where)
+    elif "hosts" in definition:
+        raise ValueError(f"{where}: hosts: only an allowlist server has hosts of its own")
+    for key in ("allow_private", "allow_tcp"):
+        if key in definition:
+            if network == "none":
+                raise ValueError(f"{where}: {key}: a server without network reaches nothing")
+            checked_allowed(key, definition[key], where)
+
+
+class ListAppend(argparse._AppendAction):
+    """--allow-private and --allow-tcp of mcp add|set: one or more in a value, separated by commas or spaces (as the
+    launcher's allow-type options take them); a value without any is refused. Each is checked where it is kept."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = list(dict.fromkeys(item for item in re.split(r"[\s,]+", str(values)) if item))
+        if not items:
+            raise argparse.ArgumentError(self, "no value (one or more, separated by commas or spaces)")
+        setattr(namespace, self.dest, [*(getattr(namespace, self.dest, None) or []), *items])
+
+
+def network_label(definition):
+    """An image server's network for people: "internet (no LAN)", "only its hosts (A:443, ...)", "internet + LAN",
+    "none", and the parts of your network opened to it."""
+    network = definition.get("network", "none")
+    label = NETWORK_LABELS.get(network, str(network))
+    if network == "allowlist":
+        label += f" ({', '.join(definition.get('hosts') or [])})"
+    opened = [*definition.get("allow_private", []), *definition.get("allow_tcp", [])]
+    return label + (f" + {', '.join(opened)}" if opened and network != "none" else "")
+
+
+def egress_note(name, definition, entry=None):
+    """What `mcp list`, `mcp add` and doctor say of the network of the image server NAME (DEFINITION; ENTRY: its
+    catalog entry, where known), or None: one that reaches your network (lan, allow_private, allow_tcp), and a full
+    server whose catalog entry needs only its hosts (switch to them)."""
+    network = definition.get("network", "none")
+    opened = [*definition.get("allow_private", []), *definition.get("allow_tcp", [])]
+    if network == "lan":
+        return (f"MCP server {name} reaches your local network and this host (--network lan); only the clouds' metadata "
+                f"service is refused. Back to the internet alone: sandbox-ai mcp set {name} --network full")
+    if network != "none" and opened:
+        return (f"MCP server {name} reaches {', '.join(opened)} of your network (--allow-private/--allow-tcp); the "
+                "rest of it stays closed")
+    if network in ("full", "allowlist") and not opened and str((definition.get("env_values") or {}).get(
+            "ALLOW_PRIVATE_TARGETS", "")).strip().lower() not in ("", "0", "false", "no"):
+        # (the way to reach your own network before 0.1.98: such a server reaches none of it now)
+        return (f"MCP server {name} has ALLOW_PRIVATE_TARGETS=1 for targets in your local network, but its network is "
+                "the internet, not your local network (since 0.1.98), so it reaches none of them: open the part it "
+                f"needs with sandbox-ai mcp set {name} --allow-private 192.168.1.0/24 (or --allow-tcp IP:PORT; all of "
+                "your network: --network lan)")
+    if network == "full" and isinstance(entry, dict) and entry.get("network") == "allowlist" and entry.get("hosts"):
+        return (f"MCP server {name} reaches the whole internet, while its catalog entry needs only "
+                f"{', '.join(map(str, entry['hosts']))}: sandbox-ai mcp set {name} --network allowlist keeps it to them")
+    return None
 
 
 def checked_tool_timeout(value, where="tool_timeout"):
@@ -596,7 +724,7 @@ def check_start_mounts(a, servers, create=False, out=None):
         for mount in mounted.get("mounts", []):
             if mount["target"] in mounts:
                 mount_host(f"{name}:{mount['target']}={mount['host']}:{mount.get('mode', 'ro')}", mount["host"],
-                           mount.get("mode", "ro"), create, out)
+                           mount.get("mode", "ro"), create, out, option="--mcp-mount")
 
 
 # --- variables: required ones, optional ones, plain values and secrets of another name ------------------------------
@@ -899,6 +1027,53 @@ def start_env(a):
     return found
 
 
+# Variables that change what code a program runs: the loader's libraries (LD_*, macOS' DYLD_*), an interpreter's
+# startup, options and module path, a shell's startup, the programs found on PATH. A value of one makes the server's
+# sandbox run other code than its own - with a folder the agent can write mounted there (--mcp-mount), the agent's
+# code, with the server's secrets and network. You choose it: set, with a warning; a preset passed on may not.
+CODE_ENV = frozenset({"NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE",
+                      "PYTHONINSPECT", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB", "RUBYOPT", "RUBYLIB", "BASH_ENV",
+                      "ENV", "PROMPT_COMMAND", "PATH", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+                      "CLASSPATH", "GCONV_PATH", "LUA_INIT", "LUA_PATH", "LUA_CPATH", "GIT_EXEC_PATH",
+                      "DENO_DIR", "BUN_OPTIONS", "GODEBUG", "PHPRC", "PHP_INI_SCAN_DIR"})
+CODE_ENV_PREFIXES = ("LD_", "DYLD_")
+
+
+def code_variable(name):
+    """Whether the variable NAME changes what code a program runs (CODE_ENV, LD_*, DYLD_*)."""
+    return str(name) in CODE_ENV or str(name).startswith(CODE_ENV_PREFIXES)
+
+
+def code_env_in(options, given=()):
+    """["--mcp-env NAME:VAR", ...] of the --mcp-env values among OPTIONS (canonical, as on the command line) whose
+    VAR changes what code runs (code_variable) - but a whole value the user GIVES (--preset-value) is theirs."""
+    given, found = {str(value).strip() for value in given if value}, []
+    for index, token in enumerate(options):
+        flag, equals, value = str(token).partition("=")
+        if flag != "--mcp-env":
+            continue
+        value = value if equals else (str(options[index + 1]) if index + 1 < len(options) else "")
+        match = re.fullmatch(r"([^:]*):([A-Za-z_][A-Za-z0-9_]{0,63})(?:[=@].*)?", value, re.S)
+        if match and code_variable(match[2]) and value.strip() not in given:
+            found.append(f"--mcp-env {match[1]}:{match[2]}")
+    return found
+
+
+def code_env_warnings(a):
+    """The warnings of the start A's --mcp-env variables that change what code runs in an MCP server's sandbox
+    (code_variable): you chose them, so they are set - the warning names the risk. [] for a value that is not valid
+    (start_problems says what is wrong with it)."""
+    try:
+        wanted = start_env(a)
+    except ValueError:
+        return []
+    # (short enough to be relayed whole from a session's supervisor: sessions.RELAYED)
+    return [f"--mcp-env {name}:{variable}: {variable} changes what code runs in the MCP server {name}'s sandbox: "
+            "code in a folder the agent can write (a --mcp-mount) would run as the server, with its secrets and "
+            "network; set as you chose it"
+            for name, variables in wanted.items() for variable in variables if code_variable(variable)]
+
+
 def with_start_env(name, definition, env):
     """DEFINITION with a start's own variables ENV ({VAR: (kind, detail)}) in place of its own: only an image
     server's (a command server's are its options' --env), never a helper's or a team's board."""
@@ -1010,14 +1185,15 @@ def check_image_policy(name, definition):
     that forbids --vpn forbids a server's VPN too."""
     l = launcher()
     policy = l.load_policy()
-    if definition.get("network", "none") == "full" and \
+    network = definition.get("network", "none")  # (full, allowlist, lan: each reaches the network)
+    if network != "none" and \
             (policy.get("mcp_network", "full") == "none" or policy.get("allow_within") is not None):
-        raise ValueError(f"MCP server {name}: network full is not allowed by the administrator's policy "
+        raise ValueError(f"MCP server {name}: network {network} is not allowed by the administrator's policy "
                          f"({l.POLICY_FILE})")
     required, vpn = policy.get("require_vpn", False), definition.get("vpn")
-    if definition.get("network", "none") == "full" and required and \
+    if network != "none" and required and \
             (not vpn or (isinstance(required, list) and vpn not in required)):
-        raise ValueError(f"MCP server {name}: the administrator's policy requires a VPN for network full"
+        raise ValueError(f"MCP server {name}: the administrator's policy requires a VPN for network {network}"
                          + (f" ({', '.join(required)})" if isinstance(required, list) else "")
                          + f" ({l.POLICY_FILE}); add one with: sandbox-ai mcp add ... --vpn PROFILE")
     if vpn and any(entry.split("=", 1)[0] == "--vpn" for entry in policy.get("forbid", [])):
@@ -1025,12 +1201,13 @@ def check_image_policy(name, definition):
 
 
 def check_image_mounts(name, definition, remember=True, warn=None):
-    """The host folders of an image server pass the launcher's host-path policy, read-only or not, as a --mount
-    does (agent_sandbox.check_given_path): no symlink a sandbox may have planted on the way, no folder of the user's
-    sockets or tree with a live socket, no file system of the kernel's own, none of sandbox-ai's own folders, a
-    private location with a warning (WARN(text), default: stderr), and not inside a tree an agent can write (it could
-    swap the folder for a link before the next connection mounts it). Their rw folders join the registry (with
-    REMEMBER: the server's start; `mcp add|set` and a start's first check only check)."""
+    """The host folders of an image server - yours: `mcp add|set --mount`, the project file you trusted - pass the
+    launcher's host-path policy, read-only or not, as a --mount does (agent_sandbox.check_given_path): no symlink a
+    sandbox may have planted on the way (refused: not your choice); a folder of your sockets or a tree with a live
+    socket, a file system of the kernel's own, sandbox-ai's own folders, a private location, a folder of the VPNs'
+    keys, one inside a tree an agent can write (it could swap the folder for a link: each connection checks it is
+    still the one it was) - given, with a warning (WARN(text), default: the launcher's warner). Their rw folders join
+    the registry (with REMEMBER: the server's start; `mcp add|set` and a start's first check only check)."""
     l = launcher()
     before = l.exposed_before()
     writable = []
@@ -1038,16 +1215,17 @@ def check_image_mounts(name, definition, remember=True, warn=None):
     for mount in definition.get("mounts", []):
         host = os.path.expanduser(mount["host"])
         option = f"MCP server {name}: mount {mount['target']}"
-        vpn.check_paths([host], option)
+        vpn.check_paths([host], option, warn=warn)
         l.check_planted(host, option, before)
         resolved = Path(host).resolve()
         for tree in before:
             if tree in resolved.parents:
-                raise ValueError(f"{option}: {resolved} lies inside {tree}, which a sandbox can write; it could "
-                                 "replace the folder with a link before a connection mounts it. Use a folder of its own.")
-        # As a --mount gets, whatever its mode (the container runs as root, you): no folder of sockets, no file
-        # system of the kernel's own, no tree with a live socket, never sandbox-ai's own folders; a private
-        # location with a warning.
+                l.warner(warn)(f"{option}: {resolved} lies inside {tree}, which a sandbox can write: an agent there "
+                               "can change what the server keeps in it, or replace the folder with a link (a "
+                               "connection is refused then); a folder of its own is safer")
+                break
+        # As a --mount gets, whatever its mode (the container runs as root, you): a folder of sockets, a file system
+        # of the kernel's own, a tree with a live socket, sandbox-ai's own folders, a private location - each said.
         l.check_given_path(resolved, option, mount.get("mode", "ro") == "rw", warn=warn)
         if mount.get("mode", "ro") == "rw":
             writable.append(resolved)
@@ -1181,6 +1359,10 @@ def image_command(plan, engine="podman"):
         for mount in definition["mounts"]:
             host = Path(os.path.expanduser(mount["host"])).resolve()
             command.append(f"--volume={host}:{mount['target']}:{mount.get('mode', 'ro')}")
+    egress = plan.get("egress") or {}
+    if egress.get("kind") == "hosts":
+        # Its names: only its pinned hosts (the guard, or its VPN container, writes them before each connection).
+        command.append(f"--volume={egress['hosts_file']}:/etc/hosts:ro")
     return [*command, definition["image"]]
 
 
@@ -1428,6 +1610,15 @@ def remember_catalog_env(found):
                for v in entry.get("env", []) if isinstance(v, dict) and isinstance(v.get("name"), str)
                and ENV_NAME.fullmatch(v["name"])}
         kept = {"signature": state, "env": env}
+        # Its network and hosts too: `mcp list` and doctor tell a full server of an allowlist entry to switch to
+        # its hosts without reading the catalog (cached_entry).
+        if entry.get("network") in ("none", "full", "allowlist"):
+            kept["network"] = entry["network"]
+            kept["hosts"] = []
+            for host in [host for host in entry.get("hosts") or [] if isinstance(host, str)][:HOSTS_LIMIT]:
+                with contextlib.suppress(ValueError):
+                    egress_module().runtime().egress_host(host)
+                    kept["hosts"].append(host)
         if not isinstance(known.get(catalog), dict):
             known[catalog] = {}
         if known[catalog].get(ident) != kept:
@@ -1437,6 +1628,23 @@ def remember_catalog_env(found):
         with contextlib.suppress(OSError):
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             write_private(path, known)
+
+
+def cached_entry(definition):
+    """{"network", "hosts"} of the catalog entry DEFINITION was added from, as that catalog was last read here
+    (catalog_env_file; nothing is downloaded), or None."""
+    catalog, source = definition.get("catalog"), definition.get("source")
+    if not isinstance(catalog, str) or not isinstance(source, str):
+        return None
+    try:
+        known = json.loads(catalog_env_file().read_text())
+    except (OSError, ValueError, RecursionError):
+        return None
+    entries = known.get(catalog) if isinstance(known, dict) else None
+    entry = entries.get(source) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict) or entry.get("signature") not in ("good", "unsigned") or "network" not in entry:
+        return None
+    return {"network": entry["network"], "hosts": list(entry.get("hosts") or [])}
 
 
 def catalog_optional(definition, variable):
@@ -1523,33 +1731,106 @@ def find_entry(entries, name):
 
 MOUNT_HELP = ("--mount TARGET=HOST[:ro|rw]: TARGET is the folder inside the server's container, HOST the folder on "
               "this machine (read-only unless :rw; a writable one that is not there yet is created)")
+START_MOUNT_HELP = ("--mcp-mount NAME:TARGET=HOST[:ro|rw]: TARGET is the folder inside the server NAME's container, HOST "
+                    "the folder on this machine (read-only unless :rw; a writable one that is not there yet is created)")
 
 
-def mount_host(value, host, mode, create=False, out=None):
+def this_machine():
+    """"this machine (NAME)": where `mcp add` runs is said by its name too - run on another host (sandbox-ai hosts run,
+    the app's or the web's Add on a host), "this machine" alone was read as the machine the human sat at (user report
+    2026-11-19: "the app tries to create the folder locally, not on the remote host")."""
+    import socket
+    try:
+        name = "".join(c for c in socket.gethostname() if c.isprintable() and not c.isspace())[:64]
+    except OSError:
+        name = ""
+    return f"this machine ({name})" if name else "this machine"
+
+
+# Where a sandbox sees its folders (agent_sandbox: the workspace at /work, the others at /workspaces/NAME): a HOST
+# folder of `mcp add --mount` given as one of these, and not there, is the agent's view of a folder (an agent that
+# told the human the command wrote its own /work; user report 2026-11-20: "--mount /work=/work:rw: /work is not there
+# and cannot be created (/ is not a folder you can write)").
+SANDBOX_PLACES = ("/work", "/workspaces")
+
+
+def running_workspaces():
+    """[(start name, its main workspace on this machine)] of the starts running here (their run.json), at most 5; []
+    when none can be read. Plain reads: said in a refusal, no Podman asked."""
+    found = []
+    try:
+        directories = net_module().run_dirs()
+    except Exception:  # noqa: BLE001 - only a hint
+        return []
+    for directory in directories:
+        try:
+            entries = sorted(Path(directory).iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                record = json.loads((entry / "run.json").read_text())
+                os.kill(int(record["pid"]), 0)
+            except (OSError, ValueError, RecursionError, KeyError, TypeError):
+                continue
+            workspace, name = record.get("workspace"), record.get("name") or record.get("start") or entry.name
+            if isinstance(workspace, str) and os.path.isabs(workspace) and record.get("kind", "agent") == "agent" \
+                    and (str(name), workspace) not in found:
+                found.append((str(name), workspace))
+    return found[:5]
+
+
+def sandbox_path_hint(value, path):
+    """" HOST is a folder of this machine ...": what is said of the --mount VALUE whose HOST folder PATH is not there
+    when PATH is where a sandbox sees a folder (SANDBOX_PLACES) - with the workspaces of the starts running here as the
+    fix, read-only unless VALUE asked for writable; "" for any other PATH."""
+    text = str(path)
+    if not any(text == place or text.startswith(place + "/") for place in SANDBOX_PLACES):
+        return ""
+    printable = launcher().printable
+    target = str(value).partition("=")[0]
+    starts = running_workspaces()
+    # Read-only, as the catalogs' analysis servers want their folder (radare2, binwalk: "read-only is enough"); :rw
+    # stays the human's choice.
+    fix = ("; ".join(f"{printable(name)}: --mount {printable(target)}={printable(folder)}:ro"
+                     for name, folder in starts) if starts else
+           f"--mount {printable(target)}=/path/of/your/project:ro on this machine")
+    return (f" HOST is a folder of {this_machine()}, not a path inside a sandbox: {printable(text)} is where a sandbox "
+            "sees its workspace (an agent that wrote the command gave its own view of the folder). Give the folder on "
+            f"this machine that the sandbox shows there - " + ("the workspace of the start running here: " if starts
+                                                               else "") + fix
+            + (" (read-only is enough to analyze it; :rw only where the server must write)"
+               if str(value).endswith(":rw") else ""))
+
+
+def mount_host(value, host, mode, create=False, out=None, option="--mount"):
     """The folder HOST (of --mount VALUE) on this machine, resolved: a folder that is there; for MODE rw one that is
     not there yet is created with CREATE (0700, its parents as needed; OUT says so), else only checked to be creatable.
-    ValueError where it is no folder, a read-only one is missing, or it cannot be created."""
+    ValueError where it is no folder, a read-only one is missing, or it cannot be created. OPTION: how VALUE was
+    given (--mount of mcp add/set, a start's --mcp-mount NAME:TARGET=HOST), named so in what is said."""
+    help_text = MOUNT_HELP if option == "--mount" else START_MOUNT_HELP
     if not host or not os.path.isabs(os.path.expanduser(host)):
-        raise ValueError(f"--mount {value}: HOST must be an absolute folder of this machine (or ~/...). {MOUNT_HELP}")
+        raise ValueError(f"{option} {value}: HOST must be an absolute folder of this machine (or ~/...). {help_text}")
     path = Path(os.path.expanduser(host)).resolve()
     if path.exists():
         if not path.is_dir():
-            raise ValueError(f"--mount {value}: {path} on this machine is not a folder. {MOUNT_HELP}")
+            raise ValueError(f"{option} {value}: {path} on {this_machine()} is not a folder. {help_text}")
         return path
     if mode != "rw":
-        raise ValueError(f"--mount {value}: the folder {path} is not there on this machine; a read-only folder must be "
-                         f"there (a writable one, :rw, is created). {MOUNT_HELP}")
+        raise ValueError(f"{option} {value}: the folder {path} is not there on {this_machine()}; a read-only folder "
+                         f"must be there (a writable one, :rw, is created)." + (sandbox_path_hint(value, path)
+                                                                                or f" {help_text}"))
     parent = path.parent
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
     if not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
-        raise ValueError(f"--mount {value}: {path} is not there and cannot be created ({parent} is not a folder you "
-                         "can write)")
+        raise ValueError(f"{option} {value}: {path} is not there on {this_machine()} and cannot be created ({parent} is "
+                         "not a folder you can write)." + sandbox_path_hint(value, path))
     if create:
         try:
             path.mkdir(mode=0o700, parents=True)
         except OSError as exc:
-            raise ValueError(f"--mount {value}: {path} cannot be created: {exc.strerror or exc}") from None
+            raise ValueError(f"{option} {value}: {path} cannot be created: {exc.strerror or exc}") from None
         (out or print)(f"sandbox-ai mcp: created {path}")
     return path
 
@@ -1591,21 +1872,22 @@ def cpus_number(text):
 
 
 def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, pids=None, vpn=None, cpus=None,
-                          create=False, out=None, tmp=None):
+                          create=False, out=None, tmp=None, allow_private=(), allow_tcp=()):
     """A definition for ENTRY with the folders, variables and network given on the command line; the limits given, else
     those the entry recommends (recommended_limits), else none (the defaults). CREATE: a writable folder that is not
-    there yet is created (mount_host)."""
+    there yet is created (mount_host). NETWORK: the entry's own unless given (an allowlist entry: only its hosts);
+    ALLOW_PRIVATE, ALLOW_TCP: parts of your network opened to it (--allow-private, --allow-tcp)."""
     digest, image = entry.get("digest"), entry.get("image")
     if entry.get("kind") != "oci" or not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError(f"{entry.get('name')}: the catalog has no digest for it yet (not published)")
     wanted = entry.get("network", "none")
     if network is None:
-        if wanted == "allowlist":
-            raise ValueError(f"{entry['name']} needs {', '.join(entry.get('hosts', []))}; sandbox-ai cannot limit a "
-                             "server to these hosts yet: add --network full to grant it the outside network")
         network = wanted
-    if network not in ("none", "full"):
-        raise ValueError("--network must be none or full")
+    if network not in NETWORKS:
+        raise ValueError("--network must be none, full, allowlist or lan")
+    if network == "allowlist" and (entry.get("network") != "allowlist" or not entry.get("hosts")):
+        raise ValueError(f"{entry.get('name')}: its catalog entry has no hosts to keep it to (network "
+                         f"{wanted}): give --network full (the internet, not your network) or none")
     limits = {**recommended_limits(entry),
               **checked_limits({key: value for key, value in (("memory", memory), ("cpus", cpus), ("pids", pids),
                                                               ("tmp", tmp)) if value}, "--memory/--cpus/--pids/--tmp")}
@@ -1623,6 +1905,12 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
         definition["pids"] = limits["pids"]
     if "tmp" in limits:
         definition["tmp"] = limits["tmp"]
+    if network == "allowlist":
+        definition["hosts"] = [str(host) for host in entry.get("hosts") or []]
+    if allow_private:
+        definition["allow_private"] = list(allow_private)
+    if allow_tcp:
+        definition["allow_tcp"] = list(allow_tcp)
     if vpn:
         definition["vpn"] = vpn
     if entry_tool_timeout(entry) is not None:
@@ -1680,8 +1968,48 @@ def pull_image(image, local, out=print, popen=subprocess.Popen):
         raise subprocess.CalledProcessError(status, argv)
 
 
+PULL_RESERVE = 256 << 20        # bytes left free beside a pulled image (the running starts write there too)
+PULL_UNKNOWN = 1 << 30          # what an image is taken to need when its catalog names no size
+PULL_FACTOR = 3                 # an image takes about this many times its rootfs archive (compressed) unpacked
+
+
+def podman_storage():
+    """Podman's image store (podman info: GraphRoot), else None (no Podman, no answer within 30 s)."""
+    try:
+        found = subprocess.run(["podman", "info", "--format", "{{.Store.GraphRoot}}"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    root = (found.stdout or "").strip().splitlines()[-1:] if found.returncode == 0 else []
+    return root[0] if root and os.path.isabs(root[0]) else None
+
+
+def check_pull_room(local, entry):
+    """Before `mcp add` pulls the image of catalog ENTRY for LOCAL: a ValueError when Podman's image store (and the
+    run directory under XDG_RUNTIME_DIR) has less room than the image needs (PULL_FACTOR times the size of its rootfs
+    archive in the catalog, else PULL_UNKNOWN) and PULL_RESERVE more - said with the file system, its free bytes and
+    inodes and the size needed. A pull that fills the disk fails half-way (Podman: no space left on device) and takes
+    the room every running start writes its logs into with it (user report 2026-11-20)."""
+    rootfs = entry.get("rootfs") if isinstance(entry.get("rootfs"), dict) else {}
+    size = rootfs.get("size") if isinstance(rootfs.get("size"), int) and rootfs["size"] > 0 else None
+    need = size * PULL_FACTOR if size else PULL_UNKNOWN
+    S = statedirs_module()
+    paths = [path for path in (podman_storage(), os.environ.get("XDG_RUNTIME_DIR")) if path]
+    short = S.space_short(paths[:1], need + PULL_RESERVE, 1000) + S.space_short(paths[1:], PULL_RESERVE, 1000)
+    if not short:
+        return
+    how = (f"about {S.human(need)} ({PULL_FACTOR} times its {S.human(size)} archive in the catalog)" if size else
+           f"about {S.human(need)} (its catalog names no size)")
+    raise ValueError(f"{local} is not added: not enough room to pull its image, which needs {how}, and "
+                     f"{S.human(PULL_RESERVE)} stay free for the running starts: "
+                     + "; ".join(text for _, text in short)
+                     + ". Free space - sandbox-ai gc --check shows what can go (the app: Storage) - then add it again"
+                     " (--no-pull when its image is there already)")
+
+
 def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=None, catalogs=None,
-        pull=True, fetch=None, out=print, vpn=None, unsigned=False, backend=None, cpus=None, tmp=None):
+        pull=True, fetch=None, out=print, vpn=None, unsigned=False, backend=None, cpus=None, tmp=None,
+        allow_private=(), allow_tcp=()):
     """sandbox-ai mcp add: write the definition of catalog entry NAME into mcp.json, once its catalog's signature
     verified (or UNSIGNED): for Podman its image pulled by digest, for Bubblewrap its rootfs fetched, checked and
     unpacked (BACKEND podman, bwrap or both; default: Podman when it is there or the entry has no rootfs). The limits
@@ -1697,7 +2025,8 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     backend = backend or ("podman" if shutil.which("podman") or not entry.get("rootfs") else "bwrap")
     if backend not in ("podman", "bwrap", "both"):
         raise ValueError("--backend is podman, bwrap or both")
-    definition = {**definition_from_entry(entry, mounts, env, network, memory, pids, vpn, cpus=cpus, tmp=tmp),
+    definition = {**definition_from_entry(entry, mounts, env, network, memory, pids, vpn, cpus=cpus, tmp=tmp,
+                                          allow_private=allow_private, allow_tcp=allow_tcp),
                   **signed,
                   **({"catalog": entry["_catalog"]} if isinstance(entry.get("_catalog"), str) else {})}
     if backend in ("bwrap", "both"):
@@ -1708,20 +2037,18 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     local = local or entry["name"]
     if not re.fullmatch(MCP_NAME_PATTERN, local) or local in BUILTIN:
         raise ValueError(f"invalid or reserved server name: {local}")
-    if entry.get("network") == "allowlist":
-        out(f"sandbox-ai mcp: {local} gets the full outside network; it needs only {', '.join(entry.get('hosts', []))}")
-    elif definition.get("network") == "full":
-        out(f"sandbox-ai mcp: {local} gets the full outside network ("
-            + ("--network full" if network == "full" else "its catalog entry asks for it") + ")")
+    for line in network_said(local, definition, entry, network):
+        out(line)
     recommended = {key: value for key, value in recommended_limits(entry).items()
                    if not {"memory": memory, "cpus": cpus, "pids": pids, "tmp": tmp}[key]}
     if recommended:
         out(f"sandbox-ai mcp: {local} gets the limits its catalog entry recommends: {limits_text(recommended)} "
             f"(sandbox-ai mcp set {local} changes them)")
-    if "image" in definition or "rootfs" in definition:  # (a folder its start would refuse: never added)
-        check_image_mounts(local, definition, remember=False, warn=lambda _line: None)
+    if "image" in definition or "rootfs" in definition:  # (a folder you chose with a risk: said, then added)
+        check_image_mounts(local, definition, remember=False, warn=lambda line: out(f"sandbox-ai mcp: warning: {line}"))
     checked_behind_tor(local, definition, vpn, out, entry)
     if pull:
+        check_pull_room(local, entry)
         pull_image(definition["image"], local, out)
     create_mounts(definition, out)
     write_definition(local, definition)
@@ -1732,6 +2059,24 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     LOG.info("mcp", f"{local} added ({form}; catalog {definition.get('catalog') or 'none'})")
     out(f"sandbox-ai mcp: {local} added ({form}); use it with --mcp {local}")
     return definition
+
+
+def network_said(local, definition, entry=None, given=None):
+    """What `mcp add` (and `mcp set`) say of the network the server LOCAL gets: where it reaches, a warning where it
+    reaches your local network."""
+    network = definition.get("network", "none")
+    lines = []
+    if network == "allowlist":
+        lines.append(f"sandbox-ai mcp: {local} reaches only {', '.join(definition.get('hosts', []))} (its catalog "
+                     "entry's hosts, nothing else - not your local network, no DNS of its own)")
+    elif network == "full":
+        why = "--network full" if given == "full" else "its catalog entry asks for it"
+        lines.append(f"sandbox-ai mcp: {local} reaches the internet, not your local network ({why})")
+    note = egress_note(local, definition, entry)
+    if note:
+        warning = network == "lan" or definition.get("allow_private") or definition.get("allow_tcp")
+        lines.append(f"sandbox-ai mcp: {'warning: ' if warning else ''}{note}")
+    return lines
 
 
 def create_mounts(definition, out=print):
@@ -1788,7 +2133,8 @@ def write_definition(name, definition):
             raise
 
 
-SET_KEYS = ("memory", "cpus", "pids", "tmp", "network", "mounts", "env", "vpn", "recommended", "tool_timeout")
+SET_KEYS = ("memory", "cpus", "pids", "tmp", "network", "mounts", "env", "vpn", "recommended", "tool_timeout",
+            "allow_private", "allow_tcp")
 
 
 def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
@@ -1802,8 +2148,12 @@ def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
         raise ValueError(f"only {', '.join(SET_KEYS)} can be set")
     _path, document = read_config()
     if name not in document:
-        where = ("built in" if name in BUILTIN else "a team's board" if name.startswith("team-") else
-                 "defined elsewhere (the project file's mcp_servers: change it there, or on the board)")
+        if name not in BUILTIN and not name.startswith("team-"):
+            raise ValueError(f"MCP server {name} is defined nowhere (not in {config_file()}, not built in, not a team's "
+                             f"board): add it with sandbox-ai mcp add {name} (a server of a catalog: sandbox-ai mcp "
+                             f"catalog lists them); one a project file's mcp_servers defines is changed there or on "
+                             f"the board")
+        where = "built in" if name in BUILTIN else "a team's board"
         raise ValueError(f"MCP server {name} is not in {config_file()} ({where}): only a server of yours can be set")
     old = validated({name: document[name]}, config_file())[name]
     new = json.loads(json.dumps(old))
@@ -1844,9 +2194,26 @@ def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
             if key in limits:
                 new[key] = cpus_number(limits[key]) if key == "cpus" else limits[key]
     if "network" in changes:
-        if changes["network"] not in ("none", "full"):
-            raise ValueError("--network must be none or full")
+        if changes["network"] not in NETWORKS:
+            raise ValueError("--network must be none, full, allowlist or lan")
         new["network"] = changes["network"]
+        new.pop("hosts", None)
+        if changes["network"] == "allowlist":
+            # Its catalog entry's hosts, as add takes them.
+            source = entry or catalog_entry_of(name, old, fetch, catalogs)
+            if source.get("network") != "allowlist" or not source.get("hosts"):
+                raise ValueError(f"MCP server {name}: its catalog entry has no hosts to keep it to: --network full "
+                                 "(the internet, not your network) or none")
+            new["hosts"] = [str(host) for host in source["hosts"]]
+        if changes["network"] == "none":
+            for key in ("allow_private", "allow_tcp"):
+                if not changes.get(key):
+                    new.pop(key, None)
+    for key in ("allow_private", "allow_tcp"):
+        if key in changes:
+            new.pop(key, None)
+            if changes[key]:
+                new[key] = list(changes[key])
     if "vpn" in changes:
         new.pop("vpn", None)
         if changes["vpn"]:
@@ -1872,6 +2239,15 @@ def set_changes(a):
             changes[key] = None if str(value).strip().lower() == "default" else value
     if a.network:
         changes["network"] = a.network
+    allowed = {"allow_private": getattr(a, "allow_private", None), "allow_tcp": getattr(a, "allow_tcp", None)}
+    if getattr(a, "no_allow", False):
+        if any(values is not None for values in allowed.values()):
+            raise ValueError("--no-allow takes your network away again; give it or --allow-private/--allow-tcp, not "
+                             "both")
+        changes.update(allow_private=[], allow_tcp=[])
+    for key, values in allowed.items():
+        if values is not None:
+            changes[key] = list(values)
     for key, values, none in (("mounts", a.mount, a.no_mounts), ("env", a.env, a.no_env)):
         if values is not None and none:
             raise ValueError(f"--no-{key} takes all of them away; give it or the new ones, not both")
@@ -1886,8 +2262,8 @@ def set_changes(a):
     if getattr(a, "tool_timeout", None) is not None:
         changes["tool_timeout"] = parse_tool_timeout(a.tool_timeout)
     if not changes:
-        raise ValueError("give what to change: --memory, --cpus, --pids, --tmp, --recommended, --network, --mount, "
-                         "--env, --vpn or --tool-timeout")
+        raise ValueError("give what to change: --memory, --cpus, --pids, --tmp, --recommended, --network, "
+                         "--allow-private, --allow-tcp, --no-allow, --mount, --env, --vpn or --tool-timeout")
     return changes
 
 
@@ -1941,8 +2317,11 @@ def set_server(name, changes, stop_running=False, out=print, fetch=None, catalog
         return result
     if "vpn" in changed:
         checked_behind_tor(name, new, new.get("vpn"), out)
-    if "mounts" in changed and ("image" in new or "rootfs" in new):  # (a folder its start would refuse: never set)
-        check_image_mounts(name, new, remember=False, warn=lambda _line: None)
+    if {"network", "hosts", "allow_private", "allow_tcp"} & set(changed):
+        for line in network_said(name, new, given=new.get("network")):
+            out(line)
+    if "mounts" in changed and ("image" in new or "rootfs" in new):  # (a folder you chose with a risk: said, set)
+        check_image_mounts(name, new, remember=False, warn=lambda line: out(f"sandbox-ai mcp: warning: {line}"))
     create_mounts(new, out)
     write_definition(name, new)
     running = instances(name)
@@ -2394,7 +2773,7 @@ def server_network(name, definition, vpn=None, vpn_module=None):
         vpn_module.check_name(vpn)
     plan = {"server": name, "kind": kind, "reaches": bool(reaches), "vpn": chosen, "vpn_type": None,
             "own": chosen is not None and chosen == own and vpn in (None, own) and not lent, "definition": definition,
-            "network": None, "vpn_container": None, "launcher": [], "lent": lent, "lent_by": lent_by}
+            "network": None, "vpn_container": None, "launcher": [], "lent": lent, "lent_by": lent_by, "egress": None}
     if lent and not reaches:
         raise ValueError(f"MCP server {name} reaches no network: it borrows no tunnel")
     if lent_by is not None:
@@ -2413,6 +2792,9 @@ def server_network(name, definition, vpn=None, vpn_module=None):
         else:
             # full: pasta without the host's loopback or forwarded ports, as the agents' own sandboxes.
             plan["network"] = f"--network={l.POD_NETWORK}" if reaches else "--network=none"
+        # What it reaches through that network (mcp_egress.py): the internet, not your network - or only its hosts,
+        # or your network too where you chose it. Behind a VPN its VPN container loads the rules.
+        plan["egress"] = egress_of(name, plan["definition"], None if chosen is not None else l.POD_NETWORK)
     elif vpn is not None:
         # Behind the start's VPN (or mcp start --vpn): a failed check stops the server, whatever its options say;
         # behind the start's tunnel, lent: borrowed from the start's run (a server's options cannot name that).
@@ -2444,6 +2826,12 @@ def server_network(name, definition, vpn=None, vpn_module=None):
     return plan
 
 
+def egress_of(name, definition, network=None):
+    """The egress of the image server NAME (DEFINITION) for its plan (mcp_egress.egress_config), or None without
+    network; NETWORK: its connections' podman network option (without a VPN)."""
+    return egress_module().egress_config(definition, state_dir(name) / "egress-hosts", network)
+
+
 def checked_plan(plan, kind):
     """(definition, network option) of PLAN, a plan of server_network for a server of KIND; ValueError for anything
     else - a definition handed in without its plan, or a plan whose VPN its network option does not carry."""
@@ -2461,6 +2849,11 @@ def checked_plan(plan, kind):
                 "--network=none", f"--network={launcher().POD_NETWORK}") \
                 or plan["definition"].get("vpn") != plan.get("vpn"):
             raise ValueError(f"MCP server {plan.get('server')}: its network plan does not hold ({network})")
+        wanted = egress_of(plan.get("server"), plan["definition"], None if plan.get("vpn") else
+                           launcher().POD_NETWORK) if plan.get("reaches") else None
+        if plan.get("egress") != wanted:
+            # A server with network reaches it through its egress rules or not at all.
+            raise ValueError(f"MCP server {plan.get('server')}: its network plan does not hold (its egress)")
     elif plan.get("vpn") and not plan.get("own") and plan.get("launcher") != [
             "--vpn", plan["vpn"], "--vpn-check", "stop", *(["--vpn-lent-by", plan.get("lent_by")] if plan.get("lent")
                                                            else [])]:
@@ -2471,10 +2864,15 @@ def checked_plan(plan, kind):
 def connection_command(plan, engine="podman"):
     """What the bridge runs for each connection of an image server: its podman run line (image_command), behind a
     VPN through vpn.py's guard, which creates the container in the checked VPN container's namespace (by ID) and
-    starts it only then (vpn.mcp_guard)."""
+    starts it only then (vpn.mcp_guard); with network but no VPN through mcp_egress.py's guard, which creates it,
+    loads its egress rules into its namespace and starts it only then."""
     command = image_command(plan, engine)
     if not plan["vpn"]:
-        return command
+        if not plan.get("egress"):
+            return command  # (no network)
+        # The rules in its namespace before it runs (mcp_egress.guard): the internet, not your network.
+        return [sys.executable, "-I", str(HERE / "mcp_egress.py"), "--internal-egress-guard",
+                egress_module().encoded(plan["egress"]), "--", *command]
     return [sys.executable, "-I", str(HERE / "vpn.py"), "--internal-mcp-guard", plan["vpn_container"], "--", *command]
 
 
@@ -2805,9 +3203,9 @@ def start_problems(a, names, servers=None, present=None):
                                    mount.get("mode", "ro"))
                     except ValueError as exc:
                         own_problems.append(f"MCP server {name}: {exc} (sandbox-ai mcp set {name} --mount ...)")
-            if not own_problems:  # (the folders there: the host-path policy its start holds them to, read-only too)
-                try:
-                    check_image_mounts(name, definition, remember=False, warn=lambda _line: None)
+            if not own_problems:  # (the folders there: the host-path policy its start holds them to, read-only too;
+                try:                # a risk you chose is said here, before anything is made)
+                    check_image_mounts(name, definition, remember=False)
                 except ValueError as exc:
                     own_problems.append(str(exc))
             try:
@@ -2824,6 +3222,15 @@ def start_problems(a, names, servers=None, present=None):
             elif engine == "bwrap" and not Path(str(definition["rootfs"].get("path", ""))).is_dir():
                 own_problems.append(f"MCP server {name}: its rootfs is gone ({definition['rootfs'].get('path')}); "
                                     "add it again: sandbox-ai mcp add ... --backend bwrap")
+        agent = definition.get("agent", "codex")
+        if "command" in definition and getattr(a, "backend", None) == "podman" and agent in l.AUTH_TARGETS and \
+                not any(str(option).split("=", 1)[0] in ("--image", "--image-variant", "-i", "-iv")
+                        for option in definition.get("options") or []) and \
+                present(f"localhost/{agent}-sandbox:latest") is False:
+            # A command server (demo, a team's board) runs in an agent's image, codex unless it names another:
+            # missing, its sandbox failed later with Podman's bare "image exists" status.
+            own_problems.append(f"MCP server {name}: it runs in the image of {agent} (localhost/{agent}-sandbox:"
+                                f"latest), which is not built here: sandbox-ai build {agent}")
         own_vpn = network_of(definition)[1]
         if own_vpn and not getattr(a, "vpn", None):
             try:
@@ -2957,6 +3364,9 @@ def helper_command(name, plan, a, directory, sock, gateway):
             *(["--workspace-ro"] if definition.get("workspace_ro") else []),
             *(["--no-auth"] if definition.get("no_auth") else []),
             *(["--dangerously-skip-permissions"] if definition.get("skip_permissions") else []),
+            # An agent without a login (Goose, OpenHands, nanobot, Letta Code): the lead's keys, its only provider.
+            *[word for key in definition.get("api_keys") or [] if isinstance(key, str)
+              for word in ("--api-key", key)],
             "--state-dir", str(directory / "home"), "--mcp-socket-dir", str(sock),
             *(["--pod-name", pod] if a.backend == "podman" else []),
             *(["--mcp-approvals-dir", str(directory / "approvals")] if gateway and gateway.get("approvals") else []),
@@ -3080,6 +3490,12 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         # there is only the rootfs.
         # (With a VPN the plan has the Podman form only: a VPN is a container's network namespace.)
         engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) else "podman"
+        if plan.get("egress") and not plan["vpn"]:
+            # Its egress rules are loaded with this host's nft: without it the server would reach your network.
+            problem = egress_module().prerequisite_problem(engine)
+            if problem:
+                LOG.warning("mcp", f"{label}: refused - {problem}")
+                raise ValueError(f"MCP server {label}: {problem}")
         bridge = [sys.executable, "-I", str(HERE / "runtime.py"), "--internal-mcp-serve", str(sock / "server.sock"),
                   *gateway_arguments(gateway), "--"]
         if engine == "bwrap":
@@ -3089,7 +3505,8 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
                 raise ValueError(f"MCP server {name}: its rootfs is gone ({definition['rootfs']['path']}); add it "
                                  "again: sandbox-ai mcp add ... --backend bwrap")
             checked = directory / "rootfs-definition.json"
-            write_private(checked, definition)
+            # With its egress (mcp_rootfs.run loads the rules into each connection's namespace before it runs).
+            write_private(checked, {**definition, "egress": plan.get("egress")})
             # Each connection under the watch (what ends its processes is recorded: watched), Bubblewrap too.
             cmd = [*bridge, *watched(directory, instance, definition,
                                      rootfs_module().bwrap_command(checked, definition, launcher()))]
@@ -3113,6 +3530,10 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         environment.update(variables)
         # The bridge compares every folder with what was checked here before each connection's container.
         environment["SANDBOX_AI_MCP_MOUNTS"] = json.dumps(mount_records(definition))
+        if plan["vpn"] and plan.get("egress"):
+            # Its VPN container loads its egress rules (and pins its hosts through the tunnel); each connection's guard
+            # checks them (vpn.mcp_wrapper, vpn.mcp_guard).
+            environment[egress_module().EGRESS_ENV] = json.dumps(plan["egress"], sort_keys=True)
         log = directory / "supervisor.log"
         process = start_logged(cmd, directory, cwd=str(directory), env=environment)
         LOG.info("mcp", f"{label}: its bridge starts ({engine}, {'behind the VPN ' + plan['vpn'] if plan['vpn'] else 'no VPN'}"
@@ -3232,18 +3653,50 @@ def split_log(directory, stream):
     # supervisor's next line found its output closed and the server's relay failed every call from then on, also
     # once there was room again. What was lost is said in the file once a line can be written there again.
     lost = {"supervisor.log": 0, "mcp-calls.jsonl": 0}
+    # Each log is rotated at MCP_LOG_PART (statedirs.rotate: renamed, compressed beside it, the oldest parts beyond
+    # their limit dropped) - a server that runs for weeks wrote hundreds of MB. The lock, held shared while this runs,
+    # tells gc to leave these logs to it.
+    lock = None
+    with contextlib.suppress(OSError):
+        lock = os.open(directory / ".log.lock", os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_SH)
+    files, sizes = {}, {}
 
-    def write(stream, name, data):
+    def rotated(name):
+        with contextlib.suppress(Exception):  # a log that cannot be rotated is written on
+            module = statedirs_module()
+            if module.rotate(directory / name, module.MCP_ARCHIVE_LIMIT, rotation_time()):
+                return True
+        return False
+
+    def reopen(name):
+        if files.get(name) is not None:
+            files.pop(name).close()
+        fd = os.open(directory / name, flags, 0o600)
+        sizes[name] = os.fstat(fd).st_size
+        files[name] = open(fd, "ab", buffering=0)
+
+    def write(name, data):
         if lost[name]:
             why = "not written (the disk was full or not writable)"
             note = json.dumps({"event": "lost", "lines": lost[name], "server": directory.name, "reason": why}) + "\n" \
                 if name.endswith(".jsonl") else f"sandbox-ai: {lost[name]} lines of this log were {why}\n"
             data = note.encode() + data
         try:
+            if files.get(name) is None:
+                reopen(name)
             view = memoryview(data)
             while view:  # (unbuffered: a write cut short by the full disk is finished, or fails, here)
-                view = view[stream.write(view):]
+                view = view[files[name].write(view):]
             lost[name] = 0
+            sizes[name] += len(data)
+            if sizes[name] > MCP_LOG_PART:
+                files.pop(name).close()
+                if not rotated(name):
+                    sizes[name] = -(MCP_LOG_PART // 4)  # tried again after a quarter more
+                    files[name] = open(os.open(directory / name, flags, 0o600), "ab", buffering=0)
+                else:
+                    reopen(name)
         except OSError:
             lost[name] += 1
 
@@ -3251,8 +3704,13 @@ def split_log(directory, stream):
         with contextlib.suppress(OSError):  # an unwritten question is never answered: its call is refused
             write_private(path, data)
 
-    with open(os.open(directory / "supervisor.log", flags, 0o600), "ab", buffering=0) as log, \
-            open(os.open(directory / "mcp-calls.jsonl", flags, 0o600), "ab", buffering=0) as calls:
+    for name in lost:
+        with contextlib.suppress(OSError):
+            if os.lstat(directory / name).st_size > MCP_LOG_PART:
+                rotated(name)  # (grown before this version, or by a reader of an older one)
+        with contextlib.suppress(OSError):
+            reopen(name)
+    try:
         for line in iter(lambda: stream.readline(1 << 20), b""):
             kind, _, rest = line.partition(b" ")
             record = None
@@ -3262,18 +3720,53 @@ def split_log(directory, stream):
                 except (ValueError, RecursionError):
                     pass
             if not isinstance(record, dict):
-                write(log, "supervisor.log", line)
+                write("supervisor.log", line)
                 continue
             record.setdefault("server", directory.name)
             if kind == b"sandbox-ai-mcp-ask":
                 ident = str(record.get("id", ""))
                 if re.fullmatch(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}", ident) and approvals.is_dir():
-                    private(approvals / f"{ident}.json", record)
+                    private(approvals / f"{ident}.json", record)  # (asked again: the same question, open once more)
+                    with contextlib.suppress(OSError):
+                        (approvals / f"{ident}.state").unlink(missing_ok=True)
                 continue
-            write(calls, "mcp-calls.jsonl", (json.dumps(record, ensure_ascii=False) + "\n").encode())
+            write("mcp-calls.jsonl", (json.dumps(record, ensure_ascii=False) + "\n").encode())
             ident = str(record.get("question", ""))
             if re.fullmatch(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}", ident) and (approvals / f"{ident}.json").exists():
-                private(approvals / f"{ident}.done", {**(record.get("approval") or {}), "id": ident})
+                approval = record.get("approval") if isinstance(record.get("approval"), dict) else {}
+                if str(approval.get("reason") or "").startswith(NOT_ANSWERED):
+                    # Nobody answered in time: no decision - the question stays open ("timed out"), answerable.
+                    private(approvals / f"{ident}.state", {"state": "timeout", "time": record.get("time")})
+                else:
+                    private(approvals / f"{ident}.done", {**approval, "id": ident})
+    finally:
+        for stream_ in files.values():
+            with contextlib.suppress(OSError):
+                stream_.close()
+        if lock is not None:
+            os.close(lock)
+
+
+MCP_LOG_PART = int(os.environ.get("SANDBOX_AI_MCP_LOG_PART") or 32 << 20)  # statedirs.MCP_LOG_PART
+NOT_ANSWERED = "not answered yet"  # the start of runtime.NOT_ANSWERED: a call refused while its question stays open
+_statedirs = None
+
+
+def rotation_time():
+    """The time a rotated log's older part is named by (tests: their own)."""
+    return time.time()
+
+
+def statedirs_module():
+    global _statedirs
+    if _statedirs is None:
+        spec = importlib.util.spec_from_file_location("statedirs_for_mcp", HERE / "statedirs.py")
+        with LOADING:
+            if _statedirs is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _statedirs = loaded
+    return _statedirs
 
 
 def write_private(path, data):
@@ -3502,10 +3995,18 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
     if running and not restart and ask is not None:
         restart = ask(f"{shown} runs; {LIVE}. Restart it now with {name}? The agent continues its conversation.")
     if running and restart:
-        out(f"{shown}: stopping it to start it again with the MCP server {name}")
-        sessions.stop(key)
-        with sessions.session_lock(key):
-            sessions.resume_locked(key, mcp=[name])
+        # Its new start checked first (the server's image, folders, rules, room on the disks): one that would fail
+        # leaves it running as it was - stopped first, a server that could not be added ended the session.
+        sessions.check_restart(key, mcp=[name])
+        why = f"to start it again with the MCP server {name}"
+        out(f"{shown}: stopping it {why}")
+        sessions.stop(key, by=f"sandbox-ai mcp attach {name} {entry['name']} --restart ({why})")
+        try:
+            with sessions.session_lock(key):
+                sessions.resume_locked(key, mcp=[name])
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            LOG.warning("mcp", f"attach {name} to {entry['name']}: stopped, and its new start failed", exc)
+            raise sessions.restart_failed(key, why, exc) from None
         result.update(attached="restarted", state="running",
                       message=f"{shown} runs again with the MCP server {name}; the agent continues its conversation")
         LOG.info("mcp", f"attach {name} to {entry['name']}: {result['attached']}")
@@ -3560,6 +4061,25 @@ LIVE_AGENTS = {
                            "until the agent restarts (sandbox-ai resume {start} --restart; the conversation "
                            "continues)."},
 }
+AGENT_TITLES = {"hermes": "Hermes", "dsh": "DeepSeek Harness", "qwen": "Qwen Code", "goose": "Goose",
+                "openhands": "OpenHands", "nanobot": "nanobot", "letta": "Letta Code", "opencode2": "OpenCode 2",
+                "pi": "Pi"}
+
+
+def live_agent(agent):
+    """LIVE_AGENTS' entry of AGENT; for any other agent (each reads its MCP servers only when it starts) one that names
+    it by its own name - they were all told they were Codex."""
+    if agent in LIVE_AGENTS:
+        return LIVE_AGENTS[agent]
+    title = AGENT_TITLES.get(agent) or "The agent"
+    return {"config": None, "restart": "required",
+            "attach": f"{title} reads its MCP servers only when it starts: restart the agent to use {{name}}: "
+                      "sandbox-ai resume {start} --restart (the conversation continues). Until then the relay is "
+                      f"open, but {title} does not know it.",
+            "detach": f"{title}: its connection to {{name}} ends now and its calls fail; it still names the server "
+                      "until the agent restarts (sandbox-ai resume {start} --restart; the conversation continues)."}
+
+
 LIVE_STATE = "mcp-live.json"  # in the run's directory: what attach --live wrote into the agent's configuration
 _net = None
 
@@ -3842,10 +4362,10 @@ def attach_live(name, start, helper=None, out=print):
     if not listed.get("live"):
         raise ValueError(f"{shown} made no place for MCP servers attached while it runs (started by an older version): "
                          f"restart it with the server (sandbox-ai mcp attach {name} {shown} --restart)")
-    agent = record.get("agent") if record.get("agent") in LIVE_AGENTS else "codex"
+    agent = record.get("agent") if isinstance(record.get("agent"), str) else "codex"
     result = {"server": name, "start": entry["name"], "run": record.get("run"), "state": "running",
               "server_started": False, "agent": agent, "agent_config": None,
-              "agent_restart": LIVE_AGENTS[agent]["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
+              "agent_restart": live_agent(agent)["restart"], "relay": f"{launcher().MCP_AGENT_DIR}/{name}/server.sock"}
     a.started_for = {"start": entry.get("id") if entry.get("directory") else None, "run": record.get("run")}
     if record.get("vpn_profile"):
         # The VPN the run has (its --llm server's, say), whatever its kept options say now; the run that lends its
@@ -3899,7 +4419,7 @@ def attach_live(name, start, helper=None, out=print):
     except (OSError, ValueError) as exc:
         result["kept"] = False
         out(f"  not kept for the next start: {printable(str(exc))}")
-    how = LIVE_AGENTS[agent]["attach"].format(name=name, start=shown)
+    how = live_agent(agent)["attach"].format(name=name, start=shown)
     result["message"] = (f"{shown} reaches the MCP server {name} now"
                          f"{' (it was attached already)' if result['attached'] == 'already' else ''}"
                          f"{', kept for its later starts' if result['kept'] else ''}. {how}")
@@ -3940,7 +4460,7 @@ def detach(name, start, helper=None, live=False, out=print):
     agent = (record or {}).get("agent") if (record or {}).get("agent") in LIVE_AGENTS else entry.get("agent")
     result = {"server": name, "start": entry["name"], "run": (record or {}).get("run") or entry.get("run"),
               "state": entry["state"], "relay_closed": False, "agent": agent, "agent_config": None,
-              "agent_restart": LIVE_AGENTS.get(agent, LIVE_AGENTS["codex"])["restart"] if live else None}
+              "agent_restart": live_agent(agent)["restart"] if live else None}
     if live:
         with run_lock(record):
             answer = net_module().ask(record["directory"], {"op": "mcp-close", "name": name})
@@ -3959,7 +4479,7 @@ def detach(name, start, helper=None, live=False, out=print):
     later = ", and its later starts go without it" if removed else ""
     if result["relay_closed"]:
         result["detached"] = "live"
-        how = LIVE_AGENTS.get(agent, LIVE_AGENTS["codex"])["detach"].format(name=name, start=shown)
+        how = live_agent(agent)["detach"].format(name=name, start=shown)
         result["message"] = f"{shown} no longer reaches the MCP server {name}: its relay is closed{later}. {how}"
     elif removed:
         result["detached"] = "next start"
@@ -4034,6 +4554,11 @@ def server_list(served=None):
                                                          else {"command": []}) if "helper" not in d else None,
                       "last_problem": problem,
                       "below_recommended": below_recommended(d) if "image" in d or "rootfs" in d else {},
+                      # Where it reaches (an image server: network_label; a command server: its sandbox's own
+                      # rules), and what to say of it (egress_note).
+                      "network": network_label(d) if "image" in d or "rootfs" in d else None,
+                      "egress_note": egress_note(name, d, cached_entry(d)) if "image" in d or "rootfs" in d
+                      else None,
                       **origin(name, d)})
     return found
 
@@ -4061,19 +4586,76 @@ def catalog_json(prefix, entry):
             "network": shown(entry.get("network", "none")), "hosts": [shown(host) for host in entry.get("hosts", [])],
             "published": bool(entry.get("digest")), "signature": {"good": "good", "bad": "bad"}.get(signature, "none"),
             "catalog": shown(catalog_label(entry["_catalog"])) if isinstance(entry.get("_catalog"), str) else None,
-            "env": variables, "mounts": mounts, "tool_timeout": entry_tool_timeout(entry)}
+            "env": variables, "mounts": mounts, "tool_timeout": entry_tool_timeout(entry),
+            # (0.1.98) what Add… on another host shows as this machine's does: its description and the limits it
+            # recommends (recommended_limits: checked, {} when it names none)
+            "description": shown(entry.get("description") or "", 1000), "limits": recommended_limits(entry)}
+
+
+_copy = None
+
+
+def copy_module():
+    """mcp_copy.py: mcp export, import and copy (a server of one host taken over by another), with this module's
+    names."""
+    global _copy
+    if _copy is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_mcp_copy", HERE / "mcp_copy.py")
+        with LOADING:
+            if _copy is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded.bind(globals())
+                _copy = loaded
+    return _copy
+
+
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
+PINS = {}
+
+
+def pins_module():
+    """mcp_pins.py: the tool definitions pinned per project (sandbox-ai mcp tools)."""
+    with LOADING:
+        if "mcp_pins" not in PINS:
+            spec = importlib.util.spec_from_file_location("sandbox_mcp_pins", HERE / "mcp_pins.py")
+            loaded = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(loaded)
+            PINS["mcp_pins"] = loaded
+        return PINS["mcp_pins"]
 
 
 def cli(argv):
-    parser = argparse.ArgumentParser(prog="sandbox-ai mcp", description="Manage local MCP servers that run in their "
-                                     "own sandboxes. Agents use them with --mcp NAME.")
+    parser = argparse.ArgumentParser(prog="sandbox-ai mcp", formatter_class=help_style,
+                                     description="Manage local MCP servers that run in their own sandboxes. Agents use "
+                                                 "them with --mcp NAME.")
     parser.add_argument("-V", "--version", action=LauncherVersion)
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="Defined servers, their status and the starts they serve")
-    listing.add_argument("-j", "--json", action="store_true")
+    pinned = commands.add_parser("tools", help="The tool definitions pinned for a project (a change is asked)",
+                                 description="The MCP tool definitions pinned for a project: a later change of a "
+                                             "server's tools is asked about (approval kind mcp-tools).")
+    pinned.add_argument("name", nargs="?", metavar="NAME", help="one server: its pinned tools with their definitions")
+    pinned.add_argument("--project", metavar="DIR", default=".", help="the project (its main workspace; default: here)")
+    pinned.add_argument("--forget", action="store_true", help="drop NAME's pin: its next list is pinned anew")
+    pinned.add_argument("--repin", action="store_true", help="pin the list NAME's relay saw last instead (refused "
+                                                             "when the hidden-text checker finds something in it)")
+    pinned.add_argument("--all", action="store_true", help="the pins of every project, each with its folder")
+    pinned.add_argument("--json", action="store_true", help="as JSON (for programs)")
+    listing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     start = commands.add_parser("start", help="Start a server sandbox now")
     start.add_argument("name")
-    start.add_argument("-b", "--backend", choices=["podman", "bwrap"], default="podman")
+    start.add_argument("-b", "--backend", choices=["podman", "bwrap"], default="podman", help="the sandbox backend of the server: podman or bwrap")
     start.add_argument("-v", "--vpn", metavar="PROFILE", help="Put this VPN profile in front (sandbox-ai vpn list)")
     start.add_argument("-f", "--for", dest="for_start", metavar="START",
                        help="for this agent start (sandbox-ai list): started as it starts it (its backend and rules) "
@@ -4087,7 +4669,7 @@ def cli(argv):
                                           "       sandbox-ai mcp attach --helper AGENT START --live [--json]")
     attaching.add_argument("name", metavar="NAME", help="the server (sandbox-ai mcp list); with --helper: START")
     attaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
-    attaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"],
+    attaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"],
                            help="the agent AGENT as a helper (an MCP server of its own sandbox), as --helper at a start")
     attaching.add_argument("-r", "--restart", action="store_true",
                            help="a running start is restarted with it now (the agent continues its conversation); "
@@ -4097,21 +4679,24 @@ def cli(argv):
                            help="into the running sandbox now, without a restart: its relay is opened and the agent's "
                                 "MCP configuration updated (Claude Code: /mcp; Codex and OpenCode: after a restart "
                                 "of the agent)")
-    attaching.add_argument("-j", "--json", action="store_true")
-    detaching = commands.add_parser("detach", help="Take a server from an agent start (and with --live from its "
-                                                   "running sandbox now)",
+    attaching.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    detaching = commands.add_parser("detach", help="take a server from an agent start",
+                                              description="Take a server from an agent start (and with --live from "
+                                                          "its running sandbox now).",
                                     usage="sandbox-ai mcp detach NAME START [--live] [--json]\n"
                                           "       sandbox-ai mcp detach --helper AGENT START [--live] [--json]")
     detaching.add_argument("name", metavar="NAME", help="the server; with --helper: START")
     detaching.add_argument("start", metavar="START", nargs="?", help="the agent start (sandbox-ai list)")
-    detaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"])
+    detaching.add_argument("-H", "--helper", metavar="AGENT", choices=["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"], help="detach from this agent's helper start instead of NAME's start")
     detaching.add_argument("-l", "--live", action="store_true",
                            help="close its relay in the running sandbox now (the agent's connections to it end)")
-    detaching.add_argument("-j", "--json", action="store_true")
+    detaching.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     commands.add_parser("stop", help="Stop a server sandbox: all of its instances (NAME.HASH: that one)").add_argument(
         "name")
-    setting = commands.add_parser("set", help="Change a server of yours (mcp.json): its limits for every start, its "
-                                              "network, folders, variables, VPN; checked as add checks them")
+    setting = commands.add_parser("set", help="change a server of yours (mcp.json)",
+                                         description="Change a server of yours (mcp.json): its limits for every "
+                                                     "start, its network, folders, variables, VPN; checked as add "
+                                                     "checks them.")
     setting.add_argument("name")
     setting.add_argument("-M", "--memory", metavar="SIZE", help="Memory limit, e.g. 2g; default: back to the default")
     setting.add_argument("-C", "--cpus", metavar="N", help="CPU limit, e.g. 2 or 1.5; default: back to the default")
@@ -4120,7 +4705,19 @@ def cli(argv):
                          help="Size of its /tmp, e.g. 1g (memory: at most the memory limit); default: back to 64m")
     setting.add_argument("-R", "--recommended", action="store_true",
                          help="The limits its catalog entry recommends (those given here win)")
-    setting.add_argument("-n", "--network", choices=["none", "full"])
+    setting.add_argument("-n", "--network", choices=list(NETWORKS),
+                         help="the network of the server: full (the internet, not your local network), allowlist (only the "
+                              "hosts its catalog entry declares), lan (the internet and your local network: a warning) "
+                              "or none")
+    setting.add_argument("-ap", "--allow-private", action=ListAppend, metavar="CIDR",
+                         help="A network of yours a full or allowlist server may reach too (192.168.1.0/24; a "
+                              "warning), all of them; one or more, separated by commas or spaces; repeatable")
+    setting.add_argument("-at", "--allow-tcp", action=ListAppend, metavar="IP:PORT",
+                         help="An address and TCP port of your network it may reach too (192.168.1.20:8080, "
+                              "[fd00::7]:8080; a warning), all of them; one or more, separated by commas or spaces; "
+                              "repeatable")
+    setting.add_argument("--no-allow", action="store_true",
+                         help="None of your network again (takes --allow-private and --allow-tcp away)")
     setting.add_argument("-m", "--mount", action="append", metavar="TARGET=HOST[:ro|rw]",
                          help="The folders, all of them (TARGET: in the server's container, of those its catalog entry "
                               "takes; HOST: a folder on this machine, a writable one is created; held to the "
@@ -4138,7 +4735,7 @@ def cli(argv):
                               "run long); default: back to sandbox-ai's (660)")
     setting.add_argument("-s", "--stop", action="store_true",
                          help="Stop its running instances now: the next start that uses it starts it with the change")
-    setting.add_argument("-j", "--json", action="store_true")
+    setting.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     catalog = commands.add_parser("catalog", help="Servers of the MCP catalogs (sandbox-ai-mcp, axross-mcp-hub)")
     catalog.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
                          help="Read this catalog instead of the default ones; repeatable")
@@ -4157,15 +4754,24 @@ def cli(argv):
                             "(required where the entry requires it, else only where there is one); NAME=VALUE keeps a "
                             "value that is no secret in the definition (ALLOW_PRIVATE_TARGETS=1; never a secret's); "
                             "NAME@SECRET takes the secret SECRET of sandbox-ai secrets; repeatable")
-    added.add_argument("-n", "--network", choices=["none", "full"],
-                       help="Override the entry's network; an allowlist entry needs full")
+    added.add_argument("-n", "--network", choices=list(NETWORKS),
+                       help="Override the entry's network: full (the internet, not your local network), allowlist "
+                            "(only the hosts its entry declares: the default of such an entry), lan (the internet "
+                            "and your local network: a warning) or none")
+    added.add_argument("-ap", "--allow-private", action=ListAppend, default=[], metavar="CIDR",
+                       help="A network of yours it may reach too, e.g. 192.168.1.0/24 (a warning); one or more, "
+                            "separated by commas or spaces; repeatable")
+    added.add_argument("-at", "--allow-tcp", action=ListAppend, default=[], metavar="IP:PORT",
+                       help="An address and TCP port of your network it may reach too, e.g. 192.168.1.20:8080 "
+                            "(SearXNG on your LAN; a warning); one or more, separated by commas or spaces; "
+                            "repeatable")
     added.add_argument("-M", "--memory", metavar="SIZE", help="Memory limit, e.g. 2g (default 512m)")
     added.add_argument("-C", "--cpus", metavar="N",
                        help="CPU limit of each connection's container, e.g. 2 or 1.5 (default: half this host's CPUs)")
     added.add_argument("-p", "--pids", type=int, metavar="N", help="Process limit (default 128)")
     added.add_argument("-t", "--tmp", metavar="SIZE",
                        help="Size of its /tmp, e.g. 1g (default 64m; memory, so at most the memory limit)")
-    added.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL")
+    added.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL", help="also read this catalog (a file or an https URL; repeatable)")
     added.add_argument("-N", "--no-pull", action="store_true", help="Do not pull the image (it is there already)")
     added.add_argument("-b", "--backend", choices=["podman", "bwrap", "both"],
                        help="Podman (the image), Bubblewrap (the image's rootfs, checked and unpacked) or both; "
@@ -4174,8 +4780,90 @@ def cli(argv):
                        help="Take an entry whose catalog is not signed by a trusted key (sandbox/mcp-signers); a "
                             "signature that does not verify is refused anyway")
     added.add_argument("-v", "--vpn", metavar="PROFILE",
-                       help="Its network only through this VPN profile, with a kill switch (needs --network full)")
+                       help="Its network only through this VPN profile, with a kill switch (a server with network)")
+    exporting = commands.add_parser("export", help="what a server of yours is, for another host (no secret's value)",
+                                    description="What the server NAME of your mcp.json is, as another host needs to "
+                                                "know it (mcp import, mcp copy): a catalog server's entry and the "
+                                                "choices you made, a server of your own's definition; the names of the "
+                                                "secrets it uses, never a value; its host folders; its image.")
+    exporting.add_argument("name")
+    exporting.add_argument("-j", "--json", action="store_true", help="the document (what mcp import reads)")
+    exporting.add_argument("--image", action="store_true",
+                           help="its Podman image as podman save writes it, on standard output (mcp copy "
+                                "--copy-image)")
+
+    def resolving(command):
+        command.add_argument("-a", "--as", dest="as_name", metavar="NEWNAME", help="under this name there")
+        command.add_argument("--replace", action="store_true",
+                             help="replace a server of that name there (asked first; --yes when nothing can ask)")
+        command.add_argument("-y", "--yes", action="store_true", help="with --replace: without asking")
+        command.add_argument("-P", "--path", action="append", default=[], metavar="OLD=NEW",
+                             help="the source's folder OLD is NEW there (NEW=OLD keeps it); a folder of the source "
+                                  "is never mounted there unasked; repeatable")
+        command.add_argument("-D", "--drop-path", action="append", default=[], metavar="OLD",
+                             help="leave the source's folder OLD out; repeatable")
+        command.add_argument("--secrets-later", action="store_true",
+                             help="copied although a secret it uses is missing there (keep it before it starts)")
+        command.add_argument("--pull-image", action="store_true",
+                             help="a server of your own whose image is not there: Podman pulls it there by its digest")
+        command.add_argument("--no-vpn", action="store_true", help="without the VPN profile it is behind")
+        command.add_argument("-U", "--unsigned", action="store_true",
+                             help="a catalog server its source took unsigned: take it unsigned there too")
+        command.add_argument("--current-pin", action="store_true",
+                             help="a catalog server: the image the catalog there pins, where it pins another")
+        command.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
+                             help="the catalog to read there for a catalog server (default: the one it came from)")
+        command.add_argument("-n", "--dry-run", action="store_true", help="say what would be done; change nothing")
+        command.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    importing = commands.add_parser("import", help="take in a server another host exported (checked as add checks)",
+                                    description="Take in the server of an export (sandbox-ai mcp export NAME --json "
+                                                "on another host): a catalog server is added from the catalog as "
+                                                "this host reads it (its signature checked here), a server of your "
+                                                "own's definition is checked as mcp.json is. What this host cannot "
+                                                "take as it is - a name it has, a secret it lacks, a folder of the "
+                                                "source, an image it lacks, a VPN profile it lacks - is said with "
+                                                "how to resolve it, and nothing is written.")
+    importing.add_argument("file", metavar="FILE", help="the export (- reads standard input)")
+    resolving(importing)
+    copying = commands.add_parser("copy", help="copy servers from one host to another (sandbox-ai hosts)",
+                                  description="Copy MCP servers from one host to another (sandbox-ai hosts; local: "
+                                              "this machine): each exported there (mcp export), checked on the "
+                                              "target (mcp import --dry-run: every problem of every server said, "
+                                              "nothing written while there is one), then imported there. A catalog "
+                                              "server is added from its catalog there (the same pinned image), never "
+                                              "copied raw; secrets travel by name only.")
+    copying.add_argument("names", nargs="+", metavar="NAME", help="servers of the source host (mcp list there)")
+    copying.add_argument("-f", "--from", dest="source", required=True, metavar="HOST",
+                         help="the host they are on (local: this machine)")
+    copying.add_argument("-t", "--to", dest="target", required=True, metavar="HOST",
+                         help="the host to copy them to (local: this machine)")
+    copying.add_argument("--attach", metavar="RUN",
+                         help="then attach them to this running start of the target (mcp attach --live there)")
+    copying.add_argument("--copy-image", action="store_true",
+                         help="a server of your own whose image the target lacks: sent from the source (podman save "
+                              "| podman load, its size said); used only if it keeps its pinned digest there")
+    resolving(copying)
+    loading = commands.add_parser("image-load", help="load a server's image from standard input (mcp copy)",
+                                  description="Load an image archive from standard input into Podman (what mcp copy "
+                                              "--copy-image sends); it counts only when Podman then has REF, the "
+                                              "server's pinned image.")
+    loading.add_argument("ref", metavar="REF", help="REGISTRY/PATH@sha256:DIGEST")
     a = parser.parse_args(argv)
+    if a.command == "tools":  # mcp_pins.py, with the same options
+        return pins_module().main(list(argv[1:]))
+    if a.command in ("export", "import", "copy", "image-load"):
+        copier = copy_module()
+        if a.command == "export":
+            if a.image:
+                return copier.save_image(a.name)
+            document = copier.export(a.name)
+            print(json.dumps(document, indent=2) if a.json else copier.export_text(document))
+            return 0
+        if a.command == "import":
+            return copier.import_main(a)
+        if a.command == "copy":
+            return copier.copy_main(a)
+        return copier.load_image(a.ref, out=lambda text: print(text, file=sys.stderr))
     if a.command in ("catalog", "add"):
         sources = [(f"c{index}", value) for index, value in enumerate(a.catalog)] or None
     if a.command == "catalog":
@@ -4204,7 +4892,8 @@ def cli(argv):
     if a.command == "add":
         try:
             add(a.name, a.local, a.mount, a.env, a.network, a.memory, a.pids, sources, pull=not a.no_pull, vpn=a.vpn,
-                unsigned=a.unsigned, backend=a.backend, cpus=a.cpus, tmp=a.tmp)
+                unsigned=a.unsigned, backend=a.backend, cpus=a.cpus, tmp=a.tmp, allow_private=a.allow_private,
+                allow_tcp=a.allow_tcp)
         except subprocess.CalledProcessError as exc:
             # Its image could not be pulled (its last lines are said above): nothing is added - a message, never a
             # traceback (the app's Preparing tab shows this).
@@ -4242,6 +4931,8 @@ def cli(argv):
             if e["below_recommended"]:
                 notes.append(f"{e['name']}: below the limits its catalog recommends ({limits_text(e['below_recommended'])})"
                              f": sandbox-ai mcp set {e['name']} --recommended")
+            if e.get("egress_note"):
+                notes.append(printable(f"{e['name']}: {e['egress_note']}"))
             if e["last_problem"]:
                 problem = e["last_problem"]
                 notes.append(printable(f"{e['name']}: {problem.get('time')}: {problem.get('what')}: {problem.get('why')}"
@@ -4262,7 +4953,15 @@ def cli(argv):
     if a.command == "start" and a.for_start is None:
         if a.restart or a.json:
             raise ValueError("--restart and --json go with --for START")
-        ensure_running(a.name, launcher().parse_args(["codex", "--backend", a.backend]), a.vpn)
+        given = launcher().parse_args(["codex", "--backend", a.backend])
+        if a.name in start_servers(given):
+            # What an agent start with --mcp NAME checks first (its image there, its folders, policy, secrets):
+            # "started" was said for a server whose every connection would then fail (its image never pulled).
+            problems = [problem for problem in start_problems(given, [a.name])[0]  # (--vpn: in front of its own)
+                        if not (a.vpn and problem.startswith(f"MCP server {a.name}: its VPN: "))]
+            if problems:
+                raise ValueError(problems_text(problems, f"the MCP server {a.name}"))
+        ensure_running(a.name, given, a.vpn)
         return 0
     if a.command in ("attach", "detach"):
         if (a.start is None) != bool(a.helper):
@@ -4420,21 +5119,48 @@ class ContainerWatch:
                         self.fix("tmp", f"{max(256, tmp * 4)}m"), {"shmem": counters["shmem"], "tmp": self.tmp})
         self.seen = {**self.seen, **{k: v for k, v in counters.items() if k in ("oom_kill", "pids_max")}}
 
-    def ended(self, code, asked):
-        """The command ended with CODE; ASKED: its end was asked for (the connection closed). An end that was not asked
-        for is recorded with what it means (137: SIGKILL, mostly the out-of-memory killer)."""
+    def log_fix(self):
+        """Where the server's own output is, as a path that is there: its supervisor.log, else the newest part of it
+        rotated away (supervisor.log.TIME[.gz]); else that it has none and why (never a path that is not there: the
+        user's `cat .../mcp/binwalk/supervisor.log` said No such file or directory)."""
+        log = self.directory / "supervisor.log"
+        if log.is_file():
+            return f"read the server's log: {log}"
+        parts = sorted(self.directory.glob("supervisor.log.*"))
+        if parts:
+            return f"read the server's log: {parts[-1]} (the newest part kept)"
+        space = statedirs_module().space(self.directory)
+        return (f"its log was never written in {self.directory} (" + (statedirs_module().space_text(space) if space
+                                                                     else "that folder cannot be read")
+                + "); the launcher's own log: "
+                + str(Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai"
+                      / "launcher.log"))
+
+    def ended(self, code, asked, said=""):
+        """The command ended with CODE; ASKED: its end was asked for (the connection closed); SAID: the end of what it
+        wrote to its error output (Podman's own error line). An end that was not asked for is recorded with what it
+        means (137: SIGKILL, mostly the out-of-memory killer; 125: Podman did not start the container - its own line,
+        and "no space left on device" named as a full file system)."""
         if asked or code == 0:
             return None
         killed = any(r["kind"] == WATCH_KIND and "out of memory" in r["what"] for r in self.records)
+        lines = [line.strip() for line in str(said or "").splitlines() if line.strip()]
+        line = next((x for x in reversed(lines) if x.lower().startswith("error")), lines[-1] if lines else "")
+        line = launcher().printable(line)[-400:] if line else ""
         if code == 137:
             why = ("ended by SIGKILL (exit status 137): " + ("the kernel's out-of-memory killer (see above)" if killed
                    else f"most likely the out-of-memory killer, at its memory limit {self.limits.get('memory', '?')}"))
             fix = self.fix("memory", "2g")
         elif code == 125:
-            why, fix = "podman could not start its container (exit status 125)", \
-                f"read the server's log: {self.directory / 'supervisor.log'}"
+            full = "no space left on device" in line.lower() or "disk quota exceeded" in line.lower()
+            why = ("podman could not start its container (exit status 125)" + (f": {line}" if line else "")
+                   + ("; a file system Podman writes is full - its image store (podman info: GraphRoot) or its run "
+                      "directory (RunRoot, under XDG_RUNTIME_DIR: a tmpfs mostly) - or out of inodes" if full else ""))
+            fix = (("free space there (df -h and df -i on those folders; sandbox-ai gc --check shows what sandbox-ai "
+                    "can free), then use the server again; ") if full else "") + self.log_fix()
         else:
-            why, fix = f"it ended with exit status {code}", f"read the server's log: {self.directory / 'supervisor.log'}"
+            why = f"it ended with exit status {code}" + (f": {line}" if line else "")
+            fix = self.log_fix()
         return self.record(f"MCP server {self.instance}'s process ended while it was used", why, fix,
                            {"exit": code})
 
@@ -4484,7 +5210,26 @@ def watch_main(argv):
     if cidfile is not None:
         with contextlib.suppress(OSError):
             folder.mkdir(mode=0o700, exist_ok=True)
-    child = subprocess.Popen(command)
+    # Its error output passed on as it comes (the server's log) and its end kept: Podman's own error line goes into
+    # the record of an end that was not asked for (ContainerWatch.ended). Standard input and output stay the MCP
+    # connection's.
+    child = subprocess.Popen(command, stderr=subprocess.PIPE)
+    tail = bytearray()
+
+    def passing():
+        while True:
+            try:
+                chunk = os.read(child.stderr.fileno(), 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            with contextlib.suppress(OSError):
+                os.write(2, chunk)
+            tail.extend(chunk)
+            del tail[:-4096]
+    passer = threading.Thread(target=passing, daemon=True, name="mcp-watch-stderr")
+    passer.start()
     asked = []
 
     def forward(signum, _frame):
@@ -4513,11 +5258,12 @@ def watch_main(argv):
             time.sleep(WATCH_INTERVAL)
     threading.Thread(target=watching, daemon=True, name="mcp-watch").start()
     code = child.wait()
+    passer.join(5)  # (what it wrote last; a process it left behind holding the pipe is not waited for)
     if watch.cgroup is not None:  # the last look, when it is still there
         counters = cgroup_counters(watch.cgroup)
         if counters:
             watch.look(counters)
-    watch.ended(code if code >= 0 else 128 - code, bool(asked))
+    watch.ended(code if code >= 0 else 128 - code, bool(asked), bytes(tail).decode(errors="replace"))
     if cidfile is not None:
         with contextlib.suppress(OSError):
             cidfile.unlink()
@@ -4530,6 +5276,20 @@ def watched(directory, instance, definition, command):
     return [sys.executable, "-I", str(HERE / "mcp.py"), "--internal-watch", str(directory), instance,
             str(limits.get("tmp", "64m")), str(limits.get("memory", "?")), str(limits.get("pids", "?")), "--",
             *command]
+
+
+def full_text(exc):
+    """"; the file system of PATH (...): N free, M inodes free ..." for an OSError EXC that is a full file system
+    (ENOSPC, EDQUOT) with a file name - which file system, never "the disk" - else ""."""
+    import errno
+    if not isinstance(exc, OSError) or exc.errno not in (errno.ENOSPC, errno.EDQUOT) or not exc.filename:
+        return ""
+    with contextlib.suppress(Exception):
+        found = statedirs_module().space(os.fsdecode(exc.filename))
+        if found:
+            return (f"; the file system of {statedirs_module().space_text(found)}: free space (sandbox-ai gc --check "
+                    "shows what can go), then try again")
+    return ""
 
 
 def last_problem(instance):
@@ -4552,5 +5312,5 @@ if __name__ == "__main__":
     try:
         sys.exit(cli(sys.argv[1:]))
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"sandbox-ai mcp: {exc}", file=sys.stderr)
+        print(f"sandbox-ai mcp: {exc}" + full_text(exc), file=sys.stderr)
         sys.exit(1)

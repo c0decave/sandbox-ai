@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import time
 from pathlib import Path
 import re
 import shutil
@@ -80,11 +81,18 @@ def test_split_argv(scenario):
     assert m.split_argv(argv) == expected
 
 
+def relay_up(directory):
+    """The terminal relay of a new start is up: its socket in tmux/relay, where the supervisor binds it (0.1.117:
+    sessions.relay_socket; the session's tmux folder itself is the sandbox's to write)."""
+    (directory / "tmux" / "relay").mkdir(exist_ok=True)
+    (directory / "tmux" / "relay" / "attach.sock").touch()
+
+
 def test_start_new_session_launches_detached_supervisor(tmp_path, monkeypatch):
     launched = {}
     def popen(cmd, **kwargs):
         launched.update(cmd=cmd, **kwargs)
-        (m.session_dir("demo") / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir("demo"))
         fake_process(tmp_path, 4242, 1, start=987654)
         return Mock(pid=4242, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
@@ -112,6 +120,7 @@ def test_start_new_session_launches_detached_supervisor(tmp_path, monkeypatch):
 def test_start_refuses_running_and_resumes_stopped(scenario, tmp_path, monkeypatch):
     if scenario == "sad":
         make_session("busy", pid=77, tmp_path=tmp_path)
+        (m.session_dir("busy") / "tmux" / "attach.sock").touch()  # (its terminal is there)
         a = m.launcher().parse_args(["codex", "--session", "busy"])
         with pytest.raises(ValueError, match="attach with: sandbox-ai attach busy"):
             m.start(a, ["codex", "--session", "busy"])
@@ -136,6 +145,7 @@ def test_start_of_a_running_session_on_a_terminal_attaches_to_it(tmp_path, monke
     is attached instead of 'is running; attach with' and exit status 1; a script still gets the error; a session of
     another agent is still refused; a paused one says how to continue it."""
     make_session("busy", pid=77, tmp_path=tmp_path)
+    (m.session_dir("busy") / "tmux" / "attach.sock").touch()  # (its terminal is there)
     monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(m.sys.stdout, "isatty", lambda: True)
     attached = []
@@ -152,6 +162,70 @@ def test_start_of_a_running_session_on_a_terminal_attaches_to_it(tmp_path, monke
     (m.session_dir("busy") / "paused").touch()
     with pytest.raises(ValueError, match="paused; continue it with: sandbox-ai resume busy"):
         m.start(a, ["codex", "--session", "busy"])
+
+
+def test_a_refused_start_names_what_it_saw(tmp_path, monkeypatch, capsys):
+    """'Session NAME is running; attach with: sandbox-ai attach NAME' was all a refused start said - for a session of
+    another agent, one in the foreground and one without a terminal too. Each says what was seen there (whose it is,
+    its supervisor, its terminal) and what helps; one whose tmux session has ended is stopped and started again."""
+    make_session("busy", pid=77, tmp_path=tmp_path)
+    (m.session_dir("busy") / "tmux" / "attach.sock").touch()  # (its terminal is there)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m.sys.stdout, "isatty", lambda: True)
+    other = m.launcher().parse_args(["claude", "--session", "busy"])
+    with pytest.raises(ValueError) as refused:
+        m.start(other, ["claude", "--session", "busy"])
+    text = str(refused.value)
+    assert text.startswith("Session busy is running with codex, not claude; attach with: sandbox-ai attach busy, stop "
+                           "it first: sandbox-ai stop busy, or start under another name (--session NAME)")
+    assert "(seen: a session of codex, in tmux, its supervisor (PID 77) runs, its terminal is there)" in text
+    # Without a terminal to attach to (its start made none, its supervisor says nothing any more): refused, with why.
+    (m.session_dir("busy") / "tmux" / "attach.sock").unlink()
+    (m.session_dir("busy") / "supervisor.log").write_text("agent-sandbox: starting the sandbox\nits last words\n")
+    os.utime(m.session_dir("busy") / "supervisor.log", (1, 1))
+    same = m.launcher().parse_args(["codex", "--session", "busy"])
+    with pytest.raises(ValueError) as refused:
+        m.start(same, ["codex", "--session", "busy"])
+    text = str(refused.value)
+    assert "Session busy is running without a terminal to attach to; stop it: sandbox-ai stop busy" in text
+    assert "it has no terminal to attach to" in text and "its last words" in text
+    # In the foreground of another terminal: nothing to attach to, and never "attach with".
+    data = m.load("busy")
+    fake = tmp_path / "proc" / "77"
+    (fake / "cmdline").write_bytes(b"python3\0/x/agent_sandbox.py\0codex\0")
+    (fake / "stat").write_text("77 (python3) S 1 1 1 0 -1" + " 0" * 13 + " 4711\n")
+    m.save("busy", {**data, "mode": "foreground", "pid_start": 4711})
+    with pytest.raises(ValueError) as refused:
+        m.start(same, ["codex", "--session", "busy"])
+    text = str(refused.value)
+    assert "is running in the foreground of another terminal or script" in text and "attach with" not in text
+    assert "its launcher (PID 77) runs" in text
+    assert m.details("busy", probe=False)["attach_why"] == "foreground"
+
+
+def test_a_session_whose_tmux_session_ended_is_stopped_and_started_again(tmp_path, monkeypatch, capsys):
+    make_session("gone", pid=77, tmp_path=tmp_path)
+    (m.session_dir("gone") / "tmux" / "attach.sock").touch()
+    (m.session_dir("gone") / "tmux" / "ended").write_text('{"status": 0, "seconds": 9}')
+    assert m.details("gone", probe=False)["terminal"] == "ended"
+    assert m.details("gone", probe=False)["ended"].startswith("its agent exited with status 0 after 9 s")
+    stopped = []
+
+    def stop(name, timeout, by=None):
+        stopped.append(name)
+        assert by == "a new start of gone (it ran without an agent)"  # (said at its end: stopped, and why)
+        shutil.rmtree(tmp_path / "proc" / "77")  # (its supervisor ended at the SIGTERM)
+        return 0
+    monkeypatch.setattr(m, "stop_locked", stop)
+    monkeypatch.setattr(m.liveness(), "pod_live", lambda pod, url=None, fresh=False: False)
+    launch = Mock(return_value=0)
+    monkeypatch.setattr(m, "launch", launch)
+    a = m.launcher().parse_args(["codex", "--session", "gone"])
+    assert m.start(a, ["codex", "--session", "gone"]) == 0
+    assert stopped == ["gone"] and launch.called
+    err = capsys.readouterr().err
+    assert "session gone runs without an agent (its agent exited with status 0 after 9 s" in err
+    assert "it is stopped and started again" in err and "resuming stopped session gone" in err
 
 
 def test_start_warns_when_options_of_a_stopped_session_are_ignored(scenario, monkeypatch, capsys):
@@ -223,11 +297,36 @@ def test_launch_clears_stale_pod_first(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "clear_stale_pod", lambda name, d: order.append("clear"))
     def popen(cmd, **kwargs):
         order.append("popen")
-        (m.session_dir("s") / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir("s"))
         return Mock(pid=4243, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     assert m.launch("s", data, ["resume", "--last"]) == 0
     assert order == ["clear", "popen"]
+
+
+def test_a_start_given_up_while_its_supervisor_runs_says_so_and_how_to_end_it(tmp_path, monkeypatch):
+    """Audit 2026-11-20: a session whose terminal never came (it said nothing new for 120 s) was told "Session did not
+    become ready: ...; see .../supervisor.log" and nothing more - while its supervisor and its pod ran on (`list`:
+    "running (no terminal: see its log)"). The message says that it still runs and how to end it; a supervisor that
+    ended is not said to run."""
+    data = make_session("s")
+    monkeypatch.setattr(m, "clear_stale_pod", lambda name, d: None)
+    running = {"poll": None}
+    monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kwargs: Mock(pid=4246, poll=Mock(
+        side_effect=lambda: running["poll"]), returncode=running["poll"]))
+
+    def stuck(*args, **kwargs):
+        raise RuntimeError("Session did not become ready: it said nothing new for 120 s; see X/supervisor.log")
+    monkeypatch.setattr(m, "wait_ready", stuck)
+    with pytest.raises(RuntimeError) as given_up:
+        m.launch("s", data, [])
+    text = str(given_up.value)
+    assert text.startswith("Session did not become ready: it said nothing new for 120 s; see X/supervisor.log")
+    assert "s still runs" in text and "sandbox-ai stop s" in text, text
+    running["poll"] = 1
+    with pytest.raises(RuntimeError) as ended:
+        m.launch("s", m.load("s"), [])
+    assert "still runs" not in str(ended.value)
 
 
 def test_wait_ready(scenario, tmp_path, monkeypatch):
@@ -299,7 +398,7 @@ def test_descendants_and_signal_tree(scenario, tmp_path, monkeypatch):
 @pytest.mark.parametrize("backend", ["podman", "bwrap"])
 def test_pause_and_resume(backend, tmp_path, monkeypatch):
     make_session("p", backend=backend, pid=50, tmp_path=tmp_path)
-    run, tree = Mock(), Mock()
+    run, tree = Mock(return_value=Mock(returncode=0, stderr="")), Mock()
     monkeypatch.setattr(m.subprocess, "run", run)
     monkeypatch.setattr(m, "signal_tree", tree)
     assert m.pause("p") == 0
@@ -419,9 +518,12 @@ def test_list_and_cli(tmp_path, capsys):
     make_session("two", pid=90, tmp_path=tmp_path)
     assert m.cli(["list"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["NAME", "AGENT", "BACKEND", "STATUS", "CREATED", "WORKSPACE"]
-    assert lines[1].split()[:4] == ["one", "codex", "podman", "stopped"]
-    assert lines[2].split()[:4] == ["two", "codex", "podman", "running"]
+    assert lines[0].split() == ["NAME", "AGENT", "STATUS", "STARTED", "CREATED", "BACKEND", "WORKSPACE"]
+    assert lines[1].split()[:3] == ["two", "codex", "running"], "running first"
+    assert lines[2].split()[:3] == ["one", "codex", "stopped"]
+    assert "\x1b" not in "".join(lines), "no colour in a pipe"
+    assert [row[:4] for row in m.rows()] == [["one", "codex", "podman", "stopped"], ["two", "codex", "podman",
+                                                                                     "running"]]  # (what the app reads)
     with pytest.raises(SystemExit):
         m.cli(["frobnicate", "x"])
 
@@ -430,7 +532,7 @@ def test_wrapper_script_runs_isolated(tmp_path):
     env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "empty")}
     result = subprocess.run([str(ROOT / "sandbox-ai"), "session", "list"], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("no sessions; start one with: sandbox-ai AGENT --session NAME")
+    assert result.stdout.startswith("No sessions. Start one with: sandbox-ai AGENT --session NAME")
     result = subprocess.run([str(ROOT / "sandbox-ai"), "session", "attach", "missing"], capture_output=True, text=True, env=env)
     assert result.returncode == 1 and "No session named missing" in result.stderr
 
@@ -466,7 +568,7 @@ def test_project_agent_args_reach_sessions(scenario, tmp_path, monkeypatch):
     monkeypatch.setattr(m, "clear_stale_pod", Mock())
     def popen(cmd, **kwargs):
         captured["cmd"] = cmd
-        (m.session_dir("s") / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir("s"))
         return Mock(pid=4244, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     assert m.launch("s", data, [], a) == 0
@@ -491,7 +593,7 @@ def test_launch_recreates_socket_directory(scenario, tmp_path, monkeypatch):
     seen = {}
     def popen(cmd, **kwargs):
         seen["entries"] = sorted(p.name for p in tmux.iterdir())
-        (tmux / "attach.sock").touch()
+        relay_up(tmux.parent)
         return Mock(pid=4245, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     assert m.launch("r", data, ["resume", "--last"], m.SimpleNamespace(backend="podman", podman_url=None)) == 0
@@ -655,7 +757,7 @@ def test_start_of_an_interactive_start(scenario, tmp_path, monkeypatch):
     def popen(cmd, **kwargs):
         launched["cmd"] = cmd
         key = cmd[cmd.index("--start-id") + 1]
-        (m.session_dir(key) / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir(key))
         return Mock(pid=4250, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     monkeypatch.setattr(m, "clear_stale_pod", Mock())
@@ -956,7 +1058,7 @@ def test_rebirth_gets_a_new_run_id(tmp_path, monkeypatch):
 
     def popen(cmd, **kwargs):
         seen["cmd"] = cmd
-        (m.session_dir("web") / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir("web"))
         return Mock(pid=4260, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     assert m.resume("web") == 0
@@ -1058,7 +1160,7 @@ def test_added_options(scenario, tmp_path, monkeypatch):
         data = {**data, "options": ["--backend", "podman"], "cwd": str(tmp_path / "extra")}
         options = m.added_options(data, [str(tmp_path)], ["rel:/opt/x"])
         assert options == ["--backend", "podman", "--workspace", str(extra), "--workspace", str(tmp_path),
-                           "--mount", f"{tmp_path / 'rel'}:/opt/x"]
+                           "--mount", f"{tmp_path / 'rel'}:/opt/x:ro"]
 
 
 def test_resume_with_a_workspace_starts_with_it_and_keeps_it(tmp_path, monkeypatch):
@@ -1125,7 +1227,7 @@ def test_a_project_file_the_agent_writes_later_never_takes_a_resume_over(tmp_pat
 
     def popen(cmd, **kwargs):
         commands.append(cmd)
-        (m.session_dir("s") / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir("s"))
         return Mock(pid=4243, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     monkeypatch.setattr(m, "clear_stale_pod", lambda name, d: None)
@@ -1550,7 +1652,7 @@ def test_launch_records_the_app_tab_it_was_started_in(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "clear_stale_pod", lambda name, d: None)
 
     def popen(cmd, **kwargs):
-        (m.session_dir("s") / "tmux" / "attach.sock").touch()
+        relay_up(m.session_dir("s"))
         return Mock(pid=4243, poll=Mock(return_value=None))
     monkeypatch.setattr(m.subprocess, "Popen", popen)
     monkeypatch.setenv("SANDBOX_AI_APP_TAB", "0123456789abcdef")
@@ -1599,3 +1701,29 @@ def test_attach_waits_for_a_session_still_starting(tmp_path, monkeypatch, capsys
     clock = iter(range(0, 10000, 100))
     with pytest.raises(RuntimeError, match=r"has no terminal after \d+ s"):
         m.wait_for_terminal("x", {}, socket_path, "x", clock=lambda: next(clock), sleep=lambda seconds: None)
+
+
+def test_session_list_is_a_readable_table(tmp_path, capsys, monkeypatch):
+    """`session list` as `docker ps`: running first, then the newest; STARTED and CREATED as how long ago; your HOME
+    as ~; a workspace too long for the terminal cut from the left with an ellipsis (whole with --no-trunc)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("COLUMNS", "80")
+    now = time.time()
+
+    def stamp(ago):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - ago))
+    make_session("older")
+    make_session("newer")
+    long = str(tmp_path / "home" / "src" / ("a-very-long-folder-name-" * 4) / "app")
+    for name, created, workspace in (("older", stamp(86400 * 3), "/srv/one"), ("newer", stamp(7200), long)):
+        data = m.load(name)
+        m.save(name, {**data, "created": created, "workspace": workspace})
+    assert m.cli(["list"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [line.split()[0] for line in lines[1:]] == ["newer", "older"], "the newest first"
+    assert re.search(r"  -  +2 hours ago  +podman  ", lines[1]) and re.search(r"  3 days ago  ", lines[2])
+    assert all(len(line) <= 80 for line in lines), lines
+    assert lines[1].endswith("/app") and ("\u2026" in lines[1] or "..." in lines[1]) and "~/src/" not in lines[1]
+    assert m.cli(["list", "--no-trunc"]) == 0
+    whole = capsys.readouterr().out
+    assert "~/src/a-very-long-folder-name-" in whole.replace("\n", " ")

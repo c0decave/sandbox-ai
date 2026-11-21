@@ -18,7 +18,10 @@ pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not ba
 
 
 def test_typing_in_a_list_field_keeps_the_focus_across_the_commit(page, qapp):
-    network = page.board.first("network")
+    # (the network's lists are one field of kinds since 2026-11-19 - list_fields, test_list_fields; a part with
+    # list fields of one value per line: the approvals' hidden files and rulesets)
+    page.add_node("approvals")
+    network = page.board.first("approvals")
     holder = QtWidgets.QWidget()
     holder.setLayout(QtWidgets.QVBoxLayout())
     holder.layout().addWidget(page.inspector_holder)
@@ -29,7 +32,7 @@ def test_typing_in_a_list_field_keeps_the_focus_across_the_commit(page, qapp):
     for _ in range(5):
         qapp.processEvents()
     lists = page.inspector_holder.findChildren(LinesEdit)
-    assert lists, "the network part has list fields"
+    assert lists, "the approvals part has list fields"
     field = lists[0]
     index = lists.index(field)
     field.setFocus()
@@ -48,4 +51,33 @@ def test_typing_in_a_list_field_keeps_the_focus_across_the_commit(page, qapp):
     assert focused.textCursor().position() == len(focused.toPlainText())
     QTest.keyClicks(focused, "10.0.0.6:22")
     assert focused.values()[-2:] == ["10.0.0.5:22", "10.0.0.6:22"]
+    holder.close()
+
+
+def test_a_field_typed_into_is_kept_when_another_part_is_selected(page, qapp):
+    """The bug class of 2026-11-16 (set, gone after switching): a field of the inspector the keyboard was still in
+    when another part was selected (the parts list by keyboard, a finding, a search) lost what was typed - the rows
+    were made anew for the other part. It is taken for the part it was typed for, as leaving the field would."""
+    agent, network = page.board.first("agent"), page.board.first("network")
+    holder = QtWidgets.QWidget()
+    holder.setLayout(QtWidgets.QVBoxLayout())
+    holder.layout().addWidget(page.inspector_holder)
+    holder.show()
+    holder.activateWindow()
+    page.inspected = agent.id
+    page.inspect(agent)
+    for _ in range(5):
+        qapp.processEvents()
+    field = next(e for e in page.inspector_holder.findChildren(QtWidgets.QLineEdit)
+                 if e.placeholderText() == "e.g. --verbose")
+    field.setFocus()
+    qapp.processEvents()
+    QTest.keyClicks(field, "--verbose")
+    assert QtWidgets.QApplication.focusWidget() is field and agent.props.get("arguments") != "--verbose"
+    page.scene.clearSelection()
+    page.items[network.id].setSelected(True)
+    page.inspect_timer.timeout.emit()
+    for _ in range(5):
+        qapp.processEvents()
+    assert agent.props.get("arguments") == "--verbose"
     holder.close()

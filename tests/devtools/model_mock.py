@@ -17,7 +17,8 @@ request to a model not loaded loads it JIT (an instance with remaining_ttl_secon
 one). For the tests that no listing loads a model, that a start loads one explicitly, and of llm loaded|load|unload.
 --ollama-ps answers Ollama's GET /api/ps (the loaded models with size, size_vram, context_length, expires_at), and
 /api/generate or /api/chat without a prompt (or messages) loads the model (done_reason "load"; keep_alive in seconds,
-negative: until unloaded; options.num_ctx its context), with keep_alive 0 unloads it ("unload").
+negative: until unloaded; options.num_ctx its context, else a Modelfile's num_ctx, else default_context as
+OLLAMA_CONTEXT_LENGTH), with keep_alive 0 unloads it ("unload"); POST /api/show answers its parameters and model_info.
 POST /v1/messages is Anthropic's Messages API as the four servers offer it to Claude Code (Handler.messages: scripted
 tool calls, streamed in Anthropic's events or not); /v1/messages/count_tokens answers only with count_tokens=True.
 """
@@ -50,11 +51,28 @@ class Options:
     loaded = None
     instances = None
     jit_ttl = 3600      # the remaining_ttl_seconds of an instance JIT-loaded by a chat request
+    load_seconds = 0.0  # how long POST /api/v1/models/load takes (a real model takes seconds to minutes)
+    load_refuses = ()   # keys the load refuses as unknown although LM Studio 0.4 takes them (an older LM Studio)
     ollama_ps = False
     running = None      # the Ollama-like loaded models: {model: {"context", "expires_at"}}
     size = 4 << 30      # what an Ollama-like loaded model takes in memory (all in VRAM)
+    default_context = 4096  # the window an Ollama-like server loads a model with by default (OLLAMA_CONTEXT_LENGTH)
+    sizes = None        # LM Studio-like: {model: size_bytes} (default 1 GiB each)
+    vision = ()         # LM Studio-like: the models that read images ("vision": true)
+    trained_context = 131072  # POST /api/show's model_info <arch>.context_length (the model's own, not what is loaded)
+    modelfile_context = None  # POST /api/show's parameters "num_ctx N" (a Modelfile's PARAMETER num_ctx; {model: N})
     thinking = None     # /v1/messages: a thinking block with this text before each answer
     count_tokens = False  # /v1/messages/count_tokens answers (else 404: not every server's Messages API has it)
+    tool_arguments = None  # /v1/chat/completions streamed with tools: a call of the request's first tool with these
+    #                        arguments (in --chunks pieces) instead of a text answer
+    split_events = False  # a streamed answer's events written as two pieces each: the data line, then its blank line
+    #                       (as LM Studio did in the local-model research's round 4)
+
+
+def modelfile_of(options, model):
+    """The Modelfile num_ctx of MODEL: modelfile_context, every model's or ({model: N}) one model's."""
+    value = options.modelfile_context
+    return value.get(model) if isinstance(value, dict) else value
 
 
 def text_for(options, messages):
@@ -127,6 +145,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", kind)
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        if self.options.split_events:
+            lines = [part for line in lines for part in
+                     ((line[:-1], line[-1:]) if line.endswith(b"\n\n") else (line,))]
         for line in lines:
             if self.options.delay:
                 time.sleep(self.options.delay)
@@ -162,7 +183,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with LOCK:
                 instances = [dict(i) for i in self.options.instances]
             self.send_json(200, {"models": [
-                {"key": m, "type": "llm", "max_context_length": self.options.max_context, "size_bytes": 1 << 30,
+                {"key": m, "type": "llm", "max_context_length": self.options.max_context,
+                 "size_bytes": (self.options.sizes or {}).get(m, 1 << 30), "vision": m in (self.options.vision or ()),
                  "loaded_instances": [{"id": i["id"], "config": {"context_length": i["context"]},
                                        **({"remaining_ttl_seconds": i["ttl"]} if i.get("ttl") is not None else {})}
                                       for i in instances if i["model"] == m]}
@@ -205,10 +227,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             unknown = sorted(set(body) - {"model", "context_length", "eval_batch_size", "flash_attention",
                                           "num_experts", "offload_kv_cache_to_gpu", "echo_load_config",
                                           "parallel"})  # (parallel: LM Studio 0.4's load API takes it, measured)
+            unknown = sorted(set(unknown) | (set(body) & set(self.options.load_refuses)))
             if unknown:  # as LM Studio 0.4 answers a key it does not know ("ttl" too)
                 self.send_json(400, {"error": {"message": f"Unrecognized key(s) in object: {', '.join(unknown)}",
                                                "type": "invalid_request", "code": "unrecognized_keys"}})
                 return self.finish_answer()
+            if self.options.load_seconds:
+                time.sleep(self.options.load_seconds)
             with LOCK:
                 instance = self.add_instance(model, body.get("context_length") or 4096, None)
             self.send_json(200, {"type": "llm", "instance_id": instance, "load_time_seconds": 0.1, "status": "loaded"})
@@ -218,6 +243,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with LOCK:  # JIT loading: the first request to a model not loaded loads it, with an idle TTL
                 if not any(i["model"] == model for i in self.options.instances):
                     self.add_instance(model, 4096, self.options.jit_ttl)
+        if self.options.ollama_ps and path == "/api/show":  # (Ollama's shape: parameters text, model_info)
+            ctx = modelfile_of(self.options, body.get("model"))
+            self.send_json(200, {"modelfile": "FROM x", "parameters": f"num_ctx {ctx}\nstop <|im_end|>" if ctx else
+                                 "stop <|im_end|>", "details": {"family": "qwen2"},
+                                 "model_info": {"general.architecture": "qwen2",
+                                                "qwen2.context_length": self.options.trained_context}})
+            return self.finish_answer()
         if self.options.ollama_ps and path in ("/api/generate", "/api/chat") and body.get("model"):
             keep = body.get("keep_alive", 300)
             empty = not body.get("prompt") if path == "/api/generate" else not body.get("messages")
@@ -227,7 +259,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     reason = "unload"
                 else:
                     context = (body.get("options") or {}).get("num_ctx") or \
-                        (self.options.running.get(model) or {}).get("context") or 4096
+                        (self.options.running.get(model) or {}).get("context") or modelfile_of(self.options, model) or \
+                        self.options.default_context
                     seconds = keep if isinstance(keep, (int, float)) else 300
                     expires = "2318-01-01T00:00:00Z" if seconds < 0 else \
                         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
@@ -243,7 +276,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             text = text_for(self.options, body.get("messages") if chat else
                             [{"role": "user", "content": body.get("prompt", "")}])
             usage = {"prompt_tokens": 3, "completion_tokens": len(text.split()), "total_tokens": 3 + len(text.split())}
-            if body.get("stream"):
+            tools = [t.get("function") or {} for t in body.get("tools") or [] if isinstance(t, dict)]
+            if body.get("stream") and chat and tools and self.options.tool_arguments is not None:
+                lines = [b"data: " + json.dumps({"id": "mock-1", "object": "chat.completion.chunk", "created": created,
+                                                  "model": model, "choices": [{"index": 0, "delta": {
+                                                      "role": "assistant", "tool_calls": [{
+                                                          "index": 0, "id": "call-1", "type": "function",
+                                                          "function": {"name": tools[0].get("name", ""),
+                                                                       "arguments": ""}}]}}]}).encode() + b"\n\n"]
+                for piece in pieces(self.options.tool_arguments, self.options.chunks):
+                    lines.append(b"data: " + json.dumps({
+                        "id": "mock-1", "object": "chat.completion.chunk", "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {
+                            "arguments": piece}}]}}]}).encode() + b"\n\n")
+                lines.append(b"data: " + json.dumps({"id": "mock-1", "object": "chat.completion.chunk",
+                                                      "created": created, "model": model, "choices": [{
+                                                          "index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                                                      "usage": usage}).encode() + b"\n\n")
+                lines.append(b"data: [DONE]\n\n")
+                self.stream("text/event-stream", lines)
+            elif body.get("stream"):
                 lines = []
                 for piece in pieces(text, self.options.chunks):
                     choice = {"index": 0, "delta": {"role": "assistant", "content": piece}} if chat else \

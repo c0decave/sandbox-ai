@@ -38,7 +38,8 @@ def test_the_tour_walks_every_page_in_the_windows_order():
 
 
 OWN = {"workspace": {"path", "readonly"}, "mount": {"source", "dest", "mode"}, "mcp": {"name"}, "service": {"name", "image"},
-       "agent": {"agent", "model", "effort", "thinking"}, "proxy": {"enabled"}, "home": {"login"}, "session": {"tmux"}}
+       "agent": {"agent", "model", "effort", "thinking"}, "proxy": {"enabled"}, "home": {"login"},
+       "session": {"tmux"}, "bridge": {"peer", "direction", "message", "watch"}, "team": {"name", "lead"}}
 
 
 def test_every_question_is_about_what_its_node_owns(sai):
@@ -67,19 +68,27 @@ SAMPLES = {"path": "/home/u/src/app", "source": "/home/u/data", "dest": "/mnt/da
            "name": "demo", "--llm": "local", "--allow-host": ["api.example.org"],
            "--allow-domain": ["example.org"], "--vpn": "work",
            "--device": ["/dev/kvm"], "--memory": "4g", "--cpus": "2", "--pids": "1024", "--gui-vnc": "/home/u/vnc",
-           "--log-dir": "/home/u/logs", "--image-variant": "gpu", "image": "redis", "--browser-profile": "session"}
+           "--log-dir": "/home/u/logs", "--image-variant": "gpu", "image": "redis", "--browser-profile": "session",
+           "peer": "docs", "--cairn-workers": "claude=sonnet", "--cairn-origin": "The machine 10.0.0.5",
+           "--cairn-goal": "Its flaws, proven", "--cairn-hint": "Start at port 80"}
 
 
 def sample(question):
     if question.form == "flag":
         return question.key != "enabled" or False  # the proxy: turned off, the rest: turned on
     if question.form in ("choice", "switches"):
-        return [v for v, _ in question.choices][-1]
+        values = [v for v, _ in question.choices]
+        if question.key == "agent":  # the last one whose thinking can be chosen too (Letta Code, Qwen Code: no setting)
+            from sandbox_ai_app import thinking
+            values = [v for v in values if thinking.available(v)]
+        return values[-1]
     return SAMPLES[question.key]
 
 
 def test_answers_survive_the_way_to_the_command_line_and_back(sai):
     for kind, asked in guide.NODE_QUESTIONS.items():
+        if kind in ("bridge", "team"):  # the app's own parts: no launcher option (tests/test_board_bridge.py,
+            continue                     # tests/test_board_team.py)
         if kind == "network":  # --offline with hosts makes no sense together: asked one by one below
             continue
         board = B.Board()

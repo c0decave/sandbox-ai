@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
+    QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import applog
 from . import board as B
+from . import board_icons, theme
 from . import guide, tours
 from .board_view import VALUE_NAMES, PathEdit
 from .files import printable
@@ -270,7 +271,14 @@ class NodeGuide(QDialog):
         self.inputs = {}
         intro = QWidget()
         intro_layout = QVBoxLayout(intro)
-        intro_layout.addWidget(plain_label(tr(B.KINDS[node.kind].title), role="section"))
+        heading = QHBoxLayout()  # the kind's icon (decoration) before its name
+        mark = QLabel()
+        mark.setPixmap(board_icons.pixmap(node.kind, board_icons.SIZE, theme.colors()["title"],
+                                          self.devicePixelRatioF()))
+        mark.setFixedSize(board_icons.SIZE, board_icons.SIZE)
+        heading.addWidget(mark, 0, Qt.AlignmentFlag.AlignVCenter)
+        heading.addWidget(plain_label(tr(B.KINDS[node.kind].title), role="section"), 1)
+        intro_layout.addLayout(heading)
         intro_layout.addWidget(plain_label(tr(B.KINDS[node.kind].help)))
         intro_layout.addWidget(plain_label(tr("{count} question(s); each can be changed later in the inspector.",
                                               count=len(self.asked)), role="secondary"))
@@ -329,7 +337,7 @@ class NodeGuide(QDialog):
             widget = QComboBox()
             widget.setEditable(question.form == "model")
             self.fill_agent_choices(question, widget, self.node.props.get("agent", "claude"), current,
-                                    self.parent())
+                                    self.parent(), model=self.chosen_model())
         elif self.node.kind == "service" and question.key == "image" and hasattr(self.parent(), "image_combo"):
             # Your images to choose from (sandbox-ai images list), "Other…" for a name typed in.
             widget = self.parent().image_combo(current)
@@ -347,7 +355,10 @@ class NodeGuide(QDialog):
             widget.setText(current or "")
             widget.setAccessibleName(tr(question.label))
         elif question.form == "path":
-            widget = PathEdit(current, directory=question.key != "source")
+            # a folder or file of the host the board starts on: chosen from that host's folders (remote_chooser)
+            board = self.parent()
+            widget = PathEdit(current, directory=question.key != "source",
+                              host=board.host() if hasattr(board, "host") else "local")
             if question.placeholder:
                 widget.edit.setPlaceholderText(question.placeholder)
         else:
@@ -368,14 +379,51 @@ class NodeGuide(QDialog):
         self.inputs[question.key] = (question, widget)
         if question.key == "agent":  # the model's and the effort's choices follow the agent
             widget.currentIndexChanged.connect(lambda _i, w=widget: self.agent_changed(w.currentData()))
+        if question.key == "model":  # the effort's choices follow the model (the levels it takes)
+            widget.currentIndexChanged.connect(lambda _i: self.model_changed())
+            widget.lineEdit().editingFinished.connect(self.model_changed)
         layout.addWidget(widget)
+        if question.key == "effort":  # an effort the model chosen does not take was reset: said here
+            self.effort_note = plain_label(role="secondary")
+            self.effort_note.hide()
+            layout.addWidget(self.effort_note)
         layout.addStretch(1)
         return page
 
+    def chosen_model(self):
+        """The model answered so far (the model page's choice, else the node's)."""
+        if "model" in getattr(self, "inputs", {}):
+            question, widget = self.inputs["model"]
+            if not widget.property("server"):
+                from . import models
+                return models.combo_value(widget)
+            return ""
+        return str(self.node.props.get("model") or "")
+
+    def model_changed(self):
+        """The effort's choices for the model now chosen; an effort it does not take is reset, with a note."""
+        if "effort" not in self.inputs:
+            return
+        question, widget = self.inputs["effort"]
+        before = widget.currentData() or ""
+        agent = self.inputs["agent"][1].currentData() if "agent" in self.inputs else \
+            self.node.props.get("agent", "claude")
+        self.fill_agent_choices(question, widget, agent, before, self.parent(), model=self.chosen_model())
+        after = widget.currentData() or ""
+        note = getattr(self, "effort_note", None)
+        if note is not None:
+            if before and not after:
+                note.setText(tr("The effort {level} was reset: {model} does not take it.", level=before,
+                                model=self.chosen_model() or tr("the agent's default model")))
+                note.setVisible(True)
+            elif after:
+                note.setVisible(False)
+
     @staticmethod
-    def fill_agent_choices(question, widget, agent, current, page=None):
-        """The model names or effort levels AGENT knows; the empty choice is its default. With a model server on the
-        board of PAGE (--llm), the models are that server's (NAME:MODEL; the launcher refuses --model with --llm)."""
+    def fill_agent_choices(question, widget, agent, current, page=None, model=""):
+        """The model names or effort levels AGENT knows (the effort's: those MODEL takes, models.efforts); the empty
+        choice is its default. With a model server on the board of PAGE (--llm), the models are that server's
+        (NAME:MODEL; the launcher refuses --model with --llm)."""
         if question.form == "thinking":  # shown, hidden or the agent's default; none to choose without a switch
             from . import thinking
             widget.blockSignals(True)
@@ -394,13 +442,17 @@ class NodeGuide(QDialog):
                 fill_server_models(widget, *server)
                 return
             from . import models
-            models.fill_combo(widget, agent, current)
+            models.fill_combo(widget, agent, current, getattr(page, "sai", None))
             widget.setEnabled(True)
             return
+        from . import models
+        sai = getattr(page, "sai", None)
         widget.blockSignals(True)
         widget.clear()
-        widget.addItem(tr("the agent's default"), "")
-        for value in guide.AGENT_EFFORTS.get(agent, ()):
+        default = models.default_effort(agent, model, sai)
+        widget.addItem(tr("the agent's default ({level} for this model)", level=default) if default
+                       else tr("the agent's default"), "")
+        for value in (models.efforts(agent, model, sai) if guide.AGENT_EFFORTS.get(agent) else ()):
             widget.addItem(value, value)
         index = widget.findData(current)
         if index >= 0:
@@ -418,7 +470,7 @@ class NodeGuide(QDialog):
                 question, widget = self.inputs[key]
                 value = widget.currentData() if widget.currentText() == widget.itemText(widget.currentIndex()) \
                     else widget.currentText()
-                self.fill_agent_choices(question, widget, agent, value, self.parent())
+                self.fill_agent_choices(question, widget, agent, value, self.parent(), model=self.chosen_model())
 
     def answers(self):
         found = {}
@@ -531,10 +583,16 @@ def apply(page, node_id, answers):
     updates = guide.props_of(node.kind, answers)
 
     def change():
+        # The part as it is on the board now: the model server chosen above was a step of its own, and every step
+        # makes the board's parts anew - the answers were set on the part of the board before it, and lost (the
+        # effort, Show thinking and "Agent without approval prompts" answered in the same guide).
+        target = page.board.node(node_id)
+        if target is None:
+            return
         for key, value in updates.items():
             if value is None:
-                node.props.pop(key, None)
+                target.props.pop(key, None)
             else:
-                node.props[key] = value
+                target.props[key] = value
     page.change(tr("Set up {name}", name=tr(B.KINDS[node.kind].title)), change)
 

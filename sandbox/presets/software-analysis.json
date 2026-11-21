@@ -3,11 +3,11 @@
   "version": 1,
   "id": "software-analysis",
   "title": "Software analysis",
-  "description": "Binaries in a read-only folder, the agent reaches only its provider; capa, FLOSS, radare2, YARA and binwalk as MCP servers in containers of their own.",
+  "description": "Binaries in a read-only folder, the agent reaches only its provider; capa, FLOSS, radare2, YARA, binwalk, jadx and CFR as MCP servers in containers of their own.",
   "translations": {
     "de": {
       "title": "Software-Analyse",
-      "description": "Binärdateien in einem nur lesbaren Ordner, der Agent erreicht nur seinen Anbieter; capa, FLOSS, radare2, YARA und binwalk als MCP-Server in eigenen Containern."
+      "description": "Binärdateien in einem nur lesbaren Ordner, der Agent erreicht nur seinen Anbieter; capa, FLOSS, radare2, YARA, binwalk, jadx und CFR als MCP-Server in eigenen Containern."
     }
   },
   "category": "forensics",
@@ -18,14 +18,30 @@
   ],
   "options": [
     "--mount",
-    "{samples}:/mnt/samples:ro"
+    "{samples}:/mnt/samples:ro",
+    "--mcp-mount",
+    "capa:/work={samples}:ro",
+    "--mcp-mount",
+    "floss:/work={samples}:ro",
+    "--mcp-mount",
+    "radare2:/work={samples}:ro",
+    "--mcp-mount",
+    "yara:/work={samples}:ro",
+    "--mcp-mount",
+    "binwalk:/work={samples}:ro",
+    "--mcp-mount",
+    "jadx:/work={samples}:ro",
+    "--mcp-mount",
+    "cfr:/work={samples}:ro"
   ],
   "mcp": [
-    "hub:capa",
+    "mcp:capa",
     "hub:floss",
-    "hub:radare2",
+    "mcp:radare2",
     "hub:yara",
-    "hub:binwalk"
+    "mcp:binwalk",
+    "mcp:jadx",
+    "mcp:cfr"
   ],
   "values": {
     "samples": {
@@ -33,8 +49,9 @@
       "kind": "folder"
     }
   },
-  "prompt": "Analyse the samples in /mnt/samples: what each one is, what it can do (capa), its strings (FLOSS), its structure (radare2), YARA matches. Never run a sample. Write one report per sample to /work/reports/.",
+  "prompt": "Analyse the samples in /mnt/samples: what each one is, what it can do (capa), its strings (FLOSS), its structure (radare2), YARA matches; Android apps and Java archives decompiled with jadx and CFR. The MCP servers see the samples folder as /work (/mnt/samples/a.exe is /work/a.exe there). Never run a sample. Write one report per sample to /work/reports/.",
   "notes": [
-    "Samples stay read-only and the agent reaches only its provider: nothing it finds can call home."
+    "Samples stay read-only and the agent reaches only its provider: nothing it finds can call home.",
+    "capa, FLOSS, radare2, YARA, binwalk, jadx and CFR each run in a container of their own, without network, and get the samples folder read-only at their /work for this start (--mcp-mount NAME:/work=FOLDER:ro). capa, radare2, binwalk, jadx and CFR are sandbox-ai-mcp's reviewed builds (mcp:), FLOSS and YARA axross-mcp-hub's (hub:). jadx needs 2g memory, CFR 1g (sandbox-ai mcp add applies the catalog's limits)."
   ]
 }

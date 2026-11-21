@@ -113,6 +113,7 @@ class World:
         monkeypatch.setattr(m, "check_tor_image_user", lambda name, image: None)
         monkeypatch.setattr(m, "wait_for_socket", lambda *args, **kwargs: None)
         monkeypatch.setattr(l, "on_machine", lambda a: False)  # (Linux here; macOS: its own test below)
+        monkeypatch.setattr(m.egress_module(), "prerequisite_problem", lambda engine: None)  # (nft: this host's)
         rootfs = tmp_path / "rootfs"
         rootfs.mkdir(exist_ok=True)
         monkeypatch.setattr(m, "rootfs_module", lambda: types.SimpleNamespace(
@@ -312,7 +313,12 @@ def test_every_way_up_every_server_every_vpn(kind, source, vpn_kind, path, monke
         connection = connection[10:]
         if want["vpn"] is None:
             assert cmd[2:4] == [str(SANDBOX / "runtime.py"), "--internal-mcp-serve"], "no VPN wrapper"
-            assert connection[:2] == ["podman", "run"], "no guard without a VPN"
+            if kind != "image-none":
+                # With network: the egress guard loads its rules into the container's namespace before it runs.
+                assert connection[:4] == [sys.executable, "-I", str(SANDBOX / "mcp_egress.py"),
+                                          "--internal-egress-guard"] and connection[5] == "--", connection
+                connection = connection[6:]
+            assert connection[:2] == ["podman", "run"], "no VPN guard without a VPN"
             assert network_options(connection) == {"--network": [
                 "none" if kind == "image-none" else l.POD_NETWORK]}
             continue
@@ -623,7 +629,9 @@ def guard_world(on_start=None):
 def run_line(container="sandbox-ai-vpn-mcp-srv"):
     plan = m.server_network("srv", {"image": IMAGE, "network": "full"}, None)
     plan = {**plan, "vpn": "wg", "vpn_container": container, "network": f"--network=container:{container}",
-            "definition": {**plan["definition"], "vpn": "wg"}}
+            "definition": {**plan["definition"], "vpn": "wg"},
+            # (behind a VPN its egress rules are its VPN container's: no podman network of its own)
+            "egress": {key: value for key, value in plan["egress"].items() if key != "network"}}
     return m.image_command(plan)
 
 

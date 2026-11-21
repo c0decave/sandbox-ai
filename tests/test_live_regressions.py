@@ -287,6 +287,7 @@ class Relay:
         self.path = path
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         # (made through a short link to its folder: a test's path is longer than a socket's name may be)
+        path.parent.mkdir(exist_ok=True)  # (tmux/relay: the supervisor makes it)
         self.short = Path(tempfile.mkdtemp(prefix="relay-"))
         (self.short / "d").symlink_to(path.parent)
         self.server.bind(str(self.short / "d" / path.name))
@@ -315,6 +316,25 @@ def wait_for(check, timeout=60):
         time.sleep(0.05)
 
 
+class Said:
+    """What a process says on STREAM, read as it comes (in a thread of its own): text() so far, all of it once the
+    process ended."""
+
+    def __init__(self, stream):
+        self.lines = []
+        self.thread = threading.Thread(target=self.read, args=(stream,), daemon=True)
+        self.thread.start()
+
+    def read(self, stream):
+        for line in iter(stream.readline, ""):
+            self.lines.append(line)
+
+    def text(self, ended=False):
+        if ended:  # (the process ended: up to the stream's end)
+            self.thread.join(timeout=30)
+        return "".join(self.lines)
+
+
 @pytest.fixture
 def starting(host):
     """The session q1 of qwen started (in the background, as the app's terminal tab starts it) and held at its pod
@@ -325,7 +345,8 @@ def starting(host):
     env = {"FAKE_PODMAN_POD_HOLD": str(hold)}
     first = host.popen("qwen", "--session", "q1", env=env)
     wait_for(lambda: host.stopped_at() is not None)
-    socket_path = host.home / ".local/state/sandbox-ai/sessions/q1/tmux/attach.sock"
+    # (a start of 0.1.117: its relays lie in tmux/relay, where the supervisor binds them - sessions.relay_socket)
+    socket_path = host.home / ".local/state/sandbox-ai/sessions/q1/tmux/relay/attach.sock"
     relay = []
     yield host, socket_path, env, (lambda: relay.append(Relay(socket_path)))
     hold.touch()
@@ -349,14 +370,18 @@ def test_attach_while_starting(starting):
     assert session.get("terminal") == "starting" or session.get("state") == "starting" or \
         "starting" in json.dumps(session), session
     attach = host.popen("attach", "q1", env=env)
-    wait_for(lambda: socket_path.parent.exists())
+    out, err = Said(attach.stdout), Said(attach.stderr)
+    # The relay comes once attach said it waits: on a loaded machine its start took longer than a fixed second, the
+    # relay was there before attach looked, and it attached without waiting (~1 in 10 runs on two busy CPUs).
+    wait_for(lambda: "still starting; waiting for its terminal" in err.text() or attach.poll() is not None)
     time.sleep(1.0)
-    assert attach.poll() is None, attach.communicate()  # waiting, not 'relay not reachable'
+    assert attach.poll() is None, (out.text(), err.text())  # waiting, not 'relay not reachable'
     relay_up()
-    out, err = attach.communicate(timeout=60)
+    attach.wait(timeout=60)
+    out, err = out.text(ended=True), err.text(ended=True)
     assert "still starting; waiting for its terminal" in err
     assert "relay not reachable" not in err
-    assert "hello from the session's terminal" in out
+    assert "hello from the session's terminal" in out, (out, err)
     assert attach.returncode == 0, err
 
 
@@ -561,3 +586,191 @@ def test_tests_reach_no_real_host_over_ssh():
     result = subprocess.run(["ssh", "-o", "BatchMode=yes", "root@192.0.2.11", "true"], capture_output=True,
                             text=True, timeout=10)
     assert result.returncode == 255 and "tests reach no real host" in result.stderr
+
+
+# --- "dieser 60s timeout fuer freigaben nervt total, weil man es auch nicht rueckgaengig machen kann" (2026-11-17):
+# a question nobody answered in time was refused, the same request then refused at once for 2 minutes ------------
+
+def test_a_question_that_timed_out_is_still_answered_through_sandbox_ai(tmp_path):
+    """The supervisor marks the question timed out (its .state) and keeps it open: ./sandbox-ai lists it under
+    --state timeout and answers it (the supervisor applies that answer to the request's next try; the broker side:
+    tests/test_approvals_rework.py, end to end with a real broker and control socket there too)."""
+    short = Path(tempfile.mkdtemp(prefix="reg-", dir="/tmp"))
+    try:
+        host = Host(short / "h")
+        runs = host.runtime / "sandbox-ai" / "runs" / "claude-1"
+        (runs / "approvals").mkdir(parents=True)
+        (runs / "run.json").write_text(json.dumps({"run": "claude-1", "agent": "claude", "pid": os.getpid(),
+                                                   "workspace": str(host.workspace), "session_dir": str(short),
+                                                   "started": "2026-11-17T04:00:00Z", "ask_timeout": 60}))
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
+        (runs / "approvals" / "1763352000-1-1.json").write_text(json.dumps({
+            "id": "1763352000-1-1", "kind": "connect", "time": stamp, "timeout": 60, "destination": "192.0.2.7:443",
+            "address": "192.0.2.7", "port": 443}))
+        (runs / "approvals" / "1763352000-1-1.state").write_text(json.dumps({"state": "timeout", "time": stamp}))
+        listed = host.run("approvals", "list", "--state", "timeout", "--json", timeout=60)
+        assert listed.returncode == 0, listed.stderr
+        [entry] = json.loads(listed.stdout)
+        assert entry["state"] == "timeout" and entry["answerable"] and "allow" in entry["actions"]
+        plain = host.run("approvals", "list", timeout=60)
+        assert "1 more nobody answered in time, still answerable" in plain.stdout
+        allowed = host.run("approvals", "allow", "1763352000-1-1", "--scope", "run", timeout=60)
+        assert allowed.returncode == 0, allowed.stderr
+        assert json.loads((runs / "approvals" / "1763352000-1-1.answer").read_text()) == {"decision": "allow",
+                                                                                         "scope": "run"}
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+# --- "agent-sandbox: Session vital-wallaby-azalea is running; attach with: sandbox-ai attach vital-wallaby-azalea /
+# [Exit-Status 1]" - "the session/terminal is not opened", "the session is not started at all it seems" (2026-11-19) ---
+
+def on_terminal(host, *args, env=None, timeout=90, seen=None):
+    """`sandbox-ai ARGS` on a pseudo-terminal, as the app's tab or `ssh -tt` runs it: (exit status, what it said).
+    SEEN(text): called with all it said so far whenever more came (to let a held start go on)."""
+    controller, terminal = pty.openpty()
+    process = subprocess.Popen(host.command(*args), cwd=host.workspace, env={**host.env, **(env or {})},
+                               stdin=terminal, stdout=terminal, stderr=terminal, close_fds=True)
+    os.close(terminal)
+    said, deadline = b"", time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([controller], [], [], 0.2)
+        if ready:
+            try:
+                more = os.read(controller, 65536)
+            except OSError:
+                break
+            if not more:
+                break
+            said += more
+            if seen is not None:
+                seen(said.decode(errors="replace"))
+        elif process.poll() is not None:
+            break
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    os.close(controller)
+    return process.returncode, said.decode(errors="replace").replace("\r\n", "\n")
+
+
+def one_line(text):
+    """TEXT with its line ends as blanks (a terminal 80 columns wide wraps nothing here, the launcher's lines do)."""
+    return " ".join(text.split())
+
+
+def test_start_names_the_session_of_another_agent(starting):
+    """User: 'agent-sandbox: Session vital-wallaby-azalea is running; attach with: sandbox-ai attach
+    vital-wallaby-azalea / [Exit-Status 1]' - 'the session is not started at all it seems'. The Board had kept its
+    session name, and the second Start (another agent) met the session of the first. The launcher's refusal names
+    what it saw - whose session it is, that its supervisor runs, how far its terminal is - and what helps: attach,
+    stop it, or another name."""
+    host, socket_path, env, relay_up = starting
+    host.add_image("localhost/claude-sandbox:latest")
+    # While its first start still waits for its terminal (it holds the session's lock): the same, and that so.
+    status, said = on_terminal(host, "claude", "--session", "q1", env=env)
+    said = one_line(said)
+    assert status == 1, said
+    assert "Session q1 is running with qwen, not claude" in said, said
+    assert "its supervisor (PID " in said and "still starting" in said, said
+    assert "Another command is starting or stopping it right now" in said, said
+    relay_up()
+    deadline = time.monotonic() + 60
+    while True:
+        status, said = on_terminal(host, "claude", "--session", "q1", env=env)
+        said = one_line(said)
+        if "Another command is starting" not in said or time.monotonic() > deadline:
+            break
+        time.sleep(0.2)
+    assert status == 1, said
+    assert "Session q1 is running with qwen, not claude" in said, said
+    assert "attach with: sandbox-ai attach q1" in said and "sandbox-ai stop q1" in said, said
+    assert "another name (--session NAME)" in said, said
+    assert "its supervisor (PID " in said and "its terminal is there" in said, said
+    assert "runs already: attaching" not in said
+    # (a script too: the same words)
+    script = host.run("claude", "--session", "q1", env=env)
+    assert script.returncode == 1 and "is running with qwen, not claude" in one_line(script.stderr)
+
+
+def test_session_status_says_what_it_sees(starting):
+    """`sandbox-ai session status NAME --json`: what a start of that name would meet - its agent, state, whether its
+    supervisor runs, how far its terminal is, whether its relay answers - for the app's check before a start."""
+    host, socket_path, env, relay_up = starting
+    found = json.loads(host.run("session", "status", "q1", "--json").stdout)
+    assert (found["name"], found["agent"], found["state"], found["foreground"]) == ("q1", "qwen", "running", False)
+    assert found["terminal"] == "starting" and found["relay"] is False and found["attachable"] is True
+    assert found["supervisor"]["alive"] is True and isinstance(found["supervisor"]["pid"], int)
+    assert found["login"] is False and "still starting" in found["seen"]
+    relay_up()
+    found = json.loads(host.run("session", "status", "q1", "--json").stdout)
+    assert found["terminal"] == "ready" and found["relay"] is True and found["attach_why"] is None
+    words = host.run("session", "status", "q1")
+    assert words.returncode == 0 and "q1: running" in words.stdout and "qwen" in words.stdout
+    missing = host.run("session", "status", "nothing-here", "--json")
+    assert missing.returncode == 1 and "No session named nothing-here" in missing.stderr
+
+
+def test_start_names_a_session_in_the_foreground(host):
+    """A start of that name runs in the foreground of another terminal (a task, --no-tmux): there is no terminal to
+    attach to, and the refusal says so instead of 'attach with: sandbox-ai attach NAME' (which then refused too)."""
+    host.add_image("localhost/qwen-sandbox:latest")
+    hold = host.directory / "release-pod"
+    env = {"FAKE_PODMAN_POD_HOLD": str(hold)}
+    first = host.popen("qwen", "--name", "t1", "--no-tmux", env=env)
+    try:
+        wait_for(lambda: host.stopped_at() is not None)
+        status, said = on_terminal(host, "qwen", "--session", "t1", env=env)
+        said = one_line(said)
+        assert status == 1, said
+        assert "Session t1 is running in the foreground of another terminal or script" in said, said
+        assert "there is no terminal to attach to" in said and "sandbox-ai stop t1" in said, said
+        assert "attach with: sandbox-ai attach t1" not in said
+        found = json.loads(host.run("session", "status", "t1", "--json").stdout)
+        assert found["foreground"] is True and found["attachable"] is False and found["attach_why"] == "foreground"
+    finally:
+        hold.touch()
+        try:
+            first.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            first.kill()
+            first.communicate()
+
+
+def test_start_of_a_session_without_an_agent_starts_it_again(starting):
+    """A session that the list calls running while it has no agent any more - its tmux session ended, its supervisor
+    still runs - was 'attached' by a second start and ended in '... has no agent any more'. A start of that name
+    (the same agent) says what it saw, stops it and starts it again."""
+    host, socket_path, env, relay_up = starting
+    relay_up()
+    ended = socket_path.parent.parent / "ended"
+    ended.write_text(json.dumps({"status": 0, "seconds": 5}))
+    hold = host.directory / "release-pod"
+
+    def seen(text):
+        if "resuming stopped session q1" in text:
+            hold.touch()  # (its new supervisor gets as far as its pod, where the fake ends every start)
+    status, said = on_terminal(host, "qwen", "--session", "q1", env=env, seen=seen, timeout=120)
+    said = one_line(said)
+    assert "session q1 runs without an agent" in said and "its agent exited with status 0 after 5 s" in said, said
+    assert "it is stopped and started again" in said, said
+    assert "resuming stopped session q1 with its saved options" in said, said
+    assert "runs already: attaching" not in said and "has no agent any more" not in said, said
+
+
+def test_second_start_while_the_first_still_starts_attaches(starting):
+    """A second Start of the same session while the first still waits for its terminal (its image, a VPN): 'Session
+    NAME is being started or stopped by another command; try again in a moment', exit status 1. On a terminal it
+    attaches - waiting for the session's terminal, as attach does - instead."""
+    host, socket_path, env, relay_up = starting
+
+    def seen(text):
+        if "still starting; waiting for its terminal" in text and not socket_path.exists():
+            relay_up()
+    status, said = on_terminal(host, "qwen", "--session", "q1", env=env, seen=seen)
+    said = one_line(said)
+    assert "session q1 is being started by another command: attaching to it" in said, said
+    assert "try again in a moment" not in said, said
+    assert "hello from the session's terminal" in said and status == 0, said

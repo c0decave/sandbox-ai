@@ -431,7 +431,9 @@ def test_the_models_table_and_use_as_default(qapp, sai, monkeypatch):
     assert page.models_box.isVisible()
     widget = page.model_table
     headers = [widget.horizontalHeaderItem(c).text() for c in range(widget.columnCount())]
-    assert headers == ["Name", "Loaded", "Type", "Quant", "Context", "Size"], "only the columns with values"
+    assert headers == ["Name", "Loaded", "Type", "Quant", "Context", "Size", "Support"], \
+        "only the columns with values (and the traffic light: none of these is in the research's table)"
+    assert {widget.item(r, 6).text() for r in range(widget.rowCount())} == {"? not tested"}
     names = [widget.row_keys[widgets.row_index(widget, r)] for r in range(widget.rowCount())]
     assert names == ["qwen2.5-coder:7b", "llama3.1:8b", LONG], "loaded first, then by name"
     long_row = names.index(LONG)

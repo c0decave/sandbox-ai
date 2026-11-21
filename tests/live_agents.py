@@ -1,6 +1,7 @@
-"""What the live checks of Hermes, Qwen Code, DSH, Goose and Cairn share (tests/test_hermes_live.py, test_qwen_live.py,
-test_dsh_live.py, test_goose_live.py, test_cairn_live.py; scripts/live_check_agents.sh runs them on your machine, CI's
-job "agents-live" on GitHub's).
+"""What the live checks of Hermes, Qwen Code, DSH, Goose, OpenHands, Letta Code and Cairn share
+(tests/test_hermes_live.py, test_qwen_live.py, test_dsh_live.py, test_goose_live.py, test_openhands_live.py,
+test_letta_live.py, test_pi_live.py, test_cairn_live.py; scripts/live_check_agents.sh runs them on your machine, CI's job "agents-live" on
+GitHub's).
 
 Each check starts a real sandbox of the agent's image with Podman against a scripted model server on this host's
 loopback (tests/devtools/agent_model.py, registered with `sandbox-ai llm add` and given with --llm: no provider, no key),
@@ -37,6 +38,12 @@ AGENTS = {
     "qwen": {"args": ["--prompt=" + PROMPT], "enable": "--qwen-enable", "name": "Qwen Code"},
     "dsh": {"args": ["headless", PROMPT], "enable": None, "name": "DeepSeek Harness"},
     "goose": {"args": ["run", "--quiet", "--text=" + PROMPT], "enable": "--goose-enable", "name": "Goose"},
+    "openhands": {"args": ["task", "--text=" + PROMPT], "enable": "--openhands-enable", "name": "OpenHands"},
+    "nanobot": {"args": ["agent", "--no-markdown", "--message=" + PROMPT], "enable": "--nanobot-enable",
+                "name": "nanobot"},
+    "letta": {"args": ["-p", "--", PROMPT], "enable": "--letta-enable", "name": "Letta Code"},
+    "opencode2": {"args": ["run", "--", PROMPT], "enable": "--opencode2-enable", "name": "OpenCode 2"},
+    "pi": {"args": ["-p", "--", PROMPT], "enable": "--pi-enable", "name": "Pi"},
 }
 # What a sandbox may connect to and what the proxy did: the events of connections-*.jsonl that let a connection through.
 PASSED = {"tcp", "tls", "tls-passthrough", "http", "upgraded"}
@@ -51,6 +58,13 @@ def image_of(agent):
     return f"localhost/{agent}-sandbox:latest"
 
 
+def build_name(image):
+    """The `sandbox-ai build` target of IMAGE: localhost/AGENT-sandbox (an agent's), localhost/sandbox-ai-NAME
+    (sandbox-ai's own: cairn, browser)."""
+    name = image.split("/")[-1].split(":")[0]
+    return name.removeprefix("sandbox-ai-") if name.startswith("sandbox-ai-") else name.split("-sandbox")[0]
+
+
 def skip_reason(images, mcp=True):
     """Why the checks cannot run here (no Podman, an image not built), or None. IMAGES: the ones the check starts;
     MCP: it needs the demo MCP server's image too."""
@@ -59,7 +73,7 @@ def skip_reason(images, mcp=True):
     wanted = [*images, *([MCP_IMAGE] if mcp else [])]
     missing = [image for image in dict.fromkeys(wanted) if not image_exists(image)]
     if missing:
-        builds = " && ".join(f"sandbox-ai build {image.split('/')[1].split('-sandbox')[0]}" for image in missing)
+        builds = " && ".join(f"sandbox-ai build {build_name(image)}" for image in missing)
         return f"needs the image(s) {', '.join(missing)}: {builds} (or scripts/live_check.py --agents --build)"
     return None
 

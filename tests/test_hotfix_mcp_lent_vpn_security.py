@@ -121,8 +121,9 @@ def test_a_lender_whose_connections_are_all_in_use_is_there_and_a_refusal_says_s
     try:
         held.append(rt.ask_lender({"op": "tcp", "address": "93.184.216.34", "port": 443}, folder / "lend.sock")[1])
         for _ in range(300):  # (whichever comes first, the request or the lender's close: never "did not answer")
+            # (a look - ping - is answered on a spare place now: tests/test_lent_tunnel_busy.py)
             with pytest.raises(rt.LenderRefused, match="too many connections"):
-                rt.ask_lender({"op": "ping"}, folder / "lend.sock")
+                rt.ask_lender({"op": "tcp", "address": "93.184.216.34", "port": 443}, folder / "lend.sock")
         assert issubclass(rt.LenderRefused, OSError), "what a relay catches for a connection that fails"
         assert rt.lender_gone("wg", folder / "lend.sock") is None, "full, not gone"
         held.pop().close()
@@ -753,8 +754,8 @@ def test_no_preset_project_file_or_server_names_the_run_to_borrow_from(home):
 
 def test_the_folder_of_the_lent_tunnel_is_no_sandboxs_to_see_by_any_spelling(home):
     """A workspace, a --mount, a --state-dir, an MCP image server's folder: the folder itself, one above it, one in
-    it, and a link to it are all refused (vpn.check_paths; the launcher's own check_given_path refuses sandbox-ai's
-    folders whatever is in them)."""
+    it, and a link to it are all said (vpn.check_paths; the launcher's own check_given_path says sandbox-ai's folders
+    whatever is in them) - given with the warning: you decide what a sandbox gets."""
     l = m.launcher()
     wireguard()
     folder = v.lend_dir("codex-1")
@@ -765,9 +766,9 @@ def test_the_folder_of_the_lent_tunnel_is_no_sandboxs_to_see_by_any_spelling(hom
     above.symlink_to(folder.parent.parent.parent, target_is_directory=True)  # (.../sandbox-ai)
     for path in (folder, folder.parent, folder.parent.parent, folder.parent.parent.parent.parent, folder / "sub",
                  link, above, Path(str(folder) + "/../codex-1")):
-        with pytest.raises(ValueError, match="where the VPN profiles keep"):
-            v.check_paths([path], "--mount")
+        said = v.check_paths([path], "--mount", warn=lambda _text: None)
+        assert said and "where the VPN profiles keep" in said[0] and "read-only" in said[0], path
     for path in (folder, folder.parent, link, above):
         for writable in (False, True):
-            with pytest.raises(ValueError, match="sandbox-ai's own folder"):
-                l.check_given_path(Path(path).resolve(), "--mount", writable)
+            assert any("sandbox-ai's own folder" in text for text in l.check_given_path(
+                Path(path).resolve(), "--mount", writable, warn=lambda _text: None)), path

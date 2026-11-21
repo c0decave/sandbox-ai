@@ -40,7 +40,15 @@ LINE_LIMIT = 4000  # characters of one message
 TAIL_LIMIT = 600   # characters of a command's error output kept in its line
 REPEAT_WINDOW = 60  # seconds: the same line said again within them is counted, not written (then once more)
 SLOW_SECONDS = 10  # an outside command (run()) still running after them is said once while it runs
-STATES_KEPT = 1000  # states changed() keeps across processes (launcher.states.json), the oldest dropped first
+# The states changed() keeps across processes (launcher.states.json). Past STATES_KEPT of them those said more than
+# STATES_AGE ago are dropped, the oldest first (starts deleted since, hosts removed); one said since stays - with more
+# starts, hosts and images than STATES_KEPT, dropping the oldest for each new one dropped a state still polled, which
+# was said again at the next poll and dropped the next: every state at every poll (1010 kept starts: 1010 lines in
+# launcher.log and 1010 rewrites of the file for each `sandbox-ai list`). Never more than STATES_MOST, whatever
+# their age.
+STATES_KEPT = 1000
+STATES_AGE = 30 * 86400
+STATES_MOST = 20000
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
 # Options whose value is secret (the value after them, or after "="), and names of NAME=VALUE pairs that are.
 SECRET_OPTIONS = re.compile(r"^--?[a-z0-9-]*(?:token|secret|password|passwd|api-?key|apikey|credential|auth-key"
@@ -55,6 +63,7 @@ _secrets = set()
 _redactor = None
 _last = {"key": None, "repeats": 0}
 _states = {}
+_read = {"path": None, "raw": None, "known": {}}  # launcher.states.json as this process last read or wrote it
 _to_stderr = {"on": False}
 _local = threading.local()  # .relaying: lines said on another process' behalf (relayed())
 
@@ -311,31 +320,49 @@ def _state_value(state):
 @contextlib.contextmanager
 def _states_file():
     """{key: {"v": state, "t": time}} of launcher.states.json, under its lock; written back when the block changed
-    it (the oldest beyond STATES_KEPT dropped). OSError when it cannot be locked (this process' own states then)."""
+    it (beyond STATES_KEPT without the old ones: STATES_AGE, STATES_MOST). OSError when it cannot be locked (this
+    process' own states then)."""
     target = states_path()
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock = os.open(target.with_name(target.name + ".lock"), os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            known = json.loads(target.read_text())
-        except (OSError, ValueError, RecursionError):
-            known = {}
-        known = known if isinstance(known, dict) else {}
+            raw = target.read_bytes()
+        except OSError:
+            raw = None
+        # Parsed once for the same bytes (_read: this process' last reading of this file): a listing asks every
+        # start's status, each of them a changed() - the whole file was parsed again for each start (1000 starts:
+        # 68 KB of JSON 1000 times, half of `sandbox-ai list`'s time). The entries are never changed in place.
+        if raw is not None and _read["path"] == str(target) and _read["raw"] == raw:
+            known = dict(_read["known"])
+        else:
+            try:
+                known = json.loads(raw.decode()) if raw is not None else {}
+            except (ValueError, RecursionError):
+                known = {}
+            known = known if isinstance(known, dict) else {}
+            _read.update(path=str(target), raw=raw, known=dict(known))
         before = dict(known)
         yield known
         if known != before:
             if len(known) > STATES_KEPT:
-                oldest = sorted(known, key=lambda k: known[k].get("t", 0) if isinstance(known[k], dict) else 0)
+                def said(name):
+                    when = known[name].get("t", 0) if isinstance(known[name], dict) else 0
+                    return when if isinstance(when, (int, float)) and not isinstance(when, bool) else 0
+                oldest, aged = sorted(known, key=said), time.time() - STATES_AGE
                 for name in oldest[:len(known) - STATES_KEPT]:
-                    del known[name]
+                    if said(name) < aged or len(known) > STATES_MOST:
+                        del known[name]
             fresh = target.with_name(f"{target.name}.{os.getpid()}.new")
+            written = json.dumps(known).encode()
             fd = os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
             try:
-                os.write(fd, json.dumps(known).encode())
+                os.write(fd, written)
             finally:
                 os.close(fd)
             os.replace(fresh, target)
+            _read.update(path=str(target), raw=written, known=dict(known))
     finally:
         os.close(lock)
 

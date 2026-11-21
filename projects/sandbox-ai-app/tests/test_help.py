@@ -262,10 +262,16 @@ def test_a_question_mark_is_drawn_once_per_look_and_theme(qapp):
     assert help_view.mark_pixmap(18, False) is first and help_view.mark_pixmap(18, True) is not first
     assert first.width() == 18 and not first.isNull()
     before = theme.current()
+    # What the tests after this one see: the application's sheet, font and palette as they were (theme.apply of the
+    # same theme again puts the theme's own font on every widget - the later table tests measure with it).
+    kept = qapp.styleSheet(), qapp.font(), qapp.palette()
     try:
         theme.apply("dark" if before != "dark" else "light")
         qapp.processEvents()
         assert help_view.mark_pixmap(18, False) is not first
     finally:
         theme.apply(before)
+        qapp.setStyleSheet(kept[0])
+        qapp.setFont(kept[1])
+        qapp.setPalette(kept[2])
         qapp.processEvents()

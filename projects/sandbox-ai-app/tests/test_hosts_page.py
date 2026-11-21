@@ -169,6 +169,41 @@ def test_a_hosts_defaults_and_a_step_down_in_security_asks_first(qapp, env, monk
     page.close()
 
 
+def test_kept_starts_expire_by_default_and_unchecked_is_never(qapp, env, monkeypatch):
+    """No keep_days on the host: kept starts go after 90 days unused (sandbox-ai's default), shown checked with 90 and
+    left unwritten; unchecked writes keep_days 0 (never), a keep_days 0 there shows unchecked. 90 -> 30 days, or
+    never -> unset (90), steps down; never does not."""
+    import sandbox_ai_app.hosts_page as hp
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported():
+        pytest.skip("this sandbox-ai has no hosts.py")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    asked = []
+    shown = {"path": "/x/defaults.json", "values": {"mode": "high"}, "telemetry_levels": ["off", "strict"],
+             "modes": list(hp.MODES), "canary_categories": ["credentials", "home"], "canary_default": ["credentials"]}
+
+    def host_run(name, *args, timeout=120):
+        asked.append((name, args))
+        return 0, json.dumps(shown) if args[:2] == ("defaults", "show") else "ok", ""
+    monkeypatch.setattr(sai, "host_run", host_run)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page = HostsPage(sai, lambda argv, title: None)
+    choose(page, "ct1")
+    page.show()
+    assert page.keep.isChecked() and page.keep_days.value() == 90
+    assert "keep_days" not in page.chosen_defaults(), "the default stays unwritten"
+    page.keep.setChecked(False)
+    page.save_defaults()
+    assert ("ct1", ("defaults", "set", "keep_days", "0")) in asked
+    shown["values"] = {"mode": "high", "keep_days": 0}
+    page.load_defaults()
+    assert not page.keep.isChecked()
+    assert hp.security_steps_down({}, {"keep_days": 30}) and not hp.security_steps_down({}, {"keep_days": 0})
+    assert hp.security_steps_down({"keep_days": 0}, {}) and not hp.security_steps_down({"keep_days": 30}, {})
+    page.close()
+
+
 def test_steps_down_follow_the_webs_order_and_the_hosts_own_canaries_and_a_half_save_is_said(qapp, env, monkeypatch):
     """Review round 3 (A4): telemetry was ranked off > strict > on, so strict -> off saved without a question; the
     canaries were compared with a fixed default, not the host's own; a refused `defaults set` left the others applied

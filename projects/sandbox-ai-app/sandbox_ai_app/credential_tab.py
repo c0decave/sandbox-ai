@@ -15,7 +15,23 @@ from __future__ import annotations
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
-from .widgets import plain_label
+from .i18n import N_
+from .widgets import explanation, plain_label
+
+# Why a kind of credential cannot be given to a sandbox that runs (its Give… button is there, greyed out, with this).
+NOT_WHILE_RUNNING = {
+    "publish": N_("A publish login cannot be given to a sandbox that runs: its tools' variables are set when it "
+                  "starts, and the questions before every upload are rules of that start. Restart it with --publish "
+                  "KIND (Sandboxes › Resume with options…); the token alone, without those questions: the Secrets "
+                  "tab's Give to a running sandbox… (as an API key)."),
+    "identities": N_("An identity is chosen when a sandbox starts (--identity NAME): its commit name, its Git logins "
+                     "and its publish logins are set up then. Restart the sandbox with it (Sandboxes › Resume with "
+                     "options…); one of its Git logins for a running sandbox: the Git logins tab's (or the Secrets "
+                     "tab's) Give to a running sandbox…."),
+    "vpn": N_("A VPN is set up before the agent starts (its tunnel and kill switch are the sandbox's network): a "
+              "running sandbox cannot be given one. Restart it with --vpn PROFILE (Sandboxes › Resume with "
+              "options…)."),
+}
 
 MARGINS = (10, 10, 10, 10)
 SPACING = 8
@@ -72,6 +88,10 @@ class CredentialTab(QWidget):
     """A tab of the Credentials page: header (title, about, more labels), list, what goes below it, button row,
     message area - always in that order, with the same margins (see the module)."""
     resized = None  # the page's even_out (CredentialsPage.add_tab), told when the tab got another width
+    # What is not in the button row (it must fit a small window) but on the list's right click: functions that give
+    # a menu entry (text, enabled, why not, callback) as it is now (widgets.context_menu).
+    menu_only = ()
+    measured = None  # (width, height) the header needed when header_height measured it last
 
     def __init__(self, title="", parent=None):
         super().__init__(parent)
@@ -114,7 +134,7 @@ class CredentialTab(QWidget):
         return widget
 
     def add_about(self, text):
-        return self.add_header(plain_label(text, role="secondary"))
+        return self.add_header(explanation(text))
 
     def set_list(self, widget):
         if not widget.accessibleName():  # (a group box's title named it before)
@@ -132,7 +152,7 @@ class CredentialTab(QWidget):
             widget = self.button_row.itemAt(index).widget()
             if widget is not None:
                 found.append(widget)
-        return found
+        return found + [entry() for entry in self.menu_only]
 
     def add_below(self, item):
         """A widget or layout under the list (the list gives it the room)."""
@@ -149,8 +169,15 @@ class CredentialTab(QWidget):
     def header_height(self, width):
         """The height the header needs at WIDTH (its labels wrapped there)."""
         self.ensurePolished()  # (a tab never shown yet: its labels' fonts of the style sheet first)
+        # (A hidden tab's label that changed does not tell the layout: measured afresh. That asks the shown header
+        # for a layout once more - eventFilter tells it from a change by this measure.)
+        self.header_layout.invalidate()
+        self.measured = (width, self.laid_out_height(width))
+        return self.measured[1]
+
+    def laid_out_height(self, width):
+        """The header's height at WIDTH as its layout has it (what changed in a shown header has told it)."""
         layout = self.header_layout
-        layout.invalidate()
         return layout.totalHeightForWidth(width) if layout.hasHeightForWidth() else layout.totalSizeHint().height()
 
     def header_width(self):
@@ -159,7 +186,11 @@ class CredentialTab(QWidget):
 
     def eventFilter(self, watched, event):  # noqa: N802
         if watched is self.header and event.type() == QEvent.Type.LayoutRequest and self.resized is not None:
-            QTimer.singleShot(0, self.resized)
+            # Only for a header that needs another height now: the layout asked for by header_height's own measure
+            # evened out again measured again, for ever (~40 % of a core while the page was shown).
+            width = self.header_width()
+            if self.measured != (width, self.laid_out_height(width)):
+                QTimer.singleShot(0, self.resized)
         return False
 
     def resizeEvent(self, event):  # noqa: N802
@@ -185,3 +216,10 @@ def even_out(tabs):
     for tab in tabs:
         if tab.header.minimumHeight() != height or tab.header.maximumHeight() != height:
             tab.header.setFixedHeight(height)
+
+
+def menu_entry(button):
+    """A function that gives BUTTON (one kept out of a button row: hidden) as a context menu's entry - its text, whether
+    it is enabled, the reason when it is not (its tooltip), and its click."""
+    return lambda: (button.text(), button.isEnabled(), button.toolTip(), button.click)
+

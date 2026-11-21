@@ -89,7 +89,8 @@ def test_errors_an_old_sandbox_ai_and_nothing_touched(qapp, wait):
 
 def test_the_activity_page_has_a_canaries_tab_that_counts_them(qapp):
     page = ActivityPage(FakeSai([LOG]))
-    assert [page.tabs.tabText(i) for i in range(page.tabs.count())] == ["Timeline", "Canaries", "Safeguards"]
+    assert [page.tabs.tabText(i) for i in range(page.tabs.count())] == ["Timeline", "Canaries", "Safeguards",
+                                                                                 "Workspace review", "MCP tool pins"]
     page.canaries.show_events(canaries_view.events_of([LOG]))
     index = page.tabs.indexOf(page.canaries)
     assert page.tabs.tabText(index) == "Canaries (2)"
@@ -128,7 +129,7 @@ def test_the_real_canaries_log_command(qapp, tmp_path, monkeypatch):
     (logs / "activity.jsonl").write_text(json.dumps({
         "v": 1, "time": "2026-11-07T10:00:04Z", "run": run, "agent": "claude", "kind": "command", "id": "t2",
         "summary": "cat ~/.aws/credentials", "details": {"command": "cat ~/.aws/credentials"}, "source": "claude"}) + "\n")
-    (logs / f"connections-1-{run}.jsonl").write_text(json.dumps({
+    (logs / f"connections-20261107-095900-{run}.jsonl").write_text(json.dumps({  # the launcher's name for it
         "time": "2026-11-07T10:00:08Z", "event": "http", "host": "api.anthropic.com", "method": "POST",
         "url": "https://api.anthropic.com/v1/messages", "status": 200}) + "\n")
     sai = backend.SandboxAI()

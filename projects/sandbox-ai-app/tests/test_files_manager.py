@@ -809,7 +809,8 @@ def test_nothing_acts_on_the_rows_of_the_folder_before_while_the_next_is_listed(
     pane.open_row(widgets.find_row(pane.table, "sub"))  # a double click
     mime = QMimeData()
     mime.setUrls([QUrl.fromLocalFile(str(host / "new.txt"))])
-    assert page.drop_plan(pane, mime, row_point(pane, "sub"), Qt.KeyboardModifier.NoModifier) is None
+    plan = page.drop_plan(pane, mime, row_point(pane, "sub"), Qt.KeyboardModifier.NoModifier)
+    assert plan.refused and "still being listed" in plan.text(), "not taken, and the status line says why"
     assert not page.task.running and not page.editors and not page.dialogs
     settle(pane)
     assert pane.relative == "sub" and names(pane) == ["a.txt", "b.txt"]

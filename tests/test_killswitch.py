@@ -727,7 +727,9 @@ def test_cut_and_lift_one_run(runs, capsys):
     assert net.main(["show"], out=shown.append) == 0
     assert "kill switch: api: only its model API stays reachable" in shown[0] and "sandbox-ai net cut claude-1 off" in shown[1]
     text = []
-    assert net.main(["list"], out=text.append) == 0 and text[0].split()[-1] == "CUT" and text[1].split()[-1] == "api"
+    # The table's CUT column (its place in the header: the values themselves may hold spaces, "2 hours ago").
+    assert net.main(["list"], out=text.append) == 0 and "CUT" in text[0].split()
+    assert text[1][text[0].index(" CUT ") + 1:].split()[0] == "api"
     status, lines = cut("claude-1", "off")
     assert status == 0 and lines == ["claude-1: kill switch off: the cut is lifted: it reaches again what it may reach"]
     assert runs.networks["claude-1"].cut_mode is None and not (directory / "cut.json").exists()

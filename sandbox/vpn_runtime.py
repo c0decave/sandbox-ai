@@ -170,6 +170,11 @@ def skip_name(data, offset):
 RCODES = {1: "FORMERR", 2: "SERVFAIL", 4: "NOTIMP", 5: "REFUSED"}
 
 
+class NoAddress(ValueError):
+    """A name the tunnel's resolvers answered for without an address (NXDOMAIN, or no A/AAAA record): definite, unlike
+    a resolver that did not answer (resolve_hosts; resolve_command says it as "no_address")."""
+
+
 class DnsError(ValueError):
     """A resolver's answer with an error code other than NXDOMAIN (RCODE: 2 is SERVFAIL)."""
 
@@ -313,7 +318,7 @@ class TorDns:
             emit("progress", out=self.out, message=text)
 
     def lookup(self, name, server, qtype, timeout=4.0, port=53):
-        ask = self.ask or dns_lookup
+        ask = self.ask or tor_own_lookup
         tries, seen, begun, known, entered = 0, [], None, None, self.clock()
         while True:
             tries += 1
@@ -884,8 +889,22 @@ def tor_rules(uid=TOR_UID, bridges=(), bypass=()):
 
 
 TOR_DNS_FRONT_LIMIT = 256  # questions TorDnsFront hands tor at once (beyond: dropped, the asker asks again)
+TOR_FRONT = None  # the Tor container's TorDnsFront once up_tor started it: each check says its load (dns.front)
 TOR_DNS_FRONT_WAIT = 30.0  # seconds it waits for tor's answer to one question (no answer: none for the asker either)
 DNS_AAAA, DNS_A, DNS_IN = 28, 1, 1
+
+
+def tor_own_lookup(name, server, qtype, timeout=4.0, port=53):
+    """A lookup of the Tor container itself (its checks, the launcher's requests, `resolve`: TorDns asks so). One
+    for tor's resolver address and port 53 goes straight to tor's DNSPort (TOR_DNS_PORT), as TorDnsFront hands a
+    question on - an AAAA question asked as A, answered with no address - not through the front, whose
+    TOR_DNS_FRONT_LIMIT places the sandbox's own lookups (--dns) may fill: an agent that floods DNS cannot starve
+    the checks during the run. A lookup sent anywhere else (the outside resolver: its redirect to the front is what
+    that probe checks) is sent as it is."""
+    if server != TOR_DNS or int(port) != 53:
+        return dns_lookup(name, server, qtype, timeout=timeout, port=port)
+    found = dns_lookup(name, server, DNS_A if qtype == DNS_AAAA else qtype, timeout=timeout, port=TOR_DNS_PORT)
+    return [] if qtype == DNS_AAAA else found
 
 
 def dns_question_end(query):
@@ -926,7 +945,15 @@ class TorDnsFront:
         self.address, self.port, self.tor, self.wait = str(address), int(port), tuple(tor), float(wait)
         self.ask = ask or self.ask_tor
         self.sockets = []
+        self.limit = int(limit)
         self.slots = threading.BoundedSemaphore(limit)
+        self.dropped, self.counting = 0, threading.Lock()
+
+    def load(self):
+        """{"limit", "dropped"}: the questions dropped for want of a place since the last call (the checks')."""
+        with self.counting:
+            dropped, self.dropped = self.dropped, 0
+        return {"limit": self.limit, "dropped": dropped}
 
     def ask_tor(self, query):
         """tor's answer to QUERY (bytes), None when it gives none within WAIT seconds."""
@@ -986,6 +1013,8 @@ class TorDnsFront:
                 time.sleep(ACCEPT_PAUSE)
                 continue
             if not self.slots.acquire(blocking=False):
+                with self.counting:
+                    self.dropped += 1
                 continue
 
             def reply(query=query, peer=peer):
@@ -1214,7 +1243,10 @@ def up_tor(payload, runner, out=None, uid_of=None, clock=time.monotonic, sleep=t
         raise RuntimeError(f"{TOR_USER} has the uid {uid} in the Tor image, not {TOR_UID}: rebuild it with "
                            "sandbox-ai build tor")
     load_killswitch(runner, tor_rules(uid, bridges, payload.get("bypass") or ()))
-    (front or TorDnsFront()).start()
+    global TOR_FRONT
+    front = front or TorDnsFront()
+    front.start()
+    TOR_FRONT = front
     own_data_directory(uid)
     RUN.mkdir(mode=0o700, exist_ok=True)
     config, defaults = RUN / "torrc", RUN / "torrc-defaults"
@@ -1402,6 +1434,224 @@ def mcp_dns_rules(resolver, interface, mark=CHECK_MARK, source=None):
         f"insert rule inet {TABLE} output {redirected} tcp dport 53 accept", ""])
 
 
+# --- an MCP server's way out: the internet, not your network ----------------------------------------------------
+#
+# A catalog MCP server with network reaches the internet, never your local network: its network namespace gets
+# EGRESS_TABLE, which refuses every destination of EGRESS_REFUSED (the private networks, carrier-grade NAT, loopback,
+# link-local with the clouds' metadata services, the documentation, benchmark and reserved networks, multicast, IPv6's
+# unique-local and link-local ones, the translation prefixes that embed an IPv4 address) and this host's own
+# addresses, over IPv4 and IPv6, whatever name led there (a DNS answer that points into your network - rebinding - meets
+# the same refusal). The kinds (mcp.py's "network" of a definition):
+#   internet  ("full")      everything public; DNS to the namespace's own resolvers (one of them is often in your
+#                           network: your router, pasta's forwarder at 169.254.1.1, slirp4netns's 10.0.2.3) on port 53 only
+#   hosts     ("allowlist") only the addresses its catalog entry's hosts had when the server's connection began
+#                           (pinned, public ones only), on their ports; no DNS at all - the names are in its /etc/hosts
+#   lan       ("lan")       everything but the clouds' metadata services (you chose it, with a warning)
+# ALLOW_PRIVATE (networks) and ALLOW_TCP (address, port) open parts of your network to an internet or hosts server.
+# Without a VPN the launcher loads the table into each connection's namespace before the server runs (mcp_egress.py);
+# behind a VPN the VPN container loads it into its namespace, which the server's containers join (payload
+# "mcp_egress"): before the VPN's own redirects (its lookups to the tunnel's resolver, Tor's TransPort), so that the
+# original destination is judged; the VPN's own packets (marked; tor's user) pass it.
+EGRESS_TABLE = "sandbox_ai_mcp_egress"
+EGRESS_KINDS = ("internet", "hosts", "lan")
+EGRESS_PRIORITY = -150  # before every NAT redirect of this namespace (-100 and later)
+EGRESS_REFUSED = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
+    "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", "2001:db8::/32", "2002::/16",
+    "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8"))
+# The clouds' metadata services (instance credentials): refused even with "lan".
+EGRESS_METADATA = tuple(ipaddress.ip_network(n) for n in (
+    "169.254.169.254/32", "169.254.170.2/32", "169.254.170.23/32", "100.100.100.200/32", "fd00:ec2::254/128",
+    "fd00:ec2::23/128"))
+EGRESS_REJECT = "reject with icmpx type admin-prohibited"
+# IPv6's neighbour discovery: the solicitations and advertisements go to fe80::/10 and ff00::/8, which every kind but
+# "lan" refuses - without them a server with network has no IPv6 at all (its only neighbour is pasta or the VPN's
+# side). They pass only as the kernel sends them: hop limit 255, never routed (RFC 4861); nothing else of the link.
+EGRESS_ND = "icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } ip6 hoplimit 255 accept"
+
+
+def egress_refused(address):
+    """Whether ADDRESS (text or ipaddress) lies in a network an internet server never reaches (EGRESS_REFUSED)."""
+    ip = ipaddress.ip_address(str(address))
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip.version == net.version and ip in net for net in EGRESS_REFUSED)
+
+
+def egress_endpoint(value):
+    """(address, port) of VALUE: "ADDRESS:PORT", "[IPV6]:PORT", or a pair; ValueError otherwise."""
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        address, port = value
+    else:
+        text = str(value)
+        match = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\]:([0-9]{1,5})|([0-9.]+):([0-9]{1,5})", text)
+        if not match:
+            raise ValueError(f"{text[:80]!r}: give ADDRESS:PORT ([ADDRESS]:PORT for IPv6), e.g. 192.168.1.20:8080")
+        address, port = (match[1], match[2]) if match[1] else (match[3], match[4])
+    ip = ipaddress.ip_address(str(address))
+    if isinstance(port, bool) or not 0 < int(port) < 65536:
+        raise ValueError(f"{value}: the port must lie between 1 and 65535")
+    return str(ip), int(port)
+
+
+def egress_family(net):
+    return "ip" if net.version == 4 else "ip6"
+
+
+def egress_set(networks):
+    """'{ A, B }' of NETWORKS (one family), collapsed (nft refuses overlapping intervals in a set: this host's own
+    address inside a private network), the single addresses without a prefix."""
+    shown = [str(net.network_address) if net.num_addresses == 1 else str(net)
+             for net in ipaddress.collapse_addresses(networks)]
+    return "{ " + ", ".join(shown) + " }"
+
+
+def egress_rules(kind, own=(), resolvers=(), pins=(), allow_private=(), allow_tcp=(), dns="direct", exempt_uids=()):
+    """The table EGRESS_TABLE for an MCP server of KIND (EGRESS_KINDS) - see above. OWN: this host's own addresses
+    (refused unless "lan"). RESOLVERS: the namespace's resolvers, reached on port 53 alone where they lie in a refused
+    network (DNS "direct"); DNS "redirected" (behind a VPN: every lookup goes to the tunnel's resolver or Tor, whatever
+    address it was sent to) lets port 53 pass to wherever (the redirect follows), never for "hosts". PINS: [(address,
+    port)] a "hosts" server reaches (TCP). ALLOW_PRIVATE: networks, ALLOW_TCP: [(address, port)] of your network opened
+    on purpose. EXEMPT_UIDS: users whose packets pass (tor's own, behind a Tor profile); marked packets pass too - only
+    a process with CAP_NET_ADMIN marks one (a VPN's own, its runtime's checks), and an MCP server has none."""
+    if kind not in EGRESS_KINDS:
+        raise ValueError(f"not a kind of MCP egress: {kind!r}")
+    if dns not in ("direct", "redirected"):
+        raise ValueError(f"not a DNS mode of MCP egress: {dns!r}")
+    lines = [f"table inet {EGRESS_TABLE} {{",
+             f" chain output {{ type filter hook output priority {EGRESS_PRIORITY}; policy accept;",
+             '  oifname "lo" accept', "  meta mark != 0x0 accept", f"  {EGRESS_ND}"]
+    lines += [f"  meta skuid {int(uid)} accept" for uid in exempt_uids]
+    for address, port in sorted({egress_endpoint(value) for value in allow_tcp}):
+        ip = ipaddress.ip_address(address)
+        lines.append(f"  {'ip' if ip.version == 4 else 'ip6'} daddr {ip} tcp dport {port} accept")
+    for raw in sorted({str(ipaddress.ip_network(str(value), strict=False)) for value in allow_private}):
+        net = ipaddress.ip_network(raw)
+        lines.append(f"  {egress_family(net)} daddr {egress_set([net])} accept")
+    if kind == "hosts":
+        for address, port in sorted({egress_endpoint(value) for value in pins}):
+            ip = ipaddress.ip_address(address)
+            if egress_refused(ip):
+                raise ValueError(f"{ip} is no public address: a server's host is never pinned to it")
+            lines.append(f"  {'ip' if ip.version == 4 else 'ip6'} daddr {ip} tcp dport {port} accept")
+        lines += [f"  {EGRESS_REJECT}", " }", "}", ""]
+        return "\n".join(lines)
+    if dns == "redirected":
+        lines += ["  udp dport 53 accept", "  tcp dport 53 accept"]
+    else:
+        for raw in sorted({str(ipaddress.ip_address(str(value))) for value in resolvers}):
+            ip = ipaddress.ip_address(raw)
+            family = "ip" if ip.version == 4 else "ip6"
+            lines += [f"  {family} daddr {ip} udp dport 53 accept", f"  {family} daddr {ip} tcp dport 53 accept"]
+    refused = list(EGRESS_METADATA) if kind == "lan" else [*EGRESS_REFUSED, *(
+        ipaddress.ip_network(str(value)) for value in own)]
+    for version in (4, 6):
+        family = [net for net in refused if net.version == version]
+        if family:
+            lines.append(f"  {'ip' if version == 4 else 'ip6'} daddr {egress_set(family)} {EGRESS_REJECT}")
+    lines += [" }", "}", ""]
+    return "\n".join(lines)
+
+
+def egress_problem(listing, kind=None):
+    """None when LISTING (`nft list table inet EGRESS_TABLE`) shows an MCP server's egress table in place - its output
+    chain before every redirect, and (KIND given) what that kind refuses - else what is missing. Each connection of a
+    server is checked against it before the server runs in the namespace."""
+    if not isinstance(listing, str) or f"table inet {EGRESS_TABLE}" not in listing:
+        return f"the MCP server's egress rules (nft table inet {EGRESS_TABLE}) are not loaded"
+    if not re.search(rf"type filter hook output priority (?:{EGRESS_PRIORITY}|mangle); policy accept;", listing):
+        return "the egress rules' output chain is not the one loaded"
+    if kind == "hosts" and not re.search(r"\n\s*reject with icmpx (?:type )?admin-prohibited\s*\n\s*}", listing):
+        return "the egress rules do not refuse what is not one of the server's hosts"
+    if kind == "internet" and not re.search(r"ip daddr \{[^}]*10\.0\.0\.0/8[^}]*\} reject", listing):
+        return "the egress rules do not refuse your local network"
+    if kind == "lan" and "169.254.169.254" not in listing:
+        return "the egress rules do not refuse the clouds' metadata service"
+    return None
+
+
+def egress_command(out, kind=None, runner=None):
+    """`vpn_runtime.py egress [KIND]`, run with podman exec in a running VPN container of an MCP server: {"ok": true}
+    when its egress table is in place (egress_problem), else {"ok": false, "problem": ...}; exit status 0 or 1."""
+    try:
+        listing = (runner or Runner()).run(["nft", "list", "table", "inet", EGRESS_TABLE], check=False)
+        problem = egress_problem(listing.stdout if listing.returncode == 0 else "", kind)
+    except (OSError, subprocess.SubprocessError) as exc:
+        problem = f"nft did not run: {exc}"
+    out.write(json.dumps({"ok": problem is None, **({"problem": problem} if problem else {})}) + "\n")
+    return 0 if problem is None else 1
+
+
+def egress_pins(hosts, resolved):
+    """([(address, port)], {name: [addresses]}, [dropped]) of HOSTS (["NAME:PORT"]) from RESOLVED ({name:
+    [addresses]}): only public addresses are pinned - an answer that points into a refused network (rebinding) is
+    dropped and said. ValueError when a host keeps no address at all."""
+    pins, names, dropped = [], {}, []
+    for host in hosts:
+        name, port = egress_host(host)
+        kept = []
+        for address in resolved.get(name) or []:
+            with contextlib.suppress(ValueError):
+                if egress_refused(address):
+                    dropped.append(f"{name} -> {address}")
+                    continue
+                kept.append(str(ipaddress.ip_address(str(address))))
+        if not kept:
+            raise ValueError(f"{name} has no public address" + (f" (it pointed into a private network: "
+                                                                 f"{', '.join(d for d in dropped if d.startswith(name + ' '))})"
+                                                                 if any(d.startswith(name + " ") for d in dropped) else ""))
+        names[name] = sorted(set(names.get(name, [])) | set(kept))
+        pins += [(address, port) for address in kept]
+    return sorted(set(pins)), names, dropped
+
+
+def load_mcp_egress(egress, resolved, runner, tor=False):
+    """The egress table of an MCP server behind this VPN container (payload "mcp_egress": {"kind", "hosts",
+    "allow_private", "allow_tcp"}), loaded and checked; RESOLVED: the hosts' names as the tunnel resolved them. Its
+    lookups are redirected (to the tunnel's resolver, or Tor's); tor's own packets pass. Returns {"kind", "pins":
+    {name: [addresses]}, "dropped": [...]} for the launcher (the server's /etc/hosts); ValueError when it cannot hold."""
+    if not isinstance(egress, dict) or egress.get("kind") not in EGRESS_KINDS:
+        raise ValueError("an MCP server's egress must name its kind (internet, hosts or lan)")
+    kind = egress["kind"]
+    pins, names, dropped = ([], {}, [])
+    if kind == "hosts":
+        pins, names, dropped = egress_pins(egress.get("hosts") or [], resolved or {})
+    rules = egress_rules(kind, pins=pins, allow_private=egress.get("allow_private") or [],
+                         allow_tcp=egress.get("allow_tcp") or [], dns="redirected",
+                         exempt_uids=[TOR_UID] if tor else [])
+    runner.run(["nft", "-f", "-"], data=rules)
+    listing = runner.run(["nft", "list", "table", "inet", EGRESS_TABLE], check=False)
+    problem = egress_problem(listing.stdout if listing.returncode == 0 else "", kind)
+    if problem:
+        raise ValueError(problem)
+    return {"kind": kind, "pins": names, "dropped": dropped}
+
+
+EGRESS_HOST = re.compile(r"(?=.{1,253}:)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                         r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+:[0-9]{1,5}")
+
+
+def egress_host(value):
+    """(name, port) of a catalog entry's host "NAME:PORT" (a DNS name with a dot, a port); ValueError otherwise."""
+    text = str(value)
+    if not EGRESS_HOST.fullmatch(text):
+        raise ValueError(f"{text[:80]!r} is not a host of the form NAME:PORT (api.example.com:443)")
+    name, _, port = text.rpartition(":")
+    if not 0 < int(port) < 65536:
+        raise ValueError(f"{text}: the port must lie between 1 and 65535")
+    return name.lower(), int(port)
+
+
+def egress_hosts_file(names):
+    """/etc/hosts of a "hosts" server: its pinned names ({name: [addresses]}) and loopback, nothing else."""
+    lines = ["127.0.0.1\tlocalhost", "::1\tlocalhost ip6-localhost ip6-loopback"]
+    for name in sorted(names):
+        lines += [f"{address}\t{name}" for address in names[name]]
+    return "\n".join(lines) + "\n"
+
+
 # --- the start's tunnel, lent to its own MCP servers ------------------------------------------------------------
 #
 # A WireGuard key (Mullvad's too) or a persistent Tailscale node works in one sandbox at a time: the same key twice
@@ -1461,6 +1711,15 @@ LEND_CONNECT_TIMEOUT = 20
 LEND_PING = 5  # seconds between a borrower's looks at its lender
 LEND_MISSES = 3  # looks in a row that find no lender: it is gone
 LEND_READY = 15  # seconds a borrower waits for its lender at its start
+# A lender whose LEND_LIMIT connections are all in use (the start's other servers) still answers a look (ping) on one
+# of LEND_SPARE places of its own: a borrower that starts then, and each borrower's look during the run, learn that it
+# is there and what it lends. Only the borrowers' own VPN containers send looks (a server's program reaches the lender
+# through its relay, which asks for connections and lookups only), so these places are not the servers' to fill.
+LEND_SPARE = 8
+# Seconds a borrower at its start waits for a lender that refuses even its look (every place taken), asking again
+# after BUSY_DELAYS (the last one over and over); then it says the lender is busy - it is there, and lends.
+LEND_BUSY = 60
+BUSY_DELAYS = (0.5, 1, 2, 4, 5)
 # A lent TCP connection probes its far end after IDLE seconds of silence, every INTERVAL seconds, COUNT times: each
 # probe is a packet the start's kill switch (sandbox-ai net cut) judges, so a cut connection that says nothing ends
 # too (and one whose far end is gone without a word is not kept for good).
@@ -1520,6 +1779,12 @@ def splice(one, other, half_open=None):
     program long gone - would else keep the connection, and its slot of the lender and of the relay, for good."""
     half_open = LEND_HALF_OPEN if half_open is None else half_open
     ended = []  # [when a direction ended, or data last went by after that]
+    # What comes is passed on at once (TCP_NODELAY; a Unix socket has none): with Nagle's algorithm on a TCP side a
+    # second piece - a request's body after its head, an answer's after its headers - waited for the peer's delayed
+    # ACK of the first, 40 ms each way through each end of a lent tunnel.
+    for sock in (one, other):
+        with contextlib.suppress(OSError, AttributeError):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def copy(source, target):
         try:
@@ -1692,6 +1957,9 @@ def refuse(conn, why):
         conn.close()
 
 
+BUSY = "too many connections through the start's tunnel at once"
+
+
 class LenderRefused(OSError):
     """The lender answered and refused the request (its reason): it is there - unlike one that does not answer."""
 
@@ -1712,6 +1980,7 @@ class Lender:
         self.tunnel, self.profile, self.path = tunnel, str(profile), Path(path or LEND_SOCKET)
         self.connect, self.lookup, self.local = connect, lookup, local
         self.slots = threading.BoundedSemaphore(limit)
+        self.spare = threading.BoundedSemaphore(LEND_SPARE)  # (looks only, once every slot is taken)
         self.resolver = mcp_dns_resolver(tunnel)
         self.server = None
 
@@ -1749,16 +2018,21 @@ class Lender:
                     return
                 time.sleep(ACCEPT_PAUSE)
                 continue
-            if not self.slots.acquire(blocking=False):
-                refuse(conn, "too many connections through the start's tunnel at once")
-                continue
+            slots, looks_only = self.slots, False
+            if not slots.acquire(blocking=False):
+                slots, looks_only = self.spare, True
+                if not slots.acquire(blocking=False):
+                    refuse(conn, BUSY)
+                    continue
             try:
-                threading.Thread(target=self.handle, args=(conn,), daemon=True).start()
+                threading.Thread(target=self.handle, args=(conn, slots, looks_only), daemon=True).start()
             except RuntimeError:  # (no thread to be had now: handle, which gives the slot back, never ran)
-                self.slots.release()
+                slots.release()
                 refuse(conn, "the start's tunnel takes no further connection now")
 
-    def handle(self, conn):
+    def handle(self, conn, slots=None, looks_only=False):
+        """One request on CONN; SLOTS: the place it holds (given back at the end). LOOKS_ONLY: on a spare place, only
+        a look (ping) is answered, any other request refused as at a full lender."""
         spliced = False
         try:
             conn.settimeout(10)
@@ -1771,7 +2045,9 @@ class Lender:
                     send_line(conn, {"error": LEND_DENIED, "denied": True})
                     return
                 op = request.get("op")
-                if op == "ping":
+                if looks_only and op != "ping":
+                    send_line(conn, {"error": BUSY})
+                elif op == "ping":
                     send_line(conn, self.facts())
                 elif op == "dns":
                     query = base64.b64decode(str(request.get("query", "")), validate=True)
@@ -1797,7 +2073,7 @@ class Lender:
             if not spliced:
                 with contextlib.suppress(OSError):
                     conn.close()
-            self.slots.release()
+            (slots or self.slots).release()
 
     def close(self):
         if self.server is not None:
@@ -2011,11 +2287,13 @@ class Borrower:
 
 
 def lender_facts(profile_name, path=None, ask=None, wait=LEND_READY, clock=time.monotonic,
-                 sleep=time.sleep):
+                 sleep=time.sleep, busy=LEND_BUSY):
     """What the lender at PATH says of itself (ping), waited for up to WAIT seconds; ValueError when there is none,
     when it denies this borrower's token (at once: waiting changes nothing), or when it lends the tunnel of another
-    profile than PROFILE_NAME."""
-    deadline = clock() + wait
+    profile than PROFILE_NAME. A lender that refuses the look (every place taken, its spare ones too: LenderRefused)
+    is there: asked again after BUSY_DELAYS for up to BUSY seconds, then ValueError says it is busy."""
+    begun = clock()
+    deadline, refused = begun + wait, 0
     while True:
         try:
             facts, sock = (ask or ask_lender)({"op": "ping"}, path, timeout=5)
@@ -2023,6 +2301,15 @@ def lender_facts(profile_name, path=None, ask=None, wait=LEND_READY, clock=time.
             break
         except LenderDenied as exc:
             raise ValueError(f"the start's tunnel is not lent to this server: {exc}") from None
+        except LenderRefused as exc:
+            delay = BUSY_DELAYS[min(refused, len(BUSY_DELAYS) - 1)]
+            refused += 1
+            if clock() + delay - begun > busy:
+                raise ValueError(f"the start's lent tunnel is busy: every one of its {LEND_LIMIT} connections is "
+                                 "in use by the start's other MCP servers, and it refused this server's look "
+                                 f"{refused} times in {int(clock() - begun)} s ({exc}). It is there and lends: start "
+                                 "this server again once they use fewer") from None
+            sleep(delay)
         except OSError as exc:
             if clock() >= deadline:
                 raise ValueError(f"the start's tunnel is not lent here: {exc} (a start lends it while it runs; the "
@@ -2361,6 +2648,9 @@ def gather_checks(payload, tunnel, runner, get=fetch, started=None, dns=None):
             result["dns"]["egress"] = resolve(checks["dns_probe"], 4)
         except (OSError, ValueError) as exc:
             result["dns"]["egress_error"] = str(exc)
+    load = getattr(TOR_FRONT, "load", None) if tor else None
+    if load is not None:
+        result["dns"]["front"] = load()  # (what the sandbox's own lookups met there: dropped since the last check)
     if tor:
         # Mapped into TOR_VIRTUAL_NET by tor's DNSPort, and so by an outside resolver if the redirect works - asked as
         # patiently as every other lookup through tor right after its bootstrap (no answer yet is "not yet"); an
@@ -2401,7 +2691,7 @@ def resolve_hosts(names, tunnel, mode_tailnet=False, lookup=None):
             # Without an exit node only the tailnet goes through Tailscale: other names as without a VPN.
             addresses += found or (system_resolver(name, family) if mode_tailnet else [])
         if not addresses:
-            raise ValueError(f"Cannot resolve allowed host {name} through the VPN")
+            raise NoAddress(f"Cannot resolve allowed host {name} through the VPN")
         result[name] = sorted(set(addresses))
     return result
 
@@ -2582,6 +2872,9 @@ def resolve_command(stdin, out, path=None, clock=time.monotonic, sleep=time.slee
                         circuit=True, clock=clock, sleep=sleep).lookup if state.get("tor") else None
         out.write(json.dumps({"hosts": resolve_hosts(names, tunnel, bool(state.get("tailnet")), lookup)}) + "\n")
         return 0
+    except NoAddress as exc:  # (the launcher closes such a name's question: approvals.name_lookup)
+        out.write(json.dumps({"error": str(exc), "no_address": True}) + "\n")
+        return 1
     except (OSError, ValueError, RecursionError) as exc:
         out.write(json.dumps({"error": str(exc)}) + "\n")
         return 1
@@ -2596,6 +2889,8 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None, clock=time.monotoni
         return baseline_command(stdin, out)
     if argv[:1] == ["killswitch"]:
         return killswitch_command(out)
+    if argv[:1] == ["egress"]:
+        return egress_command(out, argv[1] if len(argv) > 1 and argv[1] in EGRESS_KINDS else None)
     if argv[:1] not in (["serve"], ["check"]):
         print("sandbox-ai vpn runtime: internal entry point; use sandbox-ai vpn", file=sys.stderr)
         return 2
@@ -2668,6 +2963,11 @@ def main(argv, stdin=sys.stdin, out=sys.stdout, runner=None, clock=time.monotoni
             if source:
                 tunnel["mcp_dns_source"] = source
             runner.run(["nft", "-f", "-"], data=mcp_dns_rules(tunnel["mcp_dns"], tunnel["interface"], source=source))
+        egress = payload.get("mcp_egress")
+        if payload.get("mcp") and egress is not None:
+            # The server's way out through the tunnel: the internet, not the networks beside or behind it (a
+            # tailnet's addresses, the provider's), nor anything but its hosts for an allowlist server.
+            tunnel["egress"] = load_mcp_egress(egress, hosts, runner, tor=kind == "tor")
         emit("ready", out=out, tunnel=tunnel, checks=checks, hosts=hosts)
     except Exception as exc:  # noqa: BLE001 - everything ends as an event the launcher shows
         emit("error", out=out, message=redact(f"{exc}", secret_values(payload)))

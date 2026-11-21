@@ -169,6 +169,62 @@
     "selectionBackground": "#0b5a22"
    }
   },
+  "hacker_neon": {
+   "label": "hacker (neon)",
+   "dark": true,
+   "colors": {
+    "window": "#000000",
+    "base": "#030806",
+    "alternate": "#06100b",
+    "text": "#8cff7a",
+    "secondary": "#4fd26a",
+    "placeholder": "#3dbb5a",
+    "button": "#021008",
+    "border": "#1fa37a",
+    "highlight": "#2ee6d6",
+    "highlight_text": "#000000",
+    "accent": "#2ee6d6",
+    "accent_text": "#000000",
+    "danger": "#ff7a45",
+    "tooltip": "#021008",
+    "disabled": "#2a8a45",
+    "nav": "#000000",
+    "nav_text": "#8cff7a",
+    "nav_selected": "#0b4a1f",
+    "nav_selected_text": "#ffe14d",
+    "title": "#ffe14d",
+    "canvas": "#000000",
+    "grid": "#16805a",
+    "node": "#030c07",
+    "node_header": "#0b4a1f"
+   },
+   "status": {
+    "ok": "#8cff7a",
+    "warn": "#ff9f1c",
+    "bad": "#ff5f56",
+    "muted": "#4fd26a"
+   },
+   "font": {
+    "families": [
+     "JetBrains Mono",
+     "Fira Code",
+     "Cascadia Mono",
+     "DejaVu Sans Mono",
+     "Liberation Mono",
+     "monospace"
+    ],
+    "size": 10
+   },
+   "radius": 0,
+   "bevel": false,
+   "extra": "hacker",
+   "terminal": {
+    "background": "#000000",
+    "foreground": "#8cff7a",
+    "cursor": "#ff9f1c",
+    "selectionBackground": "#0b5a52"
+   }
+  },
   "cyberpunk": {
    "label": "cyberpunk",
    "dark": true,

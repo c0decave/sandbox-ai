@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<!-- sandbox-ai Board: limits: a gauge (own drawing, MIT; drawn in currentColor) -->
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M4.2 18.5a9 9 0 1 1 15.6 0"/>
+  <circle cx="12" cy="14" r="1.75"/>
+  <path d="M13.25 12.75L17 9"/>
+  <path d="M6.5 14h1M12 7.5v1M16.5 14h1"/>
+</g>
+</svg>

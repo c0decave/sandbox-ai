@@ -10,6 +10,7 @@ import importlib.util
 import os
 from pathlib import Path
 import random
+import signal
 import shutil
 import subprocess
 import time
@@ -58,7 +59,6 @@ class RealDisplay:
         self.runtime.VNC_DIR = self.socket.parent
         self.kept_drop = None
         self.display, self.processes, self.xev = free_display(), [], None
-        self.start()
 
     def start(self):
         if os.geteuid() != 0 and self.kept_drop is None:
@@ -82,12 +82,17 @@ class RealDisplay:
         return self.events.read_text(errors="replace") if self.events.exists() else ""
 
     def stop(self):
+        """Every process of the display ends, whatever the others do: a x11vnc that ignores SIGTERM (it did: two
+        processes ran for 24 hours) must not keep the Xvfb alive - SIGTERM, then SIGKILL, each one on its own."""
         if getattr(self, "kept_drop", None) is not None:
             self.runtime.DROP_ALL, self.kept_drop = self.kept_drop, None
         for process in [self.xev, *reversed(self.processes)]:
-            if process is not None and process.poll() is None:
-                process.terminate()
-                process.wait(timeout=10)
+            try:
+                self.runtime.stop_process(process)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=10)
         for stale in (Path(f"/tmp/.X11-unix/X{self.display[1:]}"), Path(f"/tmp/.X{self.display[1:]}-lock")):
             if stale.exists():
                 stale.unlink()
@@ -105,11 +110,38 @@ def real_display(tmp_path):
     made = []
 
     def make(path):
-        made.append(RealDisplay(path, tmp_path / f"xev-{len(made)}.txt"))
+        made.append(RealDisplay(path, tmp_path / f"xev-{len(made)}.txt"))  # (registered before it starts anything)
+        made[-1].start()
         return made[-1]
-    yield make
-    for display in made:
+    try:
+        yield make
+    finally:
+        for display in made:
+            display.stop()
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@needs_display
+def test_a_display_whose_x11vnc_ignores_sigterm_leaves_no_process_behind(tmp_path):
+    """The leak of 2026-11-15: the teardown waited for a SIGTERM that x11vnc ignored, raised, and left it and its Xvfb
+    (display :308) running for 24 hours. Here x11vnc is stopped (SIGSTOP: SIGTERM stays pending, as ignored) and the
+    teardown must still end both, by PID, and also when the start itself failed half way."""
+    display = RealDisplay(tmp_path / "vnc" / "vnc.sock", tmp_path / "xev.txt")
+    try:
+        display.start()
+        pids = [process.pid for process in display.processes] + [display.xev.pid]
+        os.kill(display.processes[1].pid, signal.SIGSTOP)
+    finally:
         display.stop()
+    assert not [pid for pid in pids if alive(pid)], pids
+    assert not Path(f"/tmp/.X11-unix/X{display.display[1:]}").exists()
 
 
 def opened(window, page, session, wait):  # noqa: F811

@@ -1,0 +1,613 @@
+{
+  "version": 1,
+  "about": "The tools each server of the MCP catalogs lists (its servers/NAME/tools.json), by catalog entry id; made by scripts/catalog_tools.py. The launcher counts a start's MCP tools from a server's pin first, from this for a catalog server never started in the project.",
+  "sources": {
+    "mcp": "sandbox-ai-mcp ff53b5211421",
+    "hub": "axross-mcp-hub b6f417ddb15e"
+  },
+  "servers": {
+    "hub:binwalk": [
+      "binwalk_entropy",
+      "binwalk_extract",
+      "binwalk_hexdump",
+      "binwalk_scan",
+      "get_scan_results",
+      "list_active_scans",
+      "list_extractions"
+    ],
+    "hub:capa": [
+      "capa_analyze",
+      "get_analysis_results",
+      "list_active_scans"
+    ],
+    "hub:crtsh": [
+      "ct_certificate",
+      "ct_search"
+    ],
+    "hub:dnstwist": [
+      "dnstwist_fuzzers",
+      "dnstwist_permutations",
+      "dnstwist_scan"
+    ],
+    "hub:exiftool": [
+      "list_supported_formats",
+      "read_metadata"
+    ],
+    "hub:ffuf": [
+      "ffuf_custom",
+      "ffuf_dir",
+      "ffuf_param",
+      "ffuf_vhost",
+      "get_fuzz_results",
+      "list_active_scans",
+      "list_wordlists"
+    ],
+    "hub:floss": [
+      "floss_languages",
+      "floss_strings"
+    ],
+    "hub:gitleaks": [
+      "list_rules",
+      "scan_directory",
+      "scan_git_history"
+    ],
+    "hub:john": [
+      "crack",
+      "extract_hash",
+      "list_formats"
+    ],
+    "hub:mcpcap": [
+      "analyze_capinfos",
+      "analyze_dhcp_packets",
+      "analyze_dns_packets",
+      "analyze_icmp_packets",
+      "analyze_sip_packets",
+      "analyze_tcp_anomalies",
+      "analyze_tcp_connections",
+      "analyze_tcp_retransmissions",
+      "analyze_traffic_flow"
+    ],
+    "hub:nmap": [
+      "get_scan_results",
+      "list_active_scans",
+      "port_scan",
+      "quick_scan",
+      "script_scan",
+      "service_scan"
+    ],
+    "hub:nuclei": [
+      "get_scan_results",
+      "list_active_scans",
+      "list_templates",
+      "nuclei_scan",
+      "quick_scan",
+      "template_scan"
+    ],
+    "hub:radare2": [
+      "analyze",
+      "calculate",
+      "close_file",
+      "decompile_function",
+      "disassemble",
+      "disassemble_function",
+      "get_current_address",
+      "get_function_prototype",
+      "list_all_strings",
+      "list_classes",
+      "list_decompilers",
+      "list_entrypoints",
+      "list_exports",
+      "list_files",
+      "list_functions",
+      "list_functions_tree",
+      "list_imports",
+      "list_libraries",
+      "list_memory_maps",
+      "list_methods",
+      "list_sections",
+      "list_strings",
+      "list_symbols",
+      "open_file",
+      "rename_flag",
+      "rename_function",
+      "set_comment",
+      "set_function_prototype",
+      "show_function_details",
+      "show_info",
+      "use_decompiler",
+      "xrefs_to"
+    ],
+    "hub:sleuthkit": [
+      "extract_file",
+      "file_metadata",
+      "filesystem_info",
+      "list_files",
+      "partitions",
+      "read_file",
+      "timeline"
+    ],
+    "hub:sqlmap": [
+      "get_scan_results",
+      "list_active_scans",
+      "sql_dump",
+      "sql_enumerate",
+      "sql_scan",
+      "sql_test"
+    ],
+    "hub:tshark": [
+      "conversations",
+      "credentials",
+      "dns_queries",
+      "endpoints",
+      "follow_stream",
+      "http_requests",
+      "packets",
+      "pcap_info",
+      "protocol_hierarchy"
+    ],
+    "hub:yara": [
+      "get_scan_results",
+      "list_active_scans",
+      "list_rulesets",
+      "yara_scan",
+      "yara_scan_with_rules"
+    ],
+    "mcp:agentql": [
+      "extract-web-data"
+    ],
+    "mcp:arxiv": [
+      "get_paper",
+      "read_paper",
+      "search_papers"
+    ],
+    "mcp:axross": [
+      "bulk_copy",
+      "checksum",
+      "chmod",
+      "copy",
+      "grep",
+      "hardlink",
+      "list_backends",
+      "list_dir",
+      "list_versions",
+      "mkdir",
+      "open_version_read",
+      "read_file",
+      "recursive_checksum",
+      "remote_close",
+      "remote_open",
+      "remote_profiles",
+      "remove",
+      "rename",
+      "search",
+      "stat",
+      "symlink",
+      "walk",
+      "write_file"
+    ],
+    "mcp:binwalk": [
+      "binwalk_entropy",
+      "binwalk_extract",
+      "binwalk_hexdump",
+      "binwalk_scan",
+      "get_scan_results",
+      "list_active_scans",
+      "list_extractions"
+    ],
+    "mcp:bluesky": [
+      "delete_post",
+      "get_post_thread",
+      "get_profile",
+      "list_my_posts",
+      "post",
+      "thread"
+    ],
+    "mcp:brave-search": [
+      "news_search",
+      "web_search"
+    ],
+    "mcp:calculator": [
+      "calculate",
+      "convert_units",
+      "date_add",
+      "date_diff"
+    ],
+    "mcp:capa": [
+      "capa_analyze",
+      "get_analysis_results",
+      "list_active_scans"
+    ],
+    "mcp:cfr": [
+      "class_outline",
+      "decompile_class",
+      "decompile_method",
+      "list_classes",
+      "list_files",
+      "search_strings"
+    ],
+    "mcp:chrome-devtools": [
+      "click",
+      "close_page",
+      "drag",
+      "emulate",
+      "evaluate_script",
+      "fill",
+      "fill_form",
+      "get_console_message",
+      "get_css_styles",
+      "get_network_request",
+      "handle_dialog",
+      "hover",
+      "lighthouse_audit",
+      "list_console_messages",
+      "list_network_requests",
+      "list_pages",
+      "navigate_page",
+      "new_page",
+      "performance_analyze_insight",
+      "performance_start_trace",
+      "performance_stop_trace",
+      "press_key",
+      "resize_page",
+      "screencast_start",
+      "screencast_stop",
+      "select_page",
+      "take_heapsnapshot",
+      "take_screenshot",
+      "take_snapshot",
+      "type_text",
+      "upload_file",
+      "wait_for"
+    ],
+    "mcp:code-search": [
+      "find_definition",
+      "find_files",
+      "find_references",
+      "find_text",
+      "outline",
+      "project_map",
+      "read_symbol"
+    ],
+    "mcp:context7": [
+      "query-docs",
+      "resolve-library-id"
+    ],
+    "mcp:duckduckgo": [
+      "web_search"
+    ],
+    "mcp:engram": [
+      "mem_capture_passive",
+      "mem_compare",
+      "mem_consolidate",
+      "mem_context",
+      "mem_current_project",
+      "mem_doctor",
+      "mem_get_observation",
+      "mem_judge",
+      "mem_judge_many",
+      "mem_list_projects",
+      "mem_pin",
+      "mem_review",
+      "mem_save",
+      "mem_save_prompt",
+      "mem_search",
+      "mem_search_prompts",
+      "mem_session_end",
+      "mem_session_finalize",
+      "mem_session_start",
+      "mem_session_summary",
+      "mem_suggest_topic_key",
+      "mem_unpin",
+      "mem_update"
+    ],
+    "mcp:exec": [
+      "job_status",
+      "lint",
+      "list_jobs",
+      "run_command",
+      "run_tests",
+      "start_job",
+      "stop_job"
+    ],
+    "mcp:files": [
+      "append_file",
+      "apply_patch",
+      "checksum",
+      "copy",
+      "delete",
+      "delete_lines",
+      "diff",
+      "edit_file",
+      "glob",
+      "insert_lines",
+      "list_dir",
+      "mkdir",
+      "move",
+      "read_file",
+      "search",
+      "stat",
+      "write_file",
+      "write_markdown"
+    ],
+    "mcp:filesystem": [
+      "create_directory",
+      "directory_tree",
+      "edit_file",
+      "get_file_info",
+      "list_allowed_directories",
+      "list_directory",
+      "list_directory_with_sizes",
+      "move_file",
+      "read_file",
+      "read_media_file",
+      "read_multiple_files",
+      "read_text_file",
+      "search_files",
+      "write_file"
+    ],
+    "mcp:frida": [
+      "attach",
+      "detach",
+      "device_status",
+      "enumerate_exports",
+      "enumerate_modules",
+      "export_server",
+      "kill",
+      "list_abis",
+      "list_applications",
+      "list_devices",
+      "list_processes",
+      "list_sessions",
+      "push_server",
+      "resume",
+      "run_script",
+      "spawn"
+    ],
+    "mcp:gowitness": [
+      "screenshot",
+      "screenshot_many"
+    ],
+    "mcp:jadx": [
+      "class_outline",
+      "find_usages",
+      "get_class_source",
+      "get_manifest",
+      "get_method_source",
+      "get_resource",
+      "get_smali",
+      "list_classes",
+      "list_files",
+      "list_packages",
+      "list_resources",
+      "open_file",
+      "search_code",
+      "search_names"
+    ],
+    "mcp:memory": [
+      "add_observations",
+      "create_entities",
+      "create_relations",
+      "delete_entities",
+      "delete_observations",
+      "delete_relations",
+      "open_nodes",
+      "read_graph",
+      "search_nodes"
+    ],
+    "mcp:openosint": [
+      "generate_dorks",
+      "search_abuseipdb",
+      "search_breach",
+      "search_dns",
+      "search_dorks_live",
+      "search_footprint",
+      "search_gdelt_geo",
+      "search_github",
+      "search_ip",
+      "search_ip2location",
+      "search_paste",
+      "search_rdap",
+      "search_virustotal",
+      "search_whois"
+    ],
+    "mcp:osint-mcp": [
+      "asn_lookup",
+      "certificate_history",
+      "compare_domains",
+      "dns_lookup",
+      "domain_whois",
+      "email_security",
+      "http_headers",
+      "investigate_site",
+      "ip_whois",
+      "recon_batch",
+      "recon_domain",
+      "shodan_internetdb",
+      "subdomains",
+      "tls_certificate",
+      "wayback"
+    ],
+    "mcp:osv": [
+      "get_vulnerability",
+      "query_vulnerabilities_batch",
+      "query_vulnerability"
+    ],
+    "mcp:playwright": [
+      "browser_click",
+      "browser_close",
+      "browser_console_messages",
+      "browser_drag",
+      "browser_drop",
+      "browser_emulate_media",
+      "browser_evaluate",
+      "browser_file_upload",
+      "browser_fill_form",
+      "browser_find",
+      "browser_handle_dialog",
+      "browser_hover",
+      "browser_navigate",
+      "browser_navigate_back",
+      "browser_network_request",
+      "browser_network_requests",
+      "browser_press_key",
+      "browser_resize",
+      "browser_run_code_unsafe",
+      "browser_select_option",
+      "browser_snapshot",
+      "browser_tabs",
+      "browser_take_screenshot",
+      "browser_type",
+      "browser_wait_for"
+    ],
+    "mcp:radare2": [
+      "analyze",
+      "calculate",
+      "close_file",
+      "decompile_function",
+      "disassemble",
+      "disassemble_function",
+      "get_current_address",
+      "get_function_prototype",
+      "list_all_strings",
+      "list_classes",
+      "list_decompilers",
+      "list_entrypoints",
+      "list_exports",
+      "list_files",
+      "list_functions",
+      "list_functions_tree",
+      "list_imports",
+      "list_libraries",
+      "list_memory_maps",
+      "list_methods",
+      "list_sections",
+      "list_strings",
+      "list_symbols",
+      "open_file",
+      "rename_flag",
+      "rename_function",
+      "set_comment",
+      "set_function_prototype",
+      "show_function_details",
+      "show_info",
+      "use_decompiler",
+      "xrefs_to"
+    ],
+    "mcp:searxng": [
+      "web_search"
+    ],
+    "mcp:sequential-thinking": [
+      "sequentialthinking"
+    ],
+    "mcp:shodan": [
+      "api_info",
+      "cpe_lookup",
+      "cve_lookup",
+      "cves_by_product",
+      "dns_lookup",
+      "domain_info",
+      "ip_lookup",
+      "reverse_dns_lookup",
+      "search_filters",
+      "shodan_count",
+      "shodan_search"
+    ],
+    "mcp:signal": [
+      "get_conversation",
+      "get_status",
+      "get_unread",
+      "list_contacts",
+      "list_conversations",
+      "list_groups",
+      "receive_messages",
+      "search_messages"
+    ],
+    "mcp:smali": [
+      "apktool_build",
+      "apktool_decode",
+      "assemble",
+      "disassemble",
+      "get_smali",
+      "list_classes",
+      "list_dex",
+      "list_files",
+      "list_output",
+      "search_smali",
+      "sign_apk"
+    ],
+    "mcp:tasks": [
+      "add_note",
+      "add_steps",
+      "block_step",
+      "complete_step",
+      "list_steps",
+      "next_step",
+      "progress",
+      "remove_step",
+      "set_goal",
+      "start_step"
+    ],
+    "mcp:telegram": [
+      "edit_message_text",
+      "get_chat",
+      "get_me",
+      "get_updates",
+      "send_message"
+    ],
+    "mcp:telegram-user": [
+      "check_invite",
+      "get_chat_info",
+      "get_me",
+      "get_messages",
+      "get_replies",
+      "list_dialogs",
+      "resolve_chat",
+      "search_chats",
+      "search_global",
+      "search_messages"
+    ],
+    "mcp:time": [
+      "convert_time",
+      "get_current_time"
+    ],
+    "mcp:web-fetch": [
+      "fetch_page"
+    ],
+    "mcp:whatsapp": [
+      "get_chat",
+      "get_contact",
+      "get_media",
+      "get_message_context",
+      "list_accounts",
+      "list_chats",
+      "list_messages",
+      "list_recent",
+      "request_history",
+      "search_contacts",
+      "search_messages",
+      "session_status"
+    ],
+    "mcp:whatweb": [
+      "fingerprint",
+      "plugin_info"
+    ],
+    "mcp:wikipedia": [
+      "get_article",
+      "get_summary",
+      "search_wikipedia"
+    ],
+    "mcp:youtube": [
+      "list_my_videos",
+      "set_thumbnail",
+      "update_metadata",
+      "upload_captions",
+      "upload_video"
+    ],
+    "mcp:youtube-transcript": [
+      "get_available_languages",
+      "get_timed_transcript",
+      "get_transcript",
+      "get_video_info"
+    ]
+  }
+}

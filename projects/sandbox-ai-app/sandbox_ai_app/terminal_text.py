@@ -285,6 +285,8 @@ def parse_osc52(payload):
 
 ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[PX^_][^\x1b]*\x1b\\|"
                      r"\x1b[ -/]*[0-~]|[\x00-\x08\x0b-\x1f\x7f]")
+# CSI sequences that put the cursor elsewhere (CUP, HVP, the relative moves, a column or a row): a screen's rows.
+CURSOR_MOVES = re.compile(r"\x1b\[[0-9;]*[HfABCDEFGd]")
 OSC8 = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)")
 PLAIN_URL = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
 DEVICE_CODE = re.compile(r"(?<![A-Za-z0-9-])([A-Z0-9]{4,8}-[A-Z0-9]{4,8})(?![A-Za-z0-9-])")
@@ -296,9 +298,13 @@ class LoginWatch:
     target whole, however the text is wrapped), and plain ones - and a one-time code printed after a device page's
     link (Codex's device code login, GitHub's): urls (in order, each once) and code."""
 
-    def __init__(self):
+    def __init__(self, rows=False):
+        """ROWS: the output is a screen drawn by a program (an agent's interface in tmux: a start's tab) - where the
+        cursor is moved to another place, a new line begins. Without it text drawn in two rows read as one word (a
+        device page's link and the line under it)."""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending, self.text, self.urls, self.code = "", "", [], None
+        self.rows = rows
 
     def feed(self, data):
         """New output DATA (bytes); returns the links found in it that were not found before."""
@@ -314,6 +320,8 @@ class LoginWatch:
         for target in OSC8.findall(chunk):
             target = strip_trailing([(c, 0, 0) for c in target.strip()])
             new.append("".join(c for c, _, _ in target))
+        if self.rows:
+            chunk = CURSOR_MOVES.sub("\n", chunk)
         plain = ESCAPES.sub("", chunk.replace("\r\n", "\n"))
         for match in PLAIN_URL.finditer(plain):
             target = strip_trailing([(c, 0, 0) for c in match.group()])
@@ -330,10 +338,14 @@ class LoginWatch:
 
 
 def device_code(text, urls):
-    """The one-time code TEXT shows after the link of a device page among URLS (within a few lines), or None."""
+    """The one-time code TEXT shows after the link of a device page among URLS (within a few lines), or the one in
+    that link (its user_code: Qwen OAuth, a provider's verification_uri_complete), or None."""
     for url in urls:
         if flow_of(url).kind != "device":
             continue
+        given = query_value(url, "user_code")
+        if given and USER_CODE.fullmatch(given):
+            return given
         at = text.find(url)
         if at < 0:
             continue
@@ -347,6 +359,8 @@ def device_code(text, urls):
 # -- sign-in flows --
 
 Flow = namedtuple("Flow", "kind redirect state")
+# A one-time code in a device page's link (user_code=...): letters, digits and dashes - nothing that breaks a line.
+USER_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{3,39}")
 CODE_PATHS = ("/oauth/code/callback",)  # a provider's page that shows the code to paste ("CODE#STATE")
 DEVICE_PATHS = ("/codex/device", "/login/device", "/device", "/activate")
 
@@ -499,6 +513,9 @@ def flow_of(url):
             return Flow("loopback", redirect, state)
     if parts.path.rstrip("/").endswith(DEVICE_PATHS):
         return Flow("device", None, None)
+    given = query_value(url, "user_code")
+    if parts.scheme == "https" and given and USER_CODE.fullmatch(given):
+        return Flow("device", None, None)  # (the code in the link: Qwen OAuth's chat.qwen.ai/authorize?user_code=…)
     return Flow("page", None, None)
 
 
@@ -545,12 +562,17 @@ PROVIDERS = {
     "codex": ["api.openai.com", "chatgpt.com", "auth.openai.com"],
     "claude": ["api.anthropic.com", "console.anthropic.com", "claude.ai", "claude.com", "platform.claude.com"],
     "opencode": ["opencode.ai"],
+    "opencode2": ["opencode.ai"],  # the same: OpenCode Zen, Console and Go
     "hermes": ["portal.nousresearch.com", "inference-api.nousresearch.com"],
     "dsh": ["api.deepseek.com", "platform.deepseek.com"],
     "qwen": ["chat.qwen.ai", "portal.qwen.ai", "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"],
     "goose": [],  # no maker's model service: --api-key or --llm
+    "openhands": [],  # nor has OpenHands
+    "nanobot": [],  # neither: --api-key or --llm
+    "letta": [],  # Letta Cloud only with --letta-enable cloud; its models: --api-key or --llm
+    "pi": [],  # no maker's model service: --api-key, --llm, or its /login's providers
 }
-LOGIN_FRONTIER = ("opencode",)  # sandbox-ai login gives these --profile frontier (login.py LOGIN_OPTIONS)
+LOGIN_FRONTIER = ("opencode", "pi")  # sandbox-ai login gives these --profile frontier (login.py LOGIN_OPTIONS)
 
 
 def provider_hosts(launcher=None):
@@ -632,7 +654,7 @@ def without_query(url):
 
 # -- which tab runs a login --
 
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 NOT_A_SIGN_IN = frozenset({"--logout", "-L", "--status", "-s"})  # options of `sandbox-ai login` that print no link
 
 
@@ -649,3 +671,87 @@ def login_agent(words):
     if any(word.split("=", 1)[0] in NOT_A_SIGN_IN for word in rest):
         return None
     return next((word for word in rest if word in AGENTS), None)
+
+
+# -- which tab runs a start, and what its launcher said when it refused --
+
+# The agents whose sign-in is a device sign-in (a page and a one-time code: Codex's `codex login --device-auth`, also
+# run by sandbox-ai before Codex in a sandbox that has no login; Hermes' Nous Portal; Qwen OAuth): a start's tab of
+# one of them is watched for it, as a login's tab is.
+DEVICE_AGENTS = ("codex", "hermes", "qwen")
+START_WATCH_BYTES = 512 << 10  # a start's tab is read for this much output (its beginning), then left alone
+TAIL_BYTES = 8192  # the end of that output kept: the launcher's last words when the start is refused
+
+
+def start_agent(words):
+    """The agent `sandbox-ai AGENT ...` starts in WORDS (a command line: sandbox-ai or its main.py, then its words),
+    None for every other command (login, build, attach ...) and for a dry run."""
+    words = [str(word) for word in words]
+    at = next((i + 1 for i, word in enumerate(words) if word.rsplit("/", 1)[-1] in ("main.py", "sandbox-ai")), None)
+    if at is None or at >= len(words) or words[at] not in AGENTS:
+        return None
+    rest = words[at + 1:]
+    if "--" in rest:
+        rest = rest[:rest.index("--")]
+    return None if "--dry-run" in rest else words[at]
+
+
+def start_session(words):
+    """The NAME of `--session NAME` in the start WORDS (before a "--"), or None."""
+    words = [str(word) for word in words]
+    if "--" in words:
+        words = words[:words.index("--")]
+    for index, word in enumerate(words):
+        if word == "--session" and index + 1 < len(words):
+            return words[index + 1]
+        if word.startswith("--session="):
+            return word[len("--session="):]
+    return None
+
+
+LAUNCHER_LINE = re.compile(r"^(?:agent-sandbox|sandbox-ai(?: [a-z-]+)?): ")
+# The launcher's refusal of a start whose session's name is taken (sessions.busy_text and the words before 0.1.149).
+SESSION_REFUSAL = re.compile(r"Session (\S+) (?:is (?:running|paused|orphaned)\b|belongs to |is being started or "
+                             r"stopped)")
+
+
+class OutputTail:
+    """The end of what a start's tab printed (feed(bytes); at most TAIL_BYTES of its first START_WATCH_BYTES - a
+    refused start says little, an agent that runs is not read): done once that much came."""
+
+    def __init__(self, limit=START_WATCH_BYTES, keep=TAIL_BYTES):
+        self.limit, self.keep, self.seen, self.data = limit, keep, 0, b""
+
+    @property
+    def done(self):
+        return self.seen >= self.limit
+
+    def feed(self, data):
+        self.seen += len(data)
+        self.data = (self.data + data)[-self.keep:]
+
+    def text(self):
+        plain = ESCAPES.sub("", self.data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n"))
+        return plain
+
+
+def refusal(text, limit=900):
+    """The launcher's last words in TEXT (a tab's end, plain): its last line that begins "agent-sandbox: " (or
+    "sandbox-ai: ") with the lines after it, the prefix taken off - why a start that ended with an error did not run
+    - or "" when it said none."""
+    lines = [line.rstrip() for line in str(text).splitlines()]
+    while lines and (not lines[-1].strip() or lines[-1].startswith("[sandbox-ai: exit status")
+                     or lines[-1].startswith("[sandbox-ai: Exit-Status")):
+        lines.pop()
+    last = next((i for i in range(len(lines) - 1, -1, -1) if LAUNCHER_LINE.match(lines[i])), None)
+    if last is None:
+        return ""
+    said = "\n".join([LAUNCHER_LINE.sub("", lines[last], count=1), *lines[last + 1:]]).strip()
+    return said[-limit:]
+
+
+def session_refusal(text):
+    """The session's name when TEXT (refusal()) is the launcher's refusal of a start whose session's name is taken -
+    one of that name runs, is paused, belongs to another agent, or is being started - else None."""
+    found = SESSION_REFUSAL.search(str(text))
+    return found.group(1).rstrip(";:,.") if found else None

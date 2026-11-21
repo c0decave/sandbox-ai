@@ -1,0 +1,12 @@
+# Frida's Python bindings for the android recipe: the same version as the frida-server binaries the recipe puts in
+# /opt/frida and as the MCP server servers/frida of sandbox-ai-mcp (client and server must match), pinned by the
+# SHA-256 PyPI publishes for the wheel. Released 2026-11-02 (17 days before this was written).
+#
+# frida-tools (the frida, frida-trace, frida-ps CLIs) is NOT here: its newest release with a wheel (14.13.2) was
+# published on 2026-11-16 and is not 14 days old yet, the older 14.11.0 is an sdist that would have to be built with
+# unpinned build tools, and its release carries ~700 KB of generated agents plus a 12 MB web UI that are injected
+# into the target process and are not reviewed. Add it yourself when you want it and it is old enough:
+#   sandbox-ai images extend android --add-pip 'frida-tools==14.13.2'
+frida==17.25.2 \
+    --hash=sha256:226998c9b3cb79d99871138533d2c58525ede3b1ea45647c6483d28ced8abb73 \
+    --hash=sha256:55cb5f7f6f75922a37e451449ec71e695400e3d6a009c275c285abf88a49dd53

@@ -23,7 +23,7 @@
     "{device}"
   ],
   "mcp": [
-    "hub:binwalk"
+    "mcp:binwalk"
   ],
   "values": {
     "port": {

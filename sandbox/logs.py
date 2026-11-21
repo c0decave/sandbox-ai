@@ -11,6 +11,7 @@ Suggestions are options to review, not to apply blindly: every one widens the sa
 """
 import argparse
 from collections import Counter, deque
+import contextlib
 import hashlib
 import importlib.util
 import ipaddress
@@ -68,6 +69,24 @@ def iter_lines(path, budget=None, tail=None, line_bytes=None):
     budget = new_budget() if budget is None else budget
     tail = TAIL_BYTES if tail is None else tail
     line_bytes = LINE_BYTES if line_bytes is None else line_bytes
+    if jsonltail().compressed(path):  # a log sandbox-ai gc compressed: its newest lines, decompressed
+        if budget["left"] <= 0 or tail <= 0:
+            # Nothing of it would be kept: never unpacked (a folder's 1 GiB of compressed parts took a Statistics
+            # page tens of seconds after its budget was spent), only counted as left out.
+            budget["skipped_bytes"] += jsonltail().unpacked_size(path)
+            return
+        limited = budget["left"] < tail  # the budget, not TAIL, decides what of it is kept
+        lines, skipped, long = jsonltail().compressed_tail(path, max(0, min(tail, budget["left"])), None, line_bytes)
+        budget["skipped_bytes"] += skipped
+        budget["long"] += long
+        for line in lines:
+            budget["left"] -= len(line)
+            budget["read_bytes"] += len(line)
+            budget["lines"] += 1
+            yield line
+        if limited and skipped:  # what is left of the budget is less than a line: spent (no older file is unpacked)
+            budget["left"] = 0
+        return
     try:
         stream = open(path, "rb")
     except OSError:
@@ -78,6 +97,7 @@ def iter_lines(path, budget=None, tail=None, line_bytes=None):
         except OSError:
             return
         wanted = max(0, min(tail, budget["left"]))
+        limited = budget["left"] < tail
         start = max(0, size - wanted)
         budget["skipped_bytes"] += start
         # One byte before START: when START is the first byte of a line, the newline before it ends the skip at once
@@ -108,6 +128,8 @@ def iter_lines(path, budget=None, tail=None, line_bytes=None):
             budget["read_bytes"] += len(line)
             budget["lines"] += 1
             yield line
+        if limited and start:  # the budget cut this file: the rest of it (less than a line) reads nothing older
+            budget["left"] = 0
 
 
 _tails = None
@@ -157,6 +179,21 @@ def newest_first(paths):
     return sorted(paths, key=lambda path: path.name, reverse=True)  # connections-YYYYmmdd-HHMMSS-…: by time
 
 
+CONNECTION_PART = re.compile(r"connections-(.+?)\.jsonl(?:\.(\d{1,3}))?(?:\.gz)?")
+
+
+def connection_logs(directory):
+    """The proxy's logs in DIRECTORY, newest first: each run's (connections-TIME-RUN.jsonl), its older parts the run
+    rotated (NAME.1.gz the newest of them), and those sandbox-ai gc compressed (NAME.gz)."""
+    found = []
+    with contextlib.suppress(OSError):
+        for path in Path(directory).glob("connections-*.jsonl*"):
+            match = CONNECTION_PART.fullmatch(path.name)
+            if match:
+                found.append(((match.group(1), -int(match.group(2) or 0)), path))
+    return [path for _, path in sorted(found, key=lambda item: item[0], reverse=True)]
+
+
 def read_records(path, limit=200_000):
     """The newest LIMIT JSON objects of a JSONL file (of its newest TAIL_BYTES), and about how many older lines
     were left out."""
@@ -192,6 +229,8 @@ def suggestion(record):
         if not valid_host(host):
             # Never a ready-to-paste option for a name that is not a host name: it may carry shell syntax.
             return f"invalid {host}", None, "not a valid host name; looked up by the agent, do not allow"
+        if record.get("reserved") is True:  # (runtime.RESERVED_NAMES: refused without a question)
+            return f"reserved {host}", None, "a reserved name (RFC 2606/6761): it never exists, nothing to allow"
         preset = preset_for(host)
         if preset:
             return f"--allow-{preset}", f"--allow-{preset}", f"{host} belongs to that preset"
@@ -229,7 +268,7 @@ def refusals(directory, limit=20):
     client sent (server name, ALPN, request line, Host, DNS name)."""
     found, budget = [], new_budget()
     # The firewall's and the DNS stub's refusals first: the connection logs of many runs would use up the budget.
-    paths = [Path(directory) / "egress-denied.jsonl", *newest_first(Path(directory).glob("connections-*.jsonl"))]
+    paths = [Path(directory) / "egress-denied.jsonl", *connection_logs(directory)]
     for path in paths:
         connections = path.name.startswith("connections-")
         newest = deque(maxlen=limit)  # (a file is written in time order: its last LIMIT refusals)
@@ -257,7 +296,8 @@ def refusals(directory, limit=20):
 def suggestion_key(record):
     """What suggestion() reads of RECORD, with the types (1, 1.0 and true are equal keys, not equal records); None
     when a value is no key (a list, an object)."""
-    key = tuple((type(value), value) for value in (record.get(name) for name in ("host", "address", "protocol", "port")))
+    names = ("host", "address", "protocol", "port", "reserved")
+    key = tuple((type(value), value) for value in (record.get(name) for name in names))
     try:
         hash(key)
     except TypeError:
@@ -277,6 +317,18 @@ def parent_of(path, known):
     if parent is None:
         parent = known[folder] = str(Path(path).parent)
     return parent
+
+
+def events_of(record):
+    """How many events a record of files.jsonl counts: a folder's reads summed in one (runtime.FileReads) as the files
+    read in its window - each file once, as the log of each file's read had them (its "reads", every close, made the
+    statistics of the same work 120 times larger) -, the reads beyond the folders a window tells apart by their count,
+    any other record as one."""
+    for key in ("files", "reads"):
+        value = record.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return 1
 
 
 def summarize(directory):
@@ -307,10 +359,13 @@ def summarize(directory):
     actions, directories, errors, file_events = Counter(), Counter(), set(), 0
     for record in iter_records(Path(directory) / "files.jsonl", budget):
         if record.get("action"):
-            file_events += 1
-            actions[record["action"]] += 1
+            count = events_of(record)
+            file_events += count
+            actions[record["action"]] += count
             if isinstance(record.get("path"), str):
-                directories[parent_of(record["path"], parents)] += 1
+                directories[parent_of(record["path"], parents)] += count
+            elif isinstance(record.get("folder"), str):
+                directories[record["folder"]] += count
         if isinstance(record.get("error"), str) and len(errors) < 100:
             errors.add(record["error"])
     return {"directory": str(directory), "denied": denied, "targets": targets.most_common(),
@@ -328,7 +383,7 @@ def telemetry(directory):
     tokens = Counter()
     pushes = {"ok": 0, "refused": 0}
     refusals = Counter()
-    for path in newest_first(Path(directory).glob("connections-*.jsonl")):
+    for path in connection_logs(directory):
         for record in iter_records(path, budget):
             event = record.get("event")
             host = str(record.get("host") or record.get("destination") or "?")
@@ -356,7 +411,31 @@ def telemetry(directory):
     return {"requests": sum(hosts.values()), "hosts": hosts.most_common(20), "model_calls": dict(models),
             "tokens": dict(tokens), "pushes": pushes, "credentials": credentials.most_common(20),
             "refused": refusals.most_common(20), "processes": processes, "programs": commands.most_common(20),
-            "older_lines_skipped": skipped_lines(budget) if budget["skipped_bytes"] or budget["long"] else 0}
+            "older_lines_skipped": skipped_lines(budget) if budget["skipped_bytes"] or budget["long"] else 0,
+            "spend": spend_summary(directory)}
+
+
+def spend_summary(directory):
+    """What the model requests of DIRECTORY's runs cost (spend.py: the proxy's spend logs): {"total", "models":
+    [{"key", "usd", "requests", "unknown", "subscription", "local", "cost"}], "runs": [...]}; None without any."""
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_spend_for_logs", Path(__file__).resolve().parent /
+                                                      "spend.py")
+        spend = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(spend)
+        runs = spend.collect(directories_=[Path(directory)])
+        if not any(found["requests"] for found in runs):
+            return None
+        table = spend.price_table()
+        keep = ("key", "usd", "requests", "in", "cached", "out", "unknown", "subscription", "local")
+
+        def rows(by):
+            return [{**{key: row[key] for key in keep}, "cost": spend.cost_text(row)}
+                    for row in spend.rows_of(runs, by, table)[:50]]
+        total = spend.totals(spend.rows_of(runs, "model", table))
+        return {"total": {**total, "cost": spend.cost_text(total)}, "models": rows("model"), "runs": rows("run")}
+    except Exception:  # noqa: BLE001 - the rest of the summary goes on without it
+        return None
 
 
 def tool_calls(state_root=None):
@@ -429,6 +508,10 @@ def report(summary, out=print):
             calls = ", ".join(f"{count}x {p(model)}" for model, count in seen["model_calls"].items())
             usage = ", ".join(f"{p(key)} {value}" for key, value in sorted(seen["tokens"].items()))
             out(f"Model calls: {calls}; tokens: {usage}")
+        spent = seen.get("spend")
+        if spent:
+            out(f"Model spend: {spent['total']['cost']} (sandbox-ai spend)" + "".join(
+                f"; {p(row['key'])} {row['cost']}" for row in spent["models"][:5]))
         for entry, count in seen["credentials"][:10]:
             out(f"  credential {p(entry)} ({count}x)")
         for entry, count in seen["refused"][:10]:
@@ -484,8 +567,15 @@ def cli(argv):
     parser.add_argument("directory", nargs="?", type=Path,
                         help="a log directory, or the name or id of a start (sandbox-ai list)")
     parser.add_argument("-p", "--project", type=Path, help="Project whose wizard log directory to read")
-    parser.add_argument("-j", "--json", action="store_true")
+    parser.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    parser.add_argument("--user", metavar="USER",
+                        help="root only: the start NAME of USER (also USER:NAME), read as USER with root's own "
+                             "sandbox-ai copy (sandbox-ai list --all-users shows them)")
     a = parser.parse_args(argv)
+    if a.user is not None:  # (sandbox-ai's dispatcher runs another user's as that user: main.py, allusers.py)
+        print("sandbox-ai logs: --user USER goes through sandbox-ai (as root): sandbox-ai logs --user USER NAME",
+              file=sys.stderr)
+        return 2
     project = Path(a.project or os.getcwd()).expanduser().absolute()
     directory = a.directory or default_log_dir(project)
     if a.directory and not directory.is_dir() and os.sep not in str(a.directory):

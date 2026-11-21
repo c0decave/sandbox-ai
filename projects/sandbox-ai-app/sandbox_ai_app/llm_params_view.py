@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGridLayout, QLabel, QLineEdit,
+    QPushButton, QVBoxLayout, QWidget,
 )
 
 from .files import printable, printable_text
@@ -20,7 +20,7 @@ from .llm_params import (
     loop_changes, scope_of, set_argv, value_text,
 )
 from .mcp_fields import mark
-from .widgets import plain_label, safe_tooltip
+from .widgets import explanation, plain_label, safe_tooltip
 
 
 class ParamsFields(QWidget):
@@ -293,19 +293,21 @@ class ParamsDialog(QDialog):
     (a list of `llm set` argument lists, one per scope changed) does the saving and calls finish() or failed()."""
 
     def __init__(self, view, catalogue, scope=SCOPE_ALL, models=(), host_label="", spec=None, server_only=None,
-                 parent=None):
+                 served=None, parent=None):
         super().__init__(parent)
         self.view, self.catalogue, self.saved, self.on_save = view, list(catalogue), False, None
+        # {model: the window Ollama serves it with, in words} (wizard_llm.served_text of the models listed)
+        self.served = dict(served or {})
         self.spec = spec  # the loop guard's layers (llm_params.loop_spec); None: a sandbox-ai without them
         self.name = str(view.get("name") or "")
         self.setWindowTitle(tr("Advanced settings of {name}", name=printable(self.name)))
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr(
+        layout.addWidget(explanation(tr(
             "The server's defaults for every start (a board's values win for its start). Sampling parameters the "
             "connection proxy applies to this server's requests only, whatever agent sends them: set where the "
             "agent's request has none, forced ones in place of the agent's own; max_tokens is a ceiling, num_ctx "
             "the context window the agents are told. Only what this kind of server takes is offered: per request, "
-            "at the model's load (LM Studio) or in the agents' configuration."), role="secondary"))
+            "at the model's load (LM Studio) or in the agents' configuration.")))
         if host_label:
             layout.addWidget(plain_label(tr("on {host}", host=host_label), role="secondary"))
         form = QFormLayout()
@@ -352,7 +354,22 @@ class ParamsDialog(QDialog):
         other.addRow(tr("Other models"), self.evict)
         note = EVICT_NOTES.get(str(view.get("kind") or ""))
         if note:
-            other.addRow("", plain_label(tr(note), role="secondary"))
+            other.addRow("", explanation(tr(note)))
+        # The server's memory, for what fits it (llm recommend, the Board's use case): llm set --memory GB.
+        self.memory = QDoubleSpinBox()
+        self.memory.setRange(0, 65536)
+        self.memory.setDecimals(1)
+        self.memory.setSuffix(" GB")
+        self.memory.setSpecialValueText(tr("not said"))
+        self.memory.setAccessibleName(tr("Memory (GB)"))
+        self.memory.setToolTip(safe_tooltip(tr(
+            "The server's memory (RAM, or the GPU's VRAM), for what fits it: a model needs about its size and a "
+            "quarter more, against three quarters of this (sandbox-ai llm recommend, the Board's use case). Not said: "
+            "this computer's for a server on its loopback, else not known")))
+        stored = view.get("memory_gb")
+        self.memory.setValue(float(stored) if isinstance(stored, (int, float)) and not isinstance(stored, bool)
+                             else 0.0)
+        other.addRow(tr("Memory (GB)"), self.memory)
         layout.addLayout(other)
         self.message = plain_label(role="notice-error", selectable=True, log="llm")
         self.message.setVisible(False)
@@ -380,7 +397,8 @@ class ParamsDialog(QDialog):
         self.current = scope
         contexts = self.view.get("contexts") if isinstance(self.view.get("contexts"), dict) else {}
         reported = contexts.get(scope) if scope != SCOPE_ALL else None
-        self.context.setText(tr("{tokens} tokens, as the server reports it", tokens=reported)
+        self.context.setText(self.served[scope] if scope in self.served else
+                             tr("{tokens} tokens, as the server reports it", tokens=reported)
                              if isinstance(reported, int) and not isinstance(reported, bool) else
                              tr("as the server reports it per model (num_ctx sets it)"))
         self.validate()
@@ -425,6 +443,10 @@ class ParamsDialog(QDialog):
             extra += ["--loop-guard", value]
         if evict != (self.view.get("evict") or "never"):
             extra += ["--evict", evict]
+        stored = self.view.get("memory_gb")
+        stored = float(stored) if isinstance(stored, (int, float)) and not isinstance(stored, bool) else 0.0
+        if round(self.memory.value(), 1) != round(stored, 1):
+            extra += ["--memory", f"{self.memory.value():g}"]  # 0: forgotten
         if extra:
             if argvs:
                 argvs[0] += extra

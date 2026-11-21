@@ -17,7 +17,39 @@ from . import applog
 from . import backend
 from .files import printable, printable_text
 from .i18n import N_, tr
-from .widgets import background, plain_label, safe_tooltip
+from .widgets import background, explanation, plain_label, safe_tooltip
+
+# How the app names an MCP server's network (sandbox-ai mcp add|set --network; what each reaches is held in the
+# server's own network namespace, behind a VPN too): the internet without your local network, only the hosts its
+# catalog entry declares, the internet and your local network (a warning; asked first), nothing.
+NETWORK_LABELS = {"full": N_("internet (no LAN)"), "allowlist": N_("only its hosts"),
+                  "lan": N_("internet + LAN (warning)"), "none": N_("none")}
+
+
+def network_choice(current, hosts=()):
+    """A combo box of the networks (its text: NETWORK_LABELS, its data: the value of --network), CURRENT chosen;
+    "only its hosts" where the entry declares HOSTS or CURRENT is it already."""
+    box = QComboBox()
+    for kind in backend.MCP_NETWORKS:
+        if kind != "allowlist" or hosts or current == "allowlist":
+            box.addItem(tr(NETWORK_LABELS[kind]), kind)
+    index = box.findData(current if current in backend.MCP_NETWORKS else "none")
+    box.setCurrentIndex(index if index >= 0 else box.findData("full"))
+    box.setToolTip(safe_tooltip(tr("internet (no LAN): every public address, never your local network or this host; only its "
+                         "hosts: what its catalog entry declares{hosts}; internet + LAN: your network too (a "
+                         "warning); none: no network", hosts=f" ({printable(', '.join(hosts))})" if hosts else "")))
+    box.setAccessibleName(tr("Network"))
+    return box
+
+
+def lan_warning(box):
+    """The warning beneath a network choice BOX, shown while "internet + LAN" is chosen."""
+    label = plain_label(tr("internet + LAN: the server reaches your local network and this host (your router, "
+                           "printers, other machines' services), not only the internet; only the clouds' metadata "
+                           "service stays closed."), role="notice-warn")
+    label.setVisible(box.currentData() == "lan")
+    box.currentIndexChanged.connect(lambda _index: label.setVisible(box.currentData() == "lan"))
+    return label
 
 LIMIT_FIELDS = (
     ("memory", N_("Memory"), N_("a whole number with m or g, like 512m or 2g"), "--memory"),
@@ -449,9 +481,9 @@ class ServerPropertiesDialog(QDialog):
                             tr("Properties of {name} on {host}", name=printable(name), host=printable(host)))
         form = self.form = QFormLayout(self)
         own, kind = info.get("own", True), info.get("kind", "image")
-        form.addRow(plain_label(tr("The defaults of every start that uses it; a board can set other limits and "
+        form.addRow(explanation(tr("The defaults of every start that uses it; a board can set other limits and "
                                    "variables for its own starts (its MCP part). Use the built-in limits empties the "
-                                   "limits: sandbox-ai's own hold."), role="secondary"))
+                                   "limits: sandbox-ai's own hold.")))
         if values:
             form.addRow(plain_label(tr("Filled in with the values of the board: OK makes them this server's defaults "
                                        "for every start."), role="notice-warn"))
@@ -480,10 +512,14 @@ class ServerPropertiesDialog(QDialog):
             form.addRow(tr("Last problem"), plain_label(printable(
                 f"{problem.get('time', '')}: {problem.get('what', '')}. {problem.get('why', '')}. "
                 + tr("Fix: {fix}", fix=problem.get("fix", ""))), role="notice-error", selectable=True))
-        self.network = QComboBox()
-        self.network.addItems(["none", "full"])
-        self.network.setCurrentText(str(definition.get("network", "none")))
+        hosts = [str(h) for h in (definition.get("hosts") or ((entry or {}).get("hosts") if (entry or {}).get(
+            "network") == "allowlist" else None) or []) if isinstance(h, str)]
+        self.network = network_choice(str(definition.get("network", "none")), hosts)
         form.addRow(tr("Network"), self.network)
+        form.addRow("", lan_warning(self.network))
+        if isinstance(info.get("egress_note"), str) and info["egress_note"]:
+            # (sandbox-ai's own words: a full server whose entry needs only its hosts, one that reaches your network)
+            form.addRow("", plain_label(printable(info["egress_note"]), role="notice-warn", selectable=True))
         from .name_fields import NameField
         self.vpn = NameField("vpn", sai, host, placeholder=tr("a VPN profile (sandbox-ai vpn list); needs the full "
                                                               "network"))
@@ -599,8 +635,8 @@ class ServerPropertiesDialog(QDialog):
             if str(now if now is not None else "") != str(before if before is not None else ""):
                 changes[key] = now if now is not None else "default"
         if kind != "command":
-            if self.network.currentText() != definition.get("network", "none"):
-                changes["network"] = self.network.currentText()
+            if self.network.currentData() != definition.get("network", "none"):
+                changes["network"] = self.network.currentData()
             vpn = self.vpn.text().strip()
             if vpn != (definition.get("vpn") or ""):
                 changes["vpn"] = vpn or None

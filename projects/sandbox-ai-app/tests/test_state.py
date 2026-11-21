@@ -379,20 +379,23 @@ def test_a_failed_write_is_said_and_stops_nothing(qapp, env, monkeypatch):
     assert s.flush() is True
 
 
-@pytest.mark.parametrize("kind", ["field", "list"])
+@pytest.mark.parametrize("kind", ["field", "list", "lines"])
 def test_what_is_being_typed_in_the_inspector_is_kept_when_the_app_quits(window, env, qapp, kind):
     """Stability review 2: a field of the board's inspector is taken when it is left (a list: 600 ms after typing
-    stops). Quitting wrote the draft first - what was typed last, in the field still being edited, was lost."""
+    stops). Quitting wrote the draft first - what was typed last, in the field still being edited, was lost. (Since
+    2026-11-19 the network's lists are one field of kinds, list_fields: a value typed and not added yet is added;
+    a list of one value per line: the approvals' hidden files.)"""
     from sandbox_ai_app.board_view import LinesEdit
+    from sandbox_ai_app.list_fields import ListFields
     folder = project(env, "p")
     (folder / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude", "options": []}))
     window.set_project(folder)
     window.show()
     window.show_page("board")
     page = window.board
-    if kind == "field":
-        page.add_node("limits")
-    node = page.board.first("limits" if kind == "field" else "network")
+    if kind in ("field", "lines"):
+        page.add_node("limits" if kind == "field" else "approvals")
+    node = page.board.first({"field": "limits", "list": "network", "lines": "approvals"}[kind])
     for _ in range(3):
         qapp.processEvents()
     page.inspect(node)
@@ -404,8 +407,10 @@ def test_what_is_being_typed_in_the_inspector_is_kept_when_the_app_quits(window,
         qapp.processEvents()
         assert QtWidgets.QApplication.focusWidget() is edit
         edit.setText("7g")  # typed, the field not left
+    elif kind == "list":
+        page.inspector_holder.findChildren(ListFields)[0].value_box.setEditText("pypi.org")  # typed, not added
     else:
-        page.inspector_holder.findChildren(LinesEdit)[0].setPlainText("pypi.org")  # typed, the pause not over
+        page.option_fields["--hide"].findChildren(LinesEdit)[0].setPlainText("pypi.org")  # the pause not over
     window.shutdown()
     draft = json.loads(state.state_file().read_text())["boards"][str(folder)]["draft"]
     props = next(n["props"] for n in draft["nodes"] if n["id"] == node.id)

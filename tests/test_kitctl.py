@@ -272,7 +272,7 @@ def test_new_creates_the_missing_agent_directories(shipped):
     (kits_dir() / "review/codex/skills").rmdir()
     (kits_dir() / "review/codex").rmdir()
     status, text = run("new", "review")
-    assert status == 0 and "created codex/skills" in text and "(claude, opencode, hermes, dsh, qwen, goose existed)" in text
+    assert status == 0 and "created codex/skills" in text and "(claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi existed)" in text
     status, text = run("new", "solo", "--agent", "opencode")
     assert status == 0 and os.listdir(kits_dir() / "solo") == ["opencode"]
     status, text = run("new", "egm")
@@ -453,7 +453,7 @@ def test_add_skill_from_an_agent_writable_folder_notes_the_snapshot(shipped, tmp
 def test_new_skill_writes_a_valid_template(shipped, capsys):
     run("new", "review")
     status, text = run("new-skill", "review", "lint-fix", "--description", 'Fixes "lint" – ü; use after edits')
-    assert status == 0 and text.count("wrote") == 7  # claude, codex, opencode, hermes, dsh, qwen, goose
+    assert status == 0 and text.count("wrote") == 12  # claude, codex, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi
     content = (kits_dir() / "review/claude/skills/lint-fix/SKILL.md").read_text()
     front = content.split("---\n")[1].splitlines()
     assert front[0] == "name: lint-fix"
@@ -480,7 +480,7 @@ def test_remove_skill(shipped, tmp_path, capsys):
     assert status == 0 and not (kits_dir() / "review/codex/skills/a").exists()
     assert (kits_dir() / "review/claude/skills/a").is_dir()
     status, text = run("remove-skill", "review", "a")
-    assert status == 0 and text.count("removed") == 6  # claude, opencode, hermes, dsh, qwen, goose (codex's went before)
+    assert status == 0 and text.count("removed") == 11  # claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi (codex's went before)
     assert run("remove-skill", "review", "a")[0] == 1
     assert run("remove-skill", "review", "b", "--agent", "claude")[0] == 1
     assert run("remove-skill", "review", "..")[0] == 1
@@ -527,7 +527,9 @@ def test_add_plugin_claude(shipped, tmp_path, capsys):
     for bad in ("tool", "a@b@c", "-x@team"):
         assert run("add-plugin", "review", "--", bad)[0] == 1
     assert run("add-plugin", "review", "codex-thing", "--agent", "codex")[0] == 1
-    assert "not supported yet" in capsys.readouterr().err
+    assert "a plugin is NAME@MARKETPLACE" in capsys.readouterr().err  # Codex takes Claude's plugins now
+    assert run("add-plugin", "review", "x@sandbox-ai", "--agent", "qwen")[0] == 1
+    assert "plugins for Qwen Code are not supported" in capsys.readouterr().err
 
 
 def test_add_plugin_opencode_and_damaged_files(shipped, tmp_path, capsys):
@@ -582,7 +584,7 @@ def test_add_marketplace_refusals(shipped, tmp_path, capsys):
     assert run("add-marketplace", "review", "--", "-bad", "o/r")[0] == 1
     assert run("add-marketplace", "review", "m", "o/..")[0] == 1
     assert run("add-marketplace", "review", "m", "o/r", "--agent", "opencode")[0] == 1
-    assert "only Claude has plugin marketplaces" in capsys.readouterr().err
+    assert "only Claude Code, Codex and OpenCode 2 take plugin marketplaces" in capsys.readouterr().err
     assert list(declaration("review")["marketplaces"]) == ["sandbox-ai"]
 
 
@@ -622,5 +624,5 @@ def test_main_py_runs_the_command(tmp_path):
     assert result.returncode == 2 and "usage: sandbox-ai kits show" in result.stderr
     result = sandbox_ai("show", "nope")
     assert result.returncode == 1 and result.stderr.startswith("sandbox-ai kits: no kit nope")
-    assert "see and change kits" in subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/main.py"), "--help"],
+    assert "See and change kits" in subprocess.run([sys.executable, "-I", str(ROOT / "sandbox/main.py"), "--help"],
                                                     capture_output=True, text=True, timeout=60).stdout

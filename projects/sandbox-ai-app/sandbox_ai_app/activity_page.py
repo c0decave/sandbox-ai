@@ -19,20 +19,22 @@ import time
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QProcess, QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit,
     QMenu,
     QPlainTextEdit, QPushButton, QSplitter, QTableView, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import applog
 from . import backend, theme, widgets
+from . import bridges as BR
 from .files import printable, printable_text
-from .i18n import N_, tr
-from .widgets import MONO, flow, plain_label, shown_as_text
+from .i18n import N_, language, tr
+from .widgets import MONO, flow, plain_label
 
 KINDS = {"prompt": N_("prompt"), "reply": N_("reply"), "tool": N_("tool"), "command": N_("command"),
          "file": N_("file"), "network": N_("network"), "approval": N_("approval"), "mcp": N_("MCP"),
-         "session": N_("session"), "tokens": N_("tokens")}
+         "session": N_("session"), "tokens": N_("tokens"), "bridge": N_("bridge"),
+         "resources": N_("resources")}  # the system monitor's warnings (monitor.py)
 COLUMNS = (N_("Time"), N_("Kind"), N_("Agent"), N_("What"))
 RECORD_ROLE = Qt.ItemDataRole.UserRole + 20
 TAIL = 5000           # events read when a timeline is opened
@@ -55,7 +57,10 @@ def kind_color(record):
     return {"prompt": tokens.get("accent"), "reply": tokens.get("text"), "tool": tokens.get("secondary"),
             "command": theme.color("warn"), "file": theme.color("ok"), "network": theme.color("muted"),
             "approval": theme.color("warn"), "mcp": tokens.get("accent"), "session": theme.color("muted"),
-            "tokens": theme.color("muted")}.get(record.get("kind")) or tokens.get("text")
+            "tokens": theme.color("muted"), "resources": theme.color("warn"),
+            "bridge": theme.color("warn") if details.get("event") in ("alert", "net-cut", "pause", "suspended",
+                                                                       "write-asked")
+            else tokens.get("accent")}.get(record.get("kind")) or tokens.get("text")
 
 
 def event_time(text):
@@ -99,6 +104,39 @@ def detail_text(record):
     return "\n".join(printable(line) for line in text.split("\n"))
 
 
+# A session's own events (activity.session_summary: pause, resume, attach, detach, stop, and the human's shell),
+# written in English by the launcher: (event, its words, the text with the same names, N_ for the translation).
+_SESSION = r"session (?P<name>[A-Za-z0-9][A-Za-z0-9_.-]{0,127})"
+SESSION_EVENTS = (
+    ("pause", rf"{_SESSION} paused", N_("session {name} paused")),
+    ("resume", rf"{_SESSION} resumed", N_("session {name} resumed")),
+    ("attach", rf"{_SESSION} terminal attached", N_("session {name}: terminal attached")),
+    ("detach", rf"{_SESSION} terminal detached", N_("session {name}: terminal detached")),
+    ("stop", rf"{_SESSION} stop requested", N_("session {name}: stop requested")),
+    ("shell", rf"{_SESSION} shell opened by the human", N_("session {name}: shell opened by you")),
+    ("shell", rf"{_SESSION}: the human ran in its sandbox: (?P<command>.*)",
+     N_("session {name}: you ran in its sandbox: {command}")),
+    ("shell-end", rf"{_SESSION} shell closed \(exit status (?P<status>-?[0-9]+)\)",
+     N_("session {name}: shell closed (exit status {status})")),
+    ("shell-end", rf"{_SESSION} shell closed", N_("session {name}: shell closed")),
+)
+_SESSION_EVENTS = [(event, re.compile(pattern, re.DOTALL), text) for event, pattern, text in SESSION_EVENTS]
+
+
+def session_summary(record):
+    """The summary of an activity event of kind "session" in the app's language (the launcher writes it in English;
+    in English its own words): matched by its details' event and those words; one it does not know stays as it is."""
+    summary = str(record.get("summary") or "")
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    if record.get("kind") != "session" or language() == "en":
+        return summary
+    for event, pattern, text in _SESSION_EVENTS:
+        match = pattern.fullmatch(summary) if event == details.get("event") else None
+        if match is not None:
+            return tr(text, **match.groupdict())
+    return summary
+
+
 def text_line(record):
     """One line of the text export: date and time (local), kind, agent, summary."""
     moment = event_time(record.get("time"))
@@ -115,10 +153,14 @@ class Entry:
         self.record = record
         self.kind = str(record.get("kind") or "")
         summary = printable(record.get("summary") or "")
+        # sandbox-ai bridge writes its events in English: shown in the app's language (bridges.py), found by both.
+        words = printable(BR.event_summary(record)) if self.kind == "bridge" else \
+            printable(session_summary(record)) if self.kind == "session" else summary
         self.cells = [short_time(record.get("time")), tr(KINDS[self.kind]) if self.kind in KINDS else printable(self.kind),
-                      agent_text(record), widgets.elide(summary)]
+                      agent_text(record), widgets.elide(words)]
         details = json.dumps(record.get("details"), ensure_ascii=False)[:4000]
-        self.search = " ".join([summary, self.cells[2], self.kind, details]).lower()
+        self.search = " ".join([summary, *([words] if words != summary else []), self.cells[2], self.kind,
+                                details]).lower()
         self.color = None
 
 
@@ -397,9 +439,17 @@ class ActivityPage(QWidget):
         from .safeguards_view import SafeguardsView
         self.safeguards = SafeguardsView(sai)
         self.safeguards.counted.connect(self.safeguards_counted)
+        # What a run left for the host to run or trust (sandbox-ai workspace review), and the MCP tool definitions
+        # pinned per project (sandbox-ai mcp tools): Keep, Restore…, Re-pin…, Forget….
+        from .trust_views import McpPinsView, WorkspaceReviewView
+        self.reviews = WorkspaceReviewView(sai)
+        self.reviews.counted.connect(self.reviews_counted)
+        self.pins = McpPinsView(sai)
         self.tabs.addTab(timeline, tr("Timeline"))
         self.tabs.addTab(self.canaries, tr("Canaries"))
         self.tabs.addTab(self.safeguards, tr("Safeguards"))
+        self.tabs.addTab(self.reviews, tr("Workspace review"))
+        self.tabs.addTab(self.pins, tr("MCP tool pins"))
         outer.addWidget(self.tabs)
         self.update_buttons()
         self.started = False
@@ -415,6 +465,13 @@ class ActivityPage(QWidget):
         """The Safeguards tab names how many records there are, in the theme's warning colour when there are any."""
         index = self.tabs.indexOf(self.safeguards)
         self.tabs.setTabText(index, tr("Safeguards ({count})", count=count) if count else tr("Safeguards"))
+        self.tabs.tabBar().setTabTextColor(index, theme.color("warn") if count else
+                                           self.tabs.tabBar().palette().color(self.tabs.tabBar().foregroundRole()))
+
+    def reviews_counted(self, count):
+        """The Workspace review tab names how many changes nobody decided on yet, in the warning colour then."""
+        index = self.tabs.indexOf(self.reviews)
+        self.tabs.setTabText(index, tr("Workspace review ({count})", count=count) if count else tr("Workspace review"))
         self.tabs.tabBar().setTabTextColor(index, theme.color("warn") if count else
                                            self.tabs.tabBar().palette().color(self.tabs.tabBar().foregroundRole()))
 
@@ -442,6 +499,9 @@ class ActivityPage(QWidget):
         self.source.clear()
         self.source.blockSignals(False)
         self.canaries.set_host(host)
+        self.safeguards.set_host(host)
+        self.reviews.set_host(host)
+        self.pins.set_host(host)
         if self.started:
             self.refresh_sources()
 
@@ -538,10 +598,10 @@ class ActivityPage(QWidget):
 
     def browse(self):
         if self.host() != LOCAL:
-            # A folder on that host: typed (this machine's file dialog cannot see it).
-            path, ok = QInputDialog.getText(self, tr("Log folder"), shown_as_text(tr(
-                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label())))
-            path = path.strip()
+            # A folder on that host: chosen from its folders (remote_chooser), never this machine's.
+            from . import remote_chooser as RC
+            path = RC.choose_folder(self, self.host(), tr("Log folder"), "logs", sai=self.sai)
+            ok = bool(path)
             if ok and backend.valid_directory(path):
                 kind = "--log-dir" if "/sandbox-ai/logs/" in path or path.rstrip("/").endswith("/logs") else "--project"
                 self.refresh_sources(select=[kind, path])
@@ -876,7 +936,7 @@ class ActivityPage(QWidget):
             page.refresh_directories(select=log_dir, log_suffix=suffix)  # listed in a thread: chosen there
         elif suffix:
             for index in range(page.file.count()):
-                if page.file.itemText(index).endswith(suffix):
+                if page.file.itemText(index).endswith((suffix, suffix + ".gz")):  # (.gz: compressed by gc)
                     page.file.setCurrentIndex(index)
                     break
         target = details.get("target") or details.get("host") or details.get("address") or ""

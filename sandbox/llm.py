@@ -7,15 +7,17 @@
   sandbox-ai llm show NAME [--json]
   sandbox-ai llm remove NAME
   sandbox-ai llm models NAME [--sort name|size|loaded] [--json]
-  sandbox-ai llm check NAME [--agent claude|codex|opencode|hermes|dsh|qwen|goose] [--model MODEL]
+  sandbox-ai llm check NAME [--agent AGENT] [--model MODEL]
   sandbox-ai llm status [NAME] [--json] [--watch SECONDS]
   sandbox-ai llm loaded NAME [--json]
   sandbox-ai llm load NAME MODEL [--context TOKENS] [--ttl SECONDS] [--force]
   sandbox-ai llm unload NAME MODEL|INSTANCE [--force]
   sandbox-ai llm detect [--address IP]... [--json]
   sandbox-ai llm set NAME [--model MODEL] [--param KEY=VALUE]... [--force-param KEY=VALUE]... [--unset KEY]...
-                     [--reset] [--loop-guard on|off|LAYER=VALUE]... [--evict never|allow]
+                     [--reset] [--loop-guard on|off|LAYER=VALUE]... [--evict never|allow] [--memory GB]
   sandbox-ai llm params [NAME | --kind KIND] [--json]
+  sandbox-ai llm profiles [MODEL] [--agent AGENT] [--json]
+  sandbox-ai llm recommend [USE_CASE] [--use-case NAME] [--llm|--server NAME] [--agent AGENT] [--host HOST] [--json]
 
 KIND is ollama, lmstudio, llamacpp, vllm or openai-compatible. URL is the server's root, with a path
 prefix if a gateway puts one in front (https://gw.example.org/ollama); each agent gets the API path it
@@ -48,6 +50,7 @@ Standard library only.
 import argparse
 import base64
 import contextlib
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -83,18 +86,18 @@ LOG = launch_log()
 _filelock = None
 
 
-def settings_lock(file):
+def settings_lock(file, timeout=None):
     """The lock of a read-modify-write of the settings file FILE (filelock.py): commands that run at the same time
-    never lose each other's change."""
+    never lose each other's change. TIMEOUT: seconds to wait for it (filelock's own by default)."""
     global _filelock
     if _filelock is None:
         spec = importlib.util.spec_from_file_location("sandbox_ai_filelock", HERE / "filelock.py")
         loaded = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(loaded)
         _filelock = loaded
-    return _filelock.locked(file)
+    return _filelock.locked(file) if timeout is None else _filelock.locked(file, timeout)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")  # the launcher's agents (a test keeps both the same)
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")  # the launcher's agents (a test keeps both the same)
 SECRET = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 HEADER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 VPN_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")  # as sandbox-ai vpn names them (vpn.PROFILE_NAME)
@@ -325,7 +328,7 @@ def check_record(name, record):
     if not NAME.fullmatch(name) or not isinstance(record, dict):
         raise ValueError(f"{where}: invalid entry")
     known = {"kind", "url", "api_key_secret", "headers", "ca", "vpn", "model", "anthropic", "insecure_http",
-             "models", "checked", "contexts", "params", "forced", "loop_guard", "evict"}
+             "models", "checked", "contexts", "vision", "params", "forced", "loop_guard", "evict", "memory_gb"}
     if set(record) - known:
         raise ValueError(f"{where}: unknown fields {sorted(set(record) - known)}")
     if not isinstance(record.get("kind"), str) or record["kind"] not in KINDS:  # (a list in a file edited by hand)
@@ -366,9 +369,14 @@ def check_record(name, record):
     if not isinstance(contexts, dict) or not all(isinstance(m, str) and MODEL_NAME.fullmatch(m) and context_value(n)
                                                  for m, n in contexts.items()):
         raise ValueError(f"{where}: contexts maps model names to their context window (tokens)")
+    vision = record.get("vision", [])
+    if not isinstance(vision, list) or not all(isinstance(m, str) and MODEL_NAME.fullmatch(m) for m in vision):
+        raise ValueError(f"{where}: vision is a list of model names (the models that read images)")
     check_params(where, record["kind"], record.get("params", {}), record.get("forced", {}), record.get("loop_guard"))
     if record.get("evict", "never") not in EVICT:
         raise ValueError(f"{where}: evict is never or allow")
+    if record.get("memory_gb") is not None and memory_value(record["memory_gb"]) is None:
+        raise ValueError(f"{where}: memory_gb is the server's memory in GB (a number from 1 to {MEMORY_MAX_GB})")
     if parsed["scheme"] == "http" and not record.get("insecure_http"):
         problem = plain_http_problem(parsed)
         if problem:
@@ -377,9 +385,20 @@ def check_record(name, record):
             "headers": dict(headers), "ca": ca, "vpn": vpn, "model": model,
             "anthropic": record.get("anthropic", False), "insecure_http": record.get("insecure_http", False),
             "models": list(models), "checked": record.get("checked"), "contexts": dict(contexts),
-            "params": {scope: dict(values) for scope, values in record.get("params", {}).items()},
+            "vision": list(vision), "params": {scope: dict(values) for scope, values in record.get("params", {}).items()},
             "forced": {scope: list(keys) for scope, keys in record.get("forced", {}).items()},
-            "loop_guard": dict(record.get("loop_guard") or {}), "evict": record.get("evict", "never"), "parsed": parsed}
+            "loop_guard": dict(record.get("loop_guard") or {}), "evict": record.get("evict", "never"),
+            "memory_gb": record.get("memory_gb"), "parsed": parsed}
+
+
+MEMORY_MAX_GB = 65536
+
+
+def memory_value(value):
+    """VALUE (GB) as the store keeps a server's memory (a whole number when it is one), or None when it is none."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= MEMORY_MAX_GB:
+        return None
+    return int(value) if float(value).is_integer() else round(float(value), 1)
 
 
 def endpoint(name, path=None):
@@ -398,7 +417,7 @@ def record_of(endpoint):
     """The stored form of a checked endpoint."""
     record = {key: endpoint[key] for key in ("kind", "url", "api_key_secret", "headers", "ca", "vpn", "model",
                                               "anthropic", "insecure_http", "models", "checked", "contexts",
-                                              "params", "forced", "loop_guard", "evict")
+                                              "vision", "params", "forced", "loop_guard", "evict")
               if key in endpoint and (key != "evict" or endpoint[key] != "never")}
     kept = {key: value for key, value in record.items() if value is not None and value is not False
             and value != {} and value != []}
@@ -1210,9 +1229,13 @@ def model_table(models):
                ("TYPE", lambda m: m.get("type") or ""),
                ("PARAMS", lambda m: m.get("parameters") or ""),
                ("QUANT", lambda m: m.get("quantization") or ""),
-               ("CONTEXT", lambda m: f"{m['context'] // 1024}k" if m.get("context") else ""),
+               ("CONTEXT", lambda m: f"{m['context'] // 1024}k" if m.get("context") else
+                f"{m['served_context'] // 1024}k" if m.get("served_context") else
+                "default" if m.get("served_how") == "default" else ""),
                ("SIZE", lambda m: format_size(m["size"]) if m["size"] is not None else ""),
-               ("DETAILS", lambda m: m["details"] if m["details"] != (m.get("quantization") or "") else "")]
+               ("DETAILS", lambda m: m["details"] if m["details"] != (m.get("quantization") or "") else ""),
+               # the traffic light of the local-model research (model_support): only with a usable table
+               ("SUPPORT", lambda m: profiles_module().support_cell(m["support"]) if m.get("support") else "")]
     shown = [(title, cell) for index, (title, cell) in enumerate(columns)
              if index == 0 or any(cell(m) for m in models)]
     rows = [["#", *[title for title, _ in shown]]]
@@ -1220,6 +1243,19 @@ def model_table(models):
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     lines = ["  ".join(v.ljust(width) for v, width in zip(row, widths)).rstrip() for row in rows]
     return lines if models else [lines[0], "(no models found)"]
+
+
+def model_support(models):
+    """MODELS (llm models' entries) each with its "support": how far the local-model research supports it, per
+    harness (model_profiles.support: the colour, the harnesses of each, what worked and failed); none when the
+    profiles cannot be read."""
+    table = profile_table()
+    if table is None:
+        return models
+    module = profiles_module()
+    for model in models:
+        model["support"] = module.support(model["name"], table)
+    return models
 
 
 def name_refusal(name):
@@ -1277,14 +1313,19 @@ def endpoint_models(endpoint, get=None, client=None):
     client = client or Client(endpoint, get)
     models = discover(endpoint["kind"], client.json)
     remember_models(endpoint["name"], [m["name"] for m in models],
-                    {m["name"]: m["context"] for m in models if m.get("context")})
+                    {m["name"]: m["context"] for m in models if m.get("context")}, reads_images(models))
     return models
 
 
-def remember_models(name, names, contexts=None):
-    """The models NAME lists now, in its record (with CONTEXTS, {model: tokens}, the context windows known): read and
-    written back under the store's lock, and only while NAME is still there (an `llm remove` meanwhile is never
-    undone)."""
+def reads_images(models):
+    """The names of the listed MODELS that read images (their capabilities name vision), in their order."""
+    return [m["name"] for m in models if "vision" in (m.get("capabilities") or [])]
+
+
+def remember_models(name, names, contexts=None, vision=None):
+    """The models NAME lists now, in its record (with CONTEXTS, {model: tokens}, the context windows known, and VISION,
+    the models that read images): read and written back under the store's lock, and only while NAME is still there
+    (an `llm remove` meanwhile is never undone)."""
     with settings_lock(store_path()):
         store = load_store()
         record = store["endpoints"].get(name)
@@ -1297,6 +1338,12 @@ def remember_models(name, names, contexts=None):
                 record["contexts"] = known
             else:
                 record.pop("contexts", None)
+            if vision is not None:
+                seeing = [model for model in vision if model in record["models"]]
+                if seeing:
+                    record["vision"] = seeing
+                else:
+                    record.pop("vision", None)
             save_store(store)
 
 
@@ -1425,10 +1472,12 @@ PARAMS = {
     "presence_penalty": (float, -2.0, 2.0, "penalty for tokens that occurred at all (OpenAI's)"),
     "frequency_penalty": (float, -2.0, 2.0, "penalty growing with how often a token occurred (OpenAI's)"),
     "dry_multiplier": (float, 0.0, 5.0, "llama.cpp's DRY sampler against repeated sequences (0: off; 0.8 typical)"),
-    "max_tokens": (int, 16, 1 << 20, "the most tokens of one answer: a ceiling, the agent's own lower value stays"),
+    "max_tokens": (int, 16, 1 << 20, "the most tokens of one answer: a ceiling, the agent's own lower value stays "
+                                      "(0: no ceiling - the agent's own value, over a model profile's)"),
     "seed": (int, 0, (1 << 31) - 1, "a fixed seed (reproducible answers)"),
     "num_ctx": (int, CONTEXT_RANGE[0], CONTEXT_RANGE[1], "the context window (tokens) the agents are told; the "
-                                                         "server must load the model with at least this much"),
+                                                         "server must load the model with at least this much "
+                                                         "(Ollama: at most the window it serves is told)"),
     "cache_prompt": (bool, None, None, "llama.cpp: reuse the KV cache of the previous request (default on)"),
     # Keeping the model loaded, per request: Ollama's keep_alive (its OpenAI-compatible chat API takes it since
     # Ollama 0.35.0, openai/openai.go ChatCompletionRequest.KeepAlive; older ones ignore it), LM Studio's ttl (its
@@ -1447,11 +1496,15 @@ PARAMS = {
     # Claude Code CLAUDE_STREAM_IDLE_TIMEOUT_MS and CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS (2.1.322), Codex
     # stream_idle_timeout_ms of its provider (0.169.0), OpenCode chunkTimeout and headerTimeout of its provider
     # (1.19.5), Qwen Code its provider entry's timeout and streamIdleTimeoutMs (0.26.4), Goose OPENAI_TIMEOUT and
-    # GOOSE_STREAM_TIMEOUT (1.57.0). Unset: LOCAL_WAIT for a model server of your own (agent_wait).
+    # GOOSE_STREAM_TIMEOUT (1.57.0), Pi httpIdleTimeoutMs and retry.provider.timeoutMs of its settings (1.4.0).
+    # Unset: LOCAL_WAIT for a model server of your own (agent_wait).
     "stream_idle_timeout": (int, 10, 86400, "seconds an agent waits for the first and the next part of a streamed "
                                             "answer before it gives up (default: an hour for a server of your own; "
                                             "never sent to the server)"),
 }
+# A ceiling that 0 lifts: max_tokens=0 (your value, the start's or the endpoint's) leaves the agent's own value, over
+# the model profile's ceiling (every family has one: an answer a local model cannot end blocks the server).
+NO_CEILING = ("max_tokens",)
 # Never sent with a request: at the model's load (LOAD_ONLY, by the start or `llm load`), or into the agents'
 # configurations (AGENT_ONLY).
 LOAD_ONLY = {"lmstudio": ("num_ctx", "flash_attention", "offload_kv_cache_to_gpu"), "ollama": ("num_ctx",)}
@@ -1505,24 +1558,43 @@ MODELFILE_ONLY = {"ollama": ("top_k", "min_p", "repeat_penalty", "repeat_last_n"
 # defaults.json ("loop_guard": {...}), an endpoint's (llm set --loop-guard), a start's (--llm-param loop_guard...)
 # over them. Only for --llm starts: nothing of it touches another server's traffic or a start without --llm.
 #   steps        OpenCode: the most agentic steps of a turn of its build agent (plan and explore about half, general
-#                two thirds); at the last one OpenCode asks for a text answer (agent.<name>.steps; 0: OpenCode's own)
+#                two thirds); at the last one OpenCode asks for a text answer (agent.<name>.steps; 0: OpenCode's own).
+#                150: a debugging task took a local model 21 to 102 requests where it was solved (the local-model
+#                research; with 40 OpenCode stopped after 41, nothing fixed). The stop for loops is the proxy's guard
+#                below, not a low limit.
 #   compaction   OpenCode: automatic compaction with pruning of old tool output and room for it, tool output cut at
-#                1000 lines / 128 KiB (compaction, tool_output)
+#                1000 lines / 50,000 bytes (compaction, tool_output)
 #   instructions OpenCode: rules against loops as an instruction file of its own (instructions; your AGENTS.md stays)
 #   sampling     the model family's recommended sampling as the lowest default (Qwen3, QwQ, Qwen3-Coder,
 #                DeepSeek-R1, gpt-oss), never greedy for those that warn against it
 #   context      warn when the agents are told a larger context window than the server loaded
 #   warn, block  the proxy, on each request: the same tool call with the same result WARN times since the human's last
-#                message: a note in that result tells the model so; BLOCK times: tool use is paused for that answer (the
-#                model summarises; the human goes on). Polling (sleep, --watch, wait) counts against three times both.
-#   text         the proxy, on a streamed answer: one block repeated TEXT times in a row (4 KiB at least): the answer
+#                message: a note in that result tells the model so (and stays there in every later request: the
+#                server's prompt cache holds); BLOCK times: the note says to stop calling tools, and an answer that
+#                calls one again is replaced by sandbox-ai's own, which ends the turn (the model summarises; the human
+#                goes on). Polling (sleep, --watch, wait) counts against three times both. A call is compared without
+#                the free text harnesses have the model add (Claude Code's Bash description, Codex's justification).
+#   failures     the proxy, on each request: the same tool failed this many times in a row (other arguments each
+#                time: guessing - Laguna-S in Codex called read_mcp_resource 110 times with guessed URIs): a note in
+#                that result tells the model to stop guessing and change its approach, again every as many failures
+#                (a note only: the model goes on)
+#   text        the proxy, on a streamed answer: one block repeated TEXT times in a row (4 KiB at least): the answer
 #                ends cleanly with a note, and the next request gets stronger anti-repetition sampling
+#   rejected     the proxy, on each request: the very same request (its path and body as they go to the server)
+#                that the server rejected this many times (HTTP 4xx but 408 and 429) is not sent again for ten minutes:
+#                the agent gets sandbox-ai's error at once, the server's reason goes into the connection log. OpenCode
+#                answered Strata's "requests are never truncated" (HTTP 400) with 551 identical requests in 150 s (the
+#                Strata test, 2026-11-17). A different request always goes; one that succeeds is forgotten
 #   watchdog_requests, watchdog_minutes   for unattended runs: tool use paused after this many model requests or
 #                minutes in one turn (0: off, the default)
-LOOP_DEFAULTS = {"enabled": True, "steps": 40, "compaction": True, "instructions": True, "sampling": True,
-                 "context": True, "warn": 3, "block": 6, "text": 10, "watchdog_requests": 0, "watchdog_minutes": 0}
-LOOP_RANGES = {"steps": (5, 1000), "warn": (2, 100), "block": (3, 200), "text": (3, 100),
-               "watchdog_requests": (5, 100000), "watchdog_minutes": (1, 10080)}  # 0 is off besides these
+#   progress_notes   one more line beside the instructions (Claude Code: its system prompt): keep PROGRESS.md with
+#                what is done and what is next, and read it first after an interruption or a compaction (off by
+#                default; a model profile's pair switches it on where the research measured it helping: round 5)
+LOOP_DEFAULTS = {"enabled": True, "steps": 150, "compaction": True, "instructions": True, "sampling": True,
+                 "context": True, "warn": 3, "block": 6, "failures": 6, "text": 10, "rejected": 3,
+                 "watchdog_requests": 0, "watchdog_minutes": 0, "progress_notes": False}
+LOOP_RANGES = {"steps": (5, 1000), "warn": (2, 100), "block": (3, 200), "failures": (3, 200), "text": (3, 100),
+               "rejected": (2, 100), "watchdog_requests": (5, 100000), "watchdog_minutes": (1, 10080)}  # 0 is off besides these
 # Sampling a model family's makers recommend (model cards: Qwen3 thinking T 0.6 / top_p 0.95 / top_k 20 / min_p 0 and
 # never greedy; Qwen3 Instruct-2507 (no thinking) T 0.7 / top_p 0.8; Qwen3-Coder T 0.7 / top_p 0.8 / top_k 20 /
 # repetition penalty 1.05; DeepSeek-R1 T 0.6 / top_p 0.95; gpt-oss T 1.0 / top_p 1.0). The first match wins;
@@ -1576,8 +1648,10 @@ def param_value(kind, key, value, where="--param"):
     except (TypeError, ValueError):
         raise ValueError(f"{where} {key}: {'a whole number' if kind_of is int else 'a number'}, not "
                          f"{printable(value)!r}") from None
-    if number != number or number in (float("inf"), float("-inf")) or not low <= number <= high:
-        raise ValueError(f"{where} {key}: from {low} to {high}, not {printable(value)}")
+    if number != number or number in (float("inf"), float("-inf")) or \
+            not (low <= number <= high or (number == 0 and key in NO_CEILING)):
+        raise ValueError(f"{where} {key}: from {low} to {high}{' (0: none)' if key in NO_CEILING else ''}, not "
+                         f"{printable(value)}")
     return number
 
 
@@ -1656,10 +1730,11 @@ def user_loop():
 
 
 def loop_config(endpoint, start=None, user=None):
-    """The loop guard as it applies: sandbox-ai's defaults, yours (USER, else defaults.json), the endpoint's, the
-    start's (START) over each other; every layer off when "enabled" is off."""
-    found = {**LOOP_DEFAULTS, **(user_loop() if user is None else user), **(endpoint.get("loop_guard") or {}),
-             **(start or {})}
+    """The loop guard as it applies: sandbox-ai's defaults, the model profile's (an endpoint selection() marked:
+    profile_loop), yours (USER, else defaults.json), the endpoint's, the start's (START) over each other; every layer
+    off when "enabled" is off."""
+    found = {**LOOP_DEFAULTS, **profile_loop(endpoint), **(user_loop() if user is None else user),
+             **(endpoint.get("loop_guard") or {}), **(start or {})}
     if not found["enabled"]:
         found.update({key: False if isinstance(value, bool) else 0 for key, value in LOOP_DEFAULTS.items()})
     return found
@@ -1671,6 +1746,203 @@ def family_preset(model):
         if pattern.search(model or ""):
             return dict(values)
     return {}
+
+
+# --- model x harness profiles (model_profiles.py, model_profiles.json) -------------------------------------------
+#
+# The settings the local-model research found for a model family in each harness, applied at a start UNDER yours:
+# the profile < the endpoint's values (llm set) < the start's --llm-param < explicit options (--env). selection()
+# marks the endpoint of a start with its agent and model ("llm_profile"; --no-llm-profile: no mark), and only a
+# marked endpoint has a profile: `llm show`, `llm set` and the stored records never do.
+_profiles_module = None
+
+
+def profiles_module():
+    """model_profiles.py, loaded once."""
+    global _profiles_module
+    with LOADING:
+        if _profiles_module is None:
+            spec = importlib.util.spec_from_file_location("sandbox_model_profiles_llm", HERE / "model_profiles.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _profiles_module = module
+    return _profiles_module
+
+
+def profile_param(key, value):
+    """VALUE of the parameter KEY as some kind of server takes it (a profile serves every kind; a start keeps what
+    its kind takes: profile_params)."""
+    problem = None
+    for kind in KINDS:
+        try:
+            return param_value(kind, key, value, "--param")
+        except ValueError as exc:
+            problem = problem or exc
+    raise problem
+
+
+def profile_table():
+    """The profiles (model_profiles.json), checked with this module's own rules; None when the file cannot be used
+    (logged: the start goes on without profiles)."""
+    try:
+        return profiles_module().load(None, profile_param, loop_setting)
+    except (OSError, ValueError) as exc:
+        LOG.info("llm", "the model profiles cannot be used: starts go on without them", exc)
+        return None
+
+
+def model_profile(endpoint, model):
+    """The profile in force for MODEL at ENDPOINT (marked by selection() with the start's agent and use case), with
+    the use case's settings for that pair over it (pair_profile), or None."""
+    marked = endpoint.get("llm_profile") if isinstance(endpoint, dict) else None
+    if not isinstance(marked, dict) or not model or model == "*":
+        return None
+    return pair_profile(model, marked["agent"], marked.get("use_case"), profile_table())
+
+
+def pair_profile(model, agent, case=None, table=None):
+    """The profile of MODEL in AGENT (TABLE: the profiles, None: none), with the use case CASE's settings for that
+    model in that agent over it (model_usecases.overlay: a model of no family gets the use case's alone); None when
+    neither knows it."""
+    profile = profiles_module().match(model, agent, table) if table is not None else None
+    if not case:
+        return profile
+    try:
+        cases = usecase_table()
+        module = usecases_module()
+        entry = module.use_case(cases, case)
+        found = module.settings_for(cases, entry["id"], model, agent)
+    except ValueError as exc:  # (selection() refused an unknown use case already; a damaged table: the profile)
+        LOG.info("llm", "the use case's settings cannot be used: the model's profile alone", exc)
+        return profile
+    return module.overlay(profile, found, entry["id"], entry["label"], agent) if found is not None else profile
+
+
+def profile_params(endpoint, model):
+    """The profile's parameters for MODEL that ENDPOINT's kind takes (never Ollama's Modelfile-only ones: its APIs
+    have no field for them), {} without a profile."""
+    profile = model_profile(endpoint, model)
+    if profile is None:
+        return {}
+    taken = set(kind_params(endpoint["kind"])) - set(MODELFILE_ONLY.get(endpoint["kind"], ()))
+    return {key: value for key, value in profile["params"].items() if key in taken}
+
+
+def profile_request(endpoint, model):
+    """The profile's parameters for MODEL the proxy sets in its requests (the lowest default): without the agents'
+    and the load's own (num_ctx, stream_idle_timeout, LM Studio's load settings)."""
+    return {key: value for key, value in profile_params(endpoint, model).items()
+            if key not in AGENT_ONLY and key not in LOAD_ONLY.get(endpoint["kind"], ())}
+
+
+def profile_loop(endpoint):
+    """The loop guard's layers of the profile of the start's model (selection()'s mark), {} without one."""
+    marked = endpoint.get("llm_profile") if isinstance(endpoint, dict) else None
+    profile = model_profile(endpoint, marked.get("model")) if isinstance(marked, dict) else None
+    return dict(profile["loop_guard"]) if profile is not None else {}
+
+
+def profile_families(endpoint, sampling):
+    """proxy.json's "families" of the profiles ([[pattern, values]], before FAMILY_PRESETS'): a model of the server
+    the start did not list gets its family's profile (over the family preset with SAMPLING)."""
+    marked = endpoint.get("llm_profile") if isinstance(endpoint, dict) else None
+    table = profile_table() if isinstance(marked, dict) else None
+    found = []
+    for family in (table or {}).get("families", []):
+        example = family["examples"][0]
+        own = profile_request(endpoint, example)
+        if own:
+            found.append([family["pattern"], {**(family_preset(example) if sampling else {}), **own}])
+    return found
+
+
+def told_context(endpoint, model, override=None, reported=None, loaded=None):
+    """(the context window the agents are told for MODEL, whether you chose it): your num_ctx (the start's, the
+    endpoint's), else the profile's at most what the server has the model LOADED with or REPORTS (never more than it
+    keeps; nothing when neither is known: the agent's own guess then), else the loaded or reported one."""
+    own = effective_params(endpoint, model, override, profile=False)[0].get("num_ctx")
+    if own:
+        return own, True
+    keeps = loaded or reported
+    soft = context_value(profile_params(endpoint, model).get("num_ctx"))
+    return (min(soft, keeps) if soft and keeps else keeps), False
+
+
+def profile_report(a, endpoint, model):
+    """What the profile of MODEL in the start's agent does (the dry run's llm.profile, the start's note), or None
+    for a model of no family: its id, status and evidence, "values" (what it sets that this kind takes: parameters,
+    loop_guard.LAYER, env.NAME), "applied" (those it sets: none when --no-llm-profile switched it off),
+    "overridden" (those you set yourself: yours win), "not_taken" (parameters this kind has no field for) and its
+    warnings (a pair known not to work, more MCP servers than the model copes with)."""
+    table = profile_table()
+    case = getattr(a, "use_case", None)
+    if table is None and not case:
+        return None
+    module = profiles_module()
+    profile = pair_profile(model, a.agent, case, table)
+    if profile is None:
+        return None
+    enabled = bool(endpoint.get("llm_profile"))
+    taken = set(kind_params(endpoint["kind"])) - set(MODELFILE_ONLY.get(endpoint["kind"], ()))
+    values = module.settings(profile)
+    not_taken = sorted(key for key in profile["params"] if key not in taken)
+    for key in not_taken:
+        values.pop(key)
+    try:
+        override, start = start_params(a, endpoint)
+    except ValueError:
+        override, start = {}, {}  # validate() reports it
+    own = effective_params(endpoint, model, override, profile=False)[0]
+    layers = {**user_loop(), **(endpoint.get("loop_guard") or {}), **start}
+    given = passed_names(a)
+
+    def yours(key):
+        if key == "tools":
+            return getattr(a, "llm_tools", None) is not None
+        if key.startswith("loop_guard."):
+            return key[len("loop_guard."):] in layers or layers.get("enabled") is False
+        if key.startswith("env."):
+            return key[len("env."):] in given
+        return key in own
+    warnings = list(profile["warnings"])
+    servers = len(getattr(a, "mcp", None) or [])
+    if profile["mcp_max"] is not None and servers > profile["mcp_max"]:
+        warnings.append(f"{servers} MCP servers are attached; it copes with {profile['mcp_max'] or 'no'} MCP "
+                        f"server{'' if profile['mcp_max'] == 1 else 's'} at most")
+    return {"id": profile["id"], "name": profile["name"], "family": profile["family"], "label": profile["label"],
+            "agent": profile["agent"], "pattern": profile["pattern"], "status": profile["status"],
+            "status_text": profile["status_text"], "pair": profile["pair"], "evidence": profile["evidence"],
+            "reasoning": profile["reasoning"], "enabled": enabled, "values": values,
+            "applied": [key for key in values if not yours(key)] if enabled else [],
+            "overridden": [key for key in values if yours(key)], "not_taken": not_taken, "warnings": warnings,
+            "notes": profile["notes"], "builtin": profile["builtin"],
+            # the use case whose settings for this model in this agent go over the profile (None: none)
+            "use_case": profile.get("use_case")}
+
+
+def profile_lines(report, name):
+    """The start's lines of REPORT (profile_report) for the endpoint NAME: what the profile sets, yours that win,
+    how to switch it off, and its warnings (never a refusal)."""
+    module = profiles_module()
+    head = module.headline(report)
+    case = report.get("use_case")
+    if case and report.get("family") is None:
+        head = f"use case {case['id']}'s settings for {report['label']} × {report['agent']} (no model profile)"
+    elif case:
+        head += f" with use case {case['id']}"
+    lines = []
+    if not report["enabled"]:
+        lines.append(f"agent-sandbox: note: --llm {name}: {head} is off (--no-llm-profile)")
+    else:
+        text = module.values_text({key: report["values"][key] for key in report["applied"]}) or "nothing left to set"
+        if report["overridden"]:
+            text += "; yours win over its " + module.values_text({key: report["values"][key]
+                                                                  for key in report["overridden"]})
+        bad = report["status"] in module.WARNING_STATUSES
+        lines.append(f"agent-sandbox: {'WARNING: ' if bad else ''}--llm {name}: {head}: {text} (--no-llm-profile "
+                     "switches it off)")
+    lines += [f"agent-sandbox: WARNING: --llm {name}: {report['label']}: {warning}" for warning in report["warnings"]]
+    return [printable(line) for line in lines]
 
 
 def loop_lines(config):
@@ -1724,11 +1996,12 @@ def start_params(a, endpoint):
     return values, loop
 
 
-def effective_params(endpoint, model, override=None):
-    """({key: value}, {forced keys}) for MODEL: the endpoint's every-model values, its model's over them, the start's
-    OVERRIDE (--llm-param: forced) over both."""
+def effective_params(endpoint, model, override=None, profile=True):
+    """({key: value}, {forced keys}) for MODEL: the model profile's (PROFILE, an endpoint selection() marked:
+    profile_params), the endpoint's every-model values, its model's over them, the start's OVERRIDE (--llm-param:
+    forced) over all."""
     params, forced = endpoint.get("params") or {}, endpoint.get("forced") or {}
-    values, strong = {}, set()
+    values, strong = (profile_params(endpoint, model) if profile else {}), set()
     for scope in ("*", model):
         for key, value in (params.get(scope) or {}).items():
             values[key] = value
@@ -1790,27 +2063,38 @@ def proxy_params(a, endpoint, model):
     override, start = start_params(a, endpoint)
     loop = loop_config(endpoint, start)
     names, limited = offered_models(a)
-    presets = {name: family_preset(name) for name in names} if loop["sampling"] else {}
+    # The family preset (the loop guard's sampling layer) and the model profile's parameters over it: the relay's
+    # lowest default (runtime.llm_values), under the endpoint's values and the start's.
+    presets = {name: {**(family_preset(name) if loop["sampling"] else {}), **profile_request(endpoint, name)}
+               for name in names}
     # "models": the only models the relay takes requests for (--llm-models, --llm NAME:MODEL,...), None for any model
-    # of the server; "families": the family presets for a model of the server that was not listed at the start.
+    # of the server; "families": the family presets for a model of the server that was not listed at the start;
+    # "mcp": the start's MCP servers by name (runtime.llm_resource_hint finds one of their tools as its example);
+    # "keepalive": the seconds of silence after which the relay keeps a streamed answer alive (KEEPALIVE: a model
+    # server of your own, which sends nothing while it reads a long prompt).
+    servers = [name for name in dict.fromkeys(getattr(a, "mcp", None) or []) if isinstance(name, str)]
+    # "tools": Claude Code's own tools the relay keeps in its requests (--llm-tools; none: every tool).
+    keep = kept_tools(start_tools(a)[0]) if runs_claude(a) else None
     return {"kind": endpoint["kind"], "params": endpoint.get("params") or {}, "forced": endpoint.get("forced") or {},
+            **({"mcp": servers} if servers else {}), **({"tools": {"keep": keep}} if keep is not None else {}),
+            **({"keepalive": KEEPALIVE} if local_model_server(endpoint) else {}),
             "override": override, "sent": {api: list(keys) for api, keys in SENT[endpoint["kind"]].items()},
             "nested": {api: list(keys) for api, keys in NESTED.get(endpoint["kind"], {}).items()},
             "presets": {name: values for name, values in presets.items() if values}, "loop": loop,
             "models": names if limited else None,
-            "families": [[pattern.pattern, values] for pattern, values in FAMILY_PRESETS] if loop["sampling"] else []}
+            "families": profile_families(endpoint, loop["sampling"]) +
+                        ([[pattern.pattern, values] for pattern, values in FAMILY_PRESETS] if loop["sampling"] else [])}
 
 
-def agent_context(endpoint, model, a=None, reported=None, loaded=None):
+def agent_context(endpoint, model, a=None, reported=None, loaded=None, served=None):
     """The context window the agents are told for MODEL: num_ctx of its parameters (the start's first), else the
     window the server has the model LOADED with, else what it reports (REPORTED). With the loop guard's context layer:
-    a warning when the agent would be told more than the server keeps (it cuts the conversation then)."""
+    a warning when the agent would be told more than the server keeps (it cuts the conversation then) - not when
+    the window Ollama SERVES the model with is known: start_context tells the agent that, and says so."""
     start = start_params(a, endpoint) if a is not None else ({}, {})
-    values, _ = effective_params(endpoint, model, start[0])
-    chosen = values.get("num_ctx")
-    told = chosen or loaded or reported
+    told, chosen = told_context(endpoint, model, start[0], reported, loaded)
     keeps = loaded or (reported if chosen else None)
-    if told and keeps and told > keeps and loop_config(endpoint, start[1])["context"]:
+    if told and keeps and told > keeps and not served and loop_config(endpoint, start[1])["context"]:
         print(f"agent-sandbox: WARNING: --llm {endpoint['name']}: the agent is told a context window of {told} "
               f"tokens{' (num_ctx)' if chosen else ''}, but the server {'has' if loaded else 'reports'} {keeps} for "
               f"{model}{' loaded' if loaded else ''}: it would cut the conversation, which makes models repeat "
@@ -1840,6 +2124,233 @@ def loaded_context(endpoint, model, get=None, client=None, behind_vpn=False):
     return None
 
 
+def ollama_served_context(endpoint, model, client=None, get=None, behind_vpn=False, load=True):
+    """(the context window Ollama serves MODEL's agent requests with, how it was learnt: "loaded", "modelfile" or
+    "loaded now"), or (None, None). Its OpenAI-compatible API takes no num_ctx: a request runs with the window the
+    model is loaded with (/api/ps context_length), else the one Ollama loads it with at that request - the
+    Modelfile's num_ctx (/api/show parameters), else the server's OLLAMA_CONTEXT_LENGTH (or its default), which its
+    API does not report: then the model is loaded as the agent's first request would load it (POST /api/generate
+    without a prompt or options; it waits for that request anyway) and /api/ps read - LOAD=False: (None, None) then.
+    Not for another kind, nor from this host for a server behind a VPN. Never raises."""
+    if endpoint.get("kind") != "ollama" or endpoint.get("vpn") or behind_vpn or \
+            os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
+        return None, None
+
+    names = {model} if ":" in model.rsplit("/", 1)[-1] else {model, model + ":latest"}  # /api/ps: llama3:latest
+
+    def running(answer):
+        models = answer.get("models") if isinstance(answer, dict) else None
+        for m in models if isinstance(models, list) else []:
+            if isinstance(m, dict) and m.get("name") in names:
+                return context_value(m.get("context_length"))
+        return None
+    try:
+        client = client or Client(endpoint, get, timeout=LOAD_TIMEOUT)
+        found = running(optional(client.json, "/api/ps", {}))
+        if found:
+            return found, "loaded"
+        try:
+            shown = client.json("/api/show", body={"model": model})
+        except ValueError:
+            shown = None
+        parameters = shown.get("parameters") if isinstance(shown, dict) else None
+        own = re.search(r"^num_ctx\s+(\d{1,9})\s*$", parameters, re.MULTILINE) if isinstance(parameters, str) \
+            else None
+        if own and context_value(int(own.group(1))):
+            return int(own.group(1)), "modelfile"
+        if not load:
+            return None, None
+        client.json("/api/generate", body={"model": model, "stream": False})
+        found = running(optional(client.json, "/api/ps", {}))
+        return (found, "loaded now") if found else (None, None)
+    except Exception as exc:  # noqa: BLE001 - what cannot be learnt leaves the told window
+        LOG.info("llm", f"the window Ollama serves {model} with is not known", exc)
+        return None, None
+
+
+OLLAMA_HOW = {"loaded": "as it is loaded", "modelfile": "its Modelfile's num_ctx", "loaded now": "as it loads it",
+              "default": "as it loads a model that is not loaded"}
+
+
+def served_windows(endpoint, models, client, budget=STATUS_BUDGET):
+    """MODELS (a listing's entries) of an Ollama ENDPOINT with the window Ollama serves each one's OpenAI-compatible
+    requests with, as ollama_served_context learns it but loading nothing: "served_context" (tokens) and
+    "served_how" - "loaded" (/api/ps), "modelfile" (its Modelfile's num_ctx, /api/show), or "default" without a
+    number: the server's OLLAMA_CONTEXT_LENGTH (or its own default), which its API does not report (the start learns
+    it by loading the model). Asked within BUDGET seconds (a model not reached by then is left as it is); never
+    remembered as the model's window (it changes with every load). Another kind's MODELS stay as they are, and so
+    does what cannot be read. Returns MODELS."""
+    if endpoint.get("kind") != "ollama" or not models:
+        return models
+    try:
+        answer = client.json("/api/ps")
+    except Exception as exc:  # noqa: BLE001 - an old or refusing server: the listing as it is
+        LOG.info("llm", f"{endpoint.get('name')}: /api/ps not read for the served windows", exc)
+        return models
+    running = {}
+    for m in (answer.get("models") if isinstance(answer, dict) else None) or []:
+        if isinstance(m, dict) and isinstance(m.get("name"), str) and context_value(m.get("context_length")):
+            running[m["name"]] = m["context_length"]
+    end = time.monotonic() + budget
+    for model in models:
+        if model["name"] in running:
+            model.update(served_context=running[model["name"]], served_how="loaded")
+            continue
+        if time.monotonic() > end:
+            break
+        try:
+            shown = client.json("/api/show", body={"model": model["name"]})
+        except Exception as exc:  # noqa: BLE001 - not known for this one
+            LOG.info("llm", f"{endpoint.get('name')}: /api/show of {model['name']} not read", exc)
+            continue
+        parameters = shown.get("parameters") if isinstance(shown, dict) else None
+        own = re.search(r"^num_ctx\s+(\d{1,9})\s*$", parameters, re.MULTILINE) if isinstance(parameters, str) \
+            else None
+        if own and context_value(int(own.group(1))):
+            model.update(served_context=int(own.group(1)), served_how="modelfile")
+        elif isinstance(shown, dict):
+            model["served_how"] = "default"
+    return models
+
+
+def served_context(a, found, model, load=True):
+    """(the window Ollama serves MODEL with for this start, how it was learnt), or (None, None): ollama_served_context,
+    learnt once per start (kept on A); never by a dry run (no request: the app's previews run one for every change),
+    nor from this host for a server behind a VPN. LOAD=False (the server's other models the agent offers): a model
+    neither loaded nor with a Modelfile num_ctx is not loaded - it gets the window Ollama loaded the start's model
+    with by default ("default"), the one it loads that model with too (a model whose own maximum is smaller is cut
+    to that by Ollama: then less is told than served, never more)."""
+    if found.get("kind") != "ollama" or getattr(a, "dry_run", False):
+        return None, None
+    kept = getattr(a, "_ollama_served", None)
+    if not isinstance(kept, dict) or kept.get("endpoint") != found.get("name"):
+        kept = {"endpoint": found.get("name"), "models": {}, "told": {}}
+        try:
+            a._ollama_served = kept
+        except AttributeError:
+            pass
+    known = kept["models"].get(model)
+    if known and (known[0] or not load or known[2]):
+        return known[:2]
+    served, how = ollama_served_context(found, model, behind_vpn=bool(getattr(a, "vpn", None)), load=load)
+    if how == "loaded now":
+        print(printable(f"agent-sandbox: --llm {found['name']}: Ollama loaded {model} (as the agent's first request "
+                        f"would) to learn the window it serves it with: {served} tokens"), file=sys.stderr)
+    if not served and not load:
+        default = [v[0] for v in kept["models"].values() if v[1] == "loaded now"]
+        served, how = (default[0], "default") if default else (None, None)
+    kept["models"][model] = (served, how, load)
+    return served, how
+
+
+def start_context(a, found, model):
+    """The context window the agent is told for the start's MODEL: agent_context's (your num_ctx, else the profile's
+    at most what the server has loaded or reports, else that), at most the window Ollama serves it with
+    (served_context: its OpenAI-compatible API takes no num_ctx and sandbox-ai's start sends none, so a request runs
+    with the window Ollama loads the model with, and it cuts a longer prompt without a word) - a note says so when
+    that lowers it. None when nothing is known (the agent's own default then). Learnt once per start (kept on A)."""
+    kept = getattr(a, "_ollama_served", None)
+    if found.get("kind") == "ollama" and isinstance(kept, dict) and kept.get("endpoint") == found.get("name") and \
+            model in kept["told"]:
+        return kept["told"][model]
+    behind = bool(getattr(a, "vpn", None))
+    # What the server reports and has loaded before served_context may load the model: what the agent would be told.
+    reported, loaded = context_window(found, model, behind_vpn=behind), loaded_context(found, model, behind_vpn=behind)
+    served, how = served_context(a, found, model)
+    told = context_value(agent_context(found, model, a, reported, loaded, served))
+    kept = getattr(a, "_ollama_served", None)
+    if isinstance(kept, dict) and served:
+        kept["told"][model] = served if not told or told > served else told
+    if not served or (told and told <= served):
+        return told
+    if told and getattr(a, "agent", None) != "hermes":  # Hermes says its own (it refuses less than 64k)
+        print(printable(f"agent-sandbox: note: --llm {found['name']}: Ollama serves {model} with {served} tokens "
+                        f"({OLLAMA_HOW.get(how, how)}), not the {told} the agent would be told, and cuts a longer "
+                        f"prompt without a word: the agent is told {served}. Ollama's OpenAI-compatible API takes no "
+                        "num_ctx; for a larger window set OLLAMA_CONTEXT_LENGTH on the server (and restart it), give "
+                        "the model PARAMETER num_ctx in a Modelfile (ollama create), or load it before the start with "
+                        f"sandbox-ai llm load {found['name']} {model} --context TOKENS (kept while it stays loaded)"),
+              file=sys.stderr)
+    return served
+
+
+def served_limits(a, found, model, contexts):
+    """CONTEXTS ({model: window} of model_limits) with each of the server's other models lowered to the window
+    Ollama serves it with (served_context, without loading it), the start's MODEL learnt first."""
+    if found.get("kind") != "ollama":
+        return contexts
+    start_context(a, found, model)
+    for name in contexts:
+        if name != model:
+            served = served_context(a, found, name, load=False)[0]
+            if served and (not contexts[name] or served < contexts[name]):
+                contexts[name] = served
+    return contexts
+
+
+# What each agent assumes for a model whose context window it is not told (read in the sources of the versions
+# sandbox-ai builds, 2026-11-16): Codex' model_info_from_slug (its fallback for a model it does not know), OpenCode's
+# limit.context 0 (OpenCode 1.19.5 never compacts a model of window 0 on its own; OpenCode 2.2.5 takes 0 too), Qwen
+# Code 0.26.4's tokenLimit (DEFAULT_TOKEN_LIMIT 2e5 for a name its table does not match), Goose 1.57.0's
+# DEFAULT_CONTEXT_LIMIT, nanobot 0.4.0's context_window_tokens, Pi 1.4.0's default (docs/PI_REVIEW.md), Hermes
+# 0.22.5's CONTEXT_PROBE_TIERS (it asks the server, else 256,000 and lower after a refusal), OpenHands' LiteLLM
+# catalog, Letta Code 0.34.36's LOCAL_ENDPOINT_DEFAULT_CONTEXT_WINDOW (also its most: it reads llama.cpp's own
+# /props, nothing of sandbox-ai's). Claude Code's is claude_window_environment's note. {agent: (name, assumption)}
+AGENT_WINDOWS = {
+    "codex": ("Codex", "assumes 272,000 tokens (its fallback for a model it does not know)"),
+    "opencode": ("OpenCode", "takes a window of 0 (none) for it and never compacts the conversation on its own"),
+    "opencode2": ("OpenCode 2", "takes a window of 0 (none) for it"),
+    "qwen": ("Qwen Code", "assumes 200,000 tokens for a model name it does not know"),
+    "goose": ("Goose", "assumes 128,000 tokens for a model name it does not know"),
+    "dsh": ("DSH", "uses its own default (and grew past a window it was told in sandbox-ai's tests)"),
+    "pi": ("Pi", "assumes 128,000 tokens"),
+    "openhands": ("OpenHands", "takes the window from LiteLLM's catalog, which has none for a local model"),
+    "nanobot": ("nanobot", "assumes 200,000 tokens (its contextWindowTokens default)"),
+    "hermes": ("Hermes", "asks the server itself, else assumes 256,000 tokens and lowers it after a refusal"),
+    "letta": ("Letta Code", "assumes 128,000 tokens"),
+}
+LETTA_WINDOW = 128000  # Letta Code's LOCAL_ENDPOINT_DEFAULT_CONTEXT_WINDOW (also the most it takes)
+
+
+def unknown_window_note(a, found, model, context, agent):
+    """At a start with a model server of your own (FOUND) whose window for MODEL is not known (CONTEXT None): a note
+    with what AGENT assumes instead (AGENT_WINDOWS) - it may compact too late (the server refuses or cuts the
+    conversation) or too early - and how to set the window; once per agent and start (kept on A). Nothing is
+    written for the window then: a guess of sandbox-ai's would be as wrong. Letta Code takes no window from
+    sandbox-ai (it reads llama.cpp's /props itself: no note there): for it also a known window under the
+    LETTA_WINDOW it assumes.
+    Claude Code's note is claude_window_environment's; a public service's models the agents' catalogs know."""
+    letta = agent == "letta"
+    if agent not in AGENT_WINDOWS or (context and not (letta and context < LETTA_WINDOW)) or \
+            (letta and found.get("kind") == "llamacpp") or not local_model_server(found):
+        return
+    noted = getattr(a, "_window_noted", None)
+    if not isinstance(noted, set):
+        noted = set()
+        try:
+            a._window_noted = noted
+        except AttributeError:
+            pass
+    if agent in noted:
+        return
+    noted.add(agent)
+    label, assumes = AGENT_WINDOWS[agent]
+    if letta and context:
+        text = (f"{model} has a context window of {context} tokens, but {label} {assumes} for a server that is not "
+                "llama.cpp and has no setting sandbox-ai can give it: it compacts too late, and the server refuses "
+                f"or cuts the conversation. Load the model with {LETTA_WINDOW} tokens or more")
+    elif letta:
+        text = (f"the context window of {model} is not known; {label} {assumes} for a server that is not llama.cpp "
+                "and has no setting sandbox-ai can give it: if the server keeps less, it compacts too late. Load "
+                f"the model with {LETTA_WINDOW} tokens or more")
+    else:
+        text = (f"the context window of {model} is not known (the server does not say it, or is not asked from "
+                f"this host); {label} {assumes}, so it may compact too late (the server refuses or cuts the "
+                f"conversation) or too early. Set the window: sandbox-ai llm set {found['name']} --model {model} "
+                "--param num_ctx=TOKENS (or --llm-param num_ctx=TOKENS for this start)")
+    print(printable(f"agent-sandbox: note: --llm {found['name']}: {text}"), file=sys.stderr)
+
+
 def loop_notes(name, endpoint, given):
     """What `llm set NAME --loop-guard GIVEN` says besides: a layer set while the guard is off acts only once it is
     on; a block count at or below the warn count pauses tool use before the model was ever warned."""
@@ -1862,9 +2373,12 @@ def loop_notes(name, endpoint, given):
 def set_params(args, out=print):
     """sandbox-ai llm set NAME [--model MODEL] [--param K=V]... [--force-param K=V]... [--unset K]... [--reset]
     [--loop-guard on|off|N]: the parameters of one model (every model without --model), under the store's lock."""
-    if not (args.param or args.force_param or args.unset or args.reset or args.loop_guard or args.evict):
-        raise ValueError("llm set: nothing to change (--param, --force-param, --unset, --reset, --loop-guard or "
-                         "--evict)")
+    if not (args.param or args.force_param or args.unset or args.reset or args.loop_guard or args.evict or
+            args.memory is not None):
+        raise ValueError("llm set: nothing to change (--param, --force-param, --unset, --reset, --loop-guard, "
+                         "--evict or --memory)")
+    if args.memory is not None and args.memory != 0 and memory_value(args.memory) is None:
+        raise ValueError(f"--memory: the server's memory in GB, 1 to {MEMORY_MAX_GB} (0 forgets it)")
     scope = args.model or "*"
     if scope != "*" and not MODEL_NAME.fullmatch(scope):
         raise ValueError(f"--model: not a model name: {printable(scope)!r}")
@@ -1902,6 +2416,11 @@ def set_params(args, out=print):
             record["evict"] = "allow"
         elif args.evict == "never":
             record.pop("evict", None)
+        if args.memory is not None:
+            if args.memory:
+                record["memory_gb"] = memory_value(args.memory)
+            else:
+                record.pop("memory_gb", None)
         found = check_record(args.name, record)
         save_store(store)
     for line in describe(found):
@@ -1968,43 +2487,62 @@ def keep_loaded(endpoint, model, a=None, get=None, client=None, behind_vpn=False
             os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
         return None
     try:
-        client = client or Client(endpoint, get, timeout=LOAD_TIMEOUT)
-        native = lmstudio_native(client.json)
-        if not native:
-            return f"LM Studio's /api/v1/models (0.4 or later) does not answer: {model} is left to JIT loading"
-        found = native.get(model)
-        if found is None:
-            return None  # an instance id or a model LM Studio does not list: its own JIT loading
-        instances = [i for i in found.get("loaded_instances") or [] if isinstance(i, dict)]
-        values = effective_params(endpoint, model, start_params(a, endpoint)[0] if a is not None else None)[0]
-        if not instances:
-            status, _ = client.call("/api/v1/models/load", lmstudio_load_body(model, values.get("num_ctx"), values))
-            if status >= 300:
-                return f"LM Studio did not load {model} (HTTP {status}): left to JIT loading"
-            return f"LM Studio loaded {model} for this start (not JIT: Auto-Evict leaves it loaded; unload it in LM " \
-                   "Studio or with lms unload)"
-        if any(instance_kept("lmstudio", i) != "jit" for i in instances):
-            return None  # loaded explicitly (or LM Studio does not say how): left as it is
-        warning = f"WARNING: LM Studio has {model} loaded JIT (idle TTL): {JIT_WARNING}"
-        users = model_users(endpoint, runs, exclude=getattr(a, "run_id", None)).get(model)
-        if users:
-            return f"{warning}. The running sandbox(es) {', '.join(users)} use it, so it is left as it is; " \
-                   f"sandbox-ai llm load {endpoint['name']} {model} --force loads it explicitly"
-        context = values.get("num_ctx") or next((instance_context(i) for i in instances if instance_context(i)), None)
-        for instance in instances:
-            status, _ = client.call("/api/v1/models/unload", {"instance_id": instance.get("id") or model})
-            if status >= 300:
-                return f"{warning}. Its JIT instance did not unload (HTTP {status}): left as it is"
-        status, _ = client.call("/api/v1/models/load", lmstudio_load_body(model, context, values))
-        if status >= 300:
-            return f"{warning}. Its JIT instance was unloaded, but LM Studio did not load {model} explicitly (HTTP " \
-                   f"{status}): the agent's first request loads it JIT again"
-        told = f" (context {context})" if context else ""
-        return f"LM Studio had {model} loaded JIT (Auto-Evict could unload it for another sandbox's model); no other " \
-               f"running sandbox uses it: loaded explicitly for this start{told}, the JIT instance unloaded first, " \
-               "so the model is never in memory twice"
+        # One start at a time per server, from its look at the loaded instances to its load: two starts at once (two
+        # windows, a double click) both found the model not loaded and both loaded it - in memory twice (MODEL:2).
+        with settings_lock(load_lock_path(endpoint), timeout=2 * LOAD_TIMEOUT + UNLOAD_TIMEOUT):
+            return load_ahead(endpoint, model, a, get, client, runs)
     except Exception as exc:  # noqa: BLE001 - never fatal
         return f"LM Studio: {model} not loaded ahead ({printable(exc)[:200]}): left to JIT loading"
+
+
+def load_lock_path(endpoint):
+    """The file whose lock (filelock: FILE.lock) one start holds while it loads a model on ENDPOINT's server (its URL:
+    two endpoints of one server share it)."""
+    digest = hashlib.sha256(str(endpoint.get("url") or endpoint.get("name")).encode("utf-8", "replace")).hexdigest()
+    return ca_dir() / "loading" / digest[:24]
+
+
+def load_ahead(endpoint, model, a, get, client, runs):
+    """keep_loaded's work, under its lock."""
+    client = client or Client(endpoint, get, timeout=LOAD_TIMEOUT)
+    native = lmstudio_native(client.json)
+    if not native:
+        return f"LM Studio's /api/v1/models (0.4 or later) does not answer: {model} is left to JIT loading"
+    found = native.get(model)
+    if found is None:
+        return None  # an instance id or a model LM Studio does not list: its own JIT loading
+    instances = [i for i in found.get("loaded_instances") or [] if isinstance(i, dict)]
+    override = start_params(a, endpoint)[0] if a is not None else None
+    values = effective_params(endpoint, model, override)[0]
+    most = context_value(found.get("max_context_length"))
+    if values.get("num_ctx") and most and "num_ctx" not in effective_params(endpoint, model, override, False)[0]:
+        values["num_ctx"] = min(values["num_ctx"], most)  # the profile's window: at most what the model takes
+    if not instances:
+        status, _, refused = lmstudio_load(client, model, values.get("num_ctx"), values)
+        if status >= 300:
+            return f"LM Studio did not load {model} (HTTP {status}): left to JIT loading"
+        return f"LM Studio loaded {model} for this start (not JIT: Auto-Evict leaves it loaded; unload it in LM " \
+               "Studio or with lms unload)" + (f"; {refused}" if refused else "")
+    if any(instance_kept("lmstudio", i) != "jit" for i in instances):
+        return None  # loaded explicitly (or LM Studio does not say how): left as it is
+    warning = f"WARNING: LM Studio has {model} loaded JIT (idle TTL): {JIT_WARNING}"
+    users = model_users(endpoint, runs, exclude=getattr(a, "run_id", None)).get(model)
+    if users:
+        return f"{warning}. The running sandbox(es) {', '.join(users)} use it, so it is left as it is; " \
+               f"sandbox-ai llm load {endpoint['name']} {model} --force loads it explicitly"
+    context = values.get("num_ctx") or next((instance_context(i) for i in instances if instance_context(i)), None)
+    for instance in instances:
+        status, _ = client.call("/api/v1/models/unload", {"instance_id": instance.get("id") or model})
+        if status >= 300:
+            return f"{warning}. Its JIT instance did not unload (HTTP {status}): left as it is"
+    status, _, refused = lmstudio_load(client, model, context, values)
+    if status >= 300:
+        return f"{warning}. Its JIT instance was unloaded, but LM Studio did not load {model} explicitly (HTTP " \
+               f"{status}): the agent's first request loads it JIT again"
+    told = f" (context {context})" if context else ""
+    return f"LM Studio had {model} loaded JIT (Auto-Evict could unload it for another sandbox's model); no other " \
+           f"running sandbox uses it: loaded explicitly for this start{told}, the JIT instance unloaded first, " \
+           "so the model is never in memory twice" + (f"; {refused}" if refused else "")
 
 
 # --- the models a server has loaded; loading and unloading them (llm loaded, load, unload) --------------------------
@@ -2111,6 +2649,42 @@ def lmstudio_load_body(model, context=None, values=None):
     return {"model": model, **({"context_length": context} if context else {}), "parallel": 1,
             **{key: values[key] for key in ("flash_attention", "offload_kv_cache_to_gpu")
                if isinstance((values or {}).get(key), bool)}}
+
+
+PARALLEL_REFUSED = 'this LM Studio does not know "parallel" (its load endpoint refused it: an older version): ' \
+    "loaded without it, so with LM Studio's default of 4 parallel requests, which keeps no prompt cache for some " \
+    "models (every agent step reads the whole conversation again); update LM Studio to 0.4 or later"
+
+
+def lmstudio_load(client, model, context=None, values=None):
+    """POST /api/v1/models/load (lmstudio_load_body) with CLIENT.call: (status, bytes, note). An LM Studio that does
+    not know "parallel" (a 4xx whose answer names the key; not 401/403, a refused API key) is sent the load once more
+    without it; NOTE then says so (PARALLEL_REFUSED), else None. Any other refusal is the answer as it is."""
+    body = lmstudio_load_body(model, context, values)
+    status, data = client.call("/api/v1/models/load", body)
+    if 400 <= status < 500 and status not in (401, 403) and isinstance(data, bytes) and \
+            b"parallel" in data[:65536].lower():
+        body.pop("parallel", None)
+        status, data = client.call("/api/v1/models/load", body)
+        return status, data, PARALLEL_REFUSED
+    return status, data, None
+
+
+def lmstudio_load_json(client, model, context=None, values=None):
+    """lmstudio_load for `llm load`: (the JSON answer, note); ValueError as Client.json says it (never a secret)."""
+    where = f"{client.endpoint['url']}/api/v1/models/load"
+    try:
+        status, data, refused = lmstudio_load(client, model, context, values)
+    except OSError as exc:
+        raise ValueError(f"{where}: {printable(getattr(exc, 'reason', exc))}") from None
+    if status in (401, 403):
+        raise ValueError(f"{where}: the server refused the key (HTTP {status})")
+    if status != 200:
+        raise ValueError(f"{where}: HTTP {status}")
+    try:
+        return json.loads(data), refused
+    except (ValueError, RecursionError):
+        raise ValueError(f"{where}: not JSON") from None
 
 
 def loaded_raw(kind, fetch):
@@ -2330,11 +2904,13 @@ def load_model(endpoint, model, client, context=None, ttl=None, force=False, run
         for item in mine:  # JIT: unloaded first, never two copies in memory
             client.json("/api/v1/models/unload", body={"instance_id": item["instance"]})
             out(f"unloaded the JIT instance {item['instance']} (LM Studio may unload it: Auto-Evict)")
-        answer = client.json("/api/v1/models/load", body=lmstudio_load_body(model, context, values))
+        answer, refused = lmstudio_load_json(client, model, context, values)
         instance = answer.get("instance_id") if isinstance(answer, dict) else None
         out(printable(f"loaded {model} explicitly" + (f" as {instance}" if isinstance(instance, str) else "")
                       + (f", context {context}" if context else "") + ": it stays until it is unloaded (Auto-Evict "
                       "leaves it)"))
+        if refused:
+            out(printable(f"note: {refused}"))
         return 0
     if kind == "ollama":
         tags = [m.get("name") for m in client.json("/api/tags").get("models") or [] if isinstance(m, dict)]
@@ -2632,6 +3208,17 @@ LOOP_TEXT = """# Working without loops (sandbox-ai, local model)
 - Never repeat commands with side effects (git commit, push, install, delete, migrate, deploy).
 - Do not widen the task silently.
 """
+# The loop guard's progress_notes layer (LOOP_DEFAULTS): the local-model research's round 5 had Ornith-1.5-35B in
+# Claude Code finish its forced-compaction task only with this line (runs/c11_compact-notes__claude__orn35__m1).
+PROGRESS_TEXT = """
+## Long tasks
+- Keep PROGRESS.md in the working folder: after every finished step write what is done and what is next.
+- After an interruption or a compaction of the conversation, read PROGRESS.md first and go on from there."""
+
+
+def loop_text(loop):
+    """The loop guard's instructions for LOOP (loop_config): LOOP_TEXT, with the progress_notes line when it is on."""
+    return LOOP_TEXT + PROGRESS_TEXT if (loop or {}).get("progress_notes") else LOOP_TEXT
 
 
 def parse_models(value):
@@ -2670,14 +3257,325 @@ def selection(a, path=None):
         return cached[1]
     name, model = parse_choice(a.llm)
     found = endpoint(name, path)
+    case = getattr(a, "use_case", None)
+    report = None
+    if case:  # --use-case: picks the model when --llm names none (yours wins), its settings go over the profile
+        model, report = use_case_start(a, found, model)
     model = model or found["model"] or (found["models"][0] if len(found["models"]) == 1 else None)
+    if report is not None and not report["picked"] and not report["named"] and model:
+        # The server's default is not a choice for the use case: one it marks unsafe is never started on its own.
+        marked = usecases_module().unsafe_for(usecases_module().use_case(usecase_table(), report["id"]), model)
+        if marked is not None:
+            raise ValueError(f"--llm {name}: the use case {report['id']} marks {model} unsafe ({marked['why']}; "
+                             f"{marked['evidence']}): choose another model, or name it yourself to use it anyway: "
+                             f"--llm {name}:{model}")
+        report["note"] = "; ".join(filter(None, [report["note"], f"the server's default model {model} is used"]))
     if not model:
         listed = f"; listed: {', '.join(found['models'][:10])}" if found["models"] else \
             f"; see: sandbox-ai llm models {name}"
         raise ValueError(f"--llm {name}: name a model as --llm {name}:MODEL (or add the endpoint with --model)"
                          + listed)
+    if getattr(a, "agent", None) and not getattr(a, "no_llm_profile", False):
+        # The model profile of this agent and model applies to this start (model_profile): the mark, on a copy; with
+        # --use-case the use case's settings for the pair too.
+        found = {**found, "llm_profile": {"agent": a.agent, "model": model, **({"use_case": report["id"]}
+                                                                               if report else {})}}
+    if report is not None:
+        report["model"] = model
+        a._llm_use_case = report
     a._llm = (a.llm, (found, model))
     return found, model
+
+
+# --- model and harness per use case (model_usecases.py, model_usecases.json) ---------------------------------------
+#
+# Per use case the local-model research's ranked choices: model pattern, harness, settings over the model's profile,
+# why, known failures, evidence (model_usecases.json; round 5 fills it in). `llm recommend` picks from the models the
+# servers have now - what is loaded, what fits their memory (llm set --memory; a server on this host's loopback: this
+# host's) - the best tested choice per use case, else the nearest. A start with --use-case NAME lets it pick the model
+# of --llm's server for the start's agent (a model --llm names wins) and puts the use case's settings for that model
+# in that agent over the model's profile (pair_profile): the profile < the use case < the endpoint's values (llm set)
+# < --llm-param < explicit options; --no-llm-profile drops both, the choice stays.
+_usecases_module = None
+
+
+def usecases_module():
+    """model_usecases.py, loaded once."""
+    global _usecases_module
+    with LOADING:
+        if _usecases_module is None:
+            spec = importlib.util.spec_from_file_location("sandbox_model_usecases_llm", HERE / "model_usecases.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _usecases_module = module
+    return _usecases_module
+
+
+def usecase_table():
+    """The use cases (model_usecases.json), checked with this module's rules; ValueError when they cannot be used."""
+    try:
+        return usecases_module().load(None, profile_param, loop_setting)
+    except OSError as exc:
+        raise ValueError(f"the model use cases (model_usecases.json beside sandbox-ai) cannot be read: "
+                         f"{printable(exc)}") from None
+
+
+def host_memory():
+    """This host's memory in bytes (what a server on its loopback has), or None."""
+    try:
+        pages, size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and size > 0:
+            return pages * size
+    except (ValueError, OSError, AttributeError):
+        pass
+    if sys.platform == "darwin":
+        import subprocess
+        try:
+            return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+                                      timeout=5).stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return None
+
+
+def memory_of(endpoint):
+    """(bytes, where from) of ENDPOINT's memory: yours (llm set --memory GB: "llm set"), else this host's for a server
+    on its loopback ("this host"), else (None, None): not known (the fit check says how to tell it)."""
+    value = memory_value(endpoint.get("memory_gb")) if endpoint.get("memory_gb") is not None else None
+    if value:
+        return int(value * 1e9), "llm set"
+    if (endpoint.get("parsed") or {}).get("loopback"):
+        found = host_memory()
+        if found:
+            return found, "this host"
+    return None, None
+
+
+def usecase_server(endpoint, models, answered=True, error=None):
+    """ENDPOINT with MODELS (`llm models`' entries, or names) as model_usecases.recommend takes a server."""
+    return {"name": endpoint["name"], "memory_bytes": memory_of(endpoint)[0], "answered": answered, "error": error,
+            "models": [m for m in models if not isinstance(m, dict) or chat_model(m)]}
+
+
+def server_listing(endpoint, get=None, timeout=STATUS_TIMEOUT):
+    """(models, answered, error) of ENDPOINT now - asked through its VPN as `llm models` asks, and remembered -, or
+    its remembered names when it does not answer (answered False, why)."""
+    try:
+        with through_vpn(endpoint) as tunnel:
+            client = VPNClient(endpoint, tunnel, get, timeout=timeout) if tunnel else \
+                Client(endpoint, get, timeout=timeout)
+            return endpoint_models(endpoint, get, client=client), True, None
+    except Exception as exc:  # noqa: BLE001 - not answered, whatever the reason: the remembered names
+        LOG.info("llm", f"the models of {endpoint.get('name')} were not listed: the remembered ones count", exc)
+        return list(endpoint.get("models") or []), False, printable(str(exc) or type(exc).__name__)[:300]
+
+
+def use_case_models(a, found):
+    """The models of --llm's server for --use-case: what it lists now (sizes, what is loaded, what reads images; kept
+    for the start as server_models keeps them), else the remembered names (a dry run asks nothing, nor a start whose
+    server is behind a VPN or with SANDBOX_AI_LLM_NO_CONTEXT_FETCH=1)."""
+    if found.get("vpn") or getattr(a, "vpn", None) or getattr(a, "dry_run", False) or \
+            os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1":
+        return list(found.get("models") or []), "remembered"
+    try:
+        models = endpoint_models(found, client=Client(found, timeout=CONTEXT_TIMEOUT))
+    except Exception as exc:  # noqa: BLE001 - the remembered names then
+        LOG.info("llm", f"the models of {found.get('name')} were not listed for --use-case: the remembered ones", exc)
+        return list(found.get("models") or []), "remembered"
+    contexts = {**{name: value for name, value in (found.get("contexts") or {}).items() if context_value(value)},
+                **{m["name"]: m["context"] for m in models if context_value(m.get("context"))}}
+    try:  # what server_models would ask again: the same listing
+        a._llm_server_models = (found["name"], ([m["name"] for m in models if chat_model(m)][:OFFER_LIMIT], contexts,
+                                                "server"))
+    except AttributeError:
+        pass
+    return models, "server"
+
+
+def use_case_start(a, found, named):
+    """(model, report) of --use-case at a start with --llm's server FOUND: NAMED (the model --llm names) stays,
+    with the use case's settings where it has them for that model in the start's agent; else the use case picks
+    (model_usecases.recommend for the agent: its own harness first, what fits). REPORT {id, label, status, picked,
+    named, choice, settings, note, listing, unknown}; ValueError for a use case the table does not have."""
+    module = usecases_module()
+    table = usecase_table()
+    entry = module.use_case(table, a.use_case)
+    agent = getattr(a, "agent", None)
+    report = {"id": entry["id"], "label": entry["label"], "status": module.status(entry), "picked": False,
+              "named": bool(named), "choice": None, "settings": {}, "note": "", "listing": None,
+              "unknown": list(entry.get("unknown") or []), "unsafe": None, "unsafe_pairs": []}
+    if named:
+        marked = module.unsafe_for(entry, named)
+        if marked is not None:  # yours: it starts (you decide), said with why
+            report["unsafe"] = marked["why"]
+        found_rec = module.settings_for(table, entry["id"], named, agent) if agent else None
+        if found_rec is not None:
+            report["settings"] = module._settings(found_rec)
+            report["note"] = f"{named} as you named it; the use case's settings for it in " \
+                             f"{module.harness_name(agent)} apply (rank {found_rec['rank']})"
+        else:
+            report["note"] = f"{named} as you named it; the use case's settings were not measured for this model in " \
+                             f"{module.harness_name(agent)}: the model's profile applies"
+        return named, report
+    models, report["listing"] = use_case_models(a, found)
+    result = module.recommend(table, [usecase_server(found, models)], entry["id"], agent, profile_table())
+    choice = result["choice"]
+    report["unsafe_pairs"] = [{"model": pair["model"], "why": pair["unsafe"]} for pair in result.get("pairs") or []
+                              if pair.get("unsafe")]
+    if choice is None:
+        report["note"] = f"nothing of the use case's table is on {found['name']}, and no model there to go by"
+        if report["unsafe_pairs"]:
+            report["note"] += " but those it marks unsafe (" + ", ".join(
+                pair["model"] for pair in report["unsafe_pairs"]) + ")"
+        return None, report
+    report.update(picked=True, choice=choice)
+    if choice["source"] == "table" and choice["measured_in"] == agent:
+        report["settings"] = dict(choice["settings"])
+    report["note"] = choice["note"]
+    if report["listing"] == "remembered":
+        report["note"] = "; ".join(filter(None, [report["note"], "chosen from the remembered models (the server was "
+                                                 "not asked: what is loaded and what fits not known)"]))
+    return choice["model"], report
+
+
+def pinned_argv(a, argv):
+    """ARGV of a start whose --use-case picked the model of --llm NAME, with that model named (--llm NAME:MODEL): a
+    session keeps the options it was started with, and its later runs (the supervisor's, a restart, a resume) then
+    work with the same model, whatever the server has loaded or lists by then. ARGV as it is otherwise."""
+    report = getattr(a, "_llm_use_case", None)
+    if not report or not report.get("picked") or not report.get("model"):
+        return list(argv)
+    name, model = parse_choice(a.llm)
+    if model:
+        return list(argv)
+    pinned, found, index = [], False, 0
+    words = list(argv)
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            pinned += words[index:]
+            break
+        if word in ("--llm", "-lm") and index + 1 < len(words) and words[index + 1] == name:
+            pinned += [word, f"{name}:{report['model']}"]
+            index += 2
+            found = True
+            continue
+        if word in (f"--llm={name}", f"-lm={name}"):
+            pinned.append(f"{word}:{report['model']}")
+            found = True
+        else:
+            pinned.append(word)
+        index += 1
+    return pinned if found else list(argv)
+
+
+def use_case_lines(report, name):
+    """The start's lines of --use-case's REPORT (use_case_start) for the endpoint NAME: what it chose and why, its
+    note, and that the use case is not tested where it is not."""
+    if not report:
+        return []
+    head = f"agent-sandbox: --llm {name}: use case {report['id']} ({report['label']}, {report['status']})"
+    choice = report["choice"]
+    lines = []
+    if choice is not None:
+        lines.append(f"{head}: {usecases_module().choice_line(choice)}: {choice['why']}")
+    else:
+        lines.append(f"{head}: {report.get('model') or 'no model'}")
+    if report.get("unsafe"):
+        lines.append(f"agent-sandbox: warning: --llm {name}: use case {report['id']}: {report.get('model')} is "
+                     f"marked unsafe for it ({report['unsafe']}): started because you named it")
+    if report["note"]:
+        lines.append(f"agent-sandbox: note: --llm {name}: use case {report['id']}: {report['note']}")
+    if report["status"] == "not tested":
+        lines.append(f"agent-sandbox: note: --llm {name}: use case {report['id']} is not tested yet"
+                     + (f" ({report['unknown'][0]})" if report["unknown"] else ""))
+    return [printable(line) for line in lines]
+
+
+def load_hosts_module():
+    spec = importlib.util.spec_from_file_location("sandbox_hosts_llm", HERE / "hosts.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def without_option(argv, option):
+    """ARGV without OPTION and its value (OPTION VALUE or OPTION=VALUE)."""
+    found, index = [], 0
+    while index < len(argv):
+        if argv[index] == option:
+            index += 2
+            continue
+        if not argv[index].startswith(option + "="):
+            found.append(argv[index])
+        index += 1
+    return found
+
+
+def recommend(args, argv, out=print, get=None):
+    """sandbox-ai llm recommend [--use-case NAME] [--server NAME] [--agent AGENT] [--host H] [--json]: from the models
+    the servers have now (llm models: what is loaded, what fits their memory) the best tested choice per use case of
+    the local-model research, else the nearest, with why; --host H: on that host of sandbox-ai hosts (over SSH)."""
+    if args.host and args.host != "local":
+        status, stdout, stderr = load_hosts_module().run(args.host, ["llm", "recommend",
+                                                                     *without_option(argv[1:], "--host")],
+                                                         timeout=120)
+        if stdout:
+            out(stdout.rstrip("\n"))
+        if stderr:
+            print(stderr.rstrip("\n"), file=sys.stderr)
+        return status
+    module = usecases_module()
+    table = usecase_table()
+    word = getattr(args, "use_case_word", None)
+    if word:
+        if args.use_case and module.use_case(table, args.use_case)["id"] != module.use_case(table, word)["id"]:
+            raise ValueError(f"two use cases: {word} and --use-case {args.use_case} (name one)")
+        args.use_case = args.use_case or word
+    if args.use_case:
+        module.use_case(table, args.use_case)  # an unknown one is refused before any server is asked
+    store = load_store()
+    names = [args.server] if args.server else sorted(store["endpoints"])
+    found_ones = []
+    for name in names:
+        try:
+            found_ones.append(endpoint(name))
+        except ValueError as exc:
+            if args.server:
+                raise
+            print(printable(f"sandbox-ai llm: {name}: unusable ({exc})"), file=sys.stderr)
+    # Asked at once (a server that does not answer costs its time limit; one after the other they added up) - those
+    # behind a VPN one after the other, each through its own tunnel as `llm models` asks.
+    import concurrent.futures
+    direct = [found for found in found_ones if not found.get("vpn")]
+    listings = {}
+    if direct:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(direct))) as pool:
+            listings.update(zip((found["name"] for found in direct),
+                                pool.map(lambda found: server_listing(found, get), direct)))
+    servers = []
+    for found in found_ones:
+        models, answered, error = listings.get(found["name"]) or server_listing(found, get)
+        servers.append(usecase_server(found, models, answered, error))
+    profiles = profile_table()
+    if args.use_case:
+        found = module.recommend(table, servers, args.use_case, args.agent, profiles)
+        for line in [json.dumps(found, indent=2)] if args.json else module.lines(found):
+            out(printable(line) if not args.json else line)
+    else:
+        every = module.recommend_all(table, servers, args.agent, profiles)
+        if args.json:
+            out(json.dumps({"schema": table["schema"], "use_cases": every}, indent=2))
+        else:
+            for line in module.table_lines(every):
+                out(printable(line))
+            out("Why, the evidence and the settings: sandbox-ai llm recommend --use-case NAME")
+    if not servers and not args.json:
+        out("no LLM servers: the table's choices only (add one with: sandbox-ai llm add NAME --kind KIND --url URL)")
+    for server in [] if args.json or args.use_case else servers:
+        if not server["answered"]:
+            out(printable(f"{server['name']} did not answer ({server['error']}): its remembered models were used"))
+    return 0
 
 
 # --- the server's other models in the agent (--llm-models) ----------------------------------------------------------
@@ -2724,18 +3622,25 @@ def server_models(a, found):
     """([models], {model: context window}, source) of the server FOUND for this start, read once: what it lists now
     (asked at the start, CONTEXT_TIMEOUT; remembered for later starts as `llm models` does), else what was
     remembered ("remembered"). Not asked from this host for a server behind a VPN (or with
-    SANDBOX_AI_LLM_NO_CONTEXT_FETCH=1). Embedding models are left out. Never raises."""
+    SANDBOX_AI_LLM_NO_CONTEXT_FETCH=1), nor by a dry run (no DNS, no key read, no request: the app's previews run
+    one for every change; what `llm add` and `llm models` remembered is offered then). Embedding models are left
+    out. Never raises."""
     cached = getattr(a, "_llm_server_models", None)
     if cached is not None and cached[0] == found["name"]:
         return cached[1]
     names, source = list(found.get("models") or []), "remembered"
     contexts = {name: value for name, value in (found.get("contexts") or {}).items() if context_value(value)}
-    if not (found.get("vpn") or getattr(a, "vpn", None) or os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1"):
+    if not (found.get("vpn") or getattr(a, "vpn", None) or getattr(a, "dry_run", False)
+            or os.environ.get("SANDBOX_AI_LLM_NO_CONTEXT_FETCH") == "1"):
         try:
             models = endpoint_models(found, client=Client(found, timeout=CONTEXT_TIMEOUT))
             names = [m["name"] for m in models if chat_model(m)]
             contexts.update({m["name"]: m["context"] for m in models if context_value(m.get("context"))})
             source = "server"
+            try:
+                a._llm_server_vision = (found["name"], set(reads_images(models)))
+            except AttributeError:
+                pass
         except Exception as exc:  # noqa: BLE001 - the remembered list then
             LOG.info("llm", f"the models of {found.get('name')} were not listed at the start: the remembered ones "
                             "are offered", exc)
@@ -2745,6 +3650,16 @@ def server_models(a, found):
     except AttributeError:
         pass
     return result
+
+
+def vision_models(a, found):
+    """{model} of the server FOUND that read images: what its listing said at this start (server_models), else what
+    was remembered with its models."""
+    server_models(a, found)
+    seen = getattr(a, "_llm_server_vision", None)
+    if seen is not None and seen[0] == found["name"]:
+        return set(seen[1])
+    return set(found.get("vision") or [])
 
 
 def offered_models(a):
@@ -2761,6 +3676,79 @@ def offered_models(a):
     return list(dict.fromkeys([model, *server_models(a, found)[0]]))[:OFFER_LIMIT], False
 
 
+# --- Claude Code's tools for a local model (--llm-tools) ---------------------------------------------------------
+#
+# Claude Code 2.1.325 sends 21 tools with every request, 58,660 characters of JSON (~10k tokens; the local-model
+# research's round 2). In every Claude Code run of rounds 1-3 the local models called Bash (1,977 times), Read (558),
+# Edit (195), Write (27), the MCP servers' tools and Claude Code's MCP resource tools - never Agent, Cron*,
+# EnterWorktree/ExitWorktree, ListAgents, Monitor, NotebookEdit, ReportFindings, ScheduleWakeup, SendMessage, Skill,
+# TaskStop, WebFetch, WebSearch or Workflow; and Workflow's schema (a property without a type) makes Seed-OSS-36B's
+# chat template refuse every request (round 3). So the connection proxy leaves out of Claude Code's requests to the
+# --llm server (runtime.llm_hide_tools) every tool but these and the MCP servers' (mcp__SERVER__TOOL): "core", the
+# default. --llm-tools all keeps every tool; core,TOOL,... adds some; TOOL,TOOL,... names the built-in ones to keep
+# exactly (the MCP tools stay always). A model profile may say the same ("tools"); the start's option wins. A call of
+# a tool that was left out reaches Claude Code under a name it does not know, so that it answers with an error, which
+# the proxy then gives sandbox-ai's own words (runtime.llm_hidden_results).
+CLAUDE_CORE_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep", "TodoWrite", "ListMcpResourcesTool",
+                     "ReadMcpResourceTool", "ReadMcpResourceDirTool")
+TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+TOOLS_MAX = 64
+
+
+def parse_tools(value, where="--llm-tools"):
+    """None (all: every tool as Claude Code sends it), "core" (the default: VALUE None) or [names] ("core" among them
+    adds the core tools) of --llm-tools all|core|TOOL[,TOOL...] or a profile's "tools" (that text, or a list)."""
+    if value is None:
+        return "core"
+    listed = [str(item).strip() for item in value] if isinstance(value, list) else str(value).split(",")
+    listed = [item.strip() for item in listed]
+    if listed == ["all"]:
+        return None
+    if listed == ["core"]:
+        return "core"
+    if not listed or len(listed) > TOOLS_MAX or "all" in listed or \
+            not all(item == "core" or TOOL_NAME.fullmatch(item) for item in listed):
+        raise ValueError(f"{where} expects all, core or TOOL[,TOOL...] (Claude Code's tool names, such as "
+                         f"core,WebFetch or Bash,Read,Edit; at most {TOOLS_MAX}): {printable(value)!r}")
+    return list(dict.fromkeys(listed))
+
+
+def kept_tools(tools):
+    """The names of Claude Code's own tools the proxy keeps for TOOLS (parse_tools'), None for all of them."""
+    if tools is None:
+        return None
+    if tools == "core":
+        return list(CLAUDE_CORE_TOOLS)
+    found = []
+    for name in tools:
+        found += list(CLAUDE_CORE_TOOLS) if name == "core" else [name]
+    return list(dict.fromkeys(found))
+
+
+def start_tools(a):
+    """(parse_tools' value, where it comes from) for this start: --llm-tools ("--llm-tools"), else the model
+    profile's "tools" of the model in Claude Code ("profile"; not with --no-llm-profile), else core ("default")."""
+    given = getattr(a, "llm_tools", None)
+    if given is not None:
+        return parse_tools(given), "--llm-tools"
+    found, model = selection(a)
+    marked = found.get("llm_profile")
+    profile = pair_profile(model, "claude", marked.get("use_case"), profile_table()) if marked else None
+    if profile is not None and profile.get("tools") is not None:
+        return parse_tools(profile["tools"], f"the model profile {profile['id']}: tools"), "profile"
+    return "core", "default"
+
+
+def runs_claude(a):
+    """Whether Claude Code runs in this start: its agent or one --with."""
+    return "claude" in [getattr(a, "agent", None), *(getattr(a, "companions", None) or [])]
+
+
+def tools_text(tools):
+    """parse_tools' value in words: all, core, core,WebFetch."""
+    return "all" if tools is None else tools if isinstance(tools, str) else ",".join(tools)
+
+
 def model_limits(a, found, names):
     """({model: context window}, {model: max_tokens}) of the offered NAMES that are known: each model's num_ctx (the
     start's --llm-param first), else what the server lists for it (or was remembered); max_tokens the ceiling of
@@ -2770,10 +3758,10 @@ def model_limits(a, found, names):
     contexts, outputs = {}, {}
     for name in names:
         values = effective_params(found, name, override)[0]
-        contexts[name] = context_value(values.get("num_ctx")) or context_value(reported.get(name))
+        contexts[name] = context_value(told_context(found, name, override, context_value(reported.get(name)))[0])
         if values.get("max_tokens"):
             outputs[name] = values["max_tokens"]
-    return contexts, outputs
+    return served_limits(a, found, selection(a)[1], contexts), outputs
 
 
 def profile_slug(model, taken=()):
@@ -2787,6 +3775,7 @@ def profile_slug(model, taken=()):
 
 SWITCHING = {
     "opencode": "in OpenCode with /models ({model} stays the default)",
+    "opencode2": "in OpenCode 2 with /models ({model} stays the default)",
     "qwen": "in Qwen Code with /model",
     "hermes": "in Hermes with /model (it lists the server's models itself)",
     "goose": "in Goose with /model MODEL-ID (its context limit stays the one of {model})",
@@ -2799,9 +3788,25 @@ SWITCHING = {
 }
 
 
+# The agents that are given only the start's model (their configuration names that one: pi_llm, letta_model,
+# nanobot_config, openhands_llm), whatever --llm-models says: SWITCHING has no way for them yet.
+ONE_MODEL = tuple(agent for agent in AGENTS if agent not in SWITCHING)
+
+
 def switch_note(a):
     """The start's note on the server's other models: how many the agent offers and how it switches to them, that a
-    model the server has not loaded waits for its loading, and what keeps which model loaded. None with one model."""
+    model the server has not loaded waits for its loading, and what keeps which model loaded. None with one model.
+    An agent whose switching is not mapped yet (ONE_MODEL: the agents of 0.1.97 but OpenCode 2) is given the start's
+    model only: said when --llm-models names others."""
+    if a.agent not in SWITCHING:
+        offer = parse_offer(getattr(a, "llm_models", None))
+        found, model = selection(a)
+        if offer is not None and any(name != model for name in offer):
+            title = {"pi": "Pi", "letta": "Letta Code", "nanobot": "nanobot", "openhands": "OpenHands"}.get(
+                a.agent, a.agent)
+            return (f"--llm-models: {title} is given only the start's model {model} (sandbox-ai sets no other model "
+                    f"of {found['name']} in it yet); another one: --llm {found['name']}:MODEL")
+        return None
     found, model = selection(a)
     names, limited = offered_models(a)
     if len(names) < 2:
@@ -2904,14 +3909,25 @@ def validate(a, proxy_enabled, loopback_reachable, within_ceiling):
         raise ValueError(f"--llm {printable(a.llm)} names its models, and so does --llm-models: name them in one "
                          "place (--llm NAME:MODEL --llm-models MODEL,MODEL...)")
     override, start = start_params(a, found)  # a parameter the kind does not take stops the start here
+    tools, source = start_tools(a)  # an --llm-tools (or a profile's tools) that is no list of tools stops it here
+    if runs_claude(a) and tools is not None:
+        print(printable(f"agent-sandbox: note: --llm {found['name']}: Claude Code's tools that local models do not "
+                        f"use are left out of its requests (--llm-tools {tools_text(tools)}"
+                        f"{' from the model profile' if source == 'profile' else ''}: it keeps "
+                        f"{', '.join(kept_tools(tools))} and every MCP tool; --llm-tools all keeps every tool)"),
+              file=sys.stderr)
+    elif getattr(a, "llm_tools", None) is not None and not runs_claude(a):
+        print("agent-sandbox: note: --llm-tools chooses Claude Code's tools; this start runs no Claude Code",
+              file=sys.stderr)
     values = effective_params(found, model, override)[0]
     loop = loop_config(found, start)
-    if (any(key != "num_ctx" for key in values) or loop["warn"] or loop["block"] or loop["text"]) and \
+    guarded = loop["warn"] or loop["block"] or loop["failures"] or loop["text"]
+    if (any(key != "num_ctx" for key in values) or guarded) and \
             (not proxy_enabled or any(host_matches(parsed["host"], pattern) for pattern in a.no_inspect)):
         print(f"agent-sandbox: note: --llm {found['name']}: the sampling parameters and the loop guard are applied by "
               "the connection proxy, which does not see this server's requests here (--no-proxy or --no-inspect): "
               "only num_ctx and max_tokens reach the agent's configuration", file=sys.stderr)
-    hint = modelfile_hint(found, model, values)
+    hint = modelfile_hint(found, model, effective_params(found, model, override, profile=False)[0])
     if hint:
         print(printable(f"agent-sandbox: note: --llm {found['name']}: {hint}"), file=sys.stderr)
     if not parsed["address"] and not parsed["loopback"] and not within_ceiling(a, host=parsed["host"]):
@@ -2924,6 +3940,11 @@ def validate(a, proxy_enabled, loopback_reachable, within_ceiling):
     note = switch_note(a)
     if note:
         print(printable(f"agent-sandbox: note: {note}"), file=sys.stderr)
+    for line in use_case_lines(getattr(a, "_llm_use_case", None), found["name"]):
+        print(line, file=sys.stderr)
+    report = profile_report(a, found, model)
+    for line in profile_lines(report, found["name"]) if report else []:
+        print(line, file=sys.stderr)
     return found, model
 
 
@@ -2960,27 +3981,52 @@ def resolved_network(a, hosts, resolve_names):
     return pins
 
 
-def proxy_entry(a, get=None):
+def title_of(name):
+    """The session title the relay answers OpenCode's title request with: NAME (the start's, as sandbox-ai list shows
+    it) printable on one line, at most TITLE_LIMIT characters (OpenCode cuts a title there), or None."""
+    text = "".join(c for c in str(name or "") if c.isprintable()).strip()[:TITLE_LIMIT].strip()
+    return text or None
+
+
+def proxy_entry(a, get=None, title=None):
     """proxy.json's "llm": where the proxy swaps the placeholder for the key (and adds the header secrets), and the
-    endpoint's own CA. The values live only there, in the proxy's directory the agent cannot read."""
+    endpoint's own CA. The values live only there, in the proxy's directory the agent cannot read. TITLE: the name
+    the start runs under, OpenCode's session title (runtime.llm_title_request; none: OpenCode asks the model)."""
     found, model = selection(a)
     parsed = found["parsed"]
     key, headers = secret_values(found, get)
+    title = title_of(title)
     return [{"name": found["name"], "scheme": parsed["scheme"], "host": parsed["host"], "port": parsed["port"],
+             **({"title": title} if title else {}),
              "addresses": list(getattr(a, "llm_addresses", []) or ([parsed["address"]] if parsed["address"] else [])),
              "prefix": parsed["prefix"], "placeholder": placeholder_for(a, found), "key": key,
              "headers": [[name, value] for name, value in headers], "ca": ca_text(found),
              **proxy_params(a, found, model)}]
 
 
+# OpenCode asks the model for a session title beside the first real request (OpenCode 1.19.5 with max_tokens 32000;
+# 2.2.5 with its own prompt), and at LM Studio's parallel 1 the real request waits for it: Seed-OSS-36B thought for
+# 462-544 s over a title (the local-model research's round 3). Neither has a setting for a fixed title (1.19.5's
+# agent "title": a prompt, a model, disable - disabled, the title stays "New session - DATE"; 2.2.5: only a plugin's
+# hook), so the relay answers that request itself with the start's name (runtime.llm_title_request): the session is
+# named as sandbox-ai list names the start, and the model is not asked. Your own agent.title (a prompt of yours, a
+# model, disable) is left alone: its request is not OpenCode's own and goes to the model as it came.
+TITLE_LIMIT = 100
+
+
 # OpenCode's cut of a tool's output (the loop guard's compaction layer): what is longer reaches the model as a
-# preview and the path of a file in OpenCode's home. 128 KiB: a whole part of the files MCP server's read_file (60,000
-# characters, as JSON: ~62 KB for ASCII text, more for UTF-8) - at 50,000 bytes the model saw 860 bytes of it (the
-# local-model research's evidence/tool_output_limits.txt). 1000 lines: a shell command's long output stays cut.
-OPENCODE_TOOL_OUTPUT = {"max_lines": 1000, "max_bytes": 128 << 10}
+# preview and the path of a file in OpenCode's home. 50,000 bytes: a whole part of the files MCP server's read_file
+# fits (24,000 characters since sandbox-ai-mcp's servers/files answers in parts of that size; as JSON ~25 KB for
+# ASCII text, ~31 KB with escapes and UTF-8), and one result cannot cost tens of thousands of tokens: with 128 KiB
+# (0.1.96 and 0.1.97, when the server's parts were 60,000 characters and the model saw 860 bytes of one at 50,000)
+# a single `read` took a request from 9k to 45k tokens, 47 s before the first token (the local-model research's
+# evidence/tool_output_limits.txt and runs/t2_debug__opencode-hf__qcn). 1000 lines: a shell command's long output
+# stays cut.
+OPENCODE_TOOL_OUTPUT = {"max_lines": 1000, "max_bytes": 50000}
 
 
-def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, outputs=None, loop=None, wait=None):
+def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, outputs=None, loop=None, wait=None, prune=True,
+                    instructions="/root/" + LOOP_INSTRUCTIONS, vision=None):
     """OpenCode's configuration (the v1 shape, which OpenCode 2 reads too): an OpenAI-compatible provider
     (@ai-sdk/openai-compatible, Chat Completions) with the endpoint's models, or exactly ALLOWED (the models
     --llm NAME:MODEL,... names: no other one is offered). ONLY (--no-provider-defaults): no other provider is
@@ -2988,17 +4034,24 @@ def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, ou
     OUTPUTS ({model: tokens}, their max_tokens): limit.output at most that. LOOP (loop_config): its OpenCode layers -
     steps (agent.<name>.steps), compaction (compaction, tool_output), instructions (the loop guard's file). WAIT
     (agent_wait, seconds): the provider's headerTimeout and chunkTimeout (OpenCode's own: 5 minutes each), and no
-    timeout of the whole request."""
+    timeout of the whole request. PRUNE: compaction.prune (OpenCode 1's; OpenCode 2 ignores it with a warning, so its
+    file leaves it out). INSTRUCTIONS: where the loop guard's file lies in the sandbox (OpenCode 1's HOME; OpenCode
+    2's read-only /etc/opencode2). VISION ({model}): the models that read images - OpenCode takes a custom provider's
+    model for text-only and refuses to pass an image on ("this model does not support image input") unless its
+    modalities say image (round 5)."""
     pid = provider_id(endpoint)
     names = list(dict.fromkeys([model, *(allowed if allowed else endpoint.get("models", []))]))
 
     def entry(name):
         context = context_value((contexts or {}).get(name))
-        if not context:
-            return {"name": name}
-        output = output_limit(context)
-        ceiling = (outputs or {}).get(name)
-        return {"name": name, "limit": {"context": context, "output": min(output, ceiling) if ceiling else output}}
+        made = {"name": name}
+        if context:
+            output = output_limit(context)
+            ceiling = (outputs or {}).get(name)
+            made["limit"] = {"context": context, "output": min(output, ceiling) if ceiling else output}
+        if name in (vision or ()):
+            made.update({"attachment": True, "modalities": {"input": ["text", "image"], "output": ["text"]}})
+        return made
     config = {"$schema": "https://opencode.ai/config.json",
               "provider": {pid: {"npm": "@ai-sdk/openai-compatible",
                                  "name": f"{endpoint['name']} ({KINDS[endpoint['kind']]['label']})",
@@ -3021,11 +4074,11 @@ def opencode_config(endpoint, model, only=False, allowed=None, contexts=None, ou
                            "general": {"steps": max(4, steps * 2 // 3)}}
     if loop.get("compaction"):
         context = context_value((contexts or {}).get(model))
-        config["compaction"] = {"auto": True, "prune": True,
+        config["compaction"] = {"auto": True, **({"prune": True} if prune else {}),
                                 **({"reserved": max(2048, context // 5)} if context else {})}
         config["tool_output"] = dict(OPENCODE_TOOL_OUTPUT)
     if loop.get("instructions"):
-        config["instructions"] = ["/root/" + LOOP_INSTRUCTIONS]
+        config["instructions"] = [instructions]
     return config
 
 
@@ -3049,7 +4102,10 @@ def claude_environment(endpoint, model, given=()):
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             # The attribution block changes per request and defeats the servers' prompt caching.
             "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-            **({} if CLAUDE_TOOL_SEARCH in given else {CLAUDE_TOOL_SEARCH: "false"})}
+            **({} if CLAUDE_TOOL_SEARCH in given else {CLAUDE_TOOL_SEARCH: "false"}),
+            # The model profile's variables (Nemotron: CLAUDE_CODE_DISABLE_THINKING), under yours.
+            **{name: value for name, value in ((model_profile(endpoint, model) or {}).get("env") or {}).items()
+               if name not in given}}
 
 
 # Claude Code knows the context window of Anthropic's models only. For any other model ID it warns ('Model "M" isn't
@@ -3069,6 +4125,9 @@ CLAUDE_OUTPUT = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 CLAUDE_OWN = 25000   # tokens of the window Claude Code's own instructions and tool definitions take, about
 
 
+CLAUDE_SMALL_WINDOW, CLAUDE_SMALL_OUTPUT = 65536, 8192
+
+
 def claude_window_environment(a, found, model):
     """Claude Code's window variables for MODEL at FOUND: the context window it is told (the start's num_ctx, else
     what the server has the model loaded with or reports: agent_context) and the most tokens of one answer (the
@@ -3081,9 +4140,7 @@ def claude_window_environment(a, found, model):
                                                    for value in getattr(a, "secret_env", None) or []}
     if CLAUDE_WINDOW in given:
         return {}
-    behind = bool(getattr(a, "vpn", None))
-    context = context_value(agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
-                                          loaded_context(found, model, behind_vpn=behind)))
+    context = start_context(a, found, model)
     if not context:
         print(printable(
             f"agent-sandbox: note: --llm {found['name']}: Claude Code does not know the model {model} and assumes a "
@@ -3099,7 +4156,14 @@ def claude_window_environment(a, found, model):
             "for the work: load the model with 64k tokens or more (LM Studio: Context Length; Ollama: "
             "OLLAMA_CONTEXT_LENGTH; llama.cpp: --ctx-size; vLLM: --max-model-len)"), file=sys.stderr)
     values = effective_params(found, model, start_params(a, found)[0])[0]
-    output = max(256, min(values["max_tokens"], context // 2)) if values.get("max_tokens") else output_limit(context)
+    # At most a quarter of the window, whatever max_tokens allows: Claude Code reserves the answer (up to 20k) out of
+    # the window and compacts ~13k before the rest; half of a 32k-48k window left it 3-20k (round 5: "Autocompact is
+    # thrashing" at 32k, compactions at ~17-20k of 48k).
+    output = max(256, min(values["max_tokens"], context // 4)) if values.get("max_tokens") else output_limit(context)
+    # Up to a 64k window at most 8192: Claude Code's own prompt (24-28k) refilled a 16384-limit 64k window within 3
+    # turns of every compaction until its breaker ended the run (round 6, D13: 8192 + the PROGRESS.md line passed).
+    if context <= CLAUDE_SMALL_WINDOW:
+        output = min(output, CLAUDE_SMALL_OUTPUT)
     env = {CLAUDE_WINDOW: str(context)}
     if CLAUDE_COMPACT not in given:
         env[CLAUDE_COMPACT] = str(context)
@@ -3207,8 +4271,11 @@ def hermes_config(a):
     if note:
         print(printable(f"agent-sandbox: {'WARNING: ' if note.startswith('WARNING: ') else ''}--llm {found['name']}: "
                         f"{note[9:] if note.startswith('WARNING: ') else note}"), file=sys.stderr)
-    context = agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
-                            loaded_context(found, model, behind_vpn=behind))
+    # Ollama serves the agent's requests with the window it loads the model with, whatever Hermes is told (its
+    # OpenAI-compatible API takes no num_ctx): Hermes is told that (start_context), and refused below its minimum.
+    context = start_context(a, found, model)
+    unknown_window_note(a, found, model, context_value(context), "hermes")
+    served, how = served_context(a, found, model)
     loop = loop_guard_of(a, found)
     openrouter = found["parsed"]["host"] == HERMES_OPENROUTER_HOST
     section = {"provider": "openrouter" if openrouter else "custom", "base_url": agent_url(found), "default": model}
@@ -3216,7 +4283,19 @@ def hermes_config(a):
         section["api_key"] = PLACEHOLDER
     if context_value(context):
         section["context_length"] = context_value(context)
-        if section["context_length"] < HERMES_MIN_CONTEXT:
+        if section["context_length"] < HERMES_MIN_CONTEXT and served and section["context_length"] == served:
+            why = OLLAMA_HOW.get(how, "as it loads it")
+            problem = (f"--llm {found['name']}: Hermes needs a context window of at least 64,000 tokens and refuses "
+                       f"to work with less (it says only 'Something went wrong'); Ollama serves {model} with "
+                       f"{served} tokens ({why}), and its OpenAI-compatible API takes no num_ctx. Set "
+                       "OLLAMA_CONTEXT_LENGTH=65536 (or more) "
+                       "on the server and restart it, or give the model PARAMETER num_ctx 65536 in a Modelfile "
+                       f"(ollama create); a model loaded already keeps its window until it is unloaded (sandbox-ai "
+                       f"llm unload {found['name']} {model})")
+            if a.agent == "hermes":
+                raise ValueError(problem)
+            print(printable(f"agent-sandbox: WARNING: {problem}"), file=sys.stderr)  # Hermes as a helper
+        elif section["context_length"] < HERMES_MIN_CONTEXT:
             problem = (f"--llm {found['name']}: Hermes needs a context window of at least 64,000 tokens and refuses "
                        f"to work with less (it says only 'Something went wrong'); {model} would be told "
                        f"{section['context_length']}. Load the model with 64k tokens or more: --llm-param "
@@ -3252,8 +4331,16 @@ QWEN_LIFETIME = "QWEN_STREAM_MAX_LIFETIME_MS"
 # local-model research's mock: 6 requests for a two-turn task, 4 with both off). Off for --llm; ~/.qwen/QWEN.md, the
 # memory you keep, is not touched.
 QWEN_MEMORY = {"enableManagedAutoMemory": False, "enableManagedAutoDream": False}
+QWEN_EXCLUDED_TOOLS = ("read_mcp_resource",)  # tools.exclude for --llm (qwen_settings)
 GOOSE_CONFIG = "/etc/goose/config.yaml"  # goose.py's CONFIG
 GOOSE_LOOP_FILE = "/etc/goose/sandbox-ai-loop-guard.md"  # goose.py's LOOP_FILE
+OPENHANDS_SETTINGS = "/etc/openhands/settings.json"  # openhands.py's SETTINGS
+# letta.py's LLM_PROVIDER, LLM_URL_VARIABLE, LLM_KEY_VARIABLE: Letta Code's OpenAI-compatible provider that reads its
+# server and key from variables.
+LETTA_PROVIDER = "llama-cpp"
+LETTA_URL_VARIABLE = "LLAMA_CPP_BASE_URL"
+LETTA_KEY_VARIABLE = "LLAMA_CPP_API_KEY"
+PI_PROVIDER = "sandbox-ai"  # pi.py's LLM_PROVIDER: the provider sandbox-ai's extension registers for --llm
 DSH_PATCH = "/etc/dsh/sandbox-ai.patch.yml"  # dsh.py's PATCH
 DSH_ROUTE = "sandbox-ai"  # dsh.py's LLM_ROUTE
 
@@ -3265,8 +4352,7 @@ def llm_context(a, found, model):
     if note:
         print(printable(f"agent-sandbox: {'WARNING: ' if note.startswith('WARNING: ') else ''}--llm {found['name']}: "
                         f"{note[9:] if note.startswith('WARNING: ') else note}"), file=sys.stderr)
-    return context_value(agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
-                                       loaded_context(found, model, behind_vpn=behind)))
+    return start_context(a, found, model)
 
 
 def qwen_generation(wait):
@@ -3293,6 +4379,7 @@ def qwen_settings(a):
     names = offered_models(a)[0]
     contexts = model_limits(a, found, names)[0]
     contexts[model] = llm_context(a, found, model)
+    unknown_window_note(a, found, model, contexts[model], "qwen")
 
     def entry(name):
         # Each model of the server its own entry (Qwen Code tells them apart by id and baseUrl): /model offers them.
@@ -3304,11 +4391,24 @@ def qwen_settings(a):
     settings = {"security": {"auth": {"selectedType": "openai"}}, "model": {"name": model},
                 "modelProviders": {"openai": [entry(name) for name in names]}, "memory": dict(QWEN_MEMORY)}
     loop = loop_guard_of(a, found)
+    # Qwen Code's heuristic loop detection off (thoughts, repeated sentences, read loops): it compares the first 200
+    # characters of the last three "thoughts", a local server streams one thought in many pieces, and Qwen Code
+    # ended the run a minute into a task - "Loop detection halted the run (repetitive_thoughts ...)": Laguna-S twice
+    # of two runs, Qwen3.6-35B (the local-model research's round 1, runs/t2_debug__qwen__laguna__r1, __q36__r1).
+    # Its protection against a repeated tool call stays with the loop guard on (loopProtection), and sandbox-ai's
+    # own guard holds on the wire (the same call, repeated text).
+    settings["model"]["skipLoopDetection"] = True
+    # Qwen Code's tool for MCP resources left out: it lists read_mcp_resource ("Reads a resource from a configured MCP
+    # server ...") among its deferred tools whatever a server advertises, and a local model asked for an MCP server's
+    # tool found it with tool_search and guessed URIs until Qwen Code stopped the run (Laguna-S, round 1:
+    # runs/smoke__qwen__laguna__r2); the proxy's sentence (runtime.llm_resource_hint) never reaches it, as it is not in
+    # the request's tools. sandbox-ai's catalog servers publish no resources.
+    settings["tools"] = {"exclude": list(QWEN_EXCLUDED_TOOLS)}
     if loop["enabled"]:
-        settings["model"].update({"skipLoopDetection": False, "loopProtection": "stop"})
+        settings["model"]["loopProtection"] = "stop"
     if loop.get("steps") and "steps" in loop_given(a, found):
-        # Only steps you set: Qwen Code's own limit is otherwise qwen.MAX_SESSION_TURNS (the guard's default 40 is a
-        # step limit of a turn for OpenCode, too low for a whole Qwen Code session).
+        # Only steps you set: Qwen Code's own limit is otherwise qwen.MAX_SESSION_TURNS (the guard's default is a
+        # step limit of one turn, Qwen Code's counts a whole session).
         settings["model"]["maxSessionTurns"] = loop["steps"]
     return settings
 
@@ -3321,13 +4421,14 @@ def dsh_config(a):
     names = offered_models(a)[0]
     contexts = model_limits(a, found, names)[0]
     contexts[model] = llm_context(a, found, model)
+    unknown_window_note(a, found, model, contexts[model], "dsh")
     # The route's models are what DSH's model selection offers (a model not listed fails with UNKNOWN_MODEL).
     route = {"displayName": f"{found['name']} (sandbox-ai)", "apiKeyEnv": KEY_VARIABLE, "api": "openai-completions",
              "baseURL": agent_url(found),
              "models": [{"id": name, **({"contextWindow": contexts[name]} if contexts.get(name) else {})}
                         for name in names]}
     loop = loop_guard_of(a, found)
-    return {"route": route, "model": model, "instructions": LOOP_TEXT if loop.get("instructions") else None}
+    return {"route": route, "model": model, "instructions": loop_text(loop) if loop.get("instructions") else None}
 
 
 # Goose 1.57.0's waits, in seconds: OPENAI_TIMEOUT (its openai provider's request, 600 by default: a silent prefill
@@ -3348,6 +4449,7 @@ def goose_environment(a, found, model):
     if wait:
         env.update({name: str(wait) for name in GOOSE_WAITS if name not in given})
     context = llm_context(a, found, model)
+    unknown_window_note(a, found, model, context, "goose")
     if context:
         env["GOOSE_CONTEXT_LIMIT"] = str(context)
     loop = loop_guard_of(a, found)
@@ -3358,13 +4460,91 @@ def goose_environment(a, found, model):
     return env
 
 
+NANOBOT_SETTINGS = "/etc/nanobot/sandbox-ai.json"  # nanobot.py's SETTINGS
+PI_SETTINGS = "/etc/pi/sandbox-ai.json"  # pi.py's EXTENSION_CONFIG
+
+
+def nanobot_config(a):
+    """nanobot's settings for --llm (laid over its own file by nanobot.managed_config): its custom provider (any
+    OpenAI-compatible server) at the server's /v1 URL with the placeholder as key, the model and its context window
+    when known, and the loop guard's step limit (agents.defaults.maxToolIterations). nanobot has no place for the
+    guard's instructions outside its own files; the proxy's sampling and the step limit hold."""
+    found, model = selection(a)
+    context = llm_context(a, found, model)
+    unknown_window_note(a, found, model, context, "nanobot")
+    defaults = {"provider": "custom", "model": model}
+    if context:
+        defaults["contextWindowTokens"] = context
+    loop = loop_guard_of(a, found)
+    if loop.get("steps"):
+        defaults["maxToolIterations"] = loop["steps"]
+    return {"providers": {"custom": {"apiBase": agent_url(found), "apiKey": placeholder_for(a, found)}},
+            "agents": {"defaults": defaults}}
+
+
 def goose_loop_text(a):
     """The loop guard's instructions for Goose's GOOSE_LOOP_FILE, or None when the guard gives none."""
     try:
         found, _ = selection(a)
     except ValueError:
         return None
-    return LOOP_TEXT if loop_guard_of(a, found).get("instructions") else None
+    loop = loop_guard_of(a, found)
+    return loop_text(loop) if loop.get("instructions") else None
+
+
+def openhands_llm(a):
+    """OpenHands' LLM for --llm (in the settings its start applies, openhands.managed_settings): LiteLLM's OpenAI
+    provider at the server's /v1 URL with the model, the placeholder as key, the context window when known."""
+    found, model = selection(a)
+    settings = {"model": "openai/" + model, "base_url": agent_url(found), "api_key": placeholder_for(a, found)}
+    context = llm_context(a, found, model)
+    unknown_window_note(a, found, model, context, "openhands")
+    if context:
+        settings["max_input_tokens"] = context
+    return settings
+
+
+def openhands_loop(a):
+    """The loop guard for OpenHands: its turn limit (the conversation's max_iterations) and instructions (the
+    agent's system_message_suffix), each None when the guard gives none."""
+    try:
+        found, _ = selection(a)
+    except ValueError:
+        return None
+    loop = loop_guard_of(a, found)
+    return {"steps": loop.get("steps"), "instructions": loop_text(loop) if loop.get("instructions") else None}
+
+
+def letta_model(a):
+    """Letta Code's model handle for --llm: its OpenAI-compatible provider and the model (llama-cpp/MODEL)."""
+    _, model = selection(a)
+    return f"{LETTA_PROVIDER}/{model}"
+
+
+def letta_environment(a, found):
+    """Letta Code's variables for --llm: its OpenAI-compatible provider at the server's /v1 URL with the placeholder
+    as key (Letta Code has no read-only place for the loop guard's instructions or a turn limit; the proxy's loop
+    guard notes hold)."""
+    return {LETTA_URL_VARIABLE: agent_url(found), LETTA_KEY_VARIABLE: placeholder_for(a, found)}
+
+
+def pi_llm(a):
+    """Pi's model for --llm (registered by sandbox-ai's extension, pi.extension_config): a provider PI_PROVIDER with
+    the OpenAI Chat Completions API at the server's /v1 URL, the placeholder as key and the model with its context
+    window when known (else Pi's default), and the loop guard's instructions (a section of Pi's system prompt) and
+    turn limit (the extension stops a run there)."""
+    found, model = selection(a)
+    context = llm_context(a, found, model)
+    unknown_window_note(a, found, model, context, "pi")
+    entry = {"id": model, "name": f"{model} ({found['name']}, sandbox-ai)", "reasoning": False, "input": ["text"],
+             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}
+    if context:
+        entry["contextWindow"] = context
+    provider = {"name": f"{found['name']} (sandbox-ai)", "baseUrl": agent_url(found),
+                "apiKey": placeholder_for(a, found), "api": "openai-completions", "models": [entry]}
+    loop = loop_guard_of(a, found)
+    return {"provider": {"id": PI_PROVIDER, "config": provider}, "model": model,
+            "instructions": loop_text(loop) if loop.get("instructions") else None, "steps": loop.get("steps")}
 
 
 # The agents' wait for a model server of your own (local_model_server) where stream_idle_timeout is not set: a fresh
@@ -3373,6 +4553,13 @@ def goose_loop_text(a):
 # ever (the local-model research's mock server: evidence/timeouts_mock.txt). An hour: the proxy's own idle limit
 # (runtime.IDLE_TIMEOUT), so sandbox-ai's path never cuts a stream sooner either.
 LOCAL_WAIT = 3600
+# Two agents have no setting for that wait (Claude Code, DeepSeek Harness: 300 s without a byte, then the request
+# again and the server's prefill from its beginning; the research's round 1, evidence/waits.txt). For Claude Code -
+# and whatever else stands between an agent and a silent server - the connection proxy keeps a streamed answer of a
+# model server of your own alive: a line every reader of server-sent events skips, after this many seconds without
+# a byte from the server (proxy.json's "keepalive", runtime.llm_kept_alive). DeepSeek Harness gives up all the same
+# (its limit is not reset by such a line, nor by an empty chunk): with it a prompt must be read within 300 s.
+KEEPALIVE = 20
 
 
 def agent_wait(a, found, model):
@@ -3387,6 +4574,36 @@ def agent_wait(a, found, model):
 
 
 CLAUDE_WAITS = ("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS")
+# Pi's waits (1.4.0), 300000 ms each by default: httpIdleTimeoutMs - its HTTP client's wait for the response headers
+# and between two parts of the body (core/http-dispatcher.js: undici's headersTimeout and bodyTimeout) - and
+# retry.provider.timeoutMs, the provider request's (core/sdk.js; httpIdleTimeoutMs where it is not set). Through a
+# silent prefill of 420 s Pi ended three requests after 300 s each ("terminated", "Request timed out.") and the run
+# failed; with both raised it waited and answered (the local-model research's runs/delay_*_pi, delayfix3_pi). Pi reads
+# them from its user's settings only - no managed layer, no variable, no option (pi.py) - so a --llm start sets them
+# there, in the sandbox's HOME (prepare_home), from agent_wait like the other agents' waits.
+PI_USER_SETTINGS = ".pi/agent/settings.json"
+
+
+def pi_wait_settings(wait):
+    """Pi's settings for a wait of WAIT seconds (agent_wait)."""
+    return {"httpIdleTimeoutMs": wait * 1000, "retry": {"provider": {"timeoutMs": wait * 1000}}}
+
+
+def pi_wait_apply(wait):
+    """apply(document) for the launcher's update_json_defaults: pi_wait_settings(WAIT) set in Pi's settings
+    DOCUMENT, every other setting of the user's kept (the rest of "retry" too); whether it changed anything. The
+    start's wait goes over a value that is there: stream_idle_timeout is how it is chosen."""
+    def apply(document):
+        wanted = wait * 1000
+        retry = document.get("retry") if isinstance(document.get("retry"), dict) else {}
+        provider = retry.get("provider") if isinstance(retry.get("provider"), dict) else {}
+        if document.get("httpIdleTimeoutMs") == wanted and provider.get("timeoutMs") == wanted and \
+                type(document["httpIdleTimeoutMs"]) is int and type(provider["timeoutMs"]) is int:
+            return False
+        document["httpIdleTimeoutMs"] = wanted
+        document["retry"] = {**retry, "provider": {**provider, "timeoutMs": wanted}}
+        return True
+    return apply
 
 
 def passed_names(a):
@@ -3406,6 +4623,12 @@ def agent_environment(a, windows=True):
     """The agent's variables for --llm: placeholders and addresses, nothing secret. WINDOWS=False: without Claude
     Code's window variables (which ask the server; yours of them win, so they are never refused)."""
     found, model = selection(a)
+    if a.agent == "openhands":
+        return {}  # its model is in the settings its start applies (openhands_llm)
+    if a.agent == "letta":
+        if windows:  # Letta Code takes no window: what it assumes is said (which asks the server)
+            unknown_window_note(a, found, model, start_context(a, found, model), "letta")
+        return letta_environment(a, found)
     if a.agent == "claude":
         return {**claude_environment(found, model, passed_names(a)), **claude_wait_environment(a, found, model),
                 **(claude_window_environment(a, found, model) if windows else {})}
@@ -3423,8 +4646,17 @@ def agent_environment(a, windows=True):
             else {}
     if a.agent == "codex":
         return {KEY_VARIABLE: PLACEHOLDER}
+    if a.agent == "nanobot":
+        return {}  # its provider, key placeholder included, is in sandbox-ai's settings (nanobot_config)
+    if a.agent == "pi":
+        return {}  # its provider, key placeholder included, is registered by sandbox-ai's extension (pi_llm)
     env = {"OPENCODE_CONFIG": "/root/" + OPENCODE_CONFIG, "OPENCODE_DISABLE_MODELS_FETCH": "1",
            "OPENCODE_DISABLE_AUTOUPDATE": "1"}
+    if a.agent == "opencode2":
+        # OpenCode 2 reads OpenCode 1's file (the v1 shape), read-only in its managed directory; -D is its
+        # configuration layer's allow-all rule (it has no OPENCODE_PERMISSION and no doom_loop question: the loop
+        # guard's steps and notes hold).
+        return {**env, "OPENCODE_CONFIG": OPENCODE2_CONFIG}
     # --dangerously-skip-permissions gives OpenCode {"*": "allow"} (agent_sandbox.DANGER_ENV), which also allows its
     # doom_loop question (OpenCode 1.x: the same tool with the same input three times in one answer; its rules: the
     # last match wins). With the loop guard on, that question stays OpenCode's default, ask.
@@ -3443,6 +4675,49 @@ def loop_guard_of(a, endpoint):
     return loop_config(endpoint, start)
 
 
+def opencode_layer(a, found, model, prune=True, instructions="/root/" + LOOP_INSTRUCTIONS, agent="opencode"):
+    """(OpenCode's provider configuration for --llm, the loop guard's layers): the models the start offers
+    (offered_models) with the context windows and output limits it gives them, and the waits (opencode_config)."""
+    names = offered_models(a)[0]
+    contexts, outputs = model_limits(a, found, names)
+    contexts[model] = start_context(a, found, model)
+    unknown_window_note(a, found, model, contexts[model], agent)
+    loop = loop_guard_of(a, found)
+    config = opencode_config(found, model, only=a.no_provider_defaults, allowed=names, contexts=contexts,
+                             outputs=outputs, loop=loop, wait=agent_wait(a, found, model), prune=prune,
+                             instructions=instructions, vision=vision_models(a, found))
+    return config, loop
+
+
+# opencode2.py's LLM_CONFIG and LOOP_FILE (this module loads no sibling): OpenCode 2's --llm file and the loop guard's
+# instructions, read-only in its managed directory (OPENCODE_CONFIG names the first).
+OPENCODE2_CONFIG = "/etc/opencode2/sandbox-ai-llm.json"
+OPENCODE2_LOOP_FILE = "/etc/opencode2/sandbox-ai-loop-guard.md"
+
+
+def opencode2_files(a):
+    """OpenCode 2's managed files for --llm: {name in its managed directory: content} - OpenCode 1's provider file
+    (the v1 shape OpenCode 2 reads, without compaction.prune) and the loop guard's instructions when they are on."""
+    found, model = selection(a)
+    note = keep_loaded(found, model, a, behind_vpn=bool(getattr(a, "vpn", None)))
+    if note:
+        print(printable(f"agent-sandbox: {'WARNING: ' if note.startswith('WARNING: ') else ''}--llm {found['name']}: "
+                        f"{note[9:] if note.startswith('WARNING: ') else note}"), file=sys.stderr)
+    config, loop = opencode_layer(a, found, model, prune=False, instructions=OPENCODE2_LOOP_FILE, agent="opencode2")
+    files = {OPENCODE2_CONFIG.rsplit("/", 1)[1]: json.dumps(config, indent=2) + "\n"}
+    if loop["instructions"]:
+        files[OPENCODE2_LOOP_FILE.rsplit("/", 1)[1]] = loop_text(loop)
+    return files
+
+
+def opencode2_model(a):
+    """OpenCode 2's model for --llm, as its configuration layer names it (provider/model): the layer above every
+    file, so a project's opencode.json cannot point it elsewhere (OpenCode 2 falls back to its maker's free models
+    when the model it is given does not exist)."""
+    found, model = selection(a)
+    return f"{provider_id(found)}/{model}"
+
+
 def loop_given(a, endpoint):
     """The loop guard's layers set somewhere (your defaults.json, the endpoint's, the start's --llm-param), not
     sandbox-ai's defaults."""
@@ -3455,13 +4730,27 @@ def loop_given(a, endpoint):
 
 def agent_arguments(a):
     """Arguments put before the agent's own: Codex selects the profile written by prepare_home."""
+    if a.agent == "letta" and not getattr(a, "helper_of", None):
+        return ["--model", letta_model(a)]  # its provider's handle (a helper's Letta Code finds the model itself)
+    if a.agent == "pi" and not getattr(a, "helper_of", None):
+        return ["--model", f"{PI_PROVIDER}/{selection(a)[1]}"]  # the provider sandbox-ai's extension registers
     if a.agent == "qwen":
         # The loop guard's instructions: Qwen Code appends them to its system prompt for this run.
         try:
             found, _ = selection(a)
         except ValueError:
             return []
-        return ["--append-system-prompt", LOOP_TEXT] if loop_guard_of(a, found).get("instructions") else []
+        loop = loop_guard_of(a, found)
+        return ["--append-system-prompt", loop_text(loop)] if loop.get("instructions") else []
+    if a.agent == "claude":
+        # Claude Code gets no loop-guard text; the progress_notes line, where a profile or the start switches it on,
+        # goes into its system prompt
+        try:
+            found, _ = selection(a)
+        except ValueError:
+            return []
+        loop = loop_guard_of(a, found)
+        return ["--append-system-prompt", PROGRESS_TEXT.strip()] if loop.get("progress_notes") else []
     return ["--profile", CODEX_PROFILE] if a.agent == "codex" else []
 
 
@@ -3469,9 +4758,23 @@ def prepare_home(a, home, replace_private, update_json_defaults, state_limit):
     """Write the agent's configuration for the endpoint into the sandbox HOME with the launcher's helpers, which never
     follow a symlink the agent planted. Returns the HOME-relative paths written."""
     found, model = selection(a)
-    if a.agent in ("hermes", "dsh", "qwen", "goose"):
-        # Their configuration is managed (/etc/hermes, /etc/dsh, /etc/qwen-code; Goose's variables), nothing in the
-        # HOME.
+    if a.agent == "pi":
+        # Pi's provider is registered by sandbox-ai's extension at /etc/pi; only its waits are settings of the user's
+        # (PI_USER_SETTINGS): set there for a server that is waited for (agent_wait), left alone otherwise.
+        wait = agent_wait(a, found, model)
+        if not wait:
+            return []
+        problem = update_json_defaults(home, PI_USER_SETTINGS, pi_wait_apply(wait))
+        if problem:
+            print(f"agent-sandbox: left sandbox ~/{PI_USER_SETTINGS} unchanged ({printable(problem)}): Pi gives up "
+                  "after 5 minutes without a byte from the model unless it says otherwise (httpIdleTimeoutMs, "
+                  "retry.provider.timeoutMs)", file=sys.stderr)
+            return []
+        return [PI_USER_SETTINGS]
+    if a.agent in ("hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "opencode2"):
+        # Their configuration is managed (/etc/hermes, /etc/dsh, /etc/qwen-code, /etc/openhands, OpenCode 2's
+        # /etc/opencode2; Goose's and Letta Code's variables; nanobot's laid over its own file from /etc/nanobot at
+        # its start), nothing in the HOME.
         return []
     note = keep_loaded(found, model, a, behind_vpn=bool(getattr(a, "vpn", None)))
     if note and note.startswith("WARNING: "):
@@ -3479,24 +4782,17 @@ def prepare_home(a, home, replace_private, update_json_defaults, state_limit):
     elif note:
         print(printable(f"agent-sandbox: --llm {found['name']}: {note}"), file=sys.stderr)
     if a.agent == "opencode":
-        names = offered_models(a)[0]
-        contexts, outputs = model_limits(a, found, names)
-        behind = bool(getattr(a, "vpn", None))
-        contexts[model] = agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
-                                        loaded_context(found, model, behind_vpn=behind))
-        loop = loop_guard_of(a, found)
-        config = opencode_config(found, model, only=a.no_provider_defaults, allowed=names,
-                                 contexts=contexts, outputs=outputs, loop=loop, wait=agent_wait(a, found, model))
+        config, loop = opencode_layer(a, found, model)
         replace_private((json.dumps(config, indent=2) + "\n").encode(), home, OPENCODE_CONFIG)
         if loop["instructions"]:
-            replace_private(LOOP_TEXT.encode(), home, LOOP_INSTRUCTIONS)
+            replace_private(loop_text(loop).encode(), home, LOOP_INSTRUCTIONS)
             return [OPENCODE_CONFIG, LOOP_INSTRUCTIONS]
         return [OPENCODE_CONFIG]
     if a.agent == "codex":
+
         relative = f".codex/{CODEX_PROFILE}.config.toml"
-        behind = bool(getattr(a, "vpn", None))
-        context = agent_context(found, model, a, context_window(found, model, behind_vpn=behind),
-                                loaded_context(found, model, behind_vpn=behind))
+        context = start_context(a, found, model)
+        unknown_window_note(a, found, model, context_value(context), "codex")
         wait = agent_wait(a, found, model)
         replace_private(codex_profile(found, model, context, wait).encode(), home, relative)
         written = [relative]
@@ -3529,30 +4825,54 @@ def plan(a):
         opens = f"{parsed['hostform']}:{parsed['port']}"
     else:
         opens = f"{parsed['host']}:{parsed['port']} (pinned at the start)"
-    config = {"opencode": "/root/" + OPENCODE_CONFIG, "codex": f"/root/.codex/{CODEX_PROFILE}.config.toml",
+    config = {"opencode": "/root/" + OPENCODE_CONFIG, "opencode2": OPENCODE2_CONFIG, "codex": f"/root/.codex/{CODEX_PROFILE}.config.toml",
               "claude": "environment (ANTHROPIC_BASE_URL ...)", "hermes": HERMES_CONFIG, "dsh": DSH_PATCH,
-              "qwen": QWEN_SETTINGS, "goose": "environment (GOOSE_PROVIDER, OPENAI_BASE_URL ...)"}[a.agent]
+              "qwen": QWEN_SETTINGS, "goose": "environment (GOOSE_PROVIDER, OPENAI_BASE_URL ...)",
+              "openhands": OPENHANDS_SETTINGS,
+              "nanobot": NANOBOT_SETTINGS,
+              "letta": f"environment ({LETTA_URL_VARIABLE}, {LETTA_KEY_VARIABLE}) and --model {LETTA_PROVIDER}/MODEL",
+              "pi": f"{PI_SETTINGS} (sandbox-ai's extension), --model {PI_PROVIDER}/MODEL and its waits in "
+                    f"/root/{PI_USER_SETTINGS}"
+              }[a.agent]
     offered, limited = offered_models(a)
     return {"name": found["name"], "kind": found["kind"], "url": found["url"], "model": model,
-            # The models the agent offers (the start's first); "models_limited": the relay refuses any other.
-            "models": offered, "models_limited": limited,
+            # The models the agent offers (the start's first; ONE_MODEL: that one alone); "models_limited": the
+            # relay refuses any other.
+            "models": [model] if a.agent in ONE_MODEL else offered, "models_limited": limited,
             "agent_url": agent_url(found, "anthropic" if a.agent == "claude" else "openai"),
             "api": {"claude": "anthropic-messages", "codex": "openai-responses", "opencode": "openai-chat",
+                    "opencode2": "openai-chat",
                     "hermes": "openai-chat", "dsh": "openai-chat", "qwen": "openai-chat",
-                    "goose": "openai-chat"}[a.agent],
+                    "goose": "openai-chat", "openhands": "openai-chat", "nanobot": "openai-chat", "letta": "openai-chat",
+                    "pi": "openai-chat"}[a.agent],
             "opens": opens, "path_prefix": parsed["prefix"] or None, "http_rule": prefix_rule(a, found),
             "config": config,
             "key_secret": found["api_key_secret"], "header_secrets": found["headers"],
             "ca": str(ca_dir() / found["ca"]) if found["ca"] else None, "vpn": found["vpn"],
             "placeholder": placeholder_for(a, found), "insecure_http": found["insecure_http"],
-            "params": plan_params(a, found, model)}
+            "params": plan_params(a, found, model),
+            # Claude Code's own tools the proxy keeps in its requests (--llm-tools; None: no Claude Code in this start).
+            "claude_tools": claude_tools_plan(a),
+            # The model profile of this model in this agent (None: no family matches): profile_report.
+            "profile": profile_report(a, found, model),
+            # --use-case: what it chose and why, the settings it puts over the profile (None without it)
+            "use_case": getattr(a, "_llm_use_case", None)}
+
+
+def claude_tools_plan(a):
+    """The dry run's "claude_tools": --llm-tools as it applies ("tools": all, core or the list; "from": --llm-tools,
+    profile or default; "kept": the built-in tools kept, None for all), None when no Claude Code runs."""
+    if not runs_claude(a):
+        return None
+    tools, source = start_tools(a)
+    return {"tools": tools_text(tools), "from": source, "kept": kept_tools(tools)}
 
 
 def plan_params(a, endpoint, model):
     """The dry run's "params": what the proxy sets for MODEL (forced: in place of the agent's own), what it never
     sends to this kind, and the loop guard."""
     override, start = start_params(a, endpoint)
-    values, forced = effective_params(endpoint, model, override)
+    values, forced = effective_params(endpoint, model, override, profile=False)  # the profile's: plan()'s "profile"
     sent = set().union(*SENT[endpoint["kind"]].values())
     loop = loop_config(endpoint, start)
     load = LOAD_ONLY.get(endpoint["kind"], ())
@@ -3704,13 +5024,18 @@ def check(endpoint, agent=None, model=None, get=None, out=print, connect=socket.
     apis = [("claude", "/v1/messages", "the Anthropic Messages API (Claude Code)"),
             ("codex", "/v1/responses", "the OpenAI Responses API (Codex)"),
             ("opencode", "/v1/chat/completions", "the OpenAI Chat Completions API (OpenCode)"),
+            ("opencode2", "/v1/chat/completions", "the OpenAI Chat Completions API (OpenCode 2)"),
             ("hermes", "/v1/chat/completions", "the OpenAI Chat Completions API (Hermes)"),
             ("dsh", "/v1/chat/completions", "the OpenAI Chat Completions API (DeepSeek Harness)"),
             ("qwen", "/v1/chat/completions", "the OpenAI Chat Completions API (Qwen Code)"),
-            ("goose", "/v1/chat/completions", "the OpenAI Chat Completions API (Goose)")]
+            ("goose", "/v1/chat/completions", "the OpenAI Chat Completions API (Goose)"),
+            ("openhands", "/v1/chat/completions", "the OpenAI Chat Completions API (OpenHands)"),
+            ("nanobot", "/v1/chat/completions", "the OpenAI Chat Completions API (nanobot)"),
+            ("letta", "/v1/chat/completions", "the OpenAI Chat Completions API (Letta Code)"),
+            ("pi", "/v1/chat/completions", "the OpenAI Chat Completions API (Pi)")]
     found_messages = False
     for name, path, label in apis:
-        if agent and agent != name or not agent and name in ("hermes", "dsh", "qwen", "goose"):  # OpenCode's API
+        if agent and agent != name or not agent and name in ("opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"):  # OpenCode's API
             continue
         answer = probe(client, path)
         required = agent == name
@@ -3826,6 +5151,8 @@ def describe(endpoint):
         lines.append(f"  models ({endpoint['checked'] or 'listed earlier'}): {', '.join(endpoint['models'][:20])}"
                      + (" ..." if len(endpoint["models"]) > 20 else ""))
     lines.append("  agents: " + ", ".join(a for a in AGENTS if not agent_problem(endpoint, a)))
+    if endpoint.get("memory_gb"):
+        lines.append(f"  memory: {endpoint['memory_gb']} GB (what fits: llm recommend, --use-case)")
     lines += params_lines(endpoint)
     if endpoint["insecure_http"]:
         lines.append("  WARNING: plain http to a public address (--insecure-http)")
@@ -3840,7 +5167,7 @@ def public_view(endpoint):
     view.update(params=endpoint.get("params") or {}, forced=endpoint.get("forced") or {},
                 loop_guard=loop_config(endpoint), loop_guard_own=endpoint.get("loop_guard") or {},
                 contexts=endpoint.get("contexts") or {},
-                evict=endpoint.get("evict") or "never")
+                evict=endpoint.get("evict") or "never", memory_gb=endpoint.get("memory_gb"))
     view["agents"] = [a for a in AGENTS if not agent_problem(endpoint, a)]
     return view
 
@@ -3969,6 +5296,12 @@ def add_params(args, record, old, out):
     evict = getattr(args, "evict", None) or old.get("evict")
     if evict == "allow":
         record["evict"] = "allow"
+    memory = getattr(args, "memory", None)
+    if memory is not None and memory != 0 and memory_value(memory) is None:
+        raise ValueError(f"--memory: the server's memory in GB, 1 to {MEMORY_MAX_GB}")
+    memory = memory_value(memory) if memory else None if memory == 0 else memory_value(old.get("memory_gb"))
+    if memory:
+        record["memory_gb"] = memory
 
 
 def param_options(parser, every=False):
@@ -3981,22 +5314,100 @@ def param_options(parser, every=False):
                         help="the same, but in place of the agent's own value too; repeatable")
     parser.add_argument("-g", "--loop-guard", action="append", default=[], metavar="on|off|LAYER=VALUE",
                         help="the loop guard of this server: on or off as a whole, or one layer (steps, compaction, "
-                             "instructions, sampling, context, warn, block, text, watchdog_requests, "
+                             "instructions, sampling, context, warn, block, failures, text, watchdog_requests, "
                              "watchdog_minutes; LAYER=default: as your defaults say); repeatable")
     parser.add_argument("-e", "--evict", choices=EVICT,
                         help="never (the default): a start keeps the other models of the server loaded where the "
                              "server lets it (LM Studio: the model is loaded explicitly, which Auto-Evict leaves "
                              "alone); allow: the server's own loading and unloading")
+    parser.add_argument("-M", "--memory", type=float, metavar="GB",
+                        help="the server's memory in GB (its RAM, or the GPU's VRAM), for what fits it: llm recommend "
+                             "and --use-case (a server on this host's loopback: this host's own); 0 forgets it")
+
+
+def show_profiles(args, out=print):
+    """sandbox-ai llm profiles [MODEL] [--agent AGENT] [--json]: every family's profiles (its settings for every
+    harness as "*"), or MODEL's; the settings a start applies under yours, the status and the evidence; for MODEL
+    also what we know of each pair: works (✓), does not work (✗), not known yet (?)."""
+    if args.model is not None and not MODEL_NAME.fullmatch(args.model):
+        raise ValueError(f"not a model name: {printable(args.model)!r}")
+    table = profile_table()
+    if table is None:
+        raise ValueError("the model profiles (model_profiles.json beside sandbox-ai) cannot be read")
+    module = profiles_module()
+    rows = module.rows(table, args.model, args.agent)
+    # the traffic light of each family MODEL names: the harnesses it is green, yellow, red in
+    support = None if args.model is None else \
+        [module.family_support(family, args.model, table) for family in module.families_of(args.model, table)]
+    # the MCP tools MODEL copes with (its class's budget: a start with more says so), None: no class known
+    budget = module.tool_budget(args.model, table) if args.model and hasattr(module, "tool_budget") else None
+    if args.json:
+        out(json.dumps({"schema": table["schema"], "profiles": rows, "support": support,
+                        **({"tool_budget": budget} if args.model else {})}, indent=2))
+        return 0
+    for found in support or []:
+        out(printable(f"{found['label']}: {found['symbol']} {found['text']}"))
+    if budget is not None:
+        how = f"{budget['params']}B, from its name" if budget["from"] == "name" else f"its family {budget['family']}"
+        budget_line = printable(f"MCP tools: about {budget['tools']} at most (a {budget['class']} model: {how}; a "
+                                f"start with more says so) - {budget['evidence']}")
+    if not rows:
+        out(printable(f"no profile for {args.model}: nothing is known about this model (no family of the research "
+                      "matches it); the agents' and the server's own settings apply" if args.model else "no profiles"))
+        if budget is not None:
+            out(budget_line)
+        return 0
+    if args.model and len({row["family"] for row in rows}) > 1:
+        names = ", ".join(dict.fromkeys(row["family"] for row in rows))
+        out(printable(f"{args.model} names several families ({names}): give a family's id to see just that one"))
+    family_wide = {}  # the family's own warnings (its "*" row): not repeated under each of its pairs
+    for row in rows:
+        every = row["agent"] == "*"
+        status = "every agent" if every and row["status"] == module.UNTESTED else row["status"]
+        symbol = " " if status == "every agent" else row.get("symbol", " ")  # the traffic light's shape
+        out(printable(f"{row['name']:<34} {symbol} {status:<11} {module.values_text(module.settings(row)) or '-'}"))
+        if every:
+            family_wide[row["family"]] = set(row["warnings"])
+        details = [row["reason"] if every else row["evidence"],
+                   *(text for text in row["warnings"] if text not in family_wide.get(row["family"], ()) or every)]
+        if args.model:
+            details += [f"reasoning: {row['reasoning']}" if row["reasoning"] else None, *row["notes"],
+                        *(f"sandbox-ai sets itself: {text}" for text in row["builtin"])]
+            if not row["pair"]:
+                details.append("this pair was not tested: the model's settings for every agent apply")
+        for line in filter(None, details):
+            out(printable(f"    {line}"))
+        known = module.knowledge_lines(row) if args.model and hasattr(module, "knowledge_lines") else []
+        if known:  # what we know of one model: works (✓), does not work (✗), not known yet (?)
+            out("    what we know:")
+            for line in known:
+                out(printable(f"      {line}"))
+    if budget is not None:
+        out(budget_line)
+    out("A start with --llm NAME:MODEL applies its profile under your own values (llm set, --llm-param, --env); "
+        "--no-llm-profile switches it off.")
+    return 0
+
+
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
 
 
 def main(argv, out=print, get=None):
     parser = argparse.ArgumentParser(prog="sandbox-ai llm", description=__doc__.split("\n\n")[0],
-                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     formatter_class=help_style,
                                      epilog="\n\n".join(__doc__.split("\n\n")[1:5]))
     commands = parser.add_subparsers(dest="command", required=True)
     adding = commands.add_parser("add", help="add (or with --replace change) an endpoint")
     adding.add_argument("name")
-    adding.add_argument("-k", "--kind", choices=list(KINDS), required=True)
+    adding.add_argument("-k", "--kind", choices=list(KINDS), required=True, help="the kind of server")
     adding.add_argument("-u", "--url", required=True, help="http(s)://HOST[:PORT][/PREFIX], the server's root")
     adding.add_argument("-s", "--api-key-secret", metavar="SECRET",
                         help="the secret (sandbox-ai secrets) holding the API key; the proxy sends it as a Bearer "
@@ -4014,8 +5425,9 @@ def main(argv, out=print, get=None):
     adding.add_argument("--no-ca", action="store_true", help="with --replace: drop the CA it has (without --ca the "
                                                              "stored one is kept)")
     param_options(adding, every=True)
-    setting = commands.add_parser("set", help="sampling parameters of a model (every model without --model) and "
-                                              "the loop guard")
+    setting = commands.add_parser("set", help="sampling parameters of a model and the loop guard",
+                                         description="Sampling parameters of a model (every model without --model) "
+                                                     "and the loop guard.")
     setting.add_argument("name")
     setting.add_argument("-m", "--model", help="the model whose parameters change (default: every model's)")
     param_options(setting)
@@ -4023,40 +5435,85 @@ def main(argv, out=print, get=None):
                          help="drop a parameter of the model (or of every model); repeatable")
     setting.add_argument("-R", "--reset", action="store_true",
                          help="drop all parameters of the model (or of every model) before the others apply")
-    catalogue = commands.add_parser("params", help="the sampling parameters, their ranges and the servers that take "
-                                                   "them")
+    catalogue = commands.add_parser("params", help="the sampling parameters, their ranges and the servers taking them",
+                                              description="The sampling parameters, their ranges and the servers "
+                                                          "that take them.")
     catalogue.add_argument("name", nargs="?", help="a server's name: the parameters its kind takes")
-    catalogue.add_argument("-k", "--kind", choices=list(KINDS))
-    catalogue.add_argument("-j", "--json", action="store_true")
+    catalogue.add_argument("-k", "--kind", choices=list(KINDS), help="the kind of server")
+    catalogue.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    profiling = commands.add_parser("profiles", help="the model x harness profiles a start applies under your values",
+                                                description="The model x harness profiles a start applies under "
+                                                            "your own values (the local-model research's settings "
+                                                            "and status, with its traffic light: ✓ verified, ~ partly "
+                                                            "working, ✗ does not work); for MODEL first the agents "
+                                                            "it is verified, partly working and not working in.")
+    profiling.add_argument("model", nargs="?", help="a model's name: its profile (in every harness, or --agent's) "
+                                                    "and what we know of it: what works, what does not, what was "
+                                                    "not tested")
+    profiling.add_argument("-a", "--agent", choices=list(AGENTS), help="only for this agent")
+    profiling.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    recommending = commands.add_parser(
+        "recommend", help="the best tested model and harness per use case, from the models your servers have",
+        description="The best tested model and harness per use case of the local-model research (model_usecases.json:"
+                    " coding, sandbox behaviour, web research, code review ...), chosen from the models your LLM "
+                    "servers have now - what is loaded, what fits their memory (llm set NAME --memory GB; a server on "
+                    "this host's loopback: this host's) - else the nearest, with why, the evidence, the settings and "
+                    "the command that starts it; a use case not tested yet says so. One use case (USE_CASE or "
+                    "--use-case) also lists every model of your servers as a pair - model x its best harness -, "
+                    "best first: the table's, then those not measured for it, then those it marks unsafe (with the "
+                    "reason: never chosen on their own); with --agent, where it is not the pair's harness, what is "
+                    "known of the model in it.")
+    recommending.add_argument("use_case_word", nargs="?", metavar="USE_CASE",
+                              help="only this use case, in detail, with the pairs (model x harness) of the models "
+                                   "your servers have, best first (the same as --use-case)")
+    recommending.add_argument("-u", "--use-case", metavar="NAME", help="only this use case, in detail (default: every "
+                                                                       "use case, one line each)")
+    recommending.add_argument("-s", "--server", "--llm", dest="server", metavar="NAME",
+                              help="only this LLM server (default: every one); --llm NAME is the same")
+    recommending.add_argument("-a", "--agent", choices=list(AGENTS),
+                              help="for this agent: the choices measured in it first")
+    recommending.add_argument("-H", "--host", metavar="HOST", help="on a host of sandbox-ai hosts (over SSH)")
+    recommending.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     listing = commands.add_parser("list", help="the endpoints")
-    listing.add_argument("-j", "--json", action="store_true")
+    listing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     showing = commands.add_parser("show", help="one endpoint")
     showing.add_argument("name")
-    showing.add_argument("-j", "--json", action="store_true")
+    showing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     commands.add_parser("remove", help="forget an endpoint (its secrets stay in sandbox-ai secrets)").add_argument("name")
-    models = commands.add_parser("models", help="the models the server offers now")
+    models = commands.add_parser("models", help="the models the server offers now, each with its traffic light",
+                                 description="The models the server offers now. SUPPORT is the traffic light of "
+                                             "sandbox-ai's local-model research (model_profiles.json): green ✓ "
+                                             "verified, yellow ~ partly working, red ✗ does not work, grey ? not "
+                                             "tested, with the agents of the model's best colour; --json has the "
+                                             "details per agent (\"support\": what worked and failed, the "
+                                             "recommended settings, the speed, the round and its date).")
     models.add_argument("name")
-    models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded")
-    models.add_argument("-j", "--json", action="store_true")
-    watching = commands.add_parser("status", help="what the server has loaded and uses now (VRAM/RAM, KV cache, "
-                                                  "requests), as its API reports it; every server without NAME")
+    models.add_argument("-s", "--sort", choices=["name", "size", "loaded"], default="loaded", help="the order of the models: name, size or loaded (default: loaded)")
+    models.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    watching = commands.add_parser("status", help="what the server has loaded and uses now",
+                                             description="What the server has loaded and uses now (VRAM/RAM, KV "
+                                                         "cache, requests), as its API reports it; every server "
+                                                         "without NAME.")
     watching.add_argument("name", nargs="?")
-    watching.add_argument("-j", "--json", action="store_true")
+    watching.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     watching.add_argument("-w", "--watch", type=float, metavar="SECONDS",
                           help=f"read again every SECONDS (at least {WATCH_MIN}) until Ctrl-C; with --json one line "
                                "per reading")
-    detecting = commands.add_parser("detect", help="look for servers on this host and at the addresses given "
-                                    "(read-only model listings, short timeouts)")
+    detecting = commands.add_parser("detect", help="look for servers on this host and at the addresses given",
+                                              description="Look for servers on this host and at the addresses "
+                                                          "given (read-only model listings, short timeouts).")
     detecting.add_argument("-A", "--address", action="append", default=[], metavar="IP",
                            help="a further address to look at (this host's loopback always; its LAN address "
                                 "and other machines only when named); repeatable")
-    detecting.add_argument("-j", "--json", action="store_true")
-    loaded = commands.add_parser("loaded", help="the models the server has loaded now: instances, context, memory, "
-                                                "JIT or explicit, the running sandboxes using them")
+    detecting.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    loaded = commands.add_parser("loaded", help="the models the server has loaded now",
+                                           description="The models the server has loaded now: instances, context, "
+                                                       "memory, JIT or explicit, the running sandboxes using them.")
     loaded.add_argument("name")
-    loaded.add_argument("-j", "--json", action="store_true")
-    loading = commands.add_parser("load", help="load a model explicitly (it stays until unloaded); a JIT instance "
-                                               "(LM Studio) is replaced, never held twice")
+    loaded.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    loading = commands.add_parser("load", help="load a model explicitly (it stays until unloaded)",
+                                          description="Load a model explicitly (it stays until unloaded); a JIT "
+                                                      "instance (LM Studio) is replaced, never held twice.")
     loading.add_argument("name")
     loading.add_argument("model")
     loading.add_argument("-c", "--context", type=int, metavar="TOKENS",
@@ -4066,19 +5523,20 @@ def main(argv, out=print, get=None):
                          help="Ollama: unloaded after SECONDS idle (default: stays until unloaded)")
     loading.add_argument("-f", "--force", action="store_true",
                          help="reload a model a running sandbox uses all the same")
-    unloading = commands.add_parser("unload", help="unload a model (every instance of it) or one instance; refused "
-                                                   "while a running sandbox uses it, unless --force")
+    unloading = commands.add_parser("unload", help="unload a model or one instance of it",
+                                              description="Unload a model (every instance of it) or one instance; "
+                                                          "refused while a running sandbox uses it, unless "
+                                                          "--force.")
     unloading.add_argument("name")
     unloading.add_argument("model", metavar="MODEL|INSTANCE")
     unloading.add_argument("-f", "--force", action="store_true",
                            help="unload it although a running sandbox uses it")
     checking = commands.add_parser("check", help="reachability, TLS, key, models and the agents' APIs")
     checking.add_argument("name")
-    checking.add_argument("-a", "--agent", choices=list(AGENTS))
-    checking.add_argument("-m", "--model")
+    checking.add_argument("-a", "--agent", choices=list(AGENTS), help="only for this agent")
+    checking.add_argument("-m", "--model", help="check this model (default: the server's first)")
     traffic = load_traffic_module()
-    commands.add_parser("traffic", help="what an agent and its model exchanged, request by request (the LLM "
-                        "traffic log: messages, tool calls, the answer, the relay's changes)",
+    commands.add_parser("traffic", help="what an agent and its model exchanged, request by request",
                         parents=[traffic.parser(add_help=False)], formatter_class=argparse.RawDescriptionHelpFormatter,
                         description=traffic.__doc__.split("\n\n")[0])
     args = parser.parse_args(argv)
@@ -4110,6 +5568,10 @@ def main(argv, out=print, get=None):
                 out(f"\n{args.name}'s own values: sandbox-ai llm set {args.name} --param KEY=VALUE "
                     f"[--model MODEL] (shown by sandbox-ai llm show {args.name})")
             return 0
+        if args.command == "profiles":
+            return show_profiles(args, out)
+        if args.command == "recommend":
+            return recommend(args, argv, out, get)
         if args.command == "list":
             store = load_store()
             endpoints = []
@@ -4165,8 +5627,10 @@ def main(argv, out=print, get=None):
         if args.command == "models":
             chosen = endpoint(args.name)
             with through_vpn(chosen) as tunnel:
-                found = sort_models(endpoint_models(chosen, get, client=VPNClient(chosen, tunnel, get) if tunnel
-                                                    else None), args.sort)
+                client = VPNClient(chosen, tunnel, get) if tunnel else Client(chosen, get)
+                found = sort_models(endpoint_models(chosen, get, client=client), args.sort)
+                served_windows(chosen, found, client)  # Ollama: the window it serves each one with
+            model_support(found)  # the traffic light: how far the research supports each model, per harness
             for line in [json.dumps(found, indent=2)] if args.json else model_table(found):
                 out(line)
             return 0

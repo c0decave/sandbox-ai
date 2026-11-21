@@ -67,12 +67,9 @@ def test_the_patch_comes_right_after_the_profile():
 def test_check_refuses_what_dsh_cannot_do_here():
     dsh.check(ns(args=["headless", "x"]))  # fine
     dsh.check(ns("claude"))  # nothing to say about another agent
-    with pytest.raises(ValueError, match="not in the team image"):
-        dsh.check(ns(), companions=["claude"])
-    with pytest.raises(ValueError, match="not in the team image"):
-        dsh.check(ns("claude"), companions=["dsh"])
-    with pytest.raises(ValueError, match="not enforced for DeepSeek Harness"):
-        dsh.check(ns(), hooks_active=True)
+    dsh.check(ns(), companions=["claude"])  # --with: a layer of the team image since 0.1.98
+    dsh.check(ns("claude"), companions=["dsh"])  # --with: a layer of the team image since 0.1.98
+    dsh.check(ns(), hooks_active=True)  # rules for its own tools: sandbox-ai's Cordis plugin
     for args in (["desktop"], ["plugin", "--profile", "web", "add", "x"], ["--profile", "desktop"]):
         with pytest.raises(ValueError, match="not in a sandbox"):
             dsh.check(ns(args=args))
@@ -137,7 +134,7 @@ def test_environment_and_plan():
 
 def test_the_launcher_knows_dsh():
     assert s.DANGER_ENV["dsh"] == {"DSH_PERMISSION_MODE": dsh.DANGER_MODE} and s.DANGER_ARGS["dsh"] == []
-    assert s.AUTH_TARGETS["dsh"] == ".dsh/.credentials.yaml" and "dsh" in s.NOT_IN_TEAM
+    assert s.AUTH_TARGETS["dsh"] == ".dsh/.credentials.yaml" and "dsh" in s.COMPANION_AGENTS
     assert s.AGENT_EFFORTS["dsh"] == () and "dsh" in s.AGENT_PROGRAMS
     assert llm.DSH_PATCH == dsh.PATCH and llm.DSH_ROUTE == dsh.LLM_ROUTE and llm.KEY_VARIABLE == dsh.KEY_VARIABLE
     assert agent_mcp.DSH_PATCH == dsh.PATCH

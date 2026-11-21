@@ -1,0 +1,29 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "default-pi",
+  "title": "Pi (default)",
+  "description": "Pi on your project with sandbox-ai's defaults and nothing more: only its model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "translations": {
+    "de": {
+      "title": "Pi (Standard)",
+      "description": "Pi an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur sein Modell ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "pi"
+  ],
+  "options": [
+    "--api-key",
+    "api.anthropic.com=ANTHROPIC_API_KEY",
+    "--model",
+    "anthropic/claude-sonnet-4-5"
+  ],
+  "notes": [
+    "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once). Pi sees a placeholder, the connection proxy puts the key in on the wire; --model names provider/model. Another provider: --api-key api.openai.com=OPENAI_API_KEY or openrouter.ai=OPENROUTER_API_KEY with its --model, a model server of yours with --llm (the preset pi-local-llm), or your Pi login (sandbox-ai login pi) with that provider's hosts.",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-pi or sandbox-ai net allow during the run.",
+    "Its telemetry is always off and cannot be turned on.",
+    "Pi is not live-tested yet (a start says so); its image first: sandbox-ai build pi (a start builds it when it is missing)."
+  ]
+}

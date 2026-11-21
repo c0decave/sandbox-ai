@@ -42,7 +42,9 @@ VISITED_KEPT = 50  # pages in History (this run only)
 TITLE_CHARS = 28
 AGENT_NAMES = {"claude": N_("Claude Code"), "codex": N_("Codex"), "opencode": N_("OpenCode"),
                "hermes": N_("Hermes Agent"), "dsh": N_("DeepSeek Harness"), "qwen": N_("Qwen Code"),
-               "goose": N_("Goose")}
+               "goose": N_("Goose"), "openhands": N_("OpenHands"), "nanobot": N_("nanobot"), "letta": N_("Letta Code"),
+               "opencode2": N_("OpenCode 2"),
+               "pi": N_("Pi")}
 # The page a provider's host signs in on; a host of PROVIDERS not here opens at its root. API hosts (api.*) are none.
 SIGN_IN_PAGES = {"claude.ai": "https://claude.ai/login", "chatgpt.com": "https://chatgpt.com/auth/login",
                  "auth.openai.com": "https://auth.openai.com/log-in", "opencode.ai": "https://opencode.ai/auth",

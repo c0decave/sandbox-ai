@@ -26,12 +26,15 @@ def load(name, file):
 s = load("agent_sandbox_badges_test", "agent_sandbox.py")
 p = load("presets_badges_test", "presets.py")
 
-# The presets of Hermes, Qwen Code, DSH, Goose and Cairn.
+# The presets of Hermes, Qwen Code, DSH, Goose, OpenHands, Letta Code, Pi and Cairn.
 EXPERIMENTAL_PRESETS = {"coding-hermes": "hermes", "hermes-claude": "hermes", "hermes-kanban": "hermes",
                         "hermes-local-llm": "hermes", "coding-qwen": "qwen", "qwen-local-llm": "qwen",
                         "coding-dsh": "dsh", "dsh-local-llm": "dsh", "coding-goose": "goose",
-                        "goose-local-llm": "goose", "cairn-pentest-board": "cairn", "default-hermes": "hermes",
-                        "default-qwen": "qwen", "default-dsh": "dsh", "default-goose": "goose"}
+                        "goose-local-llm": "goose", "coding-openhands": "openhands",
+                        "openhands-local-llm": "openhands", "coding-nanobot": "nanobot",
+                        "nanobot-local-llm": "nanobot", "coding-letta": "letta", "letta-local-llm": "letta",
+                        "cairn-pentest-board": "cairn", "cairn-local-llm": "cairn", "default-openhands": "openhands", "default-nanobot": "nanobot", "default-letta": "letta", "default-hermes": "hermes", "default-qwen": "qwen", "default-dsh": "dsh", "default-goose": "goose", "default-opencode2": "opencode2", "coding-opencode2": "opencode2", "opencode2-local-llm": "opencode2",
+                        "coding-pi": "pi", "pi-local-llm": "pi", "default-pi": "pi"}
 
 
 @pytest.fixture(autouse=True)
@@ -40,12 +43,13 @@ def own_config(tmp_path, monkeypatch):
 
 
 def test_the_list_names_what_sandbox_ai_has():
-    """Its agents are agents of the launcher, Cairn's image is cairn.py's."""
+    """Its agents are agents of the launcher, Cairn is its own part (--cairn: cairn.py)."""
     agents = {part["agent"] for part in s.EXPERIMENTAL_PARTS.values() if "agent" in part}
-    assert agents == {"hermes", "dsh", "qwen", "goose"} and agents <= set(s.AUTH_TARGETS)
+    assert agents == {"opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"} and \
+        agents <= set(s.AUTH_TARGETS)
     cairn = load("cairn_badges_test", "cairn.py")
-    assert s.EXPERIMENTAL_PARTS["cairn"]["image"] == s.image_base(cairn.IMAGE)
-    assert s.experimental_needs(["claude"], ["--image", cairn.IMAGE]) == ["cairn"]
+    assert s.EXPERIMENTAL_PARTS["cairn"] == {"option": "--cairn"} and cairn.IMAGE == s.CAIRN_IMAGE
+    assert s.experimental_needs(["claude"], ["--cairn"]) == ["cairn"] == s.experimental_needs(["claude"], ["-cr"])
 
 
 def test_exactly_these_presets_are_marked():

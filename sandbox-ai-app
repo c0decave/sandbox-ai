@@ -69,6 +69,7 @@ for arg in "$@"; do
     --foreground|--fg) foreground=1 ;;
     --debug) foreground=1; export SANDBOX_AI_APP_DEBUG=1 ;;
     --debug=all) foreground=1; export SANDBOX_AI_APP_DEBUG=all QT_LOGGING_RULES="${QT_LOGGING_RULES:-*.debug=true}" ;;
+    --version|-V) foreground=1; args+=("$arg") ;;  # (says it here, in this terminal)
     *) args+=("$arg") ;;
   esac
 done

@@ -40,7 +40,14 @@ NETWORK_SHAPE = ("profile", "offline", "egress_all_allow", "no_provider_defaults
 # taint_settings()); "canaries": the decoy
 # files (canary.py): "categories" planted at least, "on_read"/"on_send" weighed like a ruleset's "canary" section
 # (the strictest wins). Without the key, the launcher's own: credentials and home, a read reported, a token leaving
-# stops.
+# stops. "packages": the package guard's decisions, weighed like a ruleset's "packages" section (the strictest wins):
+# the strict modes ask before a download of a package whose name is brand new (possibly slopsquatted), and keep
+# the minimum release age at 14 days whatever your defaults say (package_min_age_days). "packages_base": where the
+# mode's own defaults for the guard differ from the launcher's (lax, which asks nothing: young versions are recorded).
+# "secrets": the secret guard's decisions (the proxy's search of every request for the run's secrets and for token
+# shapes), weighed like a ruleset's "secrets" section (the strictest wins): the strict modes refuse a request that
+# carries a secret the run was given to a host it was not given for; high asks before one that carries what looks
+# like a credential, paranoid refuses it. Without the key: both are reported.
 # "telemetry": the least --telemetry level (agent_sandbox.telemetry_level; off when the key is missing). Telemetry is
 # always off (there is no level on since 0.1.95); strict holds back the agents' other calls as well.
 MODES = {
@@ -48,7 +55,10 @@ MODES = {
         "summary": "every outbound destination (--egress-all-allow), logged with --log-debug; no approval questions",
         "network": ["--egress-all-allow"], "ask": "off", "flags": ["--log-debug"],
         # Everything is open on purpose: a canary token leaving is reported, not refused (rulesets may be stricter).
-        "canaries": {"on_read": "report", "on_send": "report"}},
+        "canaries": {"on_read": "report", "on_send": "report"},
+        # Nothing is asked in this mode: a young package version is recorded, not held (a known malicious one is
+        # refused all the same; rulesets may be stricter).
+        "packages_base": {"min_age": "report"}},
     "low": {
         "summary": "development hosts: the provider, PyPI, npm, GitHub and the OpenAI and Anthropic APIs; "
                    "approvals on",
@@ -61,7 +71,9 @@ MODES = {
                    "Wayland or variants on your own base images; privacy check of every push; 4g memory, 2048 processes",
         "privacy_check": "always", "limits": {"memory": "4g", "pids": "2048"}, "approval_scope": "run",
         "other_workspaces_ro": True, "rules": "ask-writes", "taint": "ask-mcp",
-        "canaries": {"categories": ["credentials", "home"], "on_read": "ask", "on_send": "stop"}},
+        "canaries": {"categories": ["credentials", "home"], "on_read": "ask", "on_send": "stop"},
+        "packages": {"new_names": "ask", "min_age_days": 14},
+        "secrets": {"on_send": "block", "on_shape": "ask"}},
     "paranoid": {
         "summary": "as high, and: every HTTP request but the provider's refused, approvals only once, all "
                    "workspaces read-only, no -D, no display, no MCP server with network, no services, --log-debug; 2g "
@@ -69,6 +81,7 @@ MODES = {
         "privacy_check": "always", "limits": {"memory": "2g", "cpus": "2", "pids": "1024"},
         "approval_scope": "once", "flags": ["--workspace-ro", "--log-debug"], "rules": "deny",
         "canaries": {"categories": ["credentials", "home"], "on_read": "stop", "on_send": "stop"},
+        "packages": {"new_names": "ask", "min_age_days": 14}, "secrets": {"on_send": "block", "on_shape": "block"},
         "taint": "escalate", "telemetry": "strict"},
 }
 WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"]
@@ -250,6 +263,9 @@ RULES = [
     # Before --allow-host: --allow-domain DOMAIN is --allow-host DOMAIN '*.DOMAIN' (expand_domains), named as given.
     (STRICT, lambda a, l: _given(getattr(a, "allow_domain", None) or [], "--allow-domain"),
      "it opens a domain and every name below it, beyond the agent's provider"),
+    # Before --allow-host as well: a wildcard below a shared service (expand_shared_wildcards), named as given.
+    (STRICT, lambda a, l: _given(getattr(a, "allow_shared_wildcard", None) or [], "--allow-shared-wildcard"),
+     "a wildcard below a shared service lets the agent open any server anyone rents there, and send data there"),
     (STRICT, lambda a, l: _given(a.allow_host, "--allow-host"),
      "it opens hosts beyond the agent's provider (so does a Git token for another server)"),
     (STRICT, lambda a, l: _given(a.allow, "--allow"), "it opens addresses"),
@@ -268,6 +284,14 @@ RULES = [
      "pushes would not all be checked"),
     (STRICT, lambda a, l: "--no-canaries" if getattr(a, "canaries", None) == "none" else None,
      "without canary files a read of credentials or a leaking token goes unnoticed"),
+    (STRICT, lambda a, l: "--no-package-guard" if getattr(a, "no_package_guard", False) else None,
+     "without the package guard a known malicious package, a release of today or a made-up name is downloaded "
+     "unchecked"),
+    (STRICT, lambda a, l: _given([spec for spec in getattr(a, "allow_send", None) or []
+                                  if str(spec).strip().startswith("*@") or str(spec).strip().endswith("@*")],
+                                 "--allow-send"),
+     "a * there lets any secret out, or a secret go to any host, past the secret guard (name the kind of value and "
+     "the host)"),
     (("paranoid",), lambda a, l: "--telemetry off" if getattr(a, "telemetry", None) == "off" else None,
      "the agents would make calls beyond the model's (plugin downloads, model lists, language servers)"),
     (STRICT, lambda a, l: _given(a.device, "--device"), "the device's driver runs in your host's kernel"),
@@ -295,6 +319,10 @@ RULES = [
     # high the agent driving it must not reach a folder of yours through its profile (downloads, files of pages).
     (("paranoid",), lambda a, l: f"--browser {a.browser}" if getattr(a, "browser", None) else None,
      "a browser with a display would run beside the agent, on its network"),
+    # Cairn's board (--cairn) runs beside the agent and starts the session's agents as its workers on its own,
+    # without their questions (Cairn's flags): in paranoid nothing acts without asking.
+    (("paranoid",), lambda a, l: "--cairn" if getattr(a, "cairn", False) else None,
+     "Cairn would start the session's agents as its workers on its own, without their approval questions"),
     (STRICT, lambda a, l: f"--browser-profile {a.browser_profile}" if getattr(a, "browser", None) and
      getattr(a, "browser_control", None) in ("agent", "both") and getattr(a, "browser_profile", None) not in
      (None, "", "fresh", "session") else None,
@@ -383,6 +411,9 @@ def check(l, a, policy):
         a.max_approval_scope = scope
     a.mode_other_workspaces_ro = bool(mode.get("other_workspaces_ro"))
     a.mode_canaries = mode.get("canaries")  # canary.categories() and canary.decisions() weigh it
+    a.mode_packages = mode.get("packages")  # the package guard's decisions (packages.proxy_settings weighs it)
+    a.mode_packages_base = mode.get("packages_base")  # and the mode's own defaults for them
+    a.mode_secrets = mode.get("secrets")  # the secret guard's decisions (secret_guard.proxy_settings weighs it)
     a.mode_rules = ruleset(l, a, name)
 
 
@@ -409,6 +440,7 @@ def ruleset(l, a, name):
 
 # What `sandbox-ai net allow` can open during a run, as the start option it stands for, with a sample value.
 RUNTIME_OPTIONS = (("--allow", "192.0.2.1"), ("--allow-host", "example.org"), ("--allow-domain", "example.org"),
+                   ("--allow-shared-wildcard", "*.blob.core.windows.net"),
                    ("--allow-tcp", "192.0.2.1:443"),
                    ("--dns", None), ("--allow-host-port", "3000"))
 
@@ -454,6 +486,7 @@ def plan(a):
 WEAKENING_OPTIONS = frozenset({
     # the network and the proxy
     "--egress-all-allow", "--allow", "--allow-tcp", "--allow-host", "--allow-domain", "--allow-http", "--allow-host-port",
+    "--allow-shared-wildcard", "--yes",  # a wildcard below a shared service, and the yes to its risk question
     "--allow-pypi",
     "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",
     "--profile", "--dns", "--nameserver", "--network", "--ip", "--ip6", "--no-proxy", "--no-inspect", "--ask",
@@ -462,24 +495,30 @@ WEAKENING_OPTIONS = frozenset({
     # files, devices, displays and sound
     "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
     "--browser", "--browser-control", "--browser-profile",  # a browser beside the agent, which it may drive
+    "--cairn", "--cairn-workers",  # Cairn beside the agent, running the session's agents without their questions
     "--state-dir", "--kit", "--kit-dir", "--mcp", "--mcp-mount",  # --mcp-mount: a host folder an MCP server writes
     "--mcp-limits",  # an MCP server's limits raised (or none), as --memory raises the agent's
     "--mcp-env",  # --mcp-env: an MCP server's variable (ALLOW_PRIVATE_TARGETS=1 widens what it reaches) or secret
     # logins, secrets and identities
     "--dangerously-skip-permissions", "--env", "--secret-env", "--api-key", "--publish", "--git-token-env",
     "--git-token-file", "--git-token-secret", "--git-credentials", "--git-identity", "--git-logins", "--identity",
-    "--auth-file", "--import-codex-auth", "--copy-auth", "--with", "--helper",
+    "--auth-file", "--auth-from-session", "--import-codex-auth", "--copy-auth", "--with", "--helper",
     # what is noticed, checked and kept
     "--privacy-check", "--privacy-rules", "--canaries", "--no-canaries", "--keep", "--log-debug", "--log-dir",
+    "--no-package-guard", "--allow-package",  # the package guard off, or a package past its questions
     "--telemetry", "--llm-param",  # --llm-param loop_guard=off: the loop guard off
     "--llm-traffic", "--llm-traffic-limit",  # what the LLM traffic log keeps of the conversations
     # what runs the sandbox, and its limits
     "--runtime", "--binary", "--image", "--image-variant", "--podman-url", "--backend", "--memory", "--cpus", "--pids",
     "--tmp-size", "--nested-containers", "--service",  # --service: an image nobody reviewed, beside the agent
 })
-# Hermes', Qwen Code's and Goose's features (hermes.py, qwen.py, goose.py) open their own hosts (and give Hermes and
-# Goose secrets).
-WEAKENING_OPTIONS = WEAKENING_OPTIONS | {"--hermes-enable", "--qwen-enable", "--goose-enable"}
+# Hermes', Qwen Code's, Goose's, OpenHands', nanobot's and Letta Code's features (hermes.py, qwen.py, goose.py,
+# openhands.py, nanobot.py, letta.py, pi.py) open their own hosts or start a part of theirs (and give Hermes, Goose and nanobot
+# secrets).
+WEAKENING_OPTIONS = WEAKENING_OPTIONS | {"--hermes-enable", "--qwen-enable", "--goose-enable",
+                                         "--openhands-enable", "--nanobot-enable", "--letta-enable",
+                                         "--opencode2-enable",
+                                         "--pi-enable"}
 
 
 def option_items(l, tokens):

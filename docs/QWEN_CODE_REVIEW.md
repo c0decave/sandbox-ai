@@ -57,6 +57,7 @@ section), the same form as Hermes' `--hermes-enable`: each opens only its own ho
 | Update check (`registry.npmjs.org` dist-tags) and auto-update (npm, the standalone installer from `qwen-code-assets.oss-cn-hangzhou.aliyuncs.com`) | on (`general.enableAutoUpdate`) | off (`general.enableAutoUpdate: false`); the install is read-only in the sandbox, so an update can never be applied | `updates` (registry.npmjs.org: the check and its notice). A new Qwen Code is a new review, then `sandbox-ai build qwen` |
 | Model catalog refresh (`models.dev/api.json`, once a day) | on | off (`QWEN_CODE_MODELS_DEV_REFRESH=off`; the bundled snapshot still serves) | `model-catalog` (models.dev) |
 | Extensions: `qwen extensions install` from Git/GitHub, npm, the Claude/Gemini marketplaces | on demand | closed (installed extensions still load from `~/.qwen/extensions`) | `extensions` (github.com, api.github.com, codeload.github.com, raw.githubusercontent.com, objects.githubusercontent.com, registry.npmjs.org) |
+| Installed extensions (and their hooks, which run after sandbox-ai's rule check) while rules for its own tools hold | load | not loaded (`--extensions none`) | `extension-hooks` (no host) |
 | Its own sandbox (`--sandbox`, `tools.sandbox`, `QWEN_SANDBOX`: Docker, Podman, macOS Seatbelt) | off unless asked | off and refused: `tools.sandbox: false`, `QWEN_SANDBOX=false`, `SANDBOX=sandbox-ai` (Qwen Code then knows it is inside one); `--sandbox`/`-s`/`--sandbox-image` in the agent's arguments are refused. The image has no Docker or Podman and the sandbox no socket | none: a container of the host's engine would run the agent outside sandbox-ai's limits, rules and logs |
 | Execution sandbox for its shell tool (`tools.executionSandbox`: bwrap/Landlock, inside this sandbox) | off | the user's choice (it confines further, inside sandbox-ai's sandbox) | - |
 | Qwen OAuth (`chat.qwen.ai` device login, inference at the token's resource URL) | on `/auth` (free tier discontinued 2026-04-15) | open as Qwen Code's provider with DashScope (`chat.qwen.ai`, `portal.qwen.ai`, `dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com`); `sandbox-ai login qwen` (`/auth` in a login sandbox; the device URL through the login browser) | on; `--no-provider-defaults` closes them |
@@ -175,10 +176,32 @@ recording of tmux 3.3a passing on Qwen-like redraws.
 
 - `--with` (Qwen Code is not in the team image): use `--helper` in either direction (`sandbox-ai qwen --helper
   claude`, `sandbox-ai claude --helper qwen`, which runs `qwen --prompt=...`).
-- Rules for the agent's own tools and kit hooks (refused, never silently unenforced - so not the mode paranoid);
-  Qwen Code's own hooks stay the user's.
 - `--effort` (Qwen Code sets reasoning per model in its `generationConfig`).
 - Teams, the activity feed of its turns, `mcp attach --live`, the channels and `qwen serve`.
+
+## Rules for its own tools and kit hooks (2026-11-16)
+
+Qwen Code 0.26.4 has Claude Code's command hooks (`packages/core/src/hooks`: PreToolUse, PostToolUse and 18 more
+events; exit status 2 blocks a call with standard error as the model's feedback; `updatedInput` rewrites it). Its
+system settings (`QWEN_CODE_SYSTEM_SETTINGS_PATH`, read-only at `/etc/qwen-code`) win over the user's and the
+project's (`settings.ts`: mergeSettings) and their `hooks` are concatenated with the others (`MergeStrategy.CONCAT`).
+
+- The rule hooks (`runtime.py --internal-hook qwen EVENT`, matcher `*`, 120 s) and the approved kit hooks
+  (`hooks.json`) go into the system settings, each group `sequential`: Qwen Code then runs all of an event's hooks one
+  after the other in source order - project, user, system, extensions (`hookRegistry.ts`: getSourcePriority) - each
+  on the input the one before rewrote (`hook-sequential-input.ts`), so the rule hook checks what the project's and
+  the user's hooks made of the call. `disableAllHooks: false` is pinned there; `--bare` and `--safe-mode` (no hooks
+  at all: `Config.getDisableAllHooks`) are refused in its arguments while rules hold.
+- Its tool ids are mapped to Claude Code's names (`run_shell_command` Bash, `write_file` Write, `edit` Edit,
+  `web_fetch` WebFetch, ...; `tool-names.ts`); the arguments already are Claude Code's (`file_path`, `old_string`).
+- Extensions' hooks run after the system's (source priority 4) and the last `updatedInput` wins
+  (`HookAggregator.mergeWithOrLogic`): they could rewrite a call after the check. Qwen Code has no managed-hooks-only
+  switch and no way to put the system's last, so while rules hold Qwen Code starts with `--extensions none` (the
+  `-e none` override: no extension loads, nor its hooks; `ExtensionManager.isEnabled`) - unless the human trusts them
+  with `--qwen-enable extension-hooks` (it opens no host) or names extensions in its arguments (`--extensions`).
+- Not covered: a subagent's own hooks (`addAgentHooks`, source "session", run last; a project agent's only in a
+  trusted folder) can rewrite a call after the check too; a `qwen --bare` or `qwen -e ...` the agent starts from its
+  shell runs without the rule hooks or with extensions (a second agent, as for Claude Code).
 
 ## Go / No-Go
 

@@ -121,6 +121,9 @@ class FullFile:
     def flush(self):
         self.raw.flush()
 
+    def close(self):
+        self.raw.close()
+
     def __enter__(self):
         return self
 
@@ -252,11 +255,11 @@ def test_the_web_interface_ended_by_a_signal_cleans_up_and_starts_again(tmp_path
     web = load("webui")
     web.save_users({"tester": {"password": web.hash_password("pw-for-the-test-123456"),
                                "totp": web.new_totp_secret(), "totp_counter": 0}})
-    listen = tmp_path / "config" / "sandbox-ai" / "web" / "listen.json"
     for attempt in range(2):
         process = subprocess.Popen([sys.executable, str(ROOT / "sandbox" / "main.py"), "web", "serve", "--listen",
                                     "127.0.0.1:0"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True)
+        listen = tmp_path / "config" / "sandbox-ai" / "web" / f"listen-{process.pid}.json"
         try:
             for _ in range(1200):  # (60 s: a busy CI runner took longer than 15 s to start it)
                 if listen.exists() or process.poll() is not None:
@@ -271,7 +274,43 @@ def test_the_web_interface_ended_by_a_signal_cleans_up_and_starts_again(tmp_path
                 process.kill()
                 process.wait()
         assert process.returncode == 128 + signum and "Traceback" not in output, output
-        assert not listen.exists(), f"attempt {attempt}: listen.json left behind"
+        assert not listen.exists(), f"attempt {attempt}: {listen.name} left behind"
+
+
+SIGNAL_RIGHT_AFTER_LISTEN_JSON = """
+import os, signal, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import webui
+written = webui.write_private
+
+def write_then_signal(path, data):
+    written(path, data)
+    if Path(path).name.startswith("listen-"):
+        os.kill(os.getpid(), int(sys.argv[2]))  # the moment listen.json is there, before anything else runs
+
+webui.write_private = write_then_signal
+webui.serve("127.0.0.1:0", out=lambda line: None)
+"""
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_the_moment_listen_json_is_written_still_removes_it(tmp_path, monkeypatch, signum):
+    """`webui.serve` wrote listen.json before it installed its SIGTERM/SIGHUP handlers: a signal in between ended
+    the process at once and listen.json stayed (test_the_web_interface_ended_by_a_signal... failed once so on a busy
+    machine). The handlers come first now. The signal is sent from inside the write itself: no timing."""
+    env = environment(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    web = load("webui")
+    web.save_users({"tester": {"password": web.hash_password("pw-for-the-test-123456"),
+                               "totp": web.new_totp_secret(), "totp_counter": 0}})
+    done = subprocess.run([sys.executable, "-c", SIGNAL_RIGHT_AFTER_LISTEN_JSON, str(ROOT / "sandbox"), str(int(signum))],
+                          env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 128 + signum, (done.returncode, done.stdout + done.stderr)
+    assert "Traceback" not in done.stderr, done.stderr
+    left = list((tmp_path / "config" / "sandbox-ai" / "web").glob("listen-*.json"))
+    assert left == [], f"{[p.name for p in left]} left behind"
 
 
 # --- out of descriptors at an accept() --------------------------------------------------------------------------
@@ -536,3 +575,44 @@ def test_a_full_disk_leaves_no_temporary_file_behind(writer, tmp_path, monkeypat
             call()
     monkeypatch.undo()
     assert [p.name for p in directory.iterdir() if p.name.startswith(".")] == []
+
+
+def test_two_web_interfaces_at_once_each_keep_their_port_refused(tmp_path):
+    """Two `sandbox-ai web serve` at once (one on loopback, one on the LAN) shared one listen.json: the second wrote
+    over the first's port, so --allow-host-port of the first's port was accepted while it ran - a sandbox reached a
+    web interface that controls every sandbox. Each server keeps a record of its own; both ports are refused, and
+    the end of one leaves the other's."""
+    from live_fakes import Host
+    host = Host(tmp_path / "h")
+    host.env.pop("SANDBOX_AI_RUN", None)
+    host.env.update(SANDBOX_AI_SECRETS="file", SANDBOX_AI_NO_UPDATE_CHECK="1")
+    users = host.home / ".config/sandbox-ai/web/users.json"
+    users.parent.mkdir(parents=True)
+    users.write_text(json.dumps({"version": 1, "users": {"tester": {"password": "x", "totp": "x", "totp_counter": 0}}}))
+    users.chmod(0o600)
+    servers, ports = [], []
+    try:
+        for _ in range(2):
+            with socket.socket() as probe:  # a free port (its output reaches a pipe only at its end)
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            process = host.popen("web", "serve", "--listen", f"127.0.0.1:{port}")
+            servers.append(process)
+            for _ in range(1200):  # (60 s at most: a busy CI runner)
+                assert process.poll() is None, process.communicate()
+                with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port), timeout=1):
+                    break
+                time.sleep(0.05)
+            ports.append(port)
+        for port in ports:
+            refused = host.run("claude", "--allow-host-port", port, "--dry-run")
+            assert refused.returncode != 0, f"port {port} of a running web interface was given"
+            assert "the web interface (sandbox-ai web) listens there" in refused.stderr, refused.stderr
+        servers[0].send_signal(signal.SIGTERM)
+        servers[0].communicate(timeout=30)
+        assert host.run("claude", "--allow-host-port", ports[1], "--dry-run").returncode != 0
+    finally:
+        for process in servers:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=30)

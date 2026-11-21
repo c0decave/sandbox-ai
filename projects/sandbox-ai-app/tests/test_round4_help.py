@@ -123,8 +123,9 @@ def own_buttons(page, inside=None, skip=None):
                 skipped = True
                 break
             widget = widget.parentWidget()
-        if not skipped and button.text().strip():
-            found.append(button.text())
+        text = getattr(button, "label", None) or button.text()  # (an icon button: its text, shown or not)
+        if not skipped and text.strip():
+            found.append(text)
     return found
 
 
@@ -153,14 +154,13 @@ def test_every_button_of_the_start_page_is_in_the_help(qapp, sai):
 
 def test_every_button_of_the_sandboxes_boxes_is_in_the_help(qapp, sai):
     pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
-    from PySide6.QtWidgets import QGroupBox
     from sandbox_ai_app import ui
     page = ui.SandboxesPage(sai, lambda *a, **k: None)
     try:
-        boxes = {box.title(): box for box in page.findChildren(QGroupBox)}
-        live = own_buttons(page, inside=boxes[i18n.tr("While it runs")])
+        # (the groups' rows of icon buttons since 2026-11-19; their texts are the tooltips' and the menus')
+        live = own_buttons(page, inside=page.run_row)
         assert {"Add workspace…", "Add MCP server…", "Remove MCP server…"} <= set(live)
-        labels = live + own_buttons(page, inside=boxes[i18n.tr("Session")])
+        labels = live + own_buttons(page, inside=page.session_row)
         assert "Resume with…" in labels
         assert not missing(labels), "Sandboxes page buttons the help does not mention:\n" + "\n".join(missing(labels))
     finally:

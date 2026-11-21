@@ -1360,3 +1360,68 @@ def test_the_supervisors_python_is_debians_own_without_site(tmp_path):
     assert not re_.search(r"""["']python3["'], ["']-I["']""", source), "no python3 found on PATH"
     launcher = (ROOT / "sandbox" / "agent_sandbox.py").read_text()
     assert '"--entrypoint=/usr/bin/python3", a.image, "-I"' not in launcher
+
+
+# -- the Board's image list (user 2026-11-19: "no services in the Service part's drop-down, though they should be built")
+
+def test_images_templates_lists_sandbox_ais_own_service_containerfiles(config, capsys):
+    """`images templates [--json]`: sandbox-ai's own Containerfiles for services (service-images: showcase-web), each
+    with what it is and the images of yours built from it - what the Board's image list offers on a host as "built
+    when needed" (another host is asked with its own sandbox-ai: its templates may differ)."""
+    assert sv.main(["templates", "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    web = next(row for row in rows if row["template"] == "showcase-web")
+    assert web["description"] and web["built"] == [] and web["image"] == "showcase-web"
+    record = {"kind": "built", "image": sv.IMAGE_TAG.format(name="web"), "id": ID, "builtin": "showcase-web",
+              "ports": [8080], "user": "101:101", "os": {}}
+    sv.write_registry({"web": record, "showcase-web": {**record, "image": sv.IMAGE_TAG.format(name="showcase-web")}})
+    assert sv.main(["templates", "--json"]) == 0
+    web = next(row for row in json.loads(capsys.readouterr().out) if row["template"] == "showcase-web")
+    assert web["built"] == ["showcase-web", "web"]
+    assert sv.main(["templates"]) == 0
+    text = capsys.readouterr().out
+    assert "showcase-web" in text and "built as: showcase-web, web" in text
+    handed = []
+    original = sv.main
+    sv.main = lambda argv, **kwargs: handed.append(argv) or 0
+    try:
+        assert im.main(["templates", "--json"]) == 0
+    finally:
+        sv.main = original
+    assert handed == [["templates", "--json"]]
+
+
+def test_a_service_of_a_template_not_built_names_its_build(config):
+    """The launcher's refusal of a service whose image is one of sandbox-ai's own templates, not built here: the
+    command that builds it (--builtin), not a pull or a Containerfile of yours."""
+    with pytest.raises(ValueError) as refused:
+        sv.check(start("--service", "web:image=showcase-web,port=8080"), s)
+    text = str(refused.value)
+    assert "no image showcase-web of yours" in text
+    assert "sandbox-ai images build-image showcase-web --builtin showcase-web" in text
+    assert "images pull REFERENCE --as showcase-web" not in text
+
+
+def test_a_damaged_record_hides_none_of_your_other_images(config, capfd):
+    """A record sandbox-ai no longer takes (a name that became an agent's, a hand edit) made the whole record
+    unreadable: `images list` failed, the Board's list said "no images of yours", and every --service start was
+    refused. Now the others are listed and used; the damaged one is named (standard error), refused by its own name,
+    and the record is still never rewritten while it is damaged."""
+    add_redis()
+    path = sv.registry_path()
+    document = json.loads(path.read_text())
+    document["images"]["claude"] = dict(document["images"]["redis"])  # an agent's name: refused since
+    document["images"]["broken"] = {**document["images"]["redis"], "ports": "lots"}  # a hand edit
+    path.write_text(json.dumps(document))
+    assert [row["name"] for row in sv.listing(check=False)] == ["redis"]
+    capfd.readouterr()
+    assert sv.main(["list", "--json"]) == 0
+    captured = capfd.readouterr()
+    assert [row["name"] for row in json.loads(captured.out)] == ["redis"]
+    assert "claude" in captured.err and "damaged" in captured.err and str(path) in captured.err
+    assert sv.check(start("--service", "cache:image=redis"), s)[0]["image"] == "redis"
+    assert "broken" in captured.err
+    with pytest.raises(ValueError, match="the record of your image broken .*is damaged .ports is a list"):
+        sv.check(start("--service", "x:image=broken"), s)
+    with pytest.raises(ValueError, match="claude"):  # (a change never rewrites it while it is damaged)
+        sv.record_entry("other", dict(document["images"]["redis"]), False)

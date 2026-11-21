@@ -12,12 +12,14 @@ import calendar
 import codecs
 import contextlib
 import functools
+import gzip
 import hashlib
 import importlib.util
 import inspect
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import secrets
 import selectors
@@ -32,20 +34,26 @@ import threading
 import time
 import urllib.parse
 import weakref
+import zlib
 
 from . import applog
 from .files import printable, printable_text
 
 # Fallbacks only, for the moments before an installation is loaded; SandboxAI reads the real values from
 # sandbox-ai's own modules (the launcher's parser, approvals.ID, secret_store.NAME and LIMIT, ...).
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
+# A team's members: sandbox-ai's team.AGENTS - every agent since 0.1.98 (OpenHands, nanobot, Letta Code, OpenCode 2
+# and Pi too; a test keeps both the same).
+TEAM_AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta",
+               "opencode2", "pi")
 LOGIN_AGENTS = ("claude", "codex", "opencode")  # `sandbox-ai login AGENT` of a sandbox-ai without login.AGENTS
-# The agents `sandbox-ai login` takes in this release (login.py's AGENTS): DSH and Goose have no login command, on no
-# host - a terminal with `sandbox-ai login goose` would only fail there.
-LOGIN_AGENTS_ANYWHERE = ("claude", "codex", "opencode", "hermes", "qwen")
+# The agents `sandbox-ai login` takes in this release (login.py's AGENTS): DSH, Goose, nanobot and Letta Code have no
+# login command, on no host - a terminal with `sandbox-ai login goose` would only fail there.
+LOGIN_AGENTS_ANYWHERE = ("claude", "codex", "opencode", "hermes", "qwen", "pi")
 MIN_VERSION = "0.1.21"  # the first release with approvals, secrets, images and log telemetry
 PLUGINS_WAIT = 1800  # seconds `sandbox-ai plugins claude` may take (each marketplace and plugin is fetched)
 TRANSFER_SECONDS = 1200  # sandbox-ai session copy|move: its dry run there (up to 180 s) and the start (up to 900 s)
+BUNDLE_SECONDS = 3600  # sandbox-ai board export|import: with --images, image archives saved, sent and loaded
 # What the app uses of sandbox-ai: a development checkout may have it before its version number says so.
 REQUIRED = {"approvals": ("questions", "answer", "describe", "ID"), "secret_store": ("store", "FileStore", "NAME"),
             "images": ("images", "packages"), "logs": ("telemetry", "tool_calls"), "net": ("running",),
@@ -84,22 +92,29 @@ def mac_terminal(script, iterm=False, directory=None):
     return ["/usr/bin/osascript", *(part for line in lines for part in ("-e", line)), "--", script]
 # Option groups of the launcher, in the order the app shows them.
 GROUPS = {
-    "Workspace": ["--workspace", "--workspace-ro", "--mount", "--state-dir", "--copy", "--name", "--name-style",
-                  "--project-name", "--keep", "--no-keep"],
-    "Network": ["--ask", "--profile", "--allow-host", "--allow-domain", "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
+    "Workspace": ["--workspace", "--workspace-ro", "--hide", "--mount", "--state-dir", "--copy", "--name", "--name-style",
+                  "--project-name", "--keep", "--no-keep", "--no-checkpoint", "--checkpoint-every",
+                  "--checkpoint-mounts"],
+    "Network": ["--ask", "--ask-timeout", "--profile", "--allow-host", "--allow-domain", "--allow-shared-wildcard",
+                "--allow-http", "--allow-pypi", "--allow-github", "--allow-gitlab",
                 "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--allow-tcp", "--allow", "--allow-host-port",
                 "--frontier", "--no-provider-defaults", "--dns", "--nameserver", "--egress-all-allow", "--offline",
-                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--llm-models", "--llm-param", "--llm-traffic", "--llm-traffic-limit"],
+                "--network", "--ip", "--ip6", "--subnet", "--subnet6", "--vpn", "--vpn-check", "--vpn-bypass-host-ports", "--vpn-bypass-tcp", "--llm", "--use-case", "--llm-models", "--llm-param", "--llm-tools", "--no-llm-profile", "--llm-traffic", "--llm-traffic-limit"],
     "Proxy & privacy": ["--mode", "--mode-at-least", "--no-proxy", "--no-inspect", "--rules", "--privacy-check", "--privacy-rules",
-                        "--canaries", "--no-canaries", "--telemetry", "--log-dir", "--log-debug"],
+                        "--canaries", "--no-canaries", "--allow-package", "--no-package-guard", "--allow-send",
+                        "--telemetry",
+                        "--log-dir", "--log-debug", "--budget"],
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
             "--token-proxy", "--git-credentials"],
     "Agent": ["--model", "--effort", "--show-thinking", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
               "--no-memory", "--no-plugins", "--local-config", "--env", "--secret-env", "--api-key", "--publish",
-              "--hermes-enable", "--qwen-enable", "--goose-enable"],
-    "Login": ["--copy-auth", "--no-auth", "--auth-file", "--import-codex-auth"],
+              "--hermes-enable", "--qwen-enable", "--goose-enable", "--openhands-enable", "--nanobot-enable", "--letta-enable",
+              "--opencode2-enable",
+              "--pi-enable"],
+    "Login": ["--copy-auth", "--no-auth", "--auth-file", "--auth-from-session", "--import-codex-auth"],
     "Display & terminal": ["--gui", "--gui-vnc", "--gui-screen", "--gui-wayland", "--browser", "--browser-control",
                            "--browser-profile", "--audio", "--tmux", "--no-tmux"],
+    "Cairn": ["--cairn", "--cairn-workers", "--cairn-origin", "--cairn-goal", "--cairn-hint", "--cairn-board"],
     "Hardware": ["--device", "--gpu"],
     "Limits": ["--memory", "--cpus", "--pids", "--tmp-size"],
     "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
@@ -107,11 +122,18 @@ GROUPS = {
 PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--log-dir", "--git-credentials", "--local-config",
                 "--auth-file", "--import-codex-auth", "--gui-vnc", "--kit-dir", "--config", "--runtime", "--device"}
 # Options the app sets itself (it starts sessions and dry runs on its own).
-HIDDEN = {"--session", "--dry-run", "--help", "--version"}
+# --yes: the start's own risk question answered unseen - the app asks itself (ask_first "shared-wildcard") and passes
+# what was confirmed as --allow-shared-wildcard, never --yes.
+HIDDEN = {"--session", "--dry-run", "--help", "--version", "--yes"}
 # A hidden launcher option the app adds to its own starts on this machine (SandboxAI.as_given).
 AS_GIVEN = "--workspaces-as-given"
 SCOPES = ("once", "run", "always")
 REMOTE_QUESTION_WAIT = 30  # seconds a host may take to list its open questions (over SSH)
+# The Files page's folders of a host's sandboxes (host_file_roots: `sandbox-ai list --folders --json` there): how long
+# the host has to answer, what each entry is (as file_roots names this machine's), how many are taken.
+HOST_FOLDERS_WAIT = 20
+HOST_FOLDER_KINDS = ("run", "run-home", "session", "session-home")
+HOST_FOLDERS_LIMIT = 500
 NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when its sandbox-ai version is not known
 BASE_NET_OPTIONS = frozenset({"--allow-host", "--allow-tcp", "--allow"})  # what every sandbox-ai since 0.1.70 takes
 RECENT_PROJECTS = 12  # projects the app's own list keeps
@@ -119,6 +141,7 @@ RECENT_FOLDERS = 10  # recent project folders the wizard offers
 MASTER_TRUSTED = 30  # seconds a host's shared SSH connection that carried a command is used without `ssh -O check`
 PODS_CACHE_SECONDS = 10  # how long the app keeps a Podman listing (sandbox-ai's own: 2 s); forget_pods() drops it
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"  # kits.KIT_NAME
+AGENT_PART = re.compile(r"[a-z0-9]{2,12}:[a-z-]{3,16}:[^\x00-\x1f\x7f]{1,500}")  # an id of sandbox-ai kits host-list
 SKILL_NAME = r"[a-z0-9][a-z0-9-]{0,63}"  # a new skill's name, as Claude wants it
 DRAIN = 2  # seconds call() still reads the output of a command it ended at its timeout
 CANCELLED = -2  # the exit status call() gives a command cancelled inside watching() (as Task.run says it)
@@ -138,10 +161,13 @@ class Unavailable(RuntimeError):
     """sandbox-ai is not installed where the app can find it."""
 
 
-def locate(which=shutil.which, run=subprocess.run, forbidden=None):
+def locate(which=shutil.which, run=subprocess.run, forbidden=None, package=None):
     """The directory with sandbox-ai's modules (agent_sandbox.py and main.py).
 
-    With $SANDBOX_AI_HOME set, only there: the sandbox-ai command on $PATH is not even looked up. Otherwise
+    With $SANDBOX_AI_HOME set, only there: the sandbox-ai command on $PATH is not even looked up. Otherwise the
+    sandbox_ai beside this app's package (PACKAGE, default PACKAGE_DIR) when there is one - the PyPI package
+    sandbox-ai-app installs both into one place, and the command line of the same installation is the one this app
+    was released with, whatever other sandbox-ai comes first on $PATH. Otherwise
     the installation behind the sandbox-ai command (install.sh: its `current` link is kept, not resolved,
     so an update is picked up at the next start; pip or pipx: the package as the command's own Python finds
     it), or the package sandbox_ai importable here. Before the command's Python is run to find its package,
@@ -154,6 +180,9 @@ def locate(which=shutil.which, run=subprocess.run, forbidden=None):
                 return candidate
         raise Unavailable(f"SANDBOX_AI_HOME={home} holds no sandbox-ai (agent_sandbox.py and main.py, there or "
                           "in its sandbox/ folder)")
+    beside = Path(PACKAGE_DIR if package is None else package).parent / "sandbox_ai"
+    if (beside / "agent_sandbox.py").is_file() and (beside / "main.py").is_file():
+        return beside
     candidates = []
     command = which("sandbox-ai")
     if command:
@@ -284,6 +313,26 @@ class SandboxAI:
     @property
     def launcher(self):
         return self.module("agent_sandbox")
+
+    def shared_wildcards(self, values):
+        """{"*.DOMAIN": (the risk in words, the shared suffix)} of those of VALUES (host names and wildcards) below a
+        shared service, where anyone can rent a name (sandbox-ai's runtime.shared_wildcard: the Public Suffix List,
+        read once - in the background, BLOCKING_SAI). What sandbox-ai refuses always, or an older one without the
+        check, is left out: the command says why."""
+        runtime = self.launcher.RUNTIME
+        found = {}
+        for value in values:
+            wildcard = str(value).strip().lower()
+            if not wildcard.startswith("*."):
+                continue
+            try:
+                shared = runtime.shared_wildcard(wildcard)
+                risk = runtime.shared_wildcard_risk(wildcard) if shared else None
+            except (ValueError, AttributeError):
+                continue
+            if shared and risk:
+                found[wildcard] = (risk, shared)
+        return found
 
     CANONICAL_KEPT = 4000  # option lists canonical_options() remembers
 
@@ -535,14 +584,21 @@ class SandboxAI:
 
     @property
     def approval_seconds(self):
-        """runtime.APPROVAL_SECONDS, read from the file (importing the runtime takes most of a second)."""
+        """How long a request waits for its answer: your default (sandbox-ai's defaults: ask_timeout), else
+        runtime.APPROVAL_SECONDS, read from the file (importing the runtime takes most of a second). A question says its
+        own (its "timeout"): this is only for one that does not."""
         if not hasattr(self, "_approval_seconds"):
             try:
                 found = re.search(r"^APPROVAL_SECONDS = ([0-9]+)", (self.directory / "runtime.py").read_text(), re.M)
             except OSError:
                 found = None
             self._approval_seconds = int(found[1]) if found else 60
-        return self._approval_seconds
+        try:
+            mine = self.sandbox_defaults()[0].get("ask_timeout")
+        except Exception as _exc:  # noqa: BLE001 - the built-in default then
+            applog.swallowed("backend", "SandboxAI.approval_seconds: defaults not readable", _exc)
+            mine = None
+        return mine if isinstance(mine, int) and not isinstance(mine, bool) and mine > 0 else self._approval_seconds
 
     # -- options --
 
@@ -554,6 +610,19 @@ class SandboxAI:
                 continue
             long = next((o for o in action.option_strings if o.startswith("--")), None)
             if long is None or long in HIDDEN:
+                continue
+            short = next((o for o in action.option_strings if not o.startswith("--")), "")
+            result.append(Option.from_action(action, long, short))
+        return result
+
+    def taken_options(self):
+        """[Option] of every option the launcher takes: options() and those it leaves out of its --help on purpose
+        (--workspace-name NAME=DIR, which `sandbox-ai workspace add --name` keeps; what only its own starts pass) -
+        what a preset may name without being "unknown" (presets.from_document). Only --help and --version left out."""
+        result = []
+        for action in self.parser_actions():
+            long = next((o for o in action.option_strings if o.startswith("--")), None)
+            if long is None or long in ("--help", "--version"):
                 continue
             short = next((o for o in action.option_strings if not o.startswith("--")), "")
             result.append(Option.from_action(action, long, short))
@@ -626,6 +695,35 @@ class SandboxAI:
         """`sandbox-ai session move ...`: as session_copy, then the session here is stopped (its HOME stays)."""
         return self.call(*session_transfer_args("move", name, host, new_name, maps, check, replace),
                          timeout=TRANSFER_SECONDS)
+
+    def board_bundle_supported(self):
+        """Whether this sandbox-ai has `sandbox-ai board export|import` (a board or session as one file); looked up
+        once (the Sandboxes page asks at every change of the selection)."""
+        known = self.__dict__.get("_bundle_supported")
+        if known is None:
+            known = self.__dict__["_bundle_supported"] = (self.directory / "board_bundle.py").is_file()
+        return known
+
+    def board_export(self, out, session=None, board=None, host="local", images=False):
+        """`sandbox-ai board export (--session NAME | --board -) OUT [--images] [--host HOST] --json`: the bundle of
+        session SESSION (of HOST) or of the board document BOARD (a dict, given on standard input), written to OUT
+        here. (status, out, err)."""
+        args = board_export_args(out, session, board is not None, host, images)
+        return self.call(*args, timeout=BUNDLE_SECONDS, input=None if board is None else json.dumps(board))
+
+    def board_import(self, path, host="local", check=True, **choices):
+        """`sandbox-ai board import PATH --json (--check | --yes) ...` (board_import_args): its plan (CHECK: nothing
+        written) or what it wrote, as a dict (the plan's JSON, "status" its exit status); ValueError when it gave no
+        plan (its words)."""
+        status, out, err = self.call(*board_import_args(path, host, check=check, **choices), timeout=BUNDLE_SECONDS)
+        try:
+            plan = json.loads(out)
+        except (ValueError, RecursionError):
+            plan = None
+        if not isinstance(plan, dict) or not isinstance(plan.get("problems"), list):
+            lines = (err or out or "").strip().splitlines()
+            raise ValueError(printable(lines[-1] if lines else f"sandbox-ai board import: exit {status}")[:600])
+        return {**plan, "status": status, "said": printable_text(err or "")[-4000:]}
 
     def session_ids(self):
         """{name: id} of the named sessions: the id is the session's directory, which stays when it is renamed. The
@@ -708,6 +806,19 @@ class SandboxAI:
         """{name: definition} of the MCP servers this user defined (mcp.json) and the built-in ones."""
         return self.module("mcp").definitions()
 
+    def mcp_tool_budget(self, model, servers, project=None):
+        """The MCP tools MODEL would see with the MCP servers SERVERS (names) in PROJECT (the first workspace) against
+        the budget of its class (sandbox-ai's mcp_budget.start_report: each server's pin, else its catalog's list),
+        or None: an older sandbox-ai without it, or profiles or definitions that cannot be read. Reads files."""
+        try:
+            budget = self.module("mcp_budget")
+            table = self.module("model_profiles").load()
+            definitions = self.mcp_definitions()
+        except (OSError, ValueError, AttributeError) as exc:
+            applog.swallowed("backend", "mcp_tool_budget: an older or damaged sandbox-ai counts no MCP tools", exc)
+            return None
+        return budget.start_report(model, list(servers or []), project, definitions, table)
+
     def mcp_catalog(self):
         """([(prefix, entry)], problems) of the MCP catalogs."""
         return self.module("mcp").catalog_entries()
@@ -724,8 +835,37 @@ class SandboxAI:
                 return []
             if not hasattr(module, "listing"):
                 return []
-            return [row for row in module.listing(check=False) if isinstance(row, dict)]
+            damaged = {}
+            try:
+                rows = module.listing(check=False, damaged=damaged)
+            except TypeError:  # (a sandbox-ai before 0.1.99: a damaged record made the whole list fail)
+                rows = module.listing(check=False)
+            for line in module.damaged_note(damaged) if damaged and hasattr(module, "damaged_note") else ():
+                applog.log("WARNING", "backend", line)
+            return [row for row in rows if isinstance(row, dict)]
         return self.host_listing(host, "images", "list")
+
+    def service_templates(self, host="local"):
+        """[{template, description, image, built}] of sandbox-ai's own Containerfiles for services on HOST (`sandbox-ai
+        images templates`: images build-image NAME --builtin TEMPLATE; showcase-web): here read from this
+        installation, on another host from its own sandbox-ai (its templates may differ). [] for a sandbox-ai without
+        them (an older host); ValueError when a host does not answer."""
+        if host == "local":
+            try:
+                module = self.module("services")
+            except Exception as _exc:  # noqa: BLE001 - an older or unreadable installation has none
+                applog.swallowed("backend", "SandboxAI.service_templates: an older installation has none", _exc)
+                return []
+            if not hasattr(module, "templates"):
+                return []
+            return [row for row in module.templates() if isinstance(row, dict)]
+        try:
+            rows = self.host_listing(host, "images", "templates")
+        except ValueError as exc:
+            if "invalid choice" in str(exc):
+                return []  # (an older sandbox-ai there: none of its own)
+            raise
+        return [row for row in rows if isinstance(row.get("template"), str) and isinstance(row.get("image"), str)]
 
     def variant_bases(self, host="local"):
         """{variant: your image it is built on} of the image variants (sandbox-ai images new NAME --base IMAGE); here
@@ -973,6 +1113,93 @@ class SandboxAI:
         """[(run, record, question)] of the running sandboxes (open ones unless ANSWERED)."""
         return self.module("approvals").questions(self.live_runs() if runs is None else runs, answered=answered)
 
+    def bridge_runs(self):
+        """{"bridge-ID": record} of the session bridges whose broker asks (sandbox-ai bridge: a call across a bridge,
+        every write with its diff); {} with a sandbox-ai that has none. Files only, never raises."""
+        try:
+            approvals = self.module("approvals")
+            return approvals.bridge_runs() if hasattr(approvals, "bridge_runs") else {}
+        except Exception:  # noqa: BLE001 - no bridges known
+            return {}
+
+    # -- session bridges (sandbox-ai bridge): read from its files, changed only through the command --
+
+    def bridge_supported(self):
+        """Whether this sandbox-ai has `sandbox-ai bridge` (bridge.py beside the launcher)."""
+        return (self.directory / "bridge.py").is_file()
+
+    def bridges(self, include_all=False):
+        """[{id, state, a, b, a_run, b_run, a_to_b, b_to_a, observer_actions, ask, until, calls, warnings, reason}] of
+        `sandbox-ai bridge list --json` (ALL: ended ones too), read from its files with sandbox-ai's own module (no
+        process, no Podman: the Sandboxes page reads them with every look); [] with a sandbox-ai that has none."""
+        if not self.bridge_supported():
+            return []
+        rows = self.module("bridge").listing(include_all)
+        return [row for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)]
+
+    @staticmethod
+    def bridge_add_args(a, b, allow, both=False, until=None, ask="first", observer_actions=None, limits=()):
+        """The words of `sandbox-ai bridge add A B --allow ...` (no --json, no --dry-run). ValueError for a name or a
+        value that would be read as an option. A or B may be HOST:NAME: a session of a host of `sandbox-ai hosts`."""
+        for value in (a, b):
+            if not isinstance(value, str) or not re.fullmatch(
+                    r"(?:[a-z0-9][a-z0-9_-]{0,31}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value):
+                raise ValueError(f"not a session's name: {value!r}")
+        caps = [str(cap) for cap in allow]
+        if not caps or any(not cap or cap.startswith("-") or "," in cap or any(c < " " for c in cap) for cap in caps):
+            raise ValueError("choose at least one capability")
+        args = ["bridge", "add", a, b, "--allow", ",".join(caps)]
+        if both:
+            args.append("--both")
+        if until:
+            args.append(f"--until={until}")
+        if ask:
+            args.append(f"--ask={ask}")
+        if observer_actions is not None:
+            args.append("--observer-actions=" + ",".join(observer_actions))
+        for key, value in limits:
+            args.append(f"--limit={key}={value}")
+        return args
+
+    def bridge_json(self, *args, timeout=120):
+        """The JSON document `sandbox-ai ARGS --json` says; ValueError with its message when it refuses."""
+        status, out, err = self.call(*args, "--json", timeout=timeout)
+        if status != 0:
+            raise ValueError(printable_text((err or out).strip()[-1500:]) or f"exit status {status}")
+        return json_part(out)
+
+    def bridge_plan(self, args):
+        """What `sandbox-ai bridge add ... --dry-run` says of the bridge ARGS (bridge_add_args): its grants and every
+        warning (the egress direction, a whole workspace, agents that read MCP servers only at their start). Nothing
+        is made. ValueError: refused (a session that does not run, one bridged already, a path outside ...)."""
+        return self.bridge_json(*args, "--dry-run", timeout=90)
+
+    def bridge_add(self, args):
+        """`sandbox-ai bridge add ...` (asked first by the page: bridge-add): the bridge made, {id, state, grants,
+        warnings, notes, ...}."""
+        return self.bridge_json(*args, timeout=90)
+
+    def host_bridges(self, name, timeout=60):
+        """The bridges of host NAME (`sandbox-ai bridge list --json` there, over SSH), as this machine shows them
+        (bridges.from_host: "host", its own sessions HOST:NAME). ValueError: no answer."""
+        from . import bridges as BR
+        rows = self.host_json(name, "bridge", "list", "--json", timeout=timeout)
+        if not isinstance(rows, list):
+            raise ValueError(f"{name}: not a list of bridges")
+        return BR.from_host(rows, name)
+
+    def bridge_show(self, ident):
+        """`sandbox-ai bridge show ID --json` (HOST:ID: one of that host's): its record, newest calls and alerts."""
+        return self.bridge_json("bridge", "show", valid_bridge_id(ident), timeout=120)
+
+    def bridge_revoke(self, ident):
+        """`sandbox-ai bridge revoke ID` (asked first by the page: bridge-revoke)."""
+        return self.checked("bridge", "revoke", valid_bridge_id(ident), timeout=120)
+
+    def bridge_resume(self, ident):
+        """`sandbox-ai bridge resume ID` (asked first by the page: bridge-resume)."""
+        return self.checked("bridge", "resume", valid_bridge_id(ident), timeout=120)
+
     def live_runs(self):
         """{run: record} of the sandboxes whose launcher runs, as runs() lists them, without what runs() does about a
         run whose launcher is gone (asking Podman whether its pod still runs, removing the directories of one that
@@ -1031,15 +1258,20 @@ class SandboxAI:
             return False
 
     def answer(self, ident, decision, scope="once"):
-        """Answer question IDENT through `sandbox-ai approvals allow|deny --scope SCOPE`: deny "always" blocks
-        it for the project (refused at every later start without a question). Scopes wider than the
+        """Answer question IDENT through `sandbox-ai approvals allow|deny --scope SCOPE` - an open one, one nobody
+        answered in time, or one answered already (the run's decision changed; SCOPE None: sandbox-ai's default, for
+        the run); DECISION "ask-again": `sandbox-ai approvals ask-again` (what the run decided is forgotten). Deny
+        "always" blocks it for the project (refused at every later start without a question). Scopes wider than the
         administrator's max_approval_scope are refused here already (sandbox-ai refuses them too)."""
-        if not self.question_id.fullmatch(str(ident)) or decision not in ("allow", "deny") or scope not in SCOPES:
+        if not self.question_id.fullmatch(str(ident)) or decision not in ("allow", "deny", "ask-again") or \
+                scope not in (*SCOPES, None):
             return 2, "", "invalid question or answer"
+        if decision == "ask-again":
+            return self.call("approvals", "ask-again", ident, timeout=60)
         # The policy caps allows only (as sandbox-ai does): a deny, also Block always, is never refused for its scope.
-        if decision == "allow" and SCOPES.index(scope) > SCOPES.index(self.max_scope()):
+        if decision == "allow" and scope is not None and SCOPES.index(scope) > SCOPES.index(self.max_scope()):
             return 2, "", f"the administrator's policy allows answers up to {self.max_scope()!r}"
-        return self.call("approvals", decision, ident, "--scope", scope, timeout=60)
+        return self.call("approvals", decision, ident, *(["--scope", scope] if scope else []), timeout=90)
 
     # -- administrator policy --
 
@@ -1211,6 +1443,64 @@ class SandboxAI:
             found.append((str(entry["id"]), f"{what} ({', '.join(nodes)})" if nodes else what))
         return found
 
+    def device_scan(self, host="local"):
+        """The devices of HOST a sandbox could be given (`sandbox-ai devices scan --json` there, over SSH for another
+        host - never this machine's for a host): [{"kind", "value", "option", "label", "nodes", "usb", "links",
+        "refused", "note"}], every text escaped, every value one --device or --gpu takes. ValueError: not answered (an
+        older sandbox-ai there: DeviceScanMissing)."""
+        status, out, err = self.host_run(host, "devices", "scan", "--json", timeout=60)
+        try:
+            data = json.loads(out)
+        except (ValueError, RecursionError):
+            text = (err or out).strip()
+            if status != 0 and re.search(r"invalid choice: '?scan'?", text):
+                raise DeviceScanMissing(text[-300:]) from None
+            raise ValueError(text[-500:] or f"exit status {status}") from None
+        entries = data.get("devices") if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("not a list of devices")
+        found = []
+        for entry in entries[:DEVICE_SCAN_LIMIT]:
+            if not isinstance(entry, dict) or entry.get("kind") not in DEVICE_SCAN_KINDS or \
+                    not isinstance(entry.get("value"), str):
+                continue
+            option = "--gpu" if entry.get("option") == "--gpu" else "--device"
+            value = entry["value"]
+            if (option == "--gpu" and value not in GPU_KINDS) or (option == "--device" and not valid_device(value)):
+                continue
+            text = {key: printable(entry[key])[:500] if isinstance(entry.get(key), str) else None
+                    for key in ("label", "usb", "product", "refused", "note")}
+            found.append({"kind": entry["kind"], "value": value, "option": option,
+                          "label": text["label"] or value, "usb": text["usb"], "product": text["product"],
+                          "refused": text["refused"], "note": text["note"],
+                          "nodes": [printable(n)[:300] for n in entry.get("nodes") or [] if isinstance(n, str)][:16],
+                          "links": [printable(n)[:300] for n in entry.get("links") or [] if isinstance(n, str)][:8]})
+        return found
+
+    def devices_listed(self, run, host="local"):
+        """The devices of the running sandbox RUN on HOST, given at the start or added (`sandbox-ai devices list RUN
+        --json` there): [{"id", "value", "source", "state", "nodes", "device"}], the text escaped. ValueError: not
+        answered."""
+        if not valid_run(run):
+            raise ValueError("invalid run")
+        data = self.host_json(host, "devices", "list", run, "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("not a list of devices")
+        found = []
+        for entry in data[:DEVICE_SCAN_LIMIT]:
+            if not isinstance(entry, dict):
+                continue
+            device = entry.get("device") if isinstance(entry.get("device"), dict) else {}
+            found.append({"id": str(entry.get("id")) if re.fullmatch(r"[0-9]{1,9}", str(entry.get("id"))) else None,
+                          "value": printable(entry.get("value"))[:300] if isinstance(entry.get("value"), str) else "",
+                          "source": "added" if entry.get("source") == "added" else "start",
+                          "state": printable(entry.get("state"))[:40] if isinstance(entry.get("state"), str) else "",
+                          "nodes": [printable(n)[:300] for n in entry.get("nodes") or [] if isinstance(n, str)][:16],
+                          "usb": printable(device.get("usb"))[:20] if isinstance(device.get("usb"), str) else None,
+                          "product": printable(device.get("product"))[:100] if isinstance(device.get("product"), str)
+                          else None})
+        return found
+
     def host_workspaces(self, host, run):
         """The workspaces of the running sandbox RUN on HOST (`sandbox-ai workspace list RUN --json` there), as
         workspaces() gives this machine's: [{host, sandbox, mode, source, note}], the text fields escaped. ValueError:
@@ -1220,7 +1510,8 @@ class SandboxAI:
         data = self.host_json(host, "workspace", "list", run, "--json", timeout=60)
         if not isinstance(data, list):
             raise ValueError("not a list of workspaces")
-        return [{**{key: printable(entry[key])[:1000] for key in ("host", "sandbox", "mode", "source", "note")
+        return [{**{key: printable(entry[key])[:1000] for key in ("host", "sandbox", "mode", "source", "note",
+                                                                  "remote")
                     if isinstance(entry.get(key), str)},
                  **({"kind": entry["kind"]} if entry.get("kind") in ("dir", "file") else {}),
                  **({"named": entry["named"]} if isinstance(entry.get("named"), bool) else {})}
@@ -1237,8 +1528,9 @@ class SandboxAI:
     def add_workspace(self, run, directory, read_only=False, name=None, host="local"):
         """`sandbox-ai workspace add RUN DIR|FILE [--ro] [--name NAME]`: a folder (or one regular file) at
         /workspaces/NAME until the sandbox ends (a folder is kept for a restart of a session; NAME with it). The
-        launcher does every check of a start (scope, private places, the policy)."""
-        if not valid_run(run) or not valid_directory(directory):
+        launcher does every check of a start (scope, private places, the policy). DIRECTORY may be a folder of
+        another machine (sshfs://...: remote_source.valid_source): that host mounts it with sshfs first."""
+        if not valid_run(run) or not (valid_directory(directory) or valid_remote(directory)):
             return 2, "", "invalid run or directory"
         if name and not valid_workspace_name(name):
             return 2, "", "invalid workspace name"
@@ -1252,8 +1544,8 @@ class SandboxAI:
     def remove_workspace(self, run, value, force=False, host="local"):
         """`sandbox-ai workspace remove RUN DIR|NAME [--force]`: refused while a process in the sandbox uses it,
         unless FORCE (detached lazily)."""
-        if not valid_run(run) or not valid_directory(value) and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
-                                                                                  str(value)):
+        if not valid_run(run) or not valid_directory(value) and not valid_remote(value) and \
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", str(value)):
             return 2, "", "invalid run or workspace"
         return self.host_run(host, "workspace", "remove", run, str(value), *(["--force"] if force else []),
                              timeout=120)
@@ -1356,6 +1648,7 @@ class SandboxAI:
             applog.swallowed("backend", "SandboxAI.instances: keyed by name then (an older sandbox-ai)", _exc)
             ids = {}
         by_session = runs_of_starts(runs, ids)
+        sizes = self.storage_sizes()  # (each start's size at the last storage check: the Size column)
         used = set()
         for row in rows:
             name, agent, engine, state, workspace, created = (list(row) + [""] * 6)[:6]
@@ -1371,6 +1664,8 @@ class SandboxAI:
                         record["status"] = status
             if state == "running":  # its terminal there yet, still starting, or none (terminal_state)
                 record = {**record, **self.session_terminal(ident)}
+            if isinstance(sizes.get(ident), dict):
+                record = {**record, "storage": sizes[ident]}
             found.append(Instance("session", f"session:{ident}", name, run=run, session=name, project=workspace,
                                   agent=agent, backend=engine, started=record.get("started") or created, state=state,
                                   proxy=record.get("proxy") if run else None, pid=record.get("pid"), record=record,
@@ -1707,13 +2002,17 @@ class SandboxAI:
         """This sandbox-ai writes reports (report.py, `sandbox-ai report`)."""
         return (self.directory / "report.py").is_file()
 
-    def report(self, path, kind="pdf", names=(), log_dir=None, parts=True, since=None, traffic=False):
+    def report(self, path, kind="pdf", names=(), log_dir=None, parts=True, since=None, traffic=False, host="local"):
         """`sandbox-ai report NAME... -f KIND -o PATH` (or --log-dir DIR for every run of a log folder): one report of
         the starts NAMES (each with its runs and, with PARTS, its MCP servers, helpers and team) written to PATH, from
         SINCE on (10m, 2h, an ISO time) when given; TRAFFIC: with the section on the LLM traffic log (--llm-traffic).
+        HOST: the starts of a host of sandbox-ai hosts - the report made there (its logs are there), written to its
+        standard output and into PATH here (HTML or Markdown: text over the connection; no log folder).
         Returns PATH; ValueError: not written."""
         if kind not in self.REPORT_FORMATS:
             raise ValueError(f"no report format {kind!r}")
+        if host != "local":
+            return self.host_report(host, path, kind, names, parts, since, traffic)
         if not valid_directory(path):
             raise ValueError("not an absolute path for the report")
         names = list(names or [])
@@ -1739,19 +2038,53 @@ class SandboxAI:
             raise ValueError((err or out).strip() or f"sandbox-ai report: exit status {status}")
         return str(path)
 
+    REMOTE_REPORT_FORMATS = ("html", "md")  # what a host's report comes back as (text on its standard output)
+
+    def host_report(self, host, path, kind, names, parts=True, since=None, traffic=False):
+        """report() of the starts NAMES of HOST: `sandbox-ai report -f KIND -- NAME...` there, its output written to
+        PATH here (created new or replaced, 0600). ValueError: not made (an older sandbox-ai there: the update)."""
+        if kind not in self.REMOTE_REPORT_FORMATS:
+            raise ValueError(f"a report of another host comes as HTML or Markdown, not {kind!r}")
+        if not valid_directory(path):
+            raise ValueError("not an absolute path for the report")
+        names = list(names or [])
+        if not names or any(not valid_run(name) for name in names):
+            raise ValueError("invalid start")
+        args = ["report", "--format", kind, *([] if parts else ["--no-parts"]), *(["--llm-traffic"] if traffic else [])]
+        if since:
+            if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z:.+ -]{0,39}", str(since)):
+                raise ValueError("not a time")
+            args += ["--since", str(since)]
+        result = self.host_run(host, *args, "--", *names, timeout=600)
+        status, out, err = result
+        if status != 0:
+            raise ValueError(self.too_old_text(host, result, ("report",)) or (err or out).strip()[-800:]
+                             or f"sandbox-ai report: exit status {status}")
+        if not out.strip():
+            raise ValueError("the report came back empty")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags, 0o600), "w", encoding="utf-8") as handle:
+            handle.write(out)
+        return str(path)
+
     # -- safeguards (sandbox-ai safeguards): what refused or ended something in a run, why, and the fix --
 
     def has_safeguards(self):
         """This sandbox-ai records its safeguards (safeguards.py: safeguards.jsonl, `sandbox-ai safeguards`)."""
         return (self.directory / "safeguards.py").is_file()
 
-    def safeguards(self, run=None, tail=1000):
+    def safeguards(self, run=None, tail=1000, host="local"):
         """`sandbox-ai safeguards --json`: the records of RUN (of every run: the running ones and the default log
-        directories, without RUN), oldest first, at most TAIL."""
+        directories, without RUN), oldest first, at most TAIL; on HOST (a host of sandbox-ai hosts) read there."""
+        if run is not None and not valid_run(run):
+            raise ValueError("invalid run")
         where = ["--", run] if run else ["--all"]
-        status, out, err = self.call("safeguards", "--json", "--tail", str(int(tail)), *where, timeout=60)
+        args = ("safeguards", "--json", "--tail", str(int(tail)), *where)
+        result = self.call(*args, timeout=60) if host == "local" else self.host_run(host, *args, timeout=90)
+        status, out, err = result
         if status != 0:
-            raise ValueError((err or out).strip() or f"sandbox-ai safeguards: exit status {status}")
+            raise ValueError(self.too_old_text(host, result, ("safeguards",)) or (err or out).strip()
+                             or f"sandbox-ai safeguards: exit status {status}")
         records = []
         for line in out.splitlines():
             try:
@@ -1798,20 +2131,26 @@ class SandboxAI:
             raise ValueError((err or out).strip()[-500:] or f"sandbox-ai plugins marketplaces: exit status {status}")
         return marketplaces_document(json.loads(out))
 
-    def plugins_argv(self, update=False, kits=(), marketplaces_only=False):
+    def plugins_argv(self, update=False, kits=(), marketplaces_only=False, agent="claude"):
         """`sandbox-ai plugins claude [--update] [--marketplaces-only] [--kit NAME]...` (built-in kits when this
         sandbox-ai can). --marketplaces-only fetches the kits' marketplaces (their plugin lists) in the plugin store's
         sandbox and installs nothing."""
-        return self.command(*self.plugins_args(update=update, kits=kits, marketplaces_only=marketplaces_only))
+        return self.command(*self.plugins_args(update=update, kits=kits, marketplaces_only=marketplaces_only,
+                                               agent=agent))
 
-    def plugins_args(self, update=False, kits=(), marketplaces_only=False):
-        """The arguments of plugins_argv: `plugins claude [--update] [--marketplaces-only] [--kit NAME]...`."""
-        argv = ["plugins", "claude"] + (["--update"] if update else []) + \
-            (["--marketplaces-only"] if marketplaces_only else [])
+    def plugins_args(self, update=False, kits=(), marketplaces_only=False, agent="claude"):
+        """The arguments of plugins_argv: `plugins AGENT [--update] [--marketplaces-only] [--kit NAME]...`; AGENT
+        "all" (Claude's, Codex's and OpenCode 2's kit plugins, one store) only where this sandbox-ai has it, else
+        claude."""
         try:
-            supports = "--kit" in self.source_text("plugins.py")
+            source = self.source_text("plugins.py")
         except OSError:
-            supports = False
+            source = ""
+        if agent == "all" and '"all"' not in source:
+            agent = "claude"
+        argv = ["plugins", agent] + (["--update"] if update else []) + \
+            (["--marketplaces-only"] if marketplaces_only else [])
+        supports = "--kit" in source
         if supports:
             argv += [token for name in kits if re.fullmatch(KIT_NAME, name) for token in ("--kit", name)]
         return argv
@@ -1894,27 +2233,78 @@ class SandboxAI:
         """Where `sandbox-ai secrets set` keeps a secret on HOST: "keyring" or "file" (`sandbox-ai secrets backend`
         there). ValueError: not answered."""
         status, out, err = self.host_run(host, "secrets", "backend", timeout=60)
-        word = (out.strip().splitlines() or [""])[-1].strip()
+        # "file", or since 0.1.98 "file (what protects it)": the first word
+        word = (out.strip().splitlines() or [""])[-1].strip().split(" ", 1)[0]
         if status != 0 or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", word):
             raise ValueError(printable_text((err or out).strip())[-300:] or f"exit status {status}")
         return word
+
+    def secrets_protection(self, host="local"):
+        """What protects the secrets on HOST (`sandbox-ai secrets status --json` there): {"backend": keyring,
+        keychain or file, "password": a primary password is set for the private files, "locked": True, False or
+        None (no password), "left": seconds it stays unlocked, "plain": how many are in plain files, "encrypted",
+        "plain_choice": plain files are that host's choice (SANDBOX_AI_SECRETS_PLAIN=1 there)}.
+        None: the sandbox-ai there knows no primary password (before 0.1.98). ValueError: not answered."""
+        status, out, err = self.host_run(host, "secrets", "status", "--json", timeout=60)
+        if status == 2 and re.search(r"invalid choice|unrecognized arguments", err or ""):
+            return None
+        try:
+            info = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            info = None
+        if not isinstance(info, dict) or not isinstance(info.get("backend"), str):
+            raise ValueError(printable_text((err or out).strip())[-300:] or f"exit status {status}")
+        plain, left = info.get("plain"), info.get("left")
+        return {"backend": printable(info["backend"])[:32], "password": info.get("password") is True,
+                "locked": info.get("locked") if isinstance(info.get("locked"), bool) else None,
+                "left": left if isinstance(left, int) and not isinstance(left, bool) else None,
+                "plain": len(plain) if isinstance(plain, list) else 0,
+                "encrypted": info.get("encrypted") if isinstance(info.get("encrypted"), int) else 0,
+                "plain_choice": info.get("plain_choice") is True}
+
+    def secrets_unlock(self, password, host="local"):
+        """Unlock the encrypted secrets on HOST (`sandbox-ai secrets unlock --password-stdin` there): the primary
+        password goes on standard input - over SSH too - never an argument. (status, out, err)."""
+        if not isinstance(password, str) or not password or "\n" in password:
+            return 2, "", "a primary password is one line"
+        return self.host_run(host, "secrets", "unlock", "--password-stdin", timeout=120, input=password + "\n")
+
+    def secrets_lock(self, host="local"):
+        """`sandbox-ai secrets lock` on HOST: the key is forgotten there."""
+        return self.host_run(host, "secrets", "lock", timeout=60)
+
+    def secrets_new_password(self, password, host="local"):
+        """A first primary password for the private files on HOST (`sandbox-ai secrets password set
+        --password-stdin`: what is kept there is encrypted, and unlocked); the password on standard input."""
+        if not isinstance(password, str) or not password or "\n" in password:
+            return 2, "", "a primary password is one line"
+        return self.host_run(host, "secrets", "password", "set", "--password-stdin", timeout=240,
+                             input=password + "\n")
 
     def secret_exists(self, name, host="local"):
         """Whether a secret NAME is kept on HOST (names only are read)."""
         return any(found == name for found, _ in self.host_secrets(host)[1])
 
     def save_token(self, url, token):
-        """Keep a push TOKEN typed in the wizard as sandbox-ai's own wizard does: a private file (mode 0600,
-        never through a link) under ~/.config/sandbox-ai/tokens, outside every workspace; the project file
-        only names it (--git-token-file URL=FILE). Returns the file."""
+        """Keep a push TOKEN typed in the wizard as sandbox-ai's own wizard does (since 0.1.98): as the secret
+        GIT_TOKEN_HOST of sandbox-ai secrets (`secrets set NAME`, the token on its standard input - encrypted by the
+        keyring or the primary password); the project file only names it (--git-token-secret URL=NAME). Returns the
+        name. ValueError: not kept, with what the command said (locked: "... sandbox-ai secrets unlock"; no primary
+        password yet: "... sandbox-ai secrets password set")."""
         if not isinstance(token, str) or not token.strip() or any(ord(c) < 32 or ord(c) == 127 for c in token):
             raise ValueError("a token is one line of printable characters")
         if not re.fullmatch(r"https?://[^\s/]+", str(url)):
             raise ValueError("a Git server is http(s)://[USER@]HOST[:PORT]")
-        wizard = self.module("wizard")
-        path = wizard.token_path(re.sub(r"^https?://", "", url))
-        wizard.write_token(path, token.strip())
-        return path
+        name = self.module("secret_store").token_secret_name(re.sub(r"^https?://", "", url))
+        status, out, err = self.set_secret(name, token.strip())
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return name
+
+    def moved_token(self, path):
+        """The secret a token file of the wizard's was moved into (--git-token-file of an older project file), or
+        None."""
+        return self.module("secret_store").moved_token_name(Path(str(path)).expanduser())
 
     def valid_secret(self, name, value=None):
         if not isinstance(name, str) or not self.secret_name.fullmatch(name):
@@ -2017,6 +2407,43 @@ class SandboxAI:
         for kind, label, path in extra:
             add(kind, label, path)
         return found
+
+    def host_file_roots(self, name, timeout=HOST_FOLDERS_WAIT):
+        """[(kind, label, path)] of the folders of the running sandboxes and kept sessions on host NAME of `sandbox-ai
+        hosts` - their workspaces and HOMEs, as file_roots gives them for this machine, PATH a folder of that host (the
+        Files page opens it over the host's SFTP connection) - read with one call there: `sandbox-ai list --folders
+        --json` (sandbox-ai 0.1.99 on). None: its sandbox-ai is older and lists no folders (the host's own entry still
+        works). ValueError: no answer within TIMEOUT seconds, or not such a list."""
+        if not isinstance(name, str) or name == "local" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
+            raise ValueError("invalid host")
+        status, out, err = self.host_run(name, "list", "--folders", "--json", timeout=timeout)
+        if status == 124:
+            raise ValueError(f"no answer within {timeout:g} s")
+        if status != 0 and "--folders" in (err or "") and ("unrecognized arguments" in err or
+                                                            "unrecognised arguments" in err):
+            return None
+        try:
+            data = json.loads(out)
+        except (ValueError, RecursionError):
+            raise ValueError(printable_text((err or out).strip()[-300:]) or f"exit status {status}") from None
+        if not isinstance(data, list):
+            raise ValueError("not a list of folders")
+        found, seen = [], set()
+        for entry in data:
+            if not isinstance(entry, dict) or entry.get("kind") not in HOST_FOLDER_KINDS:
+                continue
+            path, label = entry.get("path"), entry.get("name")
+            if not isinstance(path, str) or not path.startswith("/") or len(path) > 4096 or \
+                    any(c in path for c in "\0\n\r"):
+                continue
+            path = posixpath.normpath(path)
+            if path.startswith("//"):
+                path = "/" + path.lstrip("/")
+            if path in seen:
+                continue
+            seen.add(path)
+            found.append((entry["kind"], printable(label)[:100] if isinstance(label, str) else "", path))
+        return found[:HOST_FOLDERS_LIMIT]
 
     def sandbox_paths(self):
         """{host folder (resolved): its path in the sandbox} for the workspaces and HOME of every running sandbox and
@@ -2160,16 +2587,18 @@ class SandboxAI:
     def host_add(self, name, ssh, port=22, identity="", description="", command="", update_sudo=False):
         """`sandbox-ai hosts add NAME USER@HOST ...`; COMMAND: sandbox-ai's path there if not the usual, UPDATE_SUDO:
         its sandbox-ai is a system installation (updated with sudo)."""
-        args = ["hosts", "add", name, ssh, "--port", str(int(port))]
+        # (each value joined to its option and the names after "--": a description "-prod" or a key path typed with
+        # a leading "-" is never read as an option of its own)
+        args = ["hosts", "add", f"--port={int(port)}"]
         if identity:
-            args += ["--identity", identity]
+            args.append(f"--identity={identity}")
         if description:
-            args += ["--description", description]
+            args.append(f"--description={description}")
         if command:
             args.append(f"--command={path_value(command, 'sandbox-ai on the host')}")
         if update_sudo:
             args.append("--update-sudo")
-        return self.checked(*args, timeout=30)
+        return self.checked(*args, "--", name, ssh, timeout=30)
 
     def host_set(self, name, update_sudo):
         """`sandbox-ai hosts set NAME --update-sudo on|off`: whether hosts update runs its update with sudo."""
@@ -2312,26 +2741,332 @@ class SandboxAI:
             raise ValueError("not a history")
         return [entry for entry in data if isinstance(entry, dict)]
 
-    def collect(self, host="local", dry_run=True, days=None):
-        """`sandbox-ai gc [--older-than DAYS] [--dry-run] --json` on HOST: {"removed", "leftovers", "histories",
-        "skipped", "damaged", "days", "dry_run"}. ValueError: not answered."""
+    # --- the workspace checkpoints of a start (sandbox-ai checkpoint) -------------------------------------------------
+
+    def checkpoints_supported(self, host="local"):
+        """Whether this sandbox-ai has `sandbox-ai checkpoint` (looked up once; a host's: its version, 0.1.99 on)."""
+        if host != "local":
+            status = (self.host_statuses(cached=True) or {}).get(host) or {}
+            version = str(status.get("version") or "")
+            parts = tuple(int(x) for x in re.findall(r"\d+", version)[:3])
+            return not parts or parts >= (0, 1, 99)
+        known = self.__dict__.get("_checkpoints_supported")
+        if known is None:
+            known = self.__dict__["_checkpoints_supported"] = (self.directory / "checkpoints.py").is_file()
+        return known
+
+    def checkpoints(self, name, host="local"):
+        """The checkpoints of the start NAME on HOST, newest first (`sandbox-ai checkpoint list NAME --json`); [] when
+        it has none yet. ValueError: not answered."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        status, out, err = self.host_run(host, "checkpoint", "list", name, "--json", timeout=60)
+        if status != 0:
+            text = (err or out).strip()
+            if "has checkpoints" in text:  # (no start of that name has any yet)
+                return []
+            raise ValueError(printable(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        data = json.loads(out or "[]")
+        return [entry for entry in data if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                and CHECKPOINT_ID.fullmatch(entry["id"])] if isinstance(data, list) else []
+
+    def checkpoint_create(self, name, host="local", label=None):
+        """A checkpoint of the start NAME's workspaces now (`checkpoint create NAME --json [--label TEXT]`): its
+        record. ValueError: not taken (its words)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        if label is not None and (not isinstance(label, str) or len(label) > 500 or any(c in label for c in "\n\r\0")):
+            raise ValueError("a label is one line")
+        return self.checkpoint_json(host, "checkpoint", "create", name, "--json",
+                                    *([f"--label={label}"] if label else []), timeout=CHECKPOINT_SECONDS)
+
+    def checkpoint_diff(self, ident, host="local"):
+        """What changed since the checkpoint IDENT (`checkpoint diff ID --json`): {"roots", "counts"}."""
+        return self.checkpoint_json(host, "checkpoint", "diff", checkpoint_id(ident), "--json",
+                                    timeout=CHECKPOINT_SECONDS)
+
+    def checkpoint_preview(self, ident, host="local", paths=()):
+        """What restoring IDENT would change (`checkpoint restore ID --dry-run --json [--path P]...`): nothing is
+        written."""
+        return self.checkpoint_json(host, "checkpoint", "restore", checkpoint_id(ident), "--dry-run", "--json",
+                                    *checkpoint_paths(paths), timeout=CHECKPOINT_SECONDS)
+
+    def checkpoint_restore(self, ident, host="local", paths=()):
+        """IDENT put back (`checkpoint restore ID --yes --json [--path P]...`; asked first: checkpoint-restore); a
+        checkpoint of the state before is taken first ("before")."""
+        return self.checkpoint_json(host, "checkpoint", "restore", checkpoint_id(ident), "--yes", "--json",
+                                    *checkpoint_paths(paths), timeout=CHECKPOINT_SECONDS)
+
+    def checkpoint_delete(self, ident, host="local"):
+        """The checkpoint IDENT removed (`checkpoint delete ID --yes`; asked first: checkpoint-delete)."""
+        status, out, err = self.host_run(host, "checkpoint", "delete", checkpoint_id(ident), "--yes", timeout=300)
+        if status != 0:
+            text = (err or out).strip()
+            raise ValueError(printable(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        return True
+
+    def checkpoint_json(self, host, *args, timeout=120):
+        """The JSON object of `sandbox-ai ARGS` on HOST; ValueError with its last words when it failed."""
+        status, out, err = self.host_run(host, *args, timeout=timeout)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, dict):
+            text = (err or out).strip()
+            raise ValueError(printable(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        return data
+
+    # --- the workspace review after each run, and the MCP tool definitions pinned per project ------------------------
+
+    def workspace_reviews(self, host="local"):
+        """What the runs of every project on HOST changed in files the host runs or trusts (`sandbox-ai workspace review
+        --all --json`): [{"run", "time", "log_dir", "stored", "changes": [{"workspace", "sandbox", "path", "change",
+        "why", "diff", "findings", "restorable", "why_not", "decision"}]}], oldest first. ValueError: not answered."""
+        status, out, err = self.host_run(host, "workspace", "review", "--all", "--json", timeout=120)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, list):
+            text = (err or out).strip()
+            raise ValueError(printable_text(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        return [item for item in data if isinstance(item, dict) and isinstance(item.get("changes"), list)
+                and valid_run(item.get("run")) and absolute_line(item.get("log_dir"))]
+
+    def workspace_review_decide(self, log_dir, run, path, decision, host="local"):
+        """Keep (DECISION "keep") the change of PATH in RUN, or restore the file as it was at the start ("restore";
+        asked first: workspace-restore) - `sandbox-ai workspace review RUN --log-dir DIR --keep|--restore PATH [--yes]
+        --json` on HOST. ValueError: refused (its words)."""
+        if decision not in ("keep", "restore"):
+            raise ValueError("a decision is keep or restore")
+        if not valid_run(run) or not absolute_line(log_dir) or not plain_line(path):
+            raise ValueError("invalid run, log folder or path")
+        status, out, err = self.host_run(host, "workspace", "review", run, f"--log-dir={log_dir}",
+                                         f"--{decision}={path}", *(["--yes"] if decision == "restore" else []),
+                                         "--json", timeout=120)
+        try:
+            data = json.loads(out)
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, dict) or status != 0:
+            failed = data.get("failed") if isinstance(data, dict) else None
+            text = (failed[0].get("error") if failed and isinstance(failed[0], dict) else None) or (err or out).strip()
+            raise ValueError(printable_text(str(text).splitlines()[-1] if text else f"exit status {status}")[:500])
+        return data
+
+    def mcp_tool_pins(self, host="local"):
+        """The MCP tool definitions pinned for every project on HOST (`sandbox-ai mcp tools --all --json`): [{"project",
+        "server", "tools", "pinned", "how", "seen", "differs"}]. ValueError: not answered."""
+        status, out, err = self.host_run(host, "mcp", "tools", "--all", "--json", timeout=60)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, list):
+            text = (err or out).strip()
+            raise ValueError(printable_text(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        return [entry for entry in data if isinstance(entry, dict) and isinstance(entry.get("server"), str)
+                and re.fullmatch(MCP_NAME, entry["server"])]
+
+    def mcp_tool_pin(self, project, server, host="local"):
+        """SERVER's pin for PROJECT with the list seen last and how it differs (`mcp tools NAME --project DIR --json`):
+        {"server", "pinned", "how", "tools": {name: {"digest", "definition"}}, "seen", "changes"} or None."""
+        status, out, err = self.host_run(host, "mcp", "tools", self.pin_server(server), "--json",
+                                         f"--project={self.pin_project(project)}", timeout=60)
+        try:
+            data = json.loads(out) if status == 0 else ValueError
+        except (ValueError, RecursionError):
+            data = ValueError
+        if data is ValueError or not (data is None or isinstance(data, dict)):
+            text = (err or out).strip()
+            raise ValueError(printable_text(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        return data
+
+    def mcp_pin_change(self, project, server, action, host="local"):
+        """Re-pin SERVER for PROJECT to the list seen last (ACTION "repin"; asked first: mcp-pin-repin) or drop its pin
+        (ACTION "forget"; asked first: mcp-pin-forget) on HOST. ValueError: refused (its words)."""
+        if action not in ("repin", "forget"):
+            raise ValueError("re-pin or forget")
+        status, out, err = self.host_run(host, "mcp", "tools", self.pin_server(server), f"--{action}", "--json",
+                                         f"--project={self.pin_project(project)}", timeout=60)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, dict):
+            text = (err or out).strip()
+            raise ValueError(printable_text("\n".join(text.splitlines()[-12:]) if text else f"exit status {status}")
+                             [:2000])
+        return data
+
+    @staticmethod
+    def pin_server(server):
+        if not isinstance(server, str) or not re.fullmatch(MCP_NAME, server):
+            raise ValueError("invalid MCP server name")
+        return server
+
+    @staticmethod
+    def pin_project(project):
+        if not absolute_line(project):
+            raise ValueError("a project is an absolute folder")
+        return project
+
+    # --- a start's agent memory and session files, read only; its folder as one archive (sandbox-ai session) ---------
+
+    def session_inspect_supported(self, host="local"):
+        """Whether this sandbox-ai has `sandbox-ai session memory|files|export` (a host's: its version, 0.1.99 on)."""
+        if host != "local":
+            status = (self.host_statuses(cached=True) or {}).get(host) or {}
+            parts = tuple(int(x) for x in re.findall(r"\d+", str(status.get("version") or ""))[:3])
+            return not parts or parts >= (0, 1, 99)
+        known = self.__dict__.get("_session_inspect_supported")
+        if known is None:
+            known = self.__dict__["_session_inspect_supported"] = (self.directory / "session_inspect.py").is_file()
+        return known
+
+    def hide_secrets_here(self):
+        """Settings > Privacy: Hide logins and keys in file views (hide_secrets of this machine's defaults)."""
+        return self.sandbox_defaults()[0].get("hide_secrets") is True
+
+    def file_view_json(self, host, *args, timeout=120):
+        """checkpoint_json of a file view (`session memory|files`): of another host with --hide-secrets when this
+        machine's setting hides logins and keys (this machine's sandbox-ai reads it itself); an older sandbox-ai there
+        knows no --hide-secrets - it never lists them - and is asked again without it."""
+        if host == "local" or not self.hide_secrets_here():
+            return self.checkpoint_json(host, *args, timeout=timeout)
+        try:
+            return self.checkpoint_json(host, *args, "--hide-secrets", timeout=timeout)
+        except ValueError as exc:
+            if "--hide-secrets" not in str(exc):
+                raise
+        return self.checkpoint_json(host, *args, timeout=timeout)
+
+    def session_memory(self, name, host="local", source="auto", file=None, show_secret=False):
+        """The agent's memory of the start NAME on HOST (`sandbox-ai session memory NAME --from SOURCE --json [--file
+        F [--show-secret]]`): {"source": "home"|"store", "path", "files": [{"name", "size", "modified", "secret"(,
+        "text", "binary")}], "notes", "hidden"}. SHOW_SECRET: the text of a file marked as a login or key (asked
+        first: show-secret-file). ValueError: not read (its words)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        if source not in ("auto", "home", "store"):
+            raise ValueError("invalid source")
+        return self.file_view_json(host, "session", "memory", name, f"--from={source}", "--json",
+                                   *([f"--file={listed_file(file)}"] if file is not None else []),
+                                   *(["--show-secret"] if show_secret and file is not None else []), timeout=120)
+
+    def session_files(self, name, host="local", file=None, full=False, show_secret=False):
+        """The agents' session files of the start NAME on HOST (`sandbox-ai session files NAME --json [--file F
+        [--full] [--show-secret]]`): {"home", "files": [{"name", "agent", "size", "modified", "format", "verified",
+        "secret"}], "hidden"}, with FILE its "messages" [{"role", "time", "text", "tool", "error"}] and "notes".
+        SHOW_SECRET: a file marked as a login or key (asked first: show-secret-file). ValueError: not read (its
+        words)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        return self.file_view_json(host, "session", "files", name, "--json",
+                                   *([f"--file={listed_file(file)}"] if file is not None else []),
+                                   *(["--full"] if full and file is not None else []),
+                                   *(["--show-secret"] if show_secret and file is not None else []), timeout=300)
+
+    def session_export(self, name, out, include_secrets=False):
+        """The folder of the kept start NAME of this machine as a new tar.gz OUT (`sandbox-ai session export NAME OUT
+        --json [--include-secrets --yes]`): {"path", "files", "bytes", "left_out": [{"path", "why", "secret"}],
+        "secrets_left_out", "include_secrets"}. INCLUDE_SECRETS: its logins and keys too (asked first:
+        session-export-secrets). ValueError: not written (its words)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        if not isinstance(out, str) or not os.path.isabs(out) or any(c in out for c in "\n\r\0"):
+            raise ValueError("choose where the archive is written (a new file of this machine)")
+        return self.checkpoint_json("local", "session", "export", name, "--json",
+                                    *(["--include-secrets", "--yes"] if include_secrets else []), "--", out,
+                                    timeout=3600)
+
+    def collect(self, host="local", dry_run=True, days=None, caches=False):
+        """`sandbox-ai gc [--older-than DAYS] [--caches] [--dry-run] --json` on HOST: {"removed", "leftovers",
+        "histories", "skipped", "damaged", "days", "dry_run", "compacted", "caches"}. CACHES: the download caches of
+        the stopped kept starts' HOMEs too. ValueError: not answered."""
         if days is not None and not (isinstance(days, int) and not isinstance(days, bool) and 0 <= days <= 36500):
             raise ValueError("invalid number of days")
         data = self.host_json(host, "gc", *([f"--older-than={days}"] if days is not None else []),
-                              *(["--dry-run"] if dry_run else []), "--json", timeout=300)
+                              *(["--caches"] if caches else []), *(["--dry-run"] if dry_run else []), "--json",
+                              timeout=300 if dry_run else 1800)  # (compressing gigabytes of logs takes minutes)
         if not isinstance(data, dict):
             raise ValueError("not what sandbox-ai gc says")
         return data
 
-    def collect_as_shown(self, host, shown):
+    def collect_as_shown(self, host, shown, caches=False):
         """`sandbox-ai gc` on HOST removing what its dry run SHOWN listed and nothing else: with the same
-        --older-than, and only when a dry run now still lists exactly that (GcChanged otherwise: a start was used or
-        ended meanwhile, keep_days changed). Returns what gc says it removed."""
+        --older-than (and --caches), and only when a dry run now still lists exactly that (GcChanged otherwise: a start
+        was used or ended meanwhile, keep_days changed). Returns what gc says it removed."""
         days = shown.get("days") if isinstance(shown, dict) else None
         days = days if isinstance(days, int) and not isinstance(days, bool) and days >= 0 else None
-        if gc_plan(self.collect(host, True, days=days)) != gc_plan(shown):
+        extra = {"caches": True} if caches else {}
+        if gc_plan(self.collect(host, True, days=days, **extra)) != gc_plan(shown):
             raise GcChanged(host)
-        return self.collect(host, False, days=days)
+        return self.collect(host, False, days=days, **extra)
+
+    def state_usage(self, host="local"):
+        """`sandbox-ai gc --usage --json` on HOST: how big each part of what sandbox-ai keeps there is, the biggest
+        items, and what gc would free ({"total", "parts", "podman", "would_free", "scan"}). ValueError: not answered
+        (an older sandbox-ai there knows no --usage)."""
+        data = self.host_json(host, "gc", "--usage", "--json", timeout=330)
+        if not isinstance(data, dict) or not isinstance(data.get("parts"), dict):
+            raise ValueError("not what sandbox-ai gc --usage says")
+        return data
+
+    def home_details(self, host="local", name=None):
+        """`sandbox-ai gc --usage --detail [NAME] --json` on HOST: what is in the kept HOMEs (or NAME's) by kind
+        ({"starts", "kinds", "scan"}). ValueError: not answered (an older sandbox-ai there knows no --detail)."""
+        data = self.host_json(host, "gc", "--usage", "--detail", *([name] if name else []), "--json", timeout=330)
+        if not isinstance(data, dict) or not isinstance(data.get("starts"), list):
+            raise ValueError("not what sandbox-ai gc --usage --detail says (sandbox-ai 0.1.98 or later knows it)")
+        return data
+
+    def storage_check(self, host="local", name=None, dry_run=False):
+        """`sandbox-ai gc --check [--home NAME] [--dry-run] --json` on HOST: the storage check's plan ({"plan":
+        [{"kind", "start", "what", "bytes", "estimate", "argv", "command", "safe_running", "checked"}], "total",
+        "threshold", "above", "grew", "starts", "said", "notice"}; with NAME that start's storage: "detail", "logs",
+        "checkpoints", "compacted", "packed"). Without DRY_RUN the storage rules are applied and the sizes recorded
+        (the app's own check). ValueError: not answered (sandbox-ai 0.1.99 or later knows --check)."""
+        if name is not None and not valid_run(name):
+            raise ValueError("invalid start")
+        data = self.host_json(host, "gc", "--check", "--json", *(["--dry-run"] if dry_run else []),
+                              *(["--home", name] if name else []), timeout=900)
+        if not isinstance(data, dict) or not isinstance(data.get("plan"), list):
+            raise ValueError("not what sandbox-ai gc --check says (sandbox-ai 0.1.99 or later knows it)")
+        return data
+
+    def storage_apply(self, host, argv):
+        """One item of the storage check's plan: its command ARGV (storage_argv: only the gc forms the plan names)
+        run on HOST, with --json. What gc says ({} when it says no JSON). ValueError: it failed (its words)."""
+        argv = storage_argv(argv)
+        status, out, err = self.host_run(host, *argv, "--json", timeout=3600)
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        try:
+            found = json.loads(out)
+        except (ValueError, RecursionError):
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    def storage_last_check(self):
+        """When this machine's last storage check ran (seconds since the epoch; storage.json), or None."""
+        try:
+            storage = self.module("storage")
+            found = storage.read_state(storage.STATE).get("last_check")
+            return storage.seconds(found.get("time")) if isinstance(found, dict) else None
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai has no storage.py
+            applog.swallowed("backend", "SandboxAI.storage_last_check: none", _exc)
+            return None
+
+    def storage_sizes(self):
+        """{start id: {"bytes", "growth", "measured", "since"}} of this machine's last storage check (one small file;
+        {} before one, or with an older sandbox-ai)."""
+        try:
+            return self.module("storage").last_sizes()
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai has no storage.py
+            applog.swallowed("backend", "SandboxAI.storage_sizes: none (an older sandbox-ai, or not readable)", _exc)
+            return {}
 
     def host_net_options(self, name, command="allow"):
         """The options `sandbox-ai net COMMAND` takes on host NAME (its --help there, parsed), kept per host and
@@ -2370,6 +3105,20 @@ class SandboxAI:
             return 2, "", str(exc)
         return self.host_run(host, *argv, timeout=timeout)
 
+    def host_answer_relaying(self, host, argv, ident, url, timeout=60):
+        """host_answer, then - an allowed browser question of another HOST whose page opens here and whose URL sends
+        the browser back to the sandbox's loopback (its "callback", approvals list --json) - this machine's one-shot
+        catcher for that callback: `sandbox-ai approvals relay ID --url URL --host HOST` here, which forwards the one
+        request over the host's SSH connection (`approvals callback ID` there). Its note (or why not: a busy port,
+        use the device-code login) is added to the answer's output; the answer stands either way."""
+        status, out, err = self.host_answer(host, argv, timeout=timeout)
+        if status != 0:
+            return status, out, err
+        _, said, why = self.call("approvals", "relay", str(ident), "--url", str(url), "--host", str(host),
+                                       timeout=30)
+        note = (said or why).strip()
+        return status, "\n".join(part for part in (out.strip(), note) if part), err
+
     def require_options(self, host, command, options):
         """Before COMMAND (a tuple of words after sandbox-ai) with OPTIONS that newer sandbox-ai versions brought goes
         to another HOST: HostTooOld when that host's `COMMAND --help` does not list them all - said plainly (update
@@ -2387,6 +3136,23 @@ class SandboxAI:
         if missing:
             raise HostTooOld(host, command, missing)
 
+    def too_old_text(self, host, result, command):
+        """What to say when the sandbox-ai on HOST answered RESULT ((status, out, err) of `sandbox-ai COMMAND...` there)
+        with its usage - an older version that does not know COMMAND (`invalid choice`, `unrecognized arguments`): the
+        update to do (HostTooOld with this machine's version), else None (this machine, another failure, success)."""
+        if host in (None, "local") or not isinstance(result, tuple) or len(result) != 3 or result[0] != 2:
+            return None
+        text = f"{result[2] or ''}\n{result[1] or ''}"
+        if not re.search(r"invalid choice|unrecognized arguments|the following arguments are required", text):
+            return None
+        try:
+            version = self.version()
+        except Exception as _exc:  # noqa: BLE001 - not known here: said without it
+            applog.swallowed("backend", "SandboxAI.too_old_text: this machine's version is not known", _exc)
+            version = "?"
+        words = command.split() if isinstance(command, str) else command
+        return str(HostTooOld(host, tuple(words), [], needs=version))
+
     def remote_hosts(self):
         """The names of the hosts of `sandbox-ai hosts` other than this machine ([] without hosts)."""
         if not self.hosts_supported():
@@ -2394,12 +3160,22 @@ class SandboxAI:
         return [e["name"] for e in self.host_entries() if e.get("kind") != "local" and e.get("name") != "local"]
 
     def host_questions(self, name, timeout=REMOTE_QUESTION_WAIT):
-        """The open questions of the sandboxes on host NAME (`sandbox-ai approvals list --json` there, over SSH) as
-        [RemoteQuestion]; what does not look like a question of sandbox-ai is left out. ValueError: no answer.
-        Their time left counts from when the read STARTED: that host said "seconds_left" somewhere during the SSH
-        round trip, so a slow read never shows more time than there is."""
+        """The questions of the sandboxes on host NAME in every state (`sandbox-ai approvals list --state all --json`
+        there, over SSH; an older sandbox-ai there, which knows no --state: its open ones) as [RemoteQuestion]; what
+        does not look like a question of sandbox-ai is left out. ValueError: no answer. Their time left counts from
+        when the read STARTED: that host said "seconds_left" somewhere during the SSH round trip, so a slow read never
+        shows more time than there is."""
         started = time.time()
-        data = self.host_json(name, "approvals", "list", "--json", timeout=timeout)
+        if name in getattr(self, "_states_unknown", set()):
+            data = self.host_json(name, "approvals", "list", "--json", timeout=timeout)
+        else:
+            try:
+                data = self.host_json(name, "approvals", "list", "--state", "all", "--json", timeout=timeout)
+            except ValueError as exc:
+                if not re.search(r"unrecognized arguments|invalid choice", str(exc)):
+                    raise
+                self._states_unknown = {*getattr(self, "_states_unknown", set()), name}
+                data = self.host_json(name, "approvals", "list", "--json", timeout=timeout)
         if not isinstance(data, list):
             raise ValueError(f"{name}: not a list of questions")
         return remote_questions(name, data, self.question_id, read_at=started)
@@ -2454,8 +3230,9 @@ class SandboxAI:
     def rules_check(self, paths):
         """`sandbox-ai rules check FILE... --json` on this machine: {"ok", "rulesets": [{"name", "path", "ok",
         "error"?, "counts"?, "summary"?}]} (a broken file is in the answer, not an error)."""
-        # Absolute: a file name is never read as an option.
-        files = [os.path.abspath(os.path.expanduser(str(path))) for path in paths]
+        # Absolute: a file name is never read as an option; builtin:NAME is one of sandbox-ai's own rulesets.
+        files = [str(path) if re.fullmatch(r"builtin:[a-z0-9-]{1,64}", str(path))
+                 else os.path.abspath(os.path.expanduser(str(path))) for path in paths]
         status, out, err = self.call("rules", "check", "--json", *files, timeout=60)
         try:
             data = json.loads(out)
@@ -2669,6 +3446,27 @@ class SandboxAI:
         elif key == "desktop_notifications":
             if value is not None and value not in self.desktop_notification_levels():
                 raise ValueError(f"this sandbox-ai has no default {key} = {value!r}")
+        elif key == "hide_secrets":
+            # Settings > Privacy: Hide logins and keys in file views (session_inspect.py reads it)
+            if "hide_secrets" not in getattr(self.launcher, "DEFAULTS_KEYS", ()):
+                raise ValueError("this sandbox-ai has no default hide_secrets yet; update it")
+            if value is not None and value is not True:
+                raise ValueError("hide_secrets is true, or unset (listed and marked: the default)")
+        elif key.startswith("storage_"):
+            # Settings > Storage: the storage check and its rules (storage.py checks each value)
+            if key not in getattr(self.launcher, "DEFAULTS_KEYS", ()):
+                raise ValueError("this sandbox-ai has no storage check yet; update it")
+            if value is not None:
+                why = self.module("storage").check_value(key, value)
+                if why:
+                    raise ValueError(why)
+        elif key == "ask_timeout":
+            # How long a request waits for its answer (agent_sandbox.ASK_TIMEOUT_RANGE): only with this sandbox-ai.
+            if "ask_timeout" not in getattr(self.launcher, "DEFAULTS_KEYS", ()):
+                raise ValueError("this sandbox-ai has no default ask_timeout yet; update it")
+            low, high = getattr(self.launcher, "ASK_TIMEOUT_RANGE", (5, 3600))
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high):
+                raise ValueError(f"ask_timeout is a number of seconds from {low} to {high}")
         elif key == "loop_guard":
             # The loop guard's layers for every LLM server (llm.check_loop: known layers, their types and ranges).
             module = self.module("llm")
@@ -2745,15 +3543,24 @@ class SandboxAI:
             document["agent_args"] = list(agent_args)
         return document, (workspaces[0] if workspaces else None)
 
-    def create_folders(self, paths):
+    def create_folders(self, paths, warnings=None):
         """Make each folder of PATHS (with the folders above it) that a start names as its workspace or project
-        folder, checked as a start checks a workspace (the launcher's create_workspace: never a system folder,
-        XDG_RUNTIME_DIR, sandbox-ai's own tree, a file or a link to elsewhere in its path). Returns the folders made
-        or there; ValueError with the reason (never a bare errno) for the first one refused."""
+        folder, checked as a start checks a workspace (the launcher's create_workspace: never a file or a link to
+        elsewhere in its path). A risk a start would say (a system folder, XDG_RUNTIME_DIR, HOME, sandbox-ai's own
+        tree or folders) is yours to take: the folder is made, and the launcher's warning goes into WARNINGS (a
+        list) for the app to show. Returns the folders made or there; ValueError with the reason (never a bare
+        errno) for the first one refused."""
         create = getattr(self.launcher, "create_workspace", None)
         if create is None:
             raise ValueError("this sandbox-ai cannot create a workspace for the app: create the folder first")
-        return [str(create(path)) for path in paths]
+        said = warnings if warnings is not None else []
+        made = []
+        for path in paths:
+            try:
+                made.append(str(create(path, warn=said.append)))
+            except TypeError:  # a launcher before 0.1.98 (it refuses such a folder itself)
+                made.append(str(create(path)))
+        return made
 
     def write_project(self, directory, document):
         """Write DIRECTORY/.sandbox-ai.json and trust exactly the bytes written.
@@ -2997,6 +3804,165 @@ class SandboxAI:
             rows.append((agent, "store" if place == "login store" else "host", problem, printable(source)[:300]))
         return rows
 
+    def host_logins(self, host):
+        """{agent: {"where": "store" or "host", "problem": None, "missing" or "expired"}} of the logins the sandboxes
+        of HOST get (`sandbox-ai login --status --json` there; this machine for "local"); an older sandbox-ai's
+        answer is read from its lines (host_login_status). ValueError: not answered."""
+        status, out, err = self.host_run(host, "login", "--status", "--json", timeout=90)
+        data = None
+        if status == 0:
+            with contextlib.suppress(ValueError, RecursionError):
+                data = json.loads(out)
+        agents = data.get("agents") if isinstance(data, dict) else None
+        if isinstance(agents, dict):
+            return {agent: {"where": "store" if entry.get("where") == "store" else "host",
+                            "problem": entry.get("problem") if entry.get("problem") in ("missing", "expired") else None}
+                    for agent, entry in agents.items() if agent in AGENTS and isinstance(entry, dict)}
+        said = (err or out)
+        if status != 0 and "--json" not in said and "usage:" not in said:
+            raise ValueError(printable_text(said.strip()[-500:]) or f"exit status {status}")
+        return {agent: {"where": where, "problem": problem if problem in ("missing", "expired") else None}
+                for agent, where, problem, _ in self.host_login_status(host)}
+
+    def session_seen(self, host, name):
+        """What is there on HOST under the session name NAME (`sandbox-ai session status NAME --json` there): {"name",
+        "agent", "state" (running, paused, stopped, orphaned, damaged), "foreground", "terminal" (ready, starting,
+        missing, ended or None), "attachable", "attach_why", "login" (its HOME holds its agent's login), "seen" (its
+        one line in words)}, or None when there is no start of that name. An older sandbox-ai (no `session status`)
+        is asked for its list (`sandbox-ai list --json`: what runs). ValueError: not answered."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        status, out, err = self.host_run(host, "session", "status", name, "--json", timeout=60)
+        said = (err or out)
+        if status == 0:
+            try:
+                data = json.loads(out)
+            except (ValueError, RecursionError):
+                data = None
+            if not isinstance(data, dict):
+                raise ValueError("sandbox-ai session status: not an object")
+            return seen_facts(data)
+        if "No session named" in said:
+            return None
+        if "invalid choice" in said or "usage:" in said:
+            for entry in self.host_json(host, "list", "--json", timeout=60):
+                if isinstance(entry, dict) and name in (entry.get("name"), entry.get("id")):
+                    return seen_facts({**entry, "foreground": entry.get("kind") == "run"})
+            return None
+        last = said.strip().splitlines()[-1] if said.strip() else f"exit status {status}"
+        raise ValueError(printable_text(last)[:500])
+
+    def local_session_seen(self, name):
+        """session_seen for this machine without a process: what the session's own files and its supervisor's entry
+        in /proc say (sandbox-ai's sessions module, in this process) - running or paused while its supervisor runs,
+        else stopped (whether a pod of it still runs without its supervisor is Podman's to say: the launcher asks at
+        the start). For a start in the window's thread: a few small files, never Podman, never SSH. None: no start of
+        that name, or one whose record cannot be read (the launcher says what it reads there)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        sessions = self.module("sessions")
+        try:
+            key = sessions.resolve(name)
+            data = sessions.load(key)
+            running = bool(sessions.alive(key, data))
+            fore = bool(sessions.foreground(data))
+            state = "stopped" if not running else \
+                "paused" if (sessions.session_dir(key) / "paused").exists() else "running"
+            terminal = sessions.terminal_state(key, data) if state == "running" and not fore else (None, "")
+            words = sessions.seen_text(key, data, state, terminal) if hasattr(sessions, "seen_text") else ""
+            target = self.launcher.AUTH_TARGETS.get(data.get("agent"))
+            login = bool(target) and (sessions.session_dir(key) / "home" / target).is_file()
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        return seen_facts({"name": sessions.display(key, data), "agent": data.get("agent"), "state": state,
+                           "foreground": fore, "terminal": terminal[0],
+                           "attachable": state == "running" and not fore and terminal[0] not in ("missing", "ended"),
+                           "attach_why": None, "login": login, "seen": words})
+
+    def host_logged_in(self, host, agents, session=None):
+        """The agents of AGENTS whose sandboxes on HOST have a login now (host_logins: none missing or expired) - and
+        the agent of the session SESSION there when its HOME holds its own (session_seen): a start of it needs no
+        other. ValueError: not answered."""
+        if host == "local":
+            return self.logged_in_here(agents, session)
+        logins = self.host_logins(host)
+        found = {agent for agent in agents if agent in logins and logins[agent]["problem"] is None}
+        if session and valid_run(session) and set(agents) - found:
+            with contextlib.suppress(Exception):  # (not answered: the launcher has the last word)
+                seen = self.session_seen(host, session)
+                if seen and seen.get("login") and seen.get("agent") in agents:
+                    found.add(seen["agent"])
+        return found
+
+    def logged_in_here(self, agents, session=None):
+        """host_logged_in for this machine without a process: the launcher's own look at each agent's login file
+        (login_state: the login store's, else this computer's; none missing or expired) and at the session SESSION's
+        own HOME (local_session_seen). For a start in the window's thread: a few small files. An agent whose login
+        cannot be told counts as there (the launcher says what is wrong at the start)."""
+        launcher, found = self.launcher, set()
+        for agent in agents:
+            try:
+                if launcher.login_state(agent)[1] is None:
+                    found.add(agent)
+            except Exception as _exc:  # noqa: BLE001 - not told: the launcher has the last word
+                applog.swallowed("backend", "SandboxAI.logged_in_here: an agent's login could not be told", _exc)
+                found.add(agent)
+        if session and valid_run(session) and set(agents) - found:
+            seen = self.local_session_seen(session)
+            if seen and seen.get("login") and seen.get("agent") in agents:
+                found.add(seen["agent"])
+        return found
+
+    def session_stop(self, host, name):
+        """`sandbox-ai stop NAME` on HOST (asked first: start-stop); ValueError with its last words when it failed."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        status, out, err = self.host_run(host, "stop", name, timeout=150)
+        if status != 0:
+            text = (err or out).strip()
+            raise ValueError(printable(text.splitlines()[-1] if text else f"exit status {status}")[:500])
+        return True
+
+    def attach_argv(self, host, name):
+        """The command line that brings the terminal of the session NAME on HOST here: `sandbox-ai session attach
+        NAME` on this machine, `ssh -tt ... sandbox-ai attach NAME` there."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        return self.command("session", "attach", name) if host == "local" else self.host_terminal(host, "attach", name)
+
+    def resume_argv(self, host, name):
+        """The same for `sandbox-ai resume NAME` (a paused session continues, its terminal comes here)."""
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        return self.command("resume", name) if host == "local" else self.host_terminal(host, "resume", name)
+
+    def session_logins(self, host="local"):
+        """Which login each running or kept session of HOST uses (`sandbox-ai login --status --sessions --json`):
+        {"sessions": [{"name", "id", "agent", "state", "source" (store, host, file, session, none), "source_session",
+        "login", "problem", "info": {"kind", "account": {"email", "organization", "plan", "account_id", "providers"},
+        "expires", "refresh_expires", "last_refresh", "fingerprint"}, "shares_central"}], "central": {agent: info or
+        None}} - what each login file says, never a token. ValueError: not read (its words)."""
+        data = self.checkpoint_json(host, "login", "--status", "--sessions", "--json", timeout=120)
+        if not isinstance(data.get("sessions"), list):
+            raise ValueError("sandbox-ai login --status --sessions: not a list of sessions")
+        data["sessions"] = [row for row in data["sessions"] if isinstance(row, dict)]
+        data["central"] = data.get("central") if isinstance(data.get("central"), dict) else {}
+        return data
+
+    def import_session_login(self, host, agent, name, fingerprint, replace=False):
+        """The login of the session NAME on HOST as the central login of AGENT (`sandbox-ai login AGENT --from-session
+        NAME --yes --expect FINGERPRINT [--replace] --json`): only the login shown (its FINGERPRINT); REPLACE: also over
+        a central login of another account. {"imported", "agent", "session", "login", "replaced", "notes"};
+        ValueError: not imported (its words)."""
+        if agent not in LOGIN_AGENTS_ANYWHERE:
+            raise ValueError("unknown agent")
+        if not valid_run(name):
+            raise ValueError("invalid start")
+        if not (isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{8}", fingerprint)):
+            raise ValueError("invalid fingerprint")
+        return self.checkpoint_json(host, "login", agent, "--from-session", name, "--yes", f"--expect={fingerprint}",
+                                    *(["--replace"] if replace else []), "--json", timeout=180)
+
     def login_argv(self, host, agent, logout=False):
         """`sandbox-ai login AGENT [--logout]` on HOST, for a terminal (the agent's own login asks there)."""
         if agent not in AGENTS or agent not in LOGIN_AGENTS_ANYWHERE:
@@ -3028,6 +3994,76 @@ class SandboxAI:
             except HostTooOld as exc:
                 return 2, "", str(exc)
         return self.host_run(host, "kits", action, *options, "--", name, *arguments, timeout=300)
+
+    # what the agents on a host have set up themselves (sandbox-ai kits host-list, host-show, host-import)
+
+    def host_agent_parts(self, host):
+        """`sandbox-ai kits host-list --json` on HOST: {"agents", "parts", ...}; ValueError with what it said (a host
+        before 0.1.98: the update to do). Read only. Over SSH: never on the GUI thread."""
+        result = self.host_run(host, "kits", "host-list", "--json", timeout=150)
+        document = self.agent_parts_document(host, result, ("kits", "host-list"))
+        if not isinstance(document.get("parts"), list) or not isinstance(document.get("agents"), list):
+            raise ValueError("sandbox-ai kits host-list --json: not a list of the agents' parts")
+        return document
+
+    def host_agent_part(self, host, part):
+        """`sandbox-ai kits host-show --json -- PART` on HOST: one part's files, scripts, secret-looking lines (masked),
+        text and conversions. Read only."""
+        if not isinstance(part, str) or not AGENT_PART.fullmatch(part):
+            raise ValueError("not a part's id")
+        result = self.host_run(host, "kits", "host-show", "--json", "--", part, timeout=150)
+        return self.agent_parts_document(host, result, ("kits", "host-show"))
+
+    def agent_parts_document(self, host, result, command):
+        status, out, err = result
+        if status != 0:
+            raise ValueError(self.too_old_text(host, result, command) or (err or out).strip()[-1500:]
+                             or f"exit status {status}")
+        try:
+            document = json.loads(out)
+        except (ValueError, RecursionError):
+            raise ValueError(f"sandbox-ai {' '.join(command)}: no JSON") from None
+        if not isinstance(document, dict):
+            raise ValueError(f"sandbox-ai {' '.join(command)}: not an object")
+        return document
+
+    def import_args(self, parts, agents=(), allow_secrets=False, allow_findings=False):
+        if not parts or any(not isinstance(p, str) or not AGENT_PART.fullmatch(p) for p in parts):
+            raise ValueError("choose the parts to import (their ids)")
+        if any(agent not in AGENTS for agent in agents):
+            raise ValueError("unknown agent")
+        return ([f"--agent={agent}" for agent in dict.fromkeys(agents)]
+                + (["--allow-secrets"] if allow_secrets else [])
+                + (["--allow-findings"] if allow_findings else []), ["--", *dict.fromkeys(parts)])
+
+    def host_import_parts(self, host, kit, parts, new=False, agents=(), allow_secrets=False, allow_findings=False):
+        """`sandbox-ai kits host-import --kit KIT [--new] ... -- PARTS` on HOST: the parts chosen into a kit of yours
+        there (the page asked first: kit-add). (status, out, err)."""
+        if not re.fullmatch(KIT_NAME, str(kit)) or kit in ("default", "built-in"):
+            return 2, "", "invalid kit"
+        try:
+            options, tail = self.import_args(parts, agents, allow_secrets, allow_findings)
+        except ValueError as exc:
+            return 2, "", str(exc)
+        result = self.host_run(host, "kits", "host-import", f"--kit={kit}", *(["--new"] if new else []), *options,
+                               *tail, timeout=300)
+        return self.too_old_result(host, result, ("kits", "host-import"))
+
+    def host_import_memory(self, host, project, parts, agents=(), allow_secrets=False, allow_findings=False):
+        """`sandbox-ai kits host-import --project DIR ... -- PARTS` on HOST: memory parts into the memory sandbox-ai
+        keeps for the project DIR there (the page asked first: memory-add). (status, out, err)."""
+        if not isinstance(project, str) or not project.startswith("/") or "\0" in project:
+            return 2, "", "the project is an absolute path"
+        try:
+            options, tail = self.import_args(parts, agents, allow_secrets, allow_findings)
+        except ValueError as exc:
+            return 2, "", str(exc)
+        result = self.host_run(host, "kits", "host-import", f"--project={project}", *options, *tail, timeout=300)
+        return self.too_old_result(host, result, ("kits", "host-import"))
+
+    def too_old_result(self, host, result, command):
+        text = self.too_old_text(host, result, command)
+        return (result[0], result[1], text) if text else result
 
     def require_marketplaces(self, host):
         """HostTooOld when the sandbox-ai on HOST predates the marketplace browser (0.1.78: `plugins marketplaces`,
@@ -3067,13 +4103,13 @@ class SandboxAI:
                                   *(["--marketplaces-only"] if marketplaces_only else []),
                                   *[token for kit in kits if re.fullmatch(KIT_NAME, kit) for token in ("--kit", kit)])
 
-    def host_plugins(self, host, update=False, kits=(), marketplaces_only=False, timeout=PLUGINS_WAIT):
+    def host_plugins(self, host, update=False, kits=(), marketplaces_only=False, timeout=PLUGINS_WAIT, agent="claude"):
         """(status, out, err) of `sandbox-ai plugins claude [--update] [--marketplaces-only] [--kit NAME]...` on
         HOST, without a terminal: it asks nothing (each step runs in the plugin store's own sandbox); its output comes
         as it is written inside watching() (the Kits page's Task)."""
         if host == "local":
-            return self.call(*self.plugins_args(update=update, kits=kits, marketplaces_only=marketplaces_only),
-                             timeout=timeout)
+            return self.call(*self.plugins_args(update=update, kits=kits, marketplaces_only=marketplaces_only,
+                                                agent=agent), timeout=timeout)
         return self.host_run(host, "plugins", "claude", *(["--update"] if update else []),
                              *(["--marketplaces-only"] if marketplaces_only else []),
                              *[token for kit in kits if re.fullmatch(KIT_NAME, kit) for token in ("--kit", kit)],
@@ -3232,6 +4268,151 @@ class SandboxAI:
             return 2, "", "invalid action or path"
         return self.host_run(host, "presets", "dirs", action, "--", path, timeout=60)
 
+    # phone notifications (sandbox-ai notify on this machine or a host): channels with secret names, never a token
+    def has_notify(self):
+        return (self.directory / "notify.py").is_file()
+
+    def notify_channels(self, host="local"):
+        """{"channels": [{name, kind, where, events, when, detail, quiet, rate, secrets, status}], "link", "events",
+        "kinds", "default_events"} of `sandbox-ai notify list --json` on HOST. ValueError: not answered."""
+        self.require_options(host, ("notify", "list"), ["--json"])
+        data = self.host_json(host, "notify", "list", "--json", timeout=60)
+        if not isinstance(data, dict) or not isinstance(data.get("channels"), list):
+            raise ValueError("not a list of phone channels")
+        data["channels"] = [c for c in data["channels"] if isinstance(c, dict) and isinstance(c.get("name"), str)]
+        return data
+
+    def notify_add(self, host, fields):
+        """`sandbox-ai notify add` on HOST for the channel of FIELDS (notify.json's names), checked first as the
+        command checks it (this machine's notify.py: a ValueError before anything runs); (status, out, err).
+        Asked first by the caller (notify-add)."""
+        args = self.module("notify").add_arguments(fields)
+        return self.host_run(host, *args, timeout=60)
+
+    def notify_remove(self, host, name):
+        if not (isinstance(name, str) and self.module("notify").NAME.fullmatch(name)):
+            return 2, "", "invalid channel name"
+        return self.host_run(host, "notify", "remove", name, timeout=60)
+
+    def notify_test(self, host, name):
+        """`sandbox-ai notify test NAME` on HOST: a message sent now; (status, out, err) - status 1: not sent (why)."""
+        if not (isinstance(name, str) and self.module("notify").NAME.fullmatch(name)):
+            return 2, "", "invalid channel name"
+        return self.host_run(host, "notify", "test", name, timeout=60)
+
+    def notify_link(self, host, url):
+        """`sandbox-ai notify link URL` (the web interface's public address in the messages; None: --none)."""
+        if url in (None, ""):
+            return self.host_run(host, "notify", "link", "--none", timeout=60)
+        try:
+            url = self.module("notify").check_link(url)
+        except ValueError as exc:
+            return 2, "", str(exc)
+        return self.host_run(host, "notify", "link", url, timeout=60)
+
+    # scheduled runs (sandbox-ai schedule on this machine or a host): an agent started on a timetable or a trigger
+    # the update mode (sandbox-ai update mode): Settings › Updates; this machine's, or a host's
+    def has_update_mode(self):
+        return (self.directory / "updates.py").is_file()
+
+    def update_status(self, host="local"):
+        """`sandbox-ai update mode --json` on HOST: {"mode", "window", "last_check", "result", "next_check",
+        "downloaded", "waiting", "rollback", "refused", "manual", ...}. ValueError: not answered."""
+        data = self.host_json(host, "update", "mode", "--json", timeout=60)
+        if not isinstance(data, dict) or data.get("mode") not in UPDATE_MODES:
+            raise ValueError("not an update mode")
+        return data
+
+    def set_update_mode(self, mode, window=None, host="local"):
+        """`sandbox-ai update mode MODE [--at WINDOW] --json` on HOST (asked first by the caller): what it says now."""
+        if mode not in UPDATE_MODES:
+            raise ValueError(f"the mode is one of {', '.join(UPDATE_MODES)}")
+        status, out, err = self.host_run(host, "update", "mode", mode, *(["--at", window] if window else []),
+                                         "--json", timeout=180)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, dict):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return data
+
+    def update_check_now(self):
+        """`sandbox-ai update --check` here: (status, out, err); what it found is kept as the last check."""
+        return self.call("update", "--check", timeout=200)
+
+    def update_apply(self, while_running=False):
+        """`sandbox-ai update --apply` here: (status, out, err); status 3 (update_busy_reasons): something runs."""
+        return self.call("update", "--apply", *(["--while-running"] if while_running else []), timeout=1800)
+
+    def has_update_install(self):
+        """Whether this sandbox-ai has `update --install` (it came with package_update.py: the copies that replace
+        themselves)."""
+        return (self.directory / "package_update.py").is_file()
+
+    def update_install(self, while_running=False):
+        """`sandbox-ai update --install` here - the newest signed release downloaded, checked and installed, for every
+        kind of copy that replaces itself: (status, out, err); status 3 (update_busy_reasons): something runs."""
+        return self.call("update", "--install", *(["--while-running"] if while_running else []), timeout=1900)
+
+    def update_rollback(self, while_running=False):
+        """`sandbox-ai update --rollback` here: (status, out, err); status 3: something runs."""
+        return self.call("update", "--rollback", *(["--while-running"] if while_running else []), timeout=300)
+
+    def has_schedule(self):
+        return (self.directory / "schedule.py").is_file()
+
+    def schedules(self, host="local"):
+        """{"schedules": [...], "problems", "timer"} of `sandbox-ai schedule list --json` on HOST. ValueError: not
+        answered."""
+        data = self.host_json(host, "schedule", "list", "--json", timeout=60)
+        if not isinstance(data, dict) or not isinstance(data.get("schedules"), list):
+            raise ValueError("not a list of schedules")
+        data["schedules"] = [x for x in data["schedules"] if isinstance(x, dict) and isinstance(x.get("name"), str)]
+        return data
+
+    def schedule_name(self, name):
+        if not (isinstance(name, str) and self.module("schedule").NAME.fullmatch(name)):
+            raise ValueError("invalid schedule name")
+        return name
+
+    def schedule_history(self, host, name):
+        """[run] of `sandbox-ai schedule history NAME --json` on HOST, the newest last."""
+        data = self.host_json(host, "schedule", "history", self.schedule_name(name), "--json", timeout=60)
+        runs = data.get("runs") if isinstance(data, dict) else None
+        return [run for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
+
+    def schedule_report(self, host, name, run=None):
+        """The Markdown of a run of NAME (its summary and the start's report) on HOST: `sandbox-ai schedule report`."""
+        name = self.schedule_name(name)
+        if run is not None and not self.module("schedule").RUN_ID.fullmatch(str(run)):
+            raise ValueError("invalid run")
+        status, out, err = self.host_run(host, "schedule", "report", name, *([run] if run else []), timeout=60)
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return out
+
+    def schedule_add(self, host, fields):
+        """`sandbox-ai schedule add` on HOST for FIELDS (schedule.add_arguments' names), checked first as the command
+        checks them (a ValueError before anything runs); (status, out, err). Asked first by the caller."""
+        args = self.module("schedule").add_arguments(fields)
+        return self.host_run(host, *args, timeout=120)
+
+    def schedule_action(self, host, name, action, keep_history=False):
+        """run-now, pause, resume or remove of NAME on HOST: (status, out, err)."""
+        if action not in ("run-now", "pause", "resume", "remove"):
+            return 2, "", "invalid action"
+        try:
+            name = self.schedule_name(name)
+        except ValueError as exc:
+            return 2, "", str(exc)
+        return self.host_run(host, "schedule", action, name,
+                             *(["--keep-history"] if action == "remove" and keep_history else []), timeout=120)
+
+    def schedule_timer(self, host, on):
+        """`sandbox-ai schedule enable` (ON) or `disable` on HOST: the user-level timer there."""
+        return self.host_run(host, "schedule", "enable" if on else "disable", timeout=120)
+
     def trusted_projects(self, host="local"):
         """[{path, digest, state}] of `sandbox-ai wizard trust --list --json` on HOST (state trusted, changed,
         missing or unreadable)."""
@@ -3257,8 +4438,9 @@ class SandboxAI:
         found = []
         for line in out.splitlines():
             name, _, since = line.strip().partition("  since ")
+            since, _, flag = since.partition("  (")  # "  (no TOTP)": a login with the password only
             if WEB_USER.fullmatch(name):
-                found.append((name, printable(since.strip())[:40]))
+                found.append((name, printable(since.strip())[:40] + (" (no TOTP)" if flag.startswith("no TOTP") else "")))
         return found
 
     def host_web_user_remove(self, host, name):
@@ -3470,11 +4652,16 @@ class SandboxAI:
             raise ValueError("not a team")
         return data
 
-    def team_start_argv(self, host, name, agents, workspace, options=(), vpn=None, member_vpn=None,
-                        shared_openvpn=False):
-        """`sandbox-ai team start --agents A,B[,...] --workspace DIR [--vpn PROFILE] [--member-vpn AGENT=PROFILE]...
-        [--allow-shared-openvpn] NAME [-- OPTIONS]` on HOST, for a terminal (each member starts there, one after the
-        other)."""
+    TEAM_MEMBER_FLAGS = {"--model": "--member-model", "--llm": "--member-llm", "--mode": "--member-mode"}
+
+    def team_start_args(self, host, name, agents, workspace, options=(), vpn=None, member_vpn=None,
+                        shared_openvpn=False, roles=None, member_options=None, login_question=True):
+        """The words of `sandbox-ai team start --agents A,B[,...] --workspace DIR [--vpn PROFILE] [--member-vpn
+        AGENT=PROFILE]... [--allow-shared-openvpn] [--role AGENT=TEXT]... [--member-model|--member-llm|--member-mode
+        AGENT=VALUE]... NAME [-- OPTIONS]` on HOST: ROLES {agent: text}, MEMBER_OPTIONS {agent: {--model/--llm/--mode:
+        value}}. Their values are team start's to check (team.check_roles, check_member_options): only their shape
+        here, so that nothing is read as an option. Without LOGIN_QUESTION: --no-login-question (the app asked for
+        the members' logins before; only for a team start there that knows it - its dry run says "logins")."""
         if not self.TEAM_NAME.fullmatch(str(name)):
             raise ValueError("a team's name: 1-20 of a-z, 0-9, '_' and '-'")
         agents = list(dict.fromkeys(agents))
@@ -3487,6 +4674,19 @@ class SandboxAI:
         vpn_args = [*(["--vpn", vpn] if vpn else []),
                     *[value for agent, profile in member_vpn.items() for value in ("--member-vpn", f"{agent}={profile}")],
                     *(["--allow-shared-openvpn"] if shared_openvpn else [])]
+        for agent, text in (roles or {}).items():
+            if agent not in agents or not isinstance(text, str) or not text.isprintable():
+                raise ValueError("a role is one line of text, for a member of the team")
+            if text.strip():
+                vpn_args += ["--role", f"{agent}={text.strip()}"]
+        for agent, own in (member_options or {}).items():
+            if agent not in agents or not isinstance(own, dict) or set(own) - set(self.TEAM_MEMBER_FLAGS):
+                raise ValueError("a member's own options are --model, --llm and --mode, for a member of the team")
+            for option, value in own.items():
+                if not isinstance(value, str) or not value.isprintable():
+                    raise ValueError("invalid member option")
+                if value.strip():
+                    vpn_args += [self.TEAM_MEMBER_FLAGS[option], f"{agent}={value.strip()}"]
         if not valid_directory(workspace):
             raise ValueError("the workspace is an absolute path")
         if any(not isinstance(o, str) or "\0" in o for o in options):
@@ -3494,8 +4694,37 @@ class SandboxAI:
         # Each member's start: the team's workspace is the main one (see as_given; on another host where its launcher
         # is known to take the option).
         options = self.host_as_given(host, agents[0], ["--workspace", workspace, *options])[2:]
-        return self.host_terminal(host, "team", "start", "--agents", ",".join(agents), "--workspace", workspace,
-                                  *vpn_args, name, *(["--", *options] if options else []))
+        return ["team", "start", "--agents", ",".join(agents), "--workspace", workspace, *vpn_args,
+                *([] if login_question else ["--no-login-question"]), name, *(["--", *options] if options else [])]
+
+    def team_start_argv(self, host, name, agents, workspace, options=(), vpn=None, member_vpn=None,
+                        shared_openvpn=False, roles=None, member_options=None, login_question=True):
+        """team_start_args on HOST, for a terminal (each member starts there, one after the other)."""
+        return self.host_terminal(host, *self.team_start_args(host, name, agents, workspace, options, vpn, member_vpn,
+                                                              shared_openvpn, roles, member_options, login_question))
+
+    def team_check(self, host, name, agents, workspace, options=(), vpn=None, member_vpn=None, shared_openvpn=False,
+                   roles=None, member_options=None):
+        """`team start ... --dry-run --json` on HOST (team_start_args): every check of team start there, then each
+        member's start as the launcher's dry run; nothing is made. {"ok": True, "plan": [...], ...} or {"ok": False,
+        "error": why, "code": "exists" or None}. A sandbox-ai there without the dry run (older than 0.1.98) is said
+        as such. ValueError: no answer."""
+        args = self.team_start_args(host, name, agents, workspace, options, vpn, member_vpn, shared_openvpn, roles,
+                                    member_options)
+        at = args.index("--") - 1 if "--" in args else len(args) - 1  # NAME: its own options come before it
+        args = [*args[:at], "--dry-run", "--json", *args[at:]]
+        status, out, err = self.host_run(host, *args, timeout=240)
+        try:
+            found = json.loads(out)
+        except (ValueError, RecursionError):
+            found = None
+        if isinstance(found, dict) and isinstance(found.get("ok"), bool):
+            return found
+        said = (err or out).strip()
+        if "unrecognized arguments" in said or "invalid choice" in said:
+            return {"ok": False, "code": "too-old", "error": "the sandbox-ai there is older than 0.1.98: its team "
+                    "start has no dry run, roles or members' own options (update it: sandbox-ai hosts update)"}
+        raise ValueError(said[-500:] or f"exit status {status}")
 
     def team_post(self, host, name, agent, task):
         """`sandbox-ai team post -- NAME AGENT TASK` on HOST: a task for a member, from the human."""
@@ -3614,7 +4843,12 @@ class SandboxAI:
             return self.dry_run(agent, argv)
         self.host_version_known(name)  # (a worker) a host just added: its version first, for host_as_given
         argv = self.host_as_given(name, agent, argv)
-        return parse_dry_run(*self.host_run(name, agent, *argv, "--dry-run", timeout=90))
+        status, out, err = self.host_run(name, agent, *argv, "--dry-run", timeout=90)
+        if status == 255 or (status == 124 and not (out or "").strip()):
+            # ssh's own failure (not reached, refused, a host key that changed) or nothing in time: no answer of that
+            # host's launcher - never shown as its refusal of the options ("The launcher refuses: ssh: connect ...")
+            raise HostUnreachable(name, (err or out or "").strip()[-600:] or f"exit status {status}")
+        return parse_dry_run(status, out, err)
 
     def mcp_origins(self):
         """{name: the catalog it was added from, with "signed"/"unsigned"} of this machine's MCP servers
@@ -3710,7 +4944,22 @@ class SandboxAI:
             return [(prefix, {**entry, "_catalog_name": printable(label(entry["_catalog"]))[:300]}
                      if label and isinstance(entry.get("_catalog"), str) else entry)
                     for prefix, entry in entries], problems
-        status, out, err = self.host_run(name, "mcp", "catalog", *catalog_options(catalogs), timeout=150)
+        # The whole entries as this machine's module gives them (`mcp catalog --json` there, since 0.1.95): Add… shows
+        # the same fields for a host's entry - its folders with their container paths and reasons, its variables, its
+        # limits. Only a host older than that answers with its lines: the entry's line alone ("_listed").
+        args = ("mcp", "catalog", *catalog_options(catalogs))
+        status, out, err = self.host_run(name, *args, "--json", timeout=150)
+        try:
+            document = json.loads(out)
+        except (ValueError, RecursionError):
+            document = None
+        if isinstance(document, dict) and isinstance(document.get("entries"), list):
+            found = [entry for entry in (self.remote_catalog_entry(item, catalogs) for item in document["entries"])
+                     if entry is not None]
+            problems = [printable(str(p))[:600] for p in document.get("problems") or [] if isinstance(p, str)][:20]
+            return found, problems
+        if status == 2 and re.search(r"unrecognized arguments", err or ""):  # before 0.1.95: its lines
+            status, out, err = self.host_run(name, *args, timeout=150)
         if status != 0:
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
         found = []
@@ -3726,6 +4975,45 @@ class SandboxAI:
                 "_listed": True, "_catalog_name": self.catalog_name(match["prefix"], catalogs)}))
         problems = [printable(line)[:600] for line in (err or "").splitlines() if line.strip()][:20]
         return found, problems
+
+    def remote_catalog_entry(self, item, catalogs=()):
+        """(prefix, entry) of one entry of `mcp catalog --json` on a host, in the shape this machine's catalog module
+        gives (what AddServerDialog reads): its name, title, description, network and hosts, published or not, its
+        signature, the variables and folders it takes, the limits it recommends - every text printable and bounded
+        (an unsigned catalog of that host is anyone's text), anything else left out. None: not an entry."""
+        if not isinstance(item, dict) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", str(item.get("name"))):
+            return None
+        prefix = str(item.get("prefix") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", prefix):
+            return None
+
+        def text(value, limit=300):
+            return printable(" ".join(str(value or "").split()))[:limit]
+        env = [{"name": v["name"], "description": text(v.get("description"), 500), "secret": v.get("secret") is True,
+                "required": v.get("required") is True}
+               for v in item.get("env") or [] if isinstance(v, dict) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}",
+                                                                                      str(v.get("name")))]
+        mounts = [{"target": str(v["target"]), "required": v.get("required") is True,
+                   "description": text(v.get("description"))}
+                  for v in item.get("mounts") or [] if isinstance(v, dict) and isinstance(v.get("target"), str)
+                  and re.fullmatch(r"/[A-Za-z0-9._/-]{0,199}", v["target"])]
+        limits = {key: value for key, value in (item.get("limits") or {}).items()
+                  if key in ("memory", "cpus", "pids", "tmp") and isinstance(value, (str, int, float))
+                  and not isinstance(value, bool) and re.fullmatch(r"[0-9.]{1,10}[kmgKMG]?", str(value))} \
+            if isinstance(item.get("limits"), dict) else {}
+        signature = {"good": "good", "bad": "bad"}.get(str(item.get("signature")), "unsigned")
+        entry = {"name": str(item["name"]), "title": text(item.get("title")),
+                 "description": text(item.get("description"), 1000), "network": text(item.get("network") or "none", 20),
+                 "hosts": [text(h, 260) for h in item.get("hosts") or [] if isinstance(h, str)][:32],
+                 "digest": "published" if item.get("published") else None, "_signature": {"state": signature},
+                 "env": env, "mounts": mounts,
+                 "_catalog_name": text(item.get("catalog")) if item.get("catalog") else self.catalog_name(prefix,
+                                                                                                       catalogs)}
+        if limits:
+            entry["limits"] = limits
+        if isinstance(item.get("tool_timeout"), int) and not isinstance(item.get("tool_timeout"), bool):
+            entry["tool_timeout"] = item["tool_timeout"]
+        return prefix, entry
 
     def catalog_name(self, prefix, catalogs=()):
         """The catalog behind PREFIX of `mcp catalog`'s lines, for people (webui.catalog_name): sandbox-ai-mcp (mcp:),
@@ -3775,6 +5063,62 @@ class SandboxAI:
         paused start's options, for its later starts (mcp_live's answer)."""
         return self.mcp_live(host, start, server, helper, detach=True, live=False)
 
+    def host_mcp_copy(self, source, target, names, **choices):
+        """`sandbox-ai mcp copy NAME... --from SOURCE --to TARGET --json` on this machine (mcp_copy_args: the check with
+        dry_run, else the copy - asked first by the page - and with attach the start there given them now). Its answer
+        {"from", "to", "servers": [plan], "attached", "written", "dry_run"} - also when the check found what TARGET
+        cannot take as it is (each server's "problems", with their fixes). ValueError: refused (an older sandbox-ai
+        there: the update to do), with sandbox-ai's reason."""
+        args = mcp_copy_args(source, target, names, **choices)
+        status, out, err = self.call(*args, timeout=3600 if not choices.get("dry_run", True) else 300)
+        try:
+            data = json.loads(out)
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("servers"), list):
+            said = printable_text((err or out).strip())
+            older = re.search(r"the sandbox-ai on ([a-z0-9][a-z0-9_-]{0,31}) does not know `sandbox-ai (mcp "
+                              r"[a-z-]+)[^`]*` yet", said)
+            if older:  # the update to do, in the app's words (and language)
+                try:
+                    version = self.version()
+                except Exception as _exc:  # noqa: BLE001 - said without it
+                    applog.swallowed("backend", "SandboxAI.host_mcp_copy: this machine's version is not known", _exc)
+                    version = "?"
+                raise HostTooOld(older[1], tuple(older[2].split()), [], needs=version)
+            raise ValueError(said.removeprefix("sandbox-ai mcp: ")[-1500:] or f"exit status {status}")
+        data["status"] = status
+        data["said"] = [printable(line)[:600] for line in (err or "").splitlines() if line.strip()][-20:]
+        return data
+
+    def host_mcp_copy_check(self, source, target, names, **choices):
+        """The check of a copy (host_mcp_copy with dry_run): what would be copied and what TARGET cannot take as it is;
+        nothing is copied or written anywhere."""
+        return self.host_mcp_copy(source, target, names, **{**choices, "dry_run": True})
+
+    def host_mcp_elsewhere(self, target):
+        """[(host, [{"name", "kind", "catalog"}], error or None)] of the MCP servers of your own on every host but
+        TARGET (this machine and the hosts of `sandbox-ai hosts`): what "From another host…" offers. Each host is asked
+        in a thread of its own (`mcp list --json` there); one that does not answer says why."""
+        hosts = [host for host in ["local", *self.remote_hosts()] if host != target]
+        found = {}
+
+        def read(host):
+            try:
+                listed = self.host_mcp_list(host)
+                found[host] = ([{"name": e["name"], "kind": printable(str(e.get("kind") or ""))[:20],
+                                 "catalog": printable(str(e.get("catalog") or ""))[:200]}
+                                for e in listed if e.get("own", e.get("catalog") != "built-in")
+                                and e.get("catalog") != "built-in" and not str(e["name"]).startswith("team-")], None)
+            except Exception as exc:  # noqa: BLE001 - that host's row says why
+                found[host] = ([], printable_text(str(exc))[:300])
+        threads = [threading.Thread(target=read, args=(host,), name="mcp-elsewhere", daemon=True) for host in hosts]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(120)
+        return [(host, *found.get(host, ([], "no answer"))) for host in hosts]
+
     def mcp_live(self, host, start, server=None, helper=None, detach=False, live=True):
         """`sandbox-ai mcp attach NAME START --live --json` (HELPER: --helper AGENT in place of NAME; DETACH: `mcp
         detach ... --live --json`) on HOST: the server into (or out of) the running sandbox of START now, without a
@@ -3807,6 +5151,51 @@ class SandboxAI:
         data["notes"] = [printable(line.strip())[:500] for line in (err or "").splitlines()
                          if line.strip() and line.strip() != message.strip()][:10]
         return data
+
+    def host_kits_attach(self, host, args):
+        """kits_live_args (`kits attach` or `plugins attach` … --json) on HOST: given to the running start now."""
+        return self.kits_live(host, args)
+
+    def host_kits_detach(self, host, args):
+        """kits_detach_args (`kits detach` or `plugins detach` … --json) on HOST: taken out of the running start."""
+        return self.kits_live(host, args)
+
+    def host_agent_restart(self, host, start):
+        """`sandbox-ai kits restart-agent START --json` on HOST: its agent started again inside the running sandbox."""
+        return self.kits_live(host, restart_agent_args(start))
+
+    def kits_live(self, host, args):
+        """`sandbox-ai ARGS` on HOST (kits_live_args, kits_detach_args, restart_agent_args): a kit, skill, command,
+        subagent or plugin given to (taken out of) a running start, or its agent started again inside the sandbox. Its
+        answer ({"message", "reload": [{"kind", "reload": auto|command|restart|sandbox, "command", "text"}], ...}),
+        with "notes": what it said besides. ValueError: refused, with sandbox-ai's reason (an older sandbox-ai there:
+        the update to do)."""
+        args = list(args)
+        if args[:2] not in (["kits", "attach"], ["kits", "detach"], ["kits", "restart-agent"], ["plugins", "attach"],
+                            ["plugins", "detach"]) or args[-1] != "--json":
+            raise ValueError("not a command for a running start's kits")
+        status, out, err = self.host_run(host, *args, timeout=960)
+        data = None
+        if status == 0:
+            try:
+                data = json.loads(out)
+            except (ValueError, RecursionError):
+                data = None
+        if not isinstance(data, dict):
+            text = (err or out).strip()
+            if host != "local" and status == 2 and re.search(r"invalid choice|unrecognized arguments", text):
+                raise HostTooOld(host, tuple(args[:2]), [args[1]])
+            lines = [re.sub(r"^sandbox-ai(?: kits| plugins)?: ", "", line) for line in text.splitlines() if line.strip()]
+            raise ValueError("\n".join(printable(line) for line in lines[-5:])[-800:] or f"exit status {status}")
+        message = data.get("message") if isinstance(data.get("message"), str) else ""
+        data["message"] = printable_text(message)[:2000]
+        data["notes"] = [printable(str(note))[:500] for note in data.get("notes") or [] if isinstance(note, str)][:10]
+        data["reload"] = [item for item in data.get("reload") or [] if isinstance(item, dict)][:10]
+        return data
+
+    def host_running_starts(self, host):
+        """The running kept starts of HOST a kit or plugin can be given to now: [{"name", "agent", "state"}]."""
+        return [entry for entry in self.host_mcp_targets(host) if entry.get("state") == "running"]
 
     def host_llm_endpoints(self, host):
         """The model servers registered on HOST (`sandbox-ai llm list --json` there; this machine: llm_endpoints),
@@ -4030,15 +5419,30 @@ def marketplaces_document(document):
     return document
 
 
-class HostTooOld(ValueError):
-    """The sandbox-ai on HOST does not know OPTIONS of COMMAND yet (require_options): told as an update to do."""
+class HostUnreachable(ValueError):
+    """HOST gave no answer of its sandbox-ai: ssh itself failed (exit status 255: not reached, refused, a host key that
+    changed) or nothing came in time. Not a refusal of the launcher there; str(): ssh's own words."""
 
-    def __init__(self, host, command, missing):
+    def __init__(self, host, message):
+        super().__init__(message)
+        self.host = host
+
+
+class HostTooOld(ValueError):
+    """The sandbox-ai on HOST does not know OPTIONS of COMMAND yet (require_options): told as an update to do. NEEDS
+    (a version, this machine's: the command that has it): said with the update from here (too_old_text)."""
+
+    def __init__(self, host, command, missing, needs=None):
         super().__init__(host, command, missing)
-        self.host, self.command, self.missing = host, tuple(command), list(missing)
+        self.host, self.command, self.missing, self.needs = host, tuple(command), list(missing), needs
 
     def __str__(self):
         from .i18n import tr
+        if self.needs is not None:
+            return tr("The sandbox-ai on {host} does not know `sandbox-ai {command}` yet: it needs a newer version "
+                      "(this machine has {version}). Update it from here: sandbox-ai hosts update {host} --from-here "
+                      "(Hosts › Update from this machine's copy), then try again.", host=printable(self.host),
+                      command=" ".join(self.command), version=printable(str(self.needs or "?")))
         return tr("The sandbox-ai on {host} is too old for this: `sandbox-ai {command}` there does not know {options}. "
                   "Update the host (Hosts › Update), then try again.", host=printable(self.host),
                   command=" ".join(self.command), options=", ".join(self.missing))
@@ -4076,8 +5480,55 @@ def remembered_rows(known):
     return rows
 
 
+def valid_bridge_id(ident):
+    """IDENT when it is a bridge's id (eight hex digits), or HOST:ID for one of a host of `sandbox-ai hosts` (the
+    launcher asks that host over SSH); else ValueError."""
+    if not isinstance(ident, str) or not re.fullmatch(r"(?:[a-z0-9][a-z0-9_-]{0,31}:)?[0-9a-f]{8}", ident):
+        raise ValueError(f"not a bridge's id: {ident!r}")
+    return ident
+
+
+CHECKPOINT_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")  # a workspace checkpoint's id (sandbox-ai checkpoint)
+CHECKPOINT_SECONDS = 1800  # a checkpoint, diff or restore of a large workspace (a first one copies every file)
+
+
+def checkpoint_id(ident):
+    if not isinstance(ident, str) or not CHECKPOINT_ID.fullmatch(ident):
+        raise ValueError("not a checkpoint's id")
+    return ident
+
+
+def checkpoint_paths(paths):
+    """--path=P for each of PATHS (relative to /work, /work/..., /workspaces/NAME/... or a host path), checked."""
+    found = []
+    for path in paths or ():
+        if not isinstance(path, str) or not path.strip() or len(path) > 4096 or any(c in path for c in "\n\r\0"):
+            raise ValueError("a path is one line")
+        found.append(f"--path={path.strip()}")
+    return found
+
+
 def valid_run(run):
     return isinstance(run, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run))
+
+
+def plain_line(value):
+    """VALUE is one printable line of at most 4096 characters, never read as an option."""
+    return isinstance(value, str) and 0 < len(value) <= 4096 and value.isprintable() and not value.startswith("-")
+
+
+def absolute_line(value):
+    """VALUE is an absolute path on one printable line (a log folder, a project)."""
+    return plain_line(value) and value.startswith("/")
+
+
+def listed_file(value):
+    """A file's name as `sandbox-ai session memory|files` lists it (a path in the start's HOME, one printable line):
+    the command takes only a name of its own listing. ValueError for anything else."""
+    if not (isinstance(value, str) and value and len(value) <= 4096 and value.isprintable()
+            and not value.startswith(("/", "-"))):
+        raise ValueError("a file is named as the listing names it")
+    return value
 
 
 # The kill switch (sandbox-ai net cut): its modes, and how long one host's answer may take (every run at once there).
@@ -4113,6 +5564,12 @@ def valid_directory(path):
     return path.startswith("/") and len(path) <= 4096 and path.isprintable() and "\0" not in path
 
 
+def valid_remote(value):
+    """A folder of another machine as sandbox-ai takes it (sshfs://[USER@]HOST[:PORT]/PATH; remote_source.parse)."""
+    from . import remote_source
+    return remote_source.valid_source(value)
+
+
 WORKSPACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # workspaces.NAME: workspace add --name NAME
 
 
@@ -4120,6 +5577,15 @@ def valid_workspace_name(name):
     """NAME for /workspaces/NAME as `sandbox-ai workspace add --name` takes it: 1-64 letters, digits, '_', '.' or
     '-', starting with a letter or digit (never "." or "..")."""
     return isinstance(name, str) and bool(WORKSPACE_NAME.fullmatch(name)) and name not in (".", "..")
+
+
+DEVICE_SCAN_KINDS = ("usb", "serial", "video", "render", "kvm", "sound", "gpu", "input")  # devices.SCAN_KINDS
+DEVICE_SCAN_LIMIT = 512
+GPU_KINDS = ("nvidia", "dri", "rocm")  # agent_sandbox.GPU_KINDS
+
+
+class DeviceScanMissing(ValueError):
+    """The host's sandbox-ai has no `devices scan` (older than this app): its devices are typed in."""
 
 
 USB_DEVICE = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # devices.SELECTOR
@@ -4140,15 +5606,33 @@ def valid_device(path):
 # web interface does; none now). Every call path of the app that does one of these asks first through
 # widgets.ask_first(), which asks needs_confirm() (tests/test_references.py walks the mutating calls of the pages).
 NEEDS_CONFIRM = {
+    "checkpoint-restore": "a restore puts the workspaces back as the checkpoint holds them: what changed since is "
+                          "replaced or removed (a checkpoint of the state now is taken first, so it can be undone)",
+    "checkpoint-delete": "deleting a checkpoint removes it and the content only it held, for good",
+    "session-export": "the archive holds the start's HOME as its agent left it - its transcripts, its memory, the "
+                      "files it kept (logins and keys are left out) - in a new file on that host",
+    "session-export-secrets": "the archive then holds the start's logins, keys and secrets too: whoever has it can "
+                              "log in as you with them, wherever it goes",
+    "show-secret-file": "the file is marked as a login or key: its text is shown on this screen, where anyone who "
+                        "sees it can read it",
+    "board-import": "importing a bundle from elsewhere writes its parts here (MCP and LLM servers, kits, presets, "
+                    "rulesets, image recipes; replaced ones when chosen) and keeps its board",
     "start-stop": "stopping a start ends what runs in it (and its HOME, unless it is kept)",
+    "kits-attach": "skills, subagents, commands or a plugin given to a running start reach its agent at once "
+                   "(read-only; a plugin's code runs as the agent; kept: also its later starts)",
+    "kits-detach": "taking a skill, subagent, command or plugin out of a running start takes it from its agent (and "
+                   "from its later starts where it was kept)",
+    "agent-restart": "restarting the agent inside the running sandbox ends what it does now (its conversation "
+                     "continues; the sandbox, network and MCP servers stay)",
     "start-delete": "deleting a start removes its kept HOME",
+    "storage-apply": "the chosen items of the storage check run: caches, build output, toolchains or old transcripts "
+                     "removed for good, transcripts compacted, HOMEs packed - as each one says",
     "gc": "gc removes the leftovers of ended starts, and kept starts unused for that long with their HOME, for good",
-    "approval-allow-always": "an allow always is remembered for the project: every later start of it gets this "
-                             "without asking",
-    "approval-deny-always": "a deny always is remembered for the project: every later question like it is refused",
     "approval-forget": "forgetting a remembered answer changes what every later start of that project gets (a "
                        "forgotten block is asked again)",
     "defaults-lower": "this lowers the protection of every later start on that host",
+    "shared-wildcard": "a host wildcard below a shared service opens every name anyone rents there: the agent could "
+                       "open any such server, and send data there",
     "net-allow": "net allow widens what the running sandbox reaches, at once (real DNS, ports on the host, host "
                  "wildcards, Git logins included)",
     "net-untaint": "untaint takes back the rules for tainted runs: the sandbox is treated as if no untrusted content "
@@ -4164,6 +5648,8 @@ NEEDS_CONFIRM = {
     "kit-delete": "deleting a kit removes its folder",
     "kit-remove": "removing a skill or plugin from a kit takes it from every later start with that kit",
     "kit-add": "a skill, plugin or marketplace added to a kit is given to every later start with that kit",
+    "memory-add": "memory added to a project's memory is given to every later start of that project (it may hold "
+                  "private notes)",
     "mcp-attach": "an attached MCP server is reached by that start from its next start on (kept for its later "
                   "starts)",
     "mcp-restart": "restarting a running start ends what runs in it now, so that it reaches the MCP server (the agent "
@@ -4179,10 +5665,14 @@ NEEDS_CONFIRM = {
     'mcp-stop': 'stopping an MCP server ends it for every start that uses it now',
     'mcp-unsigned': 'an MCP server from a catalog no trusted key signed is taken without that check',
     'mcp-writable-mount': 'a writable mount lets the MCP server change that directory on the host',
+    "mcp-lan": "network lan lets the MCP server reach your local network and that host, not only the internet",
     'git-login-add': 'a Git login is used by the connection proxy of every sandbox that reaches that server',
     "login-replace": "a login for that server or kind exists: its token is replaced by this secret's for every later "
                      "start that uses it",
     "mcp-replace": "an MCP server of that name exists: its definition is replaced for every start that uses it",
+    "mcp-copy": "an MCP server copied from another host is defined on this one, with the folders, variables and "
+                "network shown (a server of that name replaced where asked), and reached by the start it is attached "
+                "to",
     'login-remove': 'removing a login or an identity takes it from every later start that uses it',
     'net-keep': "keeping what the run was given writes it into the project's .sandbox-ai.json: every later start of that project gets it",
     'start-restart': 'restarting a running start ends what runs in it now (the agent continues its conversation)',
@@ -4191,6 +5681,16 @@ NEEDS_CONFIRM = {
     'llm-insecure': 'plain http to an address outside your local networks is unencrypted: prompts, answers and the key can be read on the way',
     'vpn-socks': 'a SOCKS port in the sandbox lets what goes through it pass the connection proxy by',
     'login-logout': 'logging out forgets the stored login of that agent: its sandboxes need a new login',
+    "login-import": "every sandbox of that agent started from now on uses this session's login: the central login is "
+                    "replaced (with replace: also one of another account); the session keeps its own copy",
+    "login-give": "an agent login given to a running sandbox lets its agent work as that account from now on; the "
+                  "two then share the login",
+    "login-edit": "a changed login is what every later start that uses it logs in with (a sandbox that runs keeps "
+                  "the login it was started with)",
+    "secret-rename": "a renamed secret gets its new name in every login, VPN profile, trusted project file and kept "
+                     "start that names it",
+    "secret-send": "a secret sent to another host is kept in that host's secret store from then on: whoever controls "
+                   "that host can use it",
     'kit-hooks-trust': 'trusted hooks of a kit run in every later start with that kit',
     'mcp-detach': 'detaching an MCP server from a running start closes its relay there now: the agent\'s connections to it end and its calls fail (its later starts go without it)',
     "vpn-replace": "replacing a VPN profile of that name changes the tunnel of every start that uses it",
@@ -4202,8 +5702,43 @@ NEEDS_CONFIRM = {
                   "read it",
     "image-remove": "removing an extension drops what it adds from the next build (a variant's image goes with it, "
                     "unless kept)",
+    # sandbox-ai bridge (the web interface's Bridges page since 0.1.98)
+    "bridge-add": "a bridge lets one running session reach another (its files, its agent, what it does); data can flow "
+                  "from the more restricted one to the less restricted one",
+    "bridge-revoke": "revoking ends the bridge at once: both sessions lose it, a call on its way ends",
+    "bridge-resume": "resuming lets the sessions reach each other again after a kill switch or a canary alarm "
+                     "suspended the bridge",
+    # sandbox-ai notify (Settings > Notifications; the web interface's Defaults page)
+    "notify-add": "a phone channel sends that host's questions and alarms - the kind, the run's name, a short what and, "
+                  "with the detail full, destinations and paths - to the service it names",
+    "notify-remove": "removing a phone channel: its questions and alarms no longer reach you there",
+    # sandbox-ai schedule (the Sandboxes page's Schedules; the web interface's Starts page)
+    "schedule-add": "a schedule starts that agent on that host by itself, on its timetable or trigger, under the "
+                    "rules of a normal start; its questions are answered as its ask mode says (off: refused)",
+    "schedule-remove": "removing a schedule: it starts nothing any more, and without keep_history its runs' "
+                       "reports go too",
+    "schedule-timer": "the timer runs sandbox-ai schedule tick every minute as that host's user (a systemd user "
+                      "timer or a LaunchAgent): off, no schedule starts by itself",
+    "update-mode": "the update mode decides what that host's sandbox-ai does by itself: off checks nothing, notify "
+                   "announces a newer signed release, download also fetches and checks it, auto also installs it in "
+                   "its window while nothing runs (a timer as that host's user)",
+    # sandbox-ai spend raise (the System monitor page; the web interface's too)
+    "spend-raise": "raising a budget lets the running start's model requests cost that much more (its refused "
+                   "requests go again)",
+    # the workspace review (sandbox-ai workspace review RUN --restore PATH) and the MCP tool pins (mcp tools NAME)
+    "workspace-restore": "a restore puts the file back as it was at the start of the run: what the agent wrote there "
+                         "is replaced (a file it added is removed)",
+    "mcp-pin-repin": "re-pinning makes the list the server gave last the one its later lists are compared with: "
+                     "what changed in it is no longer asked about",
+    "mcp-pin-forget": "forgetting the pin lets the server's next list be pinned without a question (trust on first "
+                      "use again)",
 }
 APP_NEEDS_CONFIRM = {
+    # Settings › Updates: sandbox-ai update --apply and --rollback (the web interface has neither)
+    "update-apply": "installing the downloaded release changes the sandbox-ai every later start, command and app uses "
+                    "(what runs now goes on with its version)",
+    "update-rollback": "rolling back switches this installation to the version kept before (what runs now goes on "
+                       "with its version)",
     # the Approvals page's Allowed now: Revoke takes back what was allowed during the run, at once
     "net-revoke": "revoking takes back what the running sandbox may reach, at once (open connections to it end)",
     # sandbox-ai session move: no route of the web interface does it
@@ -4219,6 +5754,9 @@ APP_NEEDS_CONFIRM = {
                   "load again at its next request (or fails)",
     "files-delete": "deleting removes the files or folders for good (there is no wastebasket)",
     "files-replace": "replacing overwrites what is there now with what is copied or moved",
+    # a use case's pair the local-model research marks unsafe for it (use_case_view.PairList): asked, never hidden
+    "unsafe-pair": "the research marks this model unsafe for the use case: it followed an instruction planted in the "
+                   "input (a command run, .env sent) and may do it again with untrusted input",
     # what the window itself ends, drops or runs (no sandbox-ai command): asked the same way, Cancel the default
     "home-review-skip": "resuming without a clean review of the kept HOME runs whatever was written there (the agent "
                         "too) at the next start",
@@ -4327,11 +5865,22 @@ def canary_categories(value, default, categories=CANARY_CATEGORIES):
     return set() if names <= {"none"} else names
 
 
+DEFAULT_KEEP_DAYS = 90  # without keep_days, sandbox-ai gc and its daily pass remove kept starts unused this long
+
+
+def kept_starts_expire(days):
+    """After how many days unused the kept starts go with keep_days DAYS (a missing or broken one: DEFAULT_KEEP_DAYS),
+    or None: never (keep_days 0)."""
+    if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+        return DEFAULT_KEEP_DAYS
+    return None if days == 0 else days
+
+
 def defaults_lowered(old, new, canary_default=None):
     """What of the defaults OLD -> NEW ({key: value} of defaults.json, a key missing: sandbox-ai's own default)
     lowers the protection of every later start: [(key, before, after)] - a weaker mode (MODE_ORDER), telemetry less
     private (TELEMETRY_ORDER), canary categories no longer planted (against that host's own CANARY_DEFAULT), a
-    keep_days set where there was none or lowered (kept starts and their HOME go sooner), preset_dirs gaining a
+    keep_days lowered (kept starts and their HOME go sooner; none is 90 days, 0 never), preset_dirs gaining a
     directory (later starts read presets from it too) and any change of subnet or subnet6 (the network of every later
     start changes): the rules of the web interface's lowered_default. Empty: nothing does."""
     found = []
@@ -4345,10 +5894,9 @@ def defaults_lowered(old, new, canary_default=None):
                                                                                        canary_default)
     if lost:
         found.append(("canaries", sorted(lost), new.get("canaries")))
-    before, after = old.get("keep_days"), new.get("keep_days")
-    if isinstance(after, int) and not isinstance(after, bool) and (
-            not isinstance(before, int) or isinstance(before, bool) or after < before):
-        found.append(("keep_days", before, after))
+    before, after = kept_starts_expire(old.get("keep_days")), kept_starts_expire(new.get("keep_days"))
+    if after is not None and (before is None or after < before):
+        found.append(("keep_days", old.get("keep_days"), new.get("keep_days")))
     value = new.get("preset_dirs")
     if value is not None:  # unset: fewer places presets are read from
         kept = set(old.get("preset_dirs")) if isinstance(old.get("preset_dirs"), list) else set()
@@ -4361,19 +5909,58 @@ def defaults_lowered(old, new, canary_default=None):
     return found
 
 
+# The commands of the storage check's plan the app runs (sandbox-ai gc --check: starts.start_plan, global_plan):
+# gc's own forms only - what another host's answer names is checked here before it is run there.
+STORAGE_FLAGS = {"--only", "--caches", "--build-output", "--toolchains", "--images", "--yes"}
+STORAGE_DAYS = {"--compact-transcripts", "--transcripts", "--logs-older-than"}
+
+
+def storage_argv(argv):
+    """ARGV (a plan item's "argv") when it is one of the gc commands the storage check names - gc alone, gc --only
+    with --caches, --build-output, --toolchains, --images, --compact-transcripts DAYS, --transcripts DAYS,
+    --logs-older-than DAYS, --home NAME, --yes; gc --pack --home NAME --yes; gc --unpack NAME -, else ValueError."""
+    if not isinstance(argv, (list, tuple)) or not argv or argv[0] != "gc" or len(argv) > 12 or \
+            not all(isinstance(part, str) for part in argv):
+        raise ValueError("not a command of the storage check")
+    rest = list(argv[1:])
+    if rest[:1] == ["--unpack"]:
+        if len(rest) == 2 and valid_run(rest[1]):
+            return ["gc", "--unpack", rest[1]]
+        raise ValueError("not a command of the storage check")
+    if rest[:1] == ["--pack"]:
+        if len(rest) == 4 and rest[1] == "--home" and valid_run(rest[2]) and rest[3] == "--yes":
+            return list(argv)
+        raise ValueError("not a command of the storage check")
+    if rest and rest[0] != "--only":
+        raise ValueError("not a command of the storage check")
+    index = 0
+    while index < len(rest):
+        part = rest[index]
+        if part in STORAGE_FLAGS:
+            index += 1
+        elif part in STORAGE_DAYS and index + 1 < len(rest) and re.fullmatch(r"[1-9][0-9]{0,4}", rest[index + 1]):
+            index += 2
+        elif part == "--home" and index + 1 < len(rest) and valid_run(rest[index + 1]):
+            index += 2
+        else:
+            raise ValueError("not a command of the storage check")
+    return list(argv)
+
+
 class GcChanged(ValueError):
     """What `sandbox-ai gc` would remove is no longer what was shown and confirmed: nothing was removed."""
 
 
 def gc_plan(result):
-    """What a `sandbox-ai gc --json` result removes, comparable: (kept starts, leftovers, histories), each sorted."""
+    """What a `sandbox-ai gc --json` result removes, comparable: (kept starts, leftovers, histories, the HOMEs whose
+    caches are emptied), each sorted. The logs it compresses are not compared: they keep what they hold."""
     result = result if isinstance(result, dict) else {}
 
     def names(key):
         value = result.get(key)
         return tuple(sorted(str(e.get("name") if isinstance(e, dict) else e) for e in value)) \
             if isinstance(value, list) else ()
-    return names("removed"), names("leftovers"), names("histories")
+    return names("removed"), names("leftovers"), names("histories"), tuple(sorted(set(names("caches"))))
 
 
 def remote_key(host, ident):
@@ -4396,6 +5983,22 @@ def listed_instance(host, entry):
         entry.get("workspace") or ""), agent=str(entry.get("agent") or ""), started=str(entry.get("started") or ""),
         state=str(entry.get("state") or ""), record=entry, host=host, backend=printable(entry.get("backend"))[:20]
         if isinstance(entry.get("backend"), str) else "", ident=ident)
+
+
+SEEN_STATES = ("running", "paused", "stopped", "orphaned", "damaged", "starting")
+
+
+def seen_facts(data):
+    """What `sandbox-ai session status NAME --json` (or a start's entry of `list --json`) says, as the app's check
+    before a start takes it: each value of the type it is used as, text printable (the other host chooses it)."""
+    terminal = data.get("terminal") if data.get("terminal") in ("ready", "starting", "missing", "ended") else None
+    state = data.get("state") if data.get("state") in SEEN_STATES else "damaged"
+    word = data.get("attach_why") if isinstance(data.get("attach_why"), str) else None  # (one word: starts.attach_why)
+    return {"name": printable(str(data.get("name") or ""))[:128], "agent": printable(str(data.get("agent") or ""))[:40],
+            "state": "running" if state == "starting" else state, "foreground": bool(data.get("foreground")),
+            "terminal": "starting" if state == "starting" and terminal is None else terminal,
+            "attachable": bool(data.get("attachable")), "attach_why": printable(word)[:40] if word else None,
+            "login": data.get("login") is True, "seen": printable(str(data.get("seen") or ""))[:600]}
 
 
 def start_id(entry):
@@ -4531,7 +6134,7 @@ def restart_command(pid, directory=None, which=None):
     PID first (main.py): the single-instance guard is free only once this app has gone."""
     launcher = installed_launcher()
     if not launcher and directory is not None:
-        tree = Path(directory).parent
+        tree = installed_tree(directory)
         current = tree.parent.parent / "current" / "sandbox-ai-app"
         if tree.parent.name == "versions" and current.is_file():
             launcher = str(current)
@@ -4893,10 +6496,18 @@ SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "", "language": "syst
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
             "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "reopen_terminals": False, "guide_nodes": True,
             "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
+            # the explanatory texts of the pages and dialogs (widgets.explanation): off, only the (?)s and tooltips
+            "explanations": False,
+            # the Sessions page's icon buttons (button_icons.py): their texts beside the icons; off: the icons alone,
+            # the text in the tooltip
+            "button_texts": False,
             "web_without_sandbox": False, "show_flags": False,
             # the terminal tabs: where sign-in links open (app, system), copy what is selected, ask before a paste of
             # several lines, a program's OSC 52 clipboard write (ask, allow, off; a read is never answered)
-            "login_links": "app", "copy_on_select": False, "paste_warn": True, "terminal_osc52": "ask"}
+            "login_links": "app", "copy_on_select": False, "paste_warn": True, "terminal_osc52": "ask",
+            # a device sign-in (Codex's one-time code, Hermes' Nous Portal, Qwen OAuth): its page opens by itself in
+            # the system browser (system) or in the app's login browser (app); the code is shown either way
+            "device_signin": "system"}
 
 
 def setting(name, settings=None):
@@ -5054,6 +6665,29 @@ def parse_dry_run(status, out, err):
         return None, out.strip()
 
 
+# The launcher's options whose value may name several items, separated by commas and/or whitespace
+# (agent_sandbox.LIST_OPTIONS): a field of one of them may list them so ("pypi.org, *.example.com" or one per line),
+# and the app passes each item as an option of its own, which every sandbox-ai version (an older host's too) takes.
+# Other options' values may hold a comma or a space by meaning (--api-key HOST=NAME=SECRET, --allow-http rules,
+# paths): never split.
+LIST_OPTIONS = ("--allow", "--allow-host", "--allow-domain", "--allow-shared-wildcard", "--allow-tcp", "--allow-host-port", "--no-inspect",
+                "--nameserver", "--vpn-bypass-tcp")
+
+
+def list_items(text):
+    """The items of TEXT (a field of a LIST_OPTIONS option, a value of one): split at commas and whitespace (line
+    breaks too), empty ones left out, each once (the first kept), in their order."""
+    return list(dict.fromkeys(item for item in re.split(r"[\s,]+", str(text or "")) if item))
+
+
+def option_items(option, values):
+    """VALUES of the list option OPTION (long name) as its items: a LIST_OPTIONS option's split (list_items, each
+    once), any other's each stripped as given (empty ones left out)."""
+    if option in LIST_OPTIONS:
+        return list(dict.fromkeys(item for value in values or [] for item in list_items(value)))
+    return [str(value).strip() for value in values or [] if str(value).strip()]
+
+
 class Option:
     """One launcher option, as the form shows it."""
 
@@ -5084,15 +6718,20 @@ class Option:
         return self.long in PATH_OPTIONS
 
     def tokens(self, value):
-        """The command-line tokens for VALUE (bool for a flag, text for a value, [texts] for a list)."""
+        """The command-line tokens for VALUE (bool for a flag, text for a value, [texts] for a list). A value that
+        starts with "-" (a goal "- fix it", a folder "-old") is attached, --OPTION=VALUE: given apart, the launcher's
+        parser takes it for an option and refuses the start ("expected one argument")."""
         if self.kind == "flag":
             return [self.long] if value else []
         if self.kind in ("list", "multi"):
-            return [token for item in value or [] if str(item).strip() for token in (self.long, str(item).strip())]
+            return [token for item in option_items(self.long, value) for token in self.pair(item)]
         text = "" if value is None else str(value).strip()
         if not text or (self.kind == "choice" and text == str(self.default)):
             return []
-        return [self.long, text]
+        return self.pair(text)
+
+    def pair(self, text):
+        return [f"{self.long}={text}"] if text.startswith("-") else [self.long, text]
 
 
 # Values the launcher refuses in a project file (agent_sandbox.load_project_config: only the command line or the
@@ -5174,7 +6813,11 @@ def values_from_argv(options, argv, canonical=None):
             index += 1
             continue
         if option.kind in ("list", "multi"):
-            values.setdefault(name, []).append(value)
+            given = values.setdefault(name, [])
+            # (a list option's items one by one, as the launcher reads them: an older host's canonical_options or a
+            # stand-in without one leaves "a,b" whole)
+            given += [item for item in option_items(name, [value]) if item not in given] if name in LIST_OPTIONS \
+                else [value]
         else:
             values[name] = value
     return values, unknown
@@ -5206,6 +6849,43 @@ def log_state(path):
     return info.st_ino, info.st_size, info.st_mtime_ns
 
 
+CONNECTION_PART = re.compile(r"connections-(.+?)\.jsonl(?:\.(\d{1,3}))?(?:\.gz)?")
+
+
+def connection_logs(directory):
+    """The proxy's logs in DIRECTORY, newest first (as sandbox-ai's logs.connection_logs): each run's
+    connections-TIME-RUN.jsonl, the older parts a long run rotated while it ran (NAME.1.gz the newest of them), and
+    those sandbox-ai gc compressed once the run ended (NAME.gz)."""
+    found = []
+    with contextlib.suppress(OSError):
+        for path in Path(directory).glob("connections-*.jsonl*"):
+            match = CONNECTION_PART.fullmatch(path.name)
+            if match:
+                found.append(((match.group(1), -int(match.group(2) or 0)), path))
+    return [path for _, path in sorted(found, key=lambda item: item[0], reverse=True)]
+
+
+def compressed_tail(fd, max_bytes):
+    """(the newest MAX_BYTES of the compressed log FD, decompressed; the offset they start at): a compressed log is
+    read from its start, only its end kept. A damaged one gives what was read up to the damage."""
+    held, dropped = bytearray(), 0
+    with contextlib.suppress(OSError, EOFError, zlib.error), \
+            gzip.GzipFile(fileobj=os.fdopen(os.dup(fd), "rb"), mode="rb") as stream:
+        while True:
+            chunk = stream.read1(1 << 16)  # (piece by piece: a damaged end loses only its piece)
+            if not chunk:
+                break
+            held += chunk
+            if len(held) > 2 * max_bytes + (1 << 20):
+                cut = len(held) - max_bytes
+                del held[:cut]
+                dropped += cut
+    if len(held) > max_bytes:
+        dropped += len(held) - max_bytes
+        del held[:len(held) - max_bytes]
+    return bytes(held), dropped
+
+
 def read_connections(path, limit=5000, max_bytes=LOG_BYTES, strict=False, since=None, track=False):
     """The newest LIMIT records of a connections-*.jsonl log, read from at most its last MAX_BYTES
     (damaged lines and a cut first line skipped). Links, FIFOs and devices are not read: [] for them, or
@@ -5224,21 +6904,24 @@ def read_connections(path, limit=5000, max_bytes=LOG_BYTES, strict=False, since=
     appended = False
     try:
         info = os.fstat(fd)
-        size = info.st_size
-        start = max(0, size - max_bytes)
-        if track and since is not None and since[0] == info.st_ino and start <= since[1] <= size:
-            start, appended = since[1], True
-        os.lseek(fd, start, os.SEEK_SET)
-        chunks, left = [], size - start
-        while left > 0:
-            chunk = os.read(fd, min(left, 1 << 20))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            left -= len(chunk)
+        if str(path).endswith(".gz"):  # compressed by sandbox-ai gc once its run ended: never appended to
+            data, start = compressed_tail(fd, max_bytes)
+        else:
+            size = info.st_size
+            start = max(0, size - max_bytes)
+            if track and since is not None and since[0] == info.st_ino and start <= since[1] <= size:
+                start, appended = since[1], True
+            os.lseek(fd, start, os.SEEK_SET)
+            chunks, left = [], size - start
+            while left > 0:
+                chunk = os.read(fd, min(left, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                left -= len(chunk)
+            data = b"".join(chunks)
     finally:
         os.close(fd)
-    data = b"".join(chunks)
     end = start + len(data)
     if track:
         complete = data.rfind(b"\n") + 1
@@ -5259,6 +6942,100 @@ def read_connections(path, limit=5000, max_bytes=LOG_BYTES, strict=False, since=
     if track:
         return records[::-1], (info.st_ino, end), appended
     return records[::-1]
+
+
+BODY_KEYS = ("text", "base64")
+FIND_BODY_BYTES = 256 << 20  # bytes of a log searched for a body a reference names (one part of a run's log)
+
+
+def body_references(record):
+    """[(side, body)] of RECORD's bodies that are references to a body logged before in the same part of the log
+    ("same_as": {"connection", "time", "digest"} - sandbox-ai writes a body it logged already that way)."""
+    found = []
+    for side in ("request", "response"):
+        part = record.get(side) if isinstance(record, dict) else None
+        body = part.get("body") if isinstance(part, dict) else None
+        if isinstance(body, dict) and isinstance(body.get("same_as"), dict) and \
+                isinstance(body["same_as"].get("digest"), str):
+            found.append((side, body))
+    return found
+
+
+def logged_bodies(record, digests):
+    """{digest: (key, value, record)} of RECORD's bodies whose "digest" is in DIGESTS (the body itself: "text" or
+    "base64")."""
+    found = {}
+    for side in ("request", "response"):
+        part = record.get(side) if isinstance(record, dict) else None
+        body = part.get("body") if isinstance(part, dict) else None
+        if isinstance(body, dict) and body.get("digest") in digests:
+            key = next((k for k in BODY_KEYS if isinstance(body.get(k), str)), None)
+            if key:
+                found[body["digest"]] = (key, body[key], record)
+    return found
+
+
+def find_bodies(path, digests, max_bytes=FIND_BODY_BYTES):
+    """{digest: (key, value, record)} of the bodies with DIGESTS in the log PATH (a part of a run's connection log,
+    compressed or not: where the references of its records point), from its start, at most MAX_BYTES of it."""
+    found, wanted = {}, set(digests)
+    needles = [f'"digest": "{digest}"'.encode() for digest in wanted]
+    try:
+        fd = open_log(path)
+    except (OSError, TypeError):
+        return found
+    try:
+        stream = gzip.GzipFile(fileobj=os.fdopen(os.dup(fd), "rb"), mode="rb") if str(path).endswith(".gz") \
+            else os.fdopen(os.dup(fd), "rb")
+        with stream, contextlib.suppress(OSError, EOFError, zlib.error):
+            read = 0
+            for line in stream:
+                read += len(line)
+                if read > max_bytes or len(found) == len(wanted):
+                    break
+                if not any(needle in line for needle in needles):
+                    continue
+                try:
+                    record = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                found.update(logged_bodies(record, wanted - set(found)))
+    finally:
+        os.close(fd)
+    return found
+
+
+def with_bodies(record, records=(), path=None):
+    """(RECORD as it is shown, references left): each body logged as a reference ("same_as") with the body it names
+    put in - found among RECORDS (the records read, newest last), else in the log PATH -, and a note which connection
+    it was logged with. A reference whose body is in neither stays as it is (counted)."""
+    references = body_references(record)
+    if not references:
+        return record, 0
+    wanted = {body["same_as"]["digest"] for _, body in references}
+    found = {}
+    for other in reversed(records):
+        found.update(logged_bodies(other, wanted - set(found)))
+        if len(found) == len(wanted):
+            break
+    if path is not None and len(found) < len(wanted):
+        found.update(find_bodies(path, wanted - set(found)))
+    shown, left = dict(record), 0
+    for side, body in references:
+        reference = body["same_as"]
+        hit = found.get(reference["digest"])
+        if hit is None:
+            left += 1
+            shown[side] = {**shown[side], "body": {**body, "same_as": {**reference, "note": (
+                f"the same body as connection {reference.get('connection')} at {reference.get('time')}, logged "
+                "once in this part of the log" + (" (not found there)" if path is not None else ""))}}}
+            continue
+        key, value, origin = hit
+        filled = {**body, key: value, "same_as": {**reference, "note": (
+            f"logged once, with connection {origin.get('connection', reference.get('connection'))} at "
+            f"{origin.get('time', reference.get('time'))}; shown here from there")}}
+        shown[side] = {**shown[side], "body": filled}
+    return shown, left
 
 
 def summary(record):
@@ -5677,6 +7454,18 @@ class QuestionCache:
                 found.append(("answered", question, result or {}, paths))
             elif f"{stem}.answer" in names:
                 found.append(("answered", question, {"reason": "answered, being applied"}, paths))
+            elif f"{stem}.state" in names:
+                # The supervisor's word on it (0.1.98): "timeout" - nobody answered in time, it stays answerable -
+                # or "open" again (a later try waits for it, counting from then). Read anew: it changes.
+                state = read_state(directory / f"{stem}.state")
+                if state.get("state") == "timeout":
+                    found.append(("open", {**question, "state": "timeout", "timed_out": state.get("time")}, None,
+                                  paths))
+                elif state.get("state") == "open" and isinstance(state.get("time"), str):
+                    found.append(("open", {**question, "state": "open", "asked_first": question.get("time"),
+                                           "time": state["time"]}, None, paths))
+                else:
+                    found.append(("open", question, None, paths))
             else:
                 found.append(("open", question, None, paths))
         return found, complete
@@ -5715,6 +7504,39 @@ class QuestionCache:
         return pending, answered
 
 
+def read_state(path):
+    """{"state": "open"|"timeout", "time", ...} of a question's .state file (the supervisor's), or {}."""
+    try:
+        with open(path, "rb") as stream:
+            value = json.loads(stream.read(4096))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+QUESTION_STATES = ("open", "timeout", "allowed", "refused")  # sandbox-ai's approvals.STATES
+ENTRY_ACTIONS = ("allow", "deny", "deny-once", "block", "ask-again")  # approvals.entry_actions
+
+
+def question_state(question):
+    """open, timeout, allowed or refused: what QUESTION says of itself (sandbox-ai 0.1.98 on: "state"), or what its
+    answer says ("result"; an older sandbox's refusal of one nobody answered counts as timed out)."""
+    if question.get("state") in QUESTION_STATES:
+        return question["state"]
+    result = question.get("result")
+    if not isinstance(result, dict):
+        return "open"
+    if result.get("decision") == "allow":
+        return "allowed"
+    return "timeout" if str(result.get("reason") or "").startswith(("no answer", "not answered yet")) else "refused"
+
+
+def answerable(question):
+    """QUESTION still waits for its answer (open, or timed out and still open) - answered as a question."""
+    return question_state(question) in ("open", "timeout") and not isinstance(question.get("result"), dict) and \
+        question.get("answerable") is not False
+
+
 class RemoteQuestion(dict):
     """An open question of a sandbox on another HOST, as `sandbox-ai approvals list --json` there lists it: the
     question's text comes from that host's sandbox-ai ("question", escaped there), the time left from its own clock
@@ -5744,10 +7566,34 @@ class RemoteQuestion(dict):
             self["max_scope"] = "always"  # an older sandbox-ai there: it refuses what its policy does not allow
         if item.get("url_truncated") is True:
             self["url_truncated"] = True
+        # Its state (sandbox-ai 0.1.98 on: list --state all), what the run decided and what may be done about it.
+        if item.get("state") in QUESTION_STATES:
+            self["state"] = item["state"]
+        if isinstance(item.get("timed_out"), str):
+            self["timed_out"] = printable(item["timed_out"])[:40]
+        if item.get("answerable") is False:
+            self["answerable"] = False
+        if item.get("asked_again") is True:
+            self["asked_again"] = True
+        if isinstance(item.get("actions"), list):
+            self["actions"] = [a for a in item["actions"] if a in ENTRY_ACTIONS]
+        result = item.get("result")
+        if isinstance(result, dict):
+            self["result"] = {k: printable(str(result[k]))[:300] for k in ("decision", "scope", "reason", "changed")
+                              if isinstance(result.get(k), str)}
         # A tool call's arguments in full (approvals.question_details there): lines kept, escaped here too, bounded.
         if isinstance(item.get("details"), str) and item["details"]:
             self["details"] = bounded_details(item["details"])
             self["details_whole"] = item.get("details_whole") is True
+        # A login's callback to the sandbox's loopback (sandbox-ai's oauth_relay.fields): this machine's catcher
+        # relays it when the page opens here (host_answer_relaying). Kept only in its checked shape.
+        callback = item.get("callback")
+        if self.get("kind") == "browser" and self.get("url") and isinstance(callback, dict) and \
+                isinstance(callback.get("port"), int) and not isinstance(callback.get("port"), bool) and \
+                1 <= callback["port"] <= 65535 and isinstance(callback.get("url"), str) and \
+                isinstance(callback.get("path"), str):
+            self["callback"] = {"url": printable(callback["url"])[:1100], "port": callback["port"],
+                                "path": printable(callback["path"])[:1000]}
         if self.get("kind") != "browser":
             for key in ("url", "url_refused", "url_host", "url_truncated"):
                 self.pop(key, None)
@@ -5765,7 +7611,9 @@ class RemoteQuestion(dict):
 
 
 DETAILS_LIMIT = (64 << 10) + 512  # characters of a question's details shown (sandbox-ai's approvals.DETAILS_LIMIT)
-DETAILS_KINDS = ("mcp", "tool")  # questions whose details carry a call's arguments in full (approvals.DETAILS_KINDS)
+# Questions whose details carry a call's arguments in full (approvals.DETAILS_KINDS; a write across a session bridge:
+# its diff).
+DETAILS_KINDS = ("mcp", "tool", "bridge", "mcp-tools")
 
 
 def bounded_details(text, limit=DETAILS_LIMIT):
@@ -5850,6 +7698,18 @@ def question_url(question):
 
 # -- update check --
 
+UPDATE_MODES = ("off", "notify", "download", "auto")  # sandbox/updates.py MODES
+UPDATE_BUSY = 3  # updates.BUSY_STATUS: --apply or --rollback refused while something runs
+
+
+def update_busy_reasons(status, err):
+    """What runs, as `sandbox-ai update --apply` or `--rollback` named it when it refused (STATUS 3), else []."""
+    if status != UPDATE_BUSY:
+        return []
+    found = re.search(r"in use: (.*?) \(stop them first", err or "", re.S)
+    return [part.strip() for part in found[1].split("; ") if part.strip()][:50] if found else []
+
+
 def parse_update_check(status, out):
     """(installed, available) versions from `sandbox-ai update --check`, or None if it did not work
     (no network, not an installation made by install.sh)."""
@@ -5866,16 +7726,71 @@ UPDATE_PACKAGES = ("pyz", "appimage", "macos-app")  # sandbox/main.py's PACKAGES
 SYSTEM_HOMES = ("/home/", "/root/", "/Users/", "/var/home/")  # sandbox/main.py's HOMES: never a system installation
 
 
-def update_route(directory, euid=None, writable=None):
+def installed_tree(directory):
+    """The tree whose sandbox/ folder is DIRECTORY, with install.sh's `current` link followed: the app finds an
+    installation through DATA/current (kept, so that an update is picked up at the next start), and what kind of
+    installation it is - DATA/versions/X below a prefix's lib/sandbox-ai, or in a home - shows only behind the
+    link."""
+    tree = Path(directory).parent
+    if tree.name == "current" and tree.is_symlink():
+        with contextlib.suppress(OSError, RuntimeError):
+            real = tree.resolve()
+            if real.parent.name == "versions" and real.parent.parent == tree.parent:
+                return real
+    return tree
+
+
+_PACKAGE_UPDATERS = {}  # {sandbox/ folder: its package_update.py, or None (a sandbox-ai before it)}
+
+
+def package_updater(directory):
+    """sandbox-ai's package_update.py of the copy whose sandbox/ folder is DIRECTORY (the copies that replace
+    themselves: the .pyz, the AppImage, the macOS app, a pip installation), loaded once; None for a sandbox-ai that has
+    none yet."""
+    key = str(directory)
+    if key not in _PACKAGE_UPDATERS:
+        module, path = None, Path(directory) / "package_update.py"
+        if path.is_file():
+            try:
+                spec = importlib.util.spec_from_file_location("sandbox_ai_app_package_update", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as exc:  # noqa: BLE001 - unreadable: as a copy without it
+                applog.swallowed("backend", "package_updater: package_update.py could not be loaded", exc)
+                module = None
+        _PACKAGE_UPDATERS[key] = module
+    return _PACKAGE_UPDATERS[key]
+
+
+def self_update_target(directory, kind, environ=None, access=None):
+    """(PATH, None) when `sandbox-ai update` replaces the package KIND ("pyz", "appimage", "macos-app") or the pip
+    installation ("pip") whose sandbox/ folder is DIRECTORY - PATH: the file or folder it replaces -, else (None, WHY):
+    why not, with the command that updates it (sandbox-ai's package_update.target; an older sandbox-ai: no reason)."""
+    updater = package_updater(directory)
+    if updater is None:
+        return None, None
+    info = {"kind": "pip" if kind == "pip" else "package", "package": None if kind == "pip" else kind,
+            "tree": str(Path(directory).parent), "data": None, "prefix": None}
+    try:
+        return updater.target(info, environ, **({"access": access} if access else {}))
+    except Exception as exc:  # noqa: BLE001 - never an error of the status line
+        applog.swallowed("backend", "self_update_target", exc)
+        return None, None
+
+
+def update_route(directory, euid=None, writable=None, environ=None, access=None):
     """How `sandbox-ai update` updates the copy of sandbox-ai whose sandbox/ folder is DIRECTORY, decided as sandbox/main.py
     decides it (its `update` and installation_mode()): (ROUTE, PATH) with ROUTE
     - "user": install.sh's installation that this user may update (their own, or a system one they can write);
     - "root": a system installation (PREFIX/lib/sandbox-ai, installed by root for every user) whose files this user
       cannot write: only root updates it (sudo sandbox-ai update); PATH is its folder;
-    - "package": the AppImage, the macOS app or the .pyz (PATH: the kind): a new download, never install.sh;
-    - "checkout": a git checkout (git pull); "other": not installed by install.sh (pip: pip install -U sandbox-ai).
+    - "self": the AppImage, the macOS app, the .pyz or a pip installation that replaces itself with its file of the
+      release (PATH: the file or folder it replaces): sandbox-ai update, as "user";
+    - "package": the AppImage, the macOS app or the .pyz (PATH: the kind) that cannot (not writable, unpacked, a
+      sandbox-ai before that): update_blocker says the command that updates it;
+    - "checkout": a git checkout (git pull); "other": a pip installation that cannot replace itself.
     Only files are looked at (no process): quick enough for the GUI thread."""
-    tree = Path(directory).parent
+    tree = installed_tree(directory)
     euid = os.geteuid() if euid is None else euid
     writable = writable or (lambda path: os.access(path, os.W_OK))
     try:
@@ -5883,16 +7798,34 @@ def update_route(directory, euid=None, writable=None):
     except (OSError, UnicodeDecodeError):
         kind = None
     if kind in UPDATE_PACKAGES:
-        return "package", kind
+        path, _ = self_update_target(directory, kind, environ, access)
+        return ("self", str(path)) if path is not None else ("package", kind)
     if (tree / ".git").exists():
         return "checkout", str(tree)
     if not (tree / "install.sh").is_file():
-        return "other", str(tree)
+        path, _ = self_update_target(directory, "pip", environ, access)
+        return ("self", str(path)) if path is not None else ("other", str(tree))
     data = tree.parent.parent
     if tree.parent.name == "versions" and data.name == "sandbox-ai" and data.parent.name == "lib" \
             and not str(data).startswith(SYSTEM_HOMES) and euid != 0 and not writable(data):
         return "root", str(data)
     return "user", str(data if tree.parent.name == "versions" else tree)
+
+
+def update_blocker(directory, environ=None, access=None):
+    """Why the package or the pip installation whose sandbox/ folder is DIRECTORY does not replace itself, with the
+    command that updates it instead (sandbox-ai's own words), or None (it does, or it is another kind of copy)."""
+    tree = Path(directory).parent
+    try:
+        kind = (tree / "PACKAGING").read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        kind = None
+    if kind not in UPDATE_PACKAGES:
+        if (tree / ".git").exists() or (tree / "install.sh").is_file():
+            return None
+        kind = "pip"
+    path, why = self_update_target(directory, kind, environ, access)
+    return why if path is None else None
 
 
 class NoSudo(ValueError):
@@ -5905,7 +7838,7 @@ def self_update_command(sai, route, which=None):
     `sandbox-ai` command (root's files, run with root's python3; never the app's Python, which this user may write)
     after sudo from PATH, which asks for the password in that terminal (the app never sees it). NoSudo without sudo
     (its text: what to run as root instead); ValueError for a route that `sandbox-ai update` does not update."""
-    if route == "user":
+    if route in ("user", "self"):  # ("self": a package or a pip installation that replaces itself)
         return sai.command("update")
     if route != "root":
         raise ValueError(f"sandbox-ai update does not update this copy ({route})")
@@ -6063,11 +7996,17 @@ def resume_args(name, restart=False, workspaces=(), mounts=(), mcp=(), options=(
         raise ValueError("not a start's name")
     args = ["resume"]
     for directory in workspaces:
-        args.append(f"--workspace={path_value(directory, 'a workspace')}")
+        directory = str(directory or "").strip()
+        args.append(f"--workspace={directory if valid_remote(directory) else path_value(directory, 'a workspace')}")
     for source, destination, mode in mounts:
-        source, destination = path_value(source, "a mount's source"), path_value(destination, "a mount's destination")
-        if mode not in ("ro", "rw") or ":" in source + destination:
-            raise ValueError("a mount is SOURCE:DESTINATION with ro or rw (no ':' in the paths)")
+        # (a folder of another machine, sshfs://[USER@]HOST[:PORT]/PATH, as sandbox-ai resume --mount takes it)
+        source = str(source or "").strip()
+        remote = valid_remote(source)
+        source = source if remote else path_value(source, "a mount's source")
+        destination = path_value(destination, "a mount's destination")
+        if mode not in ("ro", "rw") or ":" in (destination if remote else source + destination):
+            raise ValueError("a mount is a folder and where the sandbox sees it, read-only or writable (no ':' in "
+                             "the paths)")
         args.append(f"--mount={source}:{destination}:{mode}")
     for server in mcp:
         if not re.fullmatch(MCP_NAME, str(server)):
@@ -6090,6 +8029,65 @@ def resume_args(name, restart=False, workspaces=(), mounts=(), mcp=(), options=(
 SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # the launcher's SESSION_NAME (--session, --as)
 REMOTE_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # a host of sandbox-ai hosts (host_choice.HOST)
 TRANSFER_MAPS = 64  # --map options one copy takes at most
+
+
+BUNDLE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")  # a board's name (sandbox-ai board: board_bundle.NAME)
+BUNDLE_KINDS = ("mcp", "llm", "kit", "variant", "preset", "image", "board")
+
+
+def board_export_args(out, session=None, board=False, host="local", images=False):
+    """The words after `sandbox-ai` of `board export (--session NAME | --board -) OUT [--images] [--host HOST] --json`,
+    checked: OUT an absolute path of this machine (the bundle is written here, also of a host's session), SESSION a
+    session's name, BOARD the board document given on standard input. ValueError says what is wrong."""
+    if not isinstance(out, str) or not os.path.isabs(out) or any(c in out for c in "\n\r\0"):
+        raise ValueError("choose where the bundle is written (a file of this machine)")
+    if bool(session) == bool(board):
+        raise ValueError("a session or a board")
+    if session and (not isinstance(session, str) or not SESSION_NAME.fullmatch(session)):
+        raise ValueError("not a session's name")
+    if host != "local" and (not isinstance(host, str) or not REMOTE_HOST.fullmatch(host)):
+        raise ValueError("not a host of sandbox-ai hosts")
+    return ["board", "export", f"--session={session}" if session else "--board=-", "--json",
+            *(["--images"] if images else []), *([f"--host={host}"] if host != "local" else []), "--", out]
+
+
+def board_import_args(path, host="local", as_name=None, maps=(), values=(), renames=(), replaces=(), images=False,
+                      check=True, unsigned=False):
+    """The words after `sandbox-ai` of `board import PATH --json (--check | --yes) [--as NAME] [--map=OLD=NEW]...
+    [--value=NAME=VALUE]... [--rename=KIND:OLD=NEW]... [--replace=KIND:NAME]... [--images] [--host HOST]`, checked:
+    PATH a bundle of this machine (also when it is imported on a host). ValueError says what is wrong."""
+    if not isinstance(path, str) or not os.path.isabs(path) or any(c in path for c in "\n\r\0"):
+        raise ValueError("choose the bundle (a file of this machine)")
+    if host != "local" and (not isinstance(host, str) or not REMOTE_HOST.fullmatch(host)):
+        raise ValueError("not a host of sandbox-ai hosts")
+    if as_name not in (None, "") and (not isinstance(as_name, str) or not BUNDLE_NAME.fullmatch(as_name)):
+        raise ValueError("a board's name is 1-40 lower-case letters, digits, '_' and '-'")
+    words = ["board", "import", "--json", "--check" if check else "--yes"]
+    words += [f"--as={as_name}"] if as_name else []
+    for old, new in maps:
+        if not all(isinstance(v, str) and v and not any(c in v for c in "\n\r\0") for v in (old, new)) or \
+                not os.path.isabs(os.path.expanduser(new)):
+            raise ValueError("a folder is given as an absolute path")
+        words.append(f"--map={old}={new}")
+    for name, value in values:
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", name) or \
+                not isinstance(value, str) or any(c in value for c in "\n\r\0"):
+            raise ValueError("a value is one line")
+        words.append(f"--value={name}={value}")
+    for kind, old, new in renames:
+        if kind not in BUNDLE_KINDS or not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}",
+                                                                                  v) for v in (old, new)):
+            raise ValueError("not a name a part can have")
+        words.append(f"--rename={kind}:{old}={new}")
+    for kind, name in replaces:
+        if kind not in BUNDLE_KINDS or not isinstance(name, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}", name):
+            raise ValueError("not a name a part can have")
+        words.append(f"--replace={kind}:{name}")
+    words += ["--images"] if images else []
+    words += ["--unsigned"] if unsigned else []
+    words += [f"--host={host}"] if host != "local" else []
+    return words + ["--", path]
 
 
 def session_transfer_args(command, name, host, new_name=None, maps=(), check=False, replace=False):
@@ -6133,6 +8131,59 @@ def helper_of(server):
     return match[1] if match else None
 
 
+PLUGIN_ID = re.compile(rf"{KIT_NAME}@{KIT_NAME}")  # NAME@MARKETPLACE (kits.PLUGIN_NAME twice)
+LIVE_ENTRY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@+-]{0,127}")  # kits_live.ENTRY_NAME, or a kit's name
+LIVE_KINDS = ("kit", "skill", "command", "agent_file", "plugin")  # what kits_live_args gives a running start
+
+
+def kits_live_args(start, kind, value, keep=False, restart=False, allow_findings=False):
+    """The words after `sandbox-ai` that give the running START a KIND (LIVE_KINDS) now: `kits attach START KIT`,
+    `kits attach START --skill=DIR` (--command=FILE, --agent-file=FILE: an absolute path on that host) or `plugins
+    attach START NAME@MARKETPLACE`, with --keep (also its later starts) and --restart (its agent started again inside
+    the sandbox), --allow-findings (also with what the hidden-text checker finds), always --json. ValueError says what
+    is wrong."""
+    if not valid_run(start):
+        raise ValueError("not a start's name")
+    flags = [*(["--keep"] if keep else []), *(["--restart"] if restart else []),
+             *(["--allow-findings"] if allow_findings else []), "--json"]
+    value = str(value or "").strip()
+    if kind == "plugin":
+        if not PLUGIN_ID.fullmatch(value):
+            raise ValueError("a plugin is NAME@MARKETPLACE")
+        return ["plugins", "attach", start, value, *flags]
+    if kind == "kit":
+        if not re.fullmatch(KIT_NAME, value):
+            raise ValueError("a kit's name is 1-64 letters, digits, '_', '.' or '-'")
+        return ["kits", "attach", start, value, *flags]
+    if kind not in LIVE_KINDS:
+        raise ValueError(f"one of {', '.join(LIVE_KINDS)}")
+    if not (value.startswith("/") and value.isprintable() and len(value) < 4096
+            and not any(part in (".", "..") for part in value.split("/"))):
+        raise ValueError("an absolute path on that host")
+    return ["kits", "attach", start, f"--{kind.replace('_', '-')}={value}", *flags]
+
+
+def kits_detach_args(start, value, restart=False):
+    """`kits detach START NAME --json` (a skill, subagent, command or a kit attached), or `plugins detach START
+    NAME@MARKETPLACE --json`; with --restart its agent started again inside the sandbox."""
+    if not valid_run(start):
+        raise ValueError("not a start's name")
+    value = str(value or "").strip()
+    flags = [*(["--restart"] if restart else []), "--json"]
+    if PLUGIN_ID.fullmatch(value):
+        return ["plugins", "detach", start, value, *flags]
+    if not LIVE_ENTRY.fullmatch(value):
+        raise ValueError("the name of what was given (a skill, subagent, command or kit)")
+    return ["kits", "detach", start, value, *flags]
+
+
+def restart_agent_args(start):
+    """`kits restart-agent START --json`: its agent started again inside the running sandbox."""
+    if not valid_run(start):
+        raise ValueError("not a start's name")
+    return ["kits", "restart-agent", start, "--json"]
+
+
 def mcp_live_args(start, server=None, helper=None, detach=False, live=True):
     """The words after `sandbox-ai` of `mcp attach NAME START --live --json` (HELPER: `--helper AGENT START`), or
     with DETACH `mcp detach ... --live --json`: a server into (out of) a running start now. Without LIVE (a detach
@@ -6150,6 +8201,52 @@ def mcp_live_args(start, server=None, helper=None, detach=False, live=True):
     if not live and not detach:
         raise ValueError("an attach without --live is mcp_attach")
     return ["mcp", "detach" if detach else "attach", *named, start, *(["--live"] if live else []), "--json"]
+
+
+HOST_WORD = r"(?:local|[a-z0-9][a-z0-9_-]{0,31})"  # hosts.NAME, or this machine
+MCP_COPY_FLAGS = (("secrets_later", "--secrets-later"), ("pull_image", "--pull-image"), ("copy_image", "--copy-image"),
+                  ("no_vpn", "--no-vpn"), ("current_pin", "--current-pin"), ("unsigned", "--unsigned"))
+
+
+def mcp_copy_args(source, target, names, as_name=None, paths=None, drop_paths=(), replace=False, attach=None,
+                  dry_run=True, **flags):
+    """The words after `sandbox-ai` of `mcp copy NAME... --from SOURCE --to TARGET --json` (run on this machine,
+    which reaches both hosts) with the choices that resolve what its check said: AS_NAME (one server), PATHS ({the
+    source's folder: one of TARGET}), DROP_PATHS, REPLACE (asked first by the caller: --replace --yes), ATTACH (a
+    running start of TARGET), and FLAGS (MCP_COPY_FLAGS' keys: true or false); DRY_RUN: the check. ValueError says
+    what is wrong."""
+    for host in (source, target):
+        if not re.fullmatch(HOST_WORD, str(host or "")):
+            raise ValueError("not a host's name")
+    if source == target and not as_name:
+        raise ValueError("from and to are the same host: give it another name there")
+    names = list(dict.fromkeys(names or ()))
+    if not names or not all(re.fullmatch(MCP_NAME, str(name)) for name in names):
+        raise ValueError("an MCP server's name is 1-32 letters, digits, '_' or '-'")
+    unknown = set(flags) - {key for key, _ in MCP_COPY_FLAGS}
+    if unknown:
+        raise ValueError(f"unknown choices: {', '.join(sorted(unknown))}")
+    if flags.get("pull_image") and flags.get("copy_image"):
+        raise ValueError("pull the image there or send it: one of them")
+    args = ["mcp", "copy", *names, "--from", source, "--to", target, "--json"]
+    if as_name:
+        if len(names) != 1 or not re.fullmatch(MCP_NAME, str(as_name)):
+            raise ValueError("another name is for one server: 1-32 letters, digits, '_' or '-'")
+        args.append(f"--as={as_name}")
+    for old, new in (paths or {}).items():
+        args.append(f"--path={path_value(old, 'a folder of the other host')}={path_value(new, 'a folder there')}")
+    for old in drop_paths or ():
+        args.append(f"--drop-path={path_value(old, 'a folder of the other host')}")
+    args += [flag for key, flag in MCP_COPY_FLAGS if flags.get(key)]
+    if attach:
+        if not valid_run(attach):
+            raise ValueError("not a start's name")
+        args.append(f"--attach={attach}")
+    if replace:
+        args += ["--replace", "--yes"]
+    if dry_run:
+        args.append("--dry-run")
+    return args
 
 
 def stop_args(name, wait=None):
@@ -6175,6 +8272,11 @@ def catalog_options(catalogs):
     return found
 
 
+# An MCP server's network (sandbox-ai mcp add|set --network) and how the app names it: the internet without your local
+# network, only the hosts its catalog entry declares, the internet and your network (asked first: mcp-lan), nothing.
+MCP_NETWORKS = ("full", "allowlist", "lan", "none")
+
+
 def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=None, pids=None, catalogs=(),
                  no_pull=False, engine=None, unsigned=False, vpn=None, cpus=None, tmp=None):
     """(the words after `sandbox-ai` of `mcp add ... ENTRY`, the host directories mounted writable) with --as,
@@ -6197,8 +8299,8 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
     for variable in env:
         args.append(f"--env={env_spec(variable)}")  # NAME, NAME=VALUE or NAME@SECRET
     if network:
-        if network not in ("none", "full"):
-            raise ValueError("the network is none or full")
+        if network not in MCP_NETWORKS:
+            raise ValueError("the network is none, full, allowlist or lan")
         args.append(f"--network={network}")
     if memory:
         if not re.fullmatch(SIZE, str(memory)):
@@ -6259,9 +8361,9 @@ def env_spec(value):
 
 def mcp_set_args(name, stop=False, **changes):
     """The words after `sandbox-ai` of `mcp set NAME` with CHANGES: memory, cpus, pids (a value, or "default": back to
-    the default), network (none|full), mounts ([(target, host folder, "ro"|"rw")]: all of them; [] none), env ([NAME,
-    NAME=VALUE or NAME@SECRET]: all of them; [] none - env_spec), vpn (a profile, or None: none); STOP: --stop. Every
-    value checked for its form here (the
+    the default), network (MCP_NETWORKS), mounts ([(target, host folder, "ro"|"rw")]: all of them; [] none), env
+    ([NAME, NAME=VALUE or NAME@SECRET]: all of them; [] none - env_spec), vpn (a profile, or None: none); STOP: --stop.
+    Every value checked for its form here (the
     command checks the rest as `mcp add` does). ValueError says what is wrong."""
     if not re.fullmatch(MCP_NAME, str(name or "")):
         raise ValueError("a name for --mcp is 1-32 letters, digits, '_' or '-'")
@@ -6277,8 +8379,8 @@ def mcp_set_args(name, stop=False, **changes):
                 raise ValueError(f"{key}: not a value of its kind ({value[:40]})")
             args.append(f"--{key}={value}")
     if "network" in changes:
-        if changes["network"] not in ("none", "full"):
-            raise ValueError("the network is none or full")
+        if changes["network"] not in MCP_NETWORKS:
+            raise ValueError("the network is none, full, allowlist or lan")
         args.append(f"--network={changes['network']}")
     if "mounts" in changes:
         if not changes["mounts"]:

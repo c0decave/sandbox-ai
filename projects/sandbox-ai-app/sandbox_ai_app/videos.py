@@ -48,11 +48,11 @@ MEMBER_LIMIT = 1 << 30  # bytes of one video in it, at most
 LANGUAGE_NAMES = {"en": N_("English"), "de": N_("German")}
 # The page each video is about: the navigation's titles (ui.SECTIONS; a test keeps the two the same).
 PAGE_TITLES = {"launch": N_("Start"), "board": N_("Board"), "sandboxes": N_("Sandboxes & sessions"),
-               "approvals": N_("Approvals"), "terminals": N_("Terminals"), "files": N_("File manager"),
+               "terminals": N_("Terminals"), "approvals": N_("Approvals"), "files": N_("File manager"),
                "kits": N_("Kits & plugins"), "mcp": N_("MCP servers"), "llm": N_("LLM servers"),
                "images": N_("Images"), "credentials": N_("Credentials"), "team": N_("Teams"),
                "connections": N_("Connections"), "activity": N_("Activity"), "traffic": N_("LLM traffic"),
-               "statistics": N_("Statistics"),
+               "statistics": N_("Statistics"), "monitor": N_("System monitor"),
                "system": N_("System"), "hosts": N_("Hosts"), "help": N_("Help")}
 LOOPBACK_OK = False  # http to 127.0.0.1 allowed (the tests' fake release server alone; nothing in the app sets it)
 

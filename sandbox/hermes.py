@@ -329,19 +329,16 @@ def network_options(a):
 
 def check(a, hooks_active=False, companions=()):
     """Refuse what Hermes cannot do in a sandbox (yet), before anything starts."""
-    if getattr(a, "hermes_enable", None) and a.agent != "hermes":
-        raise ValueError(f"--hermes-enable is for Hermes (sandbox-ai hermes), not {a.agent}")
+    if getattr(a, "hermes_enable", None) and a.agent != "hermes" and "hermes" not in companions:
+        raise ValueError(f"--hermes-enable is for Hermes (sandbox-ai hermes, or --with hermes), not {a.agent}")
     if a.agent != "hermes" and "hermes" not in companions:
         return
-    names = parse(getattr(a, "hermes_enable", None)) if a.agent == "hermes" else []
-    if a.agent != "hermes" or companions:
-        raise ValueError("--with: Hermes is not in the team image; give Hermes another agent as a helper "
-                         "(sandbox-ai hermes --helper claude) or Hermes to another agent (--helper hermes)")
+    names = parse(getattr(a, "hermes_enable", None)) if a.agent == "hermes" or "hermes" in companions else []
     if hooks_active:
-        raise ValueError("rules for the agent's own tools (a ruleset's \"tool\" rules, the security mode "
-                         "paranoid's) are not enforced for Hermes yet; start without them, in the mode high or "
-                         "laxer (the network, MCP and device rules hold as for every agent)")
-    refused = refused_arg(getattr(a, "agent_args", None) or [])
+        why = GUARD.safe_mode_arg((getattr(a, "agent_args", None) or []) if a.agent == "hermes" else [])
+        if why:
+            raise ValueError(f"{why} in Hermes' arguments: {GUARD.SAFE_MODE_MESSAGE}; drop it")
+    refused = refused_arg((getattr(a, "agent_args", None) or []) if a.agent == "hermes" else [])
     if refused:
         raise ValueError(f"{refused[0]} in Hermes' arguments: {refused[1]}; drop it")
     check_telemetry(a)
@@ -458,11 +455,60 @@ def thinking(a):
     return None if value is None or getattr(a, "helper_of", None) else value == "on"
 
 
-def managed_config(a, telemetry="off", mcp=None, llm=None, note=False):
+# Hermes v0.22.5's events a shell hook can bind (hermes_cli/plugins.py: VALID_HOOKS without SHELL_UNSUPPORTED_HOOKS).
+# While sandbox-ai's hooks hold, the managed configuration names every one of them - its own hooks, the approved kit
+# hooks, else an empty list - so the user's shell hooks of ~/.hermes/config.yaml do not run then (a list is one leaf of
+# the managed overlay): only reviewed hooks run with hooks_auto_accept, as with Claude Code's allowManagedHooksOnly.
+SHELL_HOOK_EVENTS = (
+    "agent_loop_stopped", "api_request_error", "gateway_platform_event", "kanban_task_blocked", "kanban_task_claimed",
+    "kanban_task_completed", "on_human_input_request", "on_human_input_resolved", "on_interim_message",
+    "on_kanban_dispatch_tick", "on_kanban_task_updated", "on_kanban_worker_exited", "on_kanban_worker_spawned",
+    "on_kanban_worker_stale_claim", "on_room_member_activity", "on_session_delete", "on_session_end",
+    "on_session_finalize", "on_session_reset", "on_session_start", "on_skill_lifecycle", "on_stream_delta",
+    "on_stream_end", "on_stream_start", "post_api_request", "post_approval_response", "post_auxiliary_call",
+    "post_compaction", "post_gateway_admission", "post_llm_call", "post_tool_call", "pre_api_request",
+    "pre_approval_request", "pre_auxiliary_call", "pre_command", "pre_gateway_dispatch", "pre_llm_call",
+    "pre_tool_call", "pre_transcription", "pre_verify", "subagent_start", "subagent_stop", "transform_llm_output",
+    "transform_terminal_output", "transform_tool_result")
+# Claude Code's event names (the launcher's hook groups, a kit's hooks.json) as Hermes' shell-hook events
+# (kits.HERMES_EVENTS keeps the same list).
+EVENTS = {"PreToolUse": "pre_tool_call", "PostToolUse": "post_tool_call", "SessionStart": "on_session_start",
+          "SessionEnd": "on_session_end", "SubagentStart": "subagent_start", "SubagentStop": "subagent_stop"}
+SHELL_TIMEOUT, SHELL_TIMEOUT_LIMIT = 60, 300  # agent/shell_hooks.py: DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS
+HOOKS_MARKER_NAME = "sandbox-ai-hooks.json"  # in MANAGED_DIR: the guard keeps the hooks (hermes_guard.HOOKS_MARKER)
+
+
+def shell_hooks(groups):
+    """Hermes' "hooks:" for the launcher's hook GROUPS ({EVENT: [{"matcher", "hooks": [handler]}]}, the rule hooks
+    first): one shell hook per handler under Hermes' event name, in order; a matcher other than * kept (a regular
+    expression on Hermes' own tool names), the timeout within Hermes' limit, a pre_tool_call failing closed (a hook
+    that cannot run blocks the call). Every other shell-hook event empty (SHELL_HOOK_EVENTS)."""
+    hooks = {event: [] for event in SHELL_HOOK_EVENTS}
+    for event, entries in groups.items():
+        name = EVENTS.get(event)
+        if name is None:  # kits.read_hooks refuses such a kit for Hermes; never written
+            continue
+        for entry in entries:
+            for handler in entry["hooks"]:
+                hook = {"command": handler["command"],
+                        "timeout": min(handler.get("timeout", SHELL_TIMEOUT), SHELL_TIMEOUT_LIMIT)}
+                if name == "pre_tool_call":
+                    hook["fail_closed"] = True
+                if entry.get("matcher") not in (None, "", "*"):
+                    hook["matcher"] = entry["matcher"]
+                hooks[name].append(hook)
+    return hooks
+
+
+def managed_config(a, telemetry="off", mcp=None, llm=None, note=False, hooks=None):
     """Hermes' /etc/hermes/config.yaml for this start: the sandbox's defaults, the telemetry switches (at every
-    level: telemetry is always off), what the features turn on again, the --mcp servers (MCP: their mcp_servers) and --llm's model
-    (LLM: llm.hermes_config, with the loop guard's skill among the external skills). Later layers win."""
+    level: telemetry is always off), what the features turn on again, the --mcp servers (MCP: their mcp_servers),
+    --llm's model (LLM: llm.hermes_config, with the loop guard's skill among the external skills) and the run's hooks
+    (HOOKS: the launcher's hook groups, shell_hooks; consented to here, hooks_auto_accept). Later layers win."""
     config = merge(merge({}, BASE_CONFIG), TELEMETRY_CONFIG)
+    if hooks:
+        config["hooks"] = shell_hooks(hooks)
+        config["hooks_auto_accept"] = True
     names = features(a)
     for name in names:
         config = merge(config, FEATURES[name].get("config", {}))
@@ -491,10 +537,15 @@ def managed_config(a, telemetry="off", mcp=None, llm=None, note=False):
 def files(a, config, loop_text=None, note=None):
     """{path in the session directory: content}: the managed configuration (JSON, which YAML reads), its .env (the
     terminal backend once more), the shared-metrics answer of every start (TELEMETRY_ANSWER), the loop guard's skill
-    when it is on, the run's network note (NOTE) as a skill of its own."""
+    when it is on, the run's network note (NOTE) as a skill of its own, the guard's marker when rules for Hermes' own
+    tools hold (HOOKS_MARKER_NAME)."""
     found = {f"{SESSION_DIR}/config.yaml": json.dumps(config, indent=2) + "\n",
              f"{SESSION_DIR}/.env": "TERMINAL_ENV=local\n",
              f"{SESSION_DIR}/{TELEMETRY_ANSWER}": TELEMETRY_ANSWER_SCRIPT}
+    if config.get("hooks") and config["hooks"].get("pre_tool_call") and any(
+            "--internal-hook hermes" in hook["command"] for hook in config["hooks"]["pre_tool_call"]):
+        # The rules hold through these hooks: the guard keeps them in every Hermes of the sandbox (hermes_guard).
+        found[f"{SESSION_DIR}/{HOOKS_MARKER_NAME}"] = json.dumps({"rules": True}) + "\n"
     if loop_text and LOOP_SKILL in config.get("skills", {}).get("auto_load", []):
         found[f"{SESSION_DIR}/skills/{LOOP_SKILL}/SKILL.md"] = loop_skill(loop_text)
     if note and NOTE_SKILL in config.get("skills", {}).get("auto_load", []):

@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sandbox-ai"
+name = "sandbox-ai-app"
 dynamic = ["version"]
-description = "Run Codex, Claude Code and OpenCode in a verified rootless Podman/Bubblewrap sandbox with an egress firewall"
+description = "sandbox-ai: run Claude Code, Codex, OpenCode and nine more agents in a verified rootless Podman/Bubblewrap sandbox with an egress firewall; command line and web interface, the desktop app with [gui]"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -15,14 +15,35 @@ keywords = ["sandbox", "podman", "bubblewrap", "firejail", "ai-agents", "claude"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
     "Intended Audience :: Developers",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Security",
     "Topic :: Software Development",
 ]
-# No runtime dependencies: the launcher uses the standard library only.
+# No runtime dependencies: the command line and the web interface use the standard library only.
+
+[project.optional-dependencies]
+# The desktop app (sandbox-ai-app): pip install 'sandbox-ai-app[gui]'. Exact pins only, each released at least 14
+# days before it was pinned. Python 3.12+: the release the AppImage and the macOS app carry (packaging/
+# requirements-app.txt). PySide6 6.12.0 crashes below Python 3.12 ("deallocating None", the app's main.py BROKEN), so
+# those Pythons get the releases the app's projects/sandbox-ai-app/uv.lock resolves for them.
+# The [gui] pins: pinned on 2026-11-16.
+# PySide6-Essentials 6.12.0: uploaded 2026-10-08
+# shiboken6 6.12.0: uploaded 2026-10-08
+# PySide6-Essentials 6.11.3: uploaded 2026-10-26
+# shiboken6 6.11.3: uploaded 2026-10-26
+# PySide6-Essentials 6.10.3: uploaded 2026-04-02
+# shiboken6 6.10.3: uploaded 2026-04-02
+gui = ["PySide6-Essentials==6.12.0; python_version >= '3.12'",
+       "shiboken6==6.12.0; python_version >= '3.12'",
+       "PySide6-Essentials==6.11.3; python_version >= '3.10' and python_version < '3.12'",
+       "shiboken6==6.11.3; python_version >= '3.10' and python_version < '3.12'",
+       "PySide6-Essentials==6.10.3; python_version < '3.10'",
+       "shiboken6==6.10.3; python_version < '3.10'"]
 
 [project.urls]
 Homepage = "https://github.com/c0decave/sandbox-ai"
@@ -31,16 +52,19 @@ Issues = "https://github.com/c0decave/sandbox-ai/issues"
 
 [project.scripts]
 sandbox-ai = "sandbox_ai.cli:main"
+# Without [gui] it says how to add PySide6 (sandbox_ai_app/launch.py).
+sandbox-ai-app = "sandbox_ai_app.launch:main"
 
 [tool.setuptools]
-# The checkout keeps its directory name "sandbox"; installed it is "sandbox_ai".
-package-dir = { "sandbox_ai" = "sandbox" }
-packages = ["sandbox_ai"]
+# The checkout keeps its directory name "sandbox"; installed it is "sandbox_ai". The desktop app comes from
+# projects/sandbox-ai-app (its own pyproject.toml there is for working on the app alone).
+package-dir = { "sandbox_ai" = "sandbox", "sandbox_ai_app" = "projects/sandbox-ai-app/sandbox_ai_app" }
+packages = ["sandbox_ai", "sandbox_ai_app"]
 
 [tool.setuptools.package-data]
-sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signers", "public_suffix_list.dat", "web/*",
+sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signers", "public_suffix_list.dat", "model_profiles.json", "model_usecases.json", "model_evidence.json", "mcp_catalog_tools.json", "prices.json", "cloud_models.json", "web/*",
               "launcher/*.py",
-              "presets/*.json",
+              "presets/*.json", "rulesets/*.json",
               "templates/*/*.md", "templates/*/*.json",
               "templates/*/skills/*/SKILL.md", "builtin/*/skills/*/SKILL.md", "builtin/kits/*/*/marketplaces.json",
               # The vendored skills of the built-in kits, whole trees (docs/skills-review.md); globs skip dot files,
@@ -49,6 +73,10 @@ sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signe
               "recipes/*/*.json", "recipes/*/*.txt", "recipes/*/*.yaml", "service-images/*/*",
               "marketplace/.claude-plugin/*",
               "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
+# The same as projects/sandbox-ai-app/pyproject.toml's (tests/test_pypi_package.py).
+sandbox_ai_app = ["web/*.html", "web/*.js", "web/vendor/*.js", "web/vendor/*.css", "web/vendor/LICENSE.*",
+                  "web/vendor/manifest.json",
+                  "icons/board/*.svg"]
 
 [tool.setuptools.dynamic]
 version = { attr = "sandbox_ai.agent_sandbox.__version__" }

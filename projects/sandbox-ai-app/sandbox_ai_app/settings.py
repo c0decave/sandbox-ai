@@ -7,6 +7,8 @@ sandbox-ai location apply at the next start. The policy tab shows /etc/sandbox-a
 it stops every start if it does, and what it forbids; the app greys those options out everywhere (the Start
 page's form, the board, the wizard).
 
+The Notifications tab holds the phone channels of this machine or a host (sandbox-ai notify: notify_view.py).
+
 The sandbox-ai tab also lists the extra preset directories (sandbox-ai presets dirs) and the trusted project
 configurations (sandbox-ai wizard trust --list; Forget… runs `sandbox-ai wizard forget PATH`, asked first:
 project-forget; Review and trust… shows a project file of that machine with every key, what weakens marked and the
@@ -31,7 +33,8 @@ from .files import printable, printable_text
 from .i18n import tr
 from .short_notices import short_notice
 from .widgets import (
-    MONO, arrow_tabs, ask_first, background, outcome, plain_label, safe_tooltip, tame_combos, warn, shown_as_text,
+    MONO, arrow_tabs, ask_first, background, explanation, outcome, plain_label, safe_tooltip, set_explanations_shown,
+    tame_combos, warn,
 )
 
 LOCAL = "local"
@@ -60,6 +63,7 @@ class WrapCheckBox(QCheckBox):
         super().__init__(text, parent)
         self.about = about  # characters on one line at most when there is room
         self.laid_width = 0  # the width it was given last: its height is the one for that width (resizeEvent)
+        self.width_before = 0  # the width it had before that one
         policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)  # (its height: for its width)
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
@@ -91,9 +95,16 @@ class WrapCheckBox(QCheckBox):
 
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
-        if event.size().width() != self.laid_width:
+        width = event.size().width()
+        if width != self.laid_width:
             before = self.heightForWidth(self.laid_width) if self.laid_width else None
-            self.laid_width = event.size().width()
+            # Back to the width it had before the last one: its tab's scroll bar comes and goes (its hint, taller at
+            # the narrower width, asked for the bar; shorter at the wider one, it let it go - without end, at some
+            # widths, until the app crashed: the settings 818 px wide with a large font). It keeps the narrower
+            # width's height then, which the bar's room holds either way.
+            flipping = width == self.width_before
+            self.width_before = self.laid_width
+            self.laid_width = min(width, self.width_before) if flipping else width
             if self.heightForWidth(self.laid_width) != before:
                 self.updateGeometry()  # the lines it needs at this width
 
@@ -125,13 +136,6 @@ def host_row(sai, owner):
     chooser = HostChooser(sai)
     chooser.changed.connect(lambda _host: owner.refresh())
     return chooser
-
-
-def typed_path(parent, title, host_label):
-    """A folder of another host, typed (this machine's file dialog cannot see it); None when cancelled."""
-    from PySide6.QtWidgets import QInputDialog
-    path, ok = QInputDialog.getText(parent, title, shown_as_text(tr("The absolute path on {host}:", host=host_label)))
-    return path.strip() if ok and path.strip() else None
 
 
 class PresetDirs(QWidget):
@@ -218,11 +222,8 @@ class PresetDirs(QWidget):
         self.remove_button.setEnabled(bool(self.list.selectedItems()))
 
     def add(self):
-        if self.host() != LOCAL:
-            path = typed_path(self, tr("Folder with presets (*.json)"), self.hosts.label())
-        else:
-            from .state import choose_folder
-            path = choose_folder(self, tr("Folder with presets (*.json)"), "presets")
+        from . import remote_chooser as RC  # (another host's: its folders, listed over SSH)
+        path = RC.choose_folder(self, self.host(), tr("Folder with presets (*.json)"), "presets", sai=self.sai)
         if path:
             self.add_path(path)
 
@@ -260,7 +261,7 @@ class PresetDirs(QWidget):
 
     def done(self, result, error):
         status, out, err = outcome(result, error)
-        text = (out + err).strip()
+        text = printable_text((out + err).strip())[-1500:]  # (what sandbox-ai there wrote: escaped, bounded)
         if status != 0:
             warn(self, tr("Preset directories"), text or tr("Failed (exit status {status}).", status=status))
         elif text:
@@ -363,14 +364,11 @@ class TrustedProjects(QWidget):
         items = self.list.selectedItems()
         if path is None and items:
             path = items[0].data(256)
-        if path is None:
-            from PySide6.QtWidgets import QInputDialog
-            text, ok = QInputDialog.getText(self, tr("Review and trust…").rstrip("…"), shown_as_text(tr(
-                "The project folder on {host} (or its .sandbox-ai.json), an absolute path:",
-                host=self.hosts.label(host))))
-            if not ok:
+        if path is None:  # a project folder of that host, chosen from its folders (this machine's dialog here)
+            from . import remote_chooser as RC
+            path = RC.choose_folder(self, host, tr("Review and trust…").rstrip("…"), "project", sai=self.sai)
+            if not path:
                 return
-            path = text
         target = PT.config_path(path)
         if target is None:
             warn(self, tr("Trusted project configurations"), tr("Give the absolute path of a folder on {host}.",
@@ -442,16 +440,18 @@ class SettingsDialog(QDialog):
         self.combo(form, "theme", tr("Theme"), [(key, tr(text)) for key, text in theme.choices()], current)
         self.font_combo(form, "ui", tr("Interface font"), current)
         self.font_combo(form, "mono", tr("Monospace font (terminal, code, logs)"), current)
-        form.addRow(plain_label(tr("The app downloads no fonts: one marked not installed says how to get it (point at it "
-                                   "in the list). Terminal tabs opened from now on use the monospace font."),
-                                role="secondary"))
+        form.addRow(explanation(tr("The app downloads no fonts: one marked not installed says how to get it (point at it "
+                                   "in the list). Terminal tabs opened from now on use the monospace font.")))
         self.combo(form, "language", tr("Language"), (("system", tr("as the system")), ("en", "English"),
                                                       ("de", "Deutsch")), current)
-        form.addRow(plain_label(tr("A new language applies when the app is started again."), role="secondary"))
+        form.addRow(explanation(tr("A new language applies when the app is started again.")))
         self.check(form, "guide_nodes", tr("Help set up each new part of the board, one question at a time"), current)
         self.check(form, "guide_tour", tr("Offer the guided tour at the first start"), current)
         self.check(form, "help_buttons", tr("Show the (?) help buttons (the Help page, the tours and F1 stay)"),
                    current)
+        self.check(form, "explanations", tr("Show explanations (the info texts below forms and tables, the pages' "
+                                            "intro lines)"), current)
+        self.check(form, "button_texts", tr("Show button texts beside the icons"), current)
         self.check(form, "intro", tr("Play the intro animation at start (Esc skips it)"), current)
         self.check(form, "show_flags", tr("Show the command-line options (--…) beside the fields' names"), current)
         self.replay = QPushButton(tr("Watch the intro again"))
@@ -480,6 +480,9 @@ class SettingsDialog(QDialog):
         self.combo(form, "login_links", tr("Open sign-in links of the agents in"),
                    (("app", tr("the app's login browser (it hands the result to the terminal)")),
                     ("system", tr("the system browser"))), current)
+        self.combo(form, "device_signin", tr("A device sign-in (a one-time code: Codex) opens its page in"),
+                   (("system", tr("the system browser, by itself (the code is shown beside it)")),
+                    ("app", tr("the app's login browser"))), current)
         self.check(form, "copy_on_select", tr("Copy text selected in a terminal tab to the clipboard at once"), current)
         self.check(form, "paste_warn", tr("Ask before pasting several lines where each line break acts as Enter"),
                    current)
@@ -489,22 +492,22 @@ class SettingsDialog(QDialog):
         forget = QPushButton(tr("Forget the login browser's cookies and data"))
         forget.clicked.connect(self.forget_login_browser)
         form.addRow("", forget)
-        form.addRow(plain_label(tr("Copy: select with the mouse (double click: a word, triple: a line; Shift - Option "
+        form.addRow(explanation(tr("Copy: select with the mouse (double click: a word, triple: a line; Shift - Option "
                                    "on macOS - selects when the program takes the mouse), then Ctrl+Shift+C (Cmd+C), "
                                    "Ctrl+Insert or the right-click menu. Paste: Ctrl+Shift+V (Cmd+V), Shift+Insert "
                                    "or the menu; control characters are always asked about. A link: Ctrl+click "
                                    "(Cmd+click), or Copy link in the menu - also one drawn over several rows. A "
-                                   "request to read the clipboard is never answered."), role="secondary"))
+                                   "request to read the clipboard is never answered.")))
         # What only says that something is done ("Written and trusted: …"): a short notice in the window that goes
         # by itself (short_notices.py); off, none is shown (the status bar and the log still have each).
         self.check(form, "short_notices", tr("Show short notices (toasts)"), current)
-        form.addRow(plain_label(tr("A short notice near the bottom of the window says for a moment that something is "
+        form.addRow(explanation(tr("A short notice near the bottom of the window says for a moment that something is "
                                    "done (written, trusted, removed…) and goes by itself; no OK to click. Off: none "
-                                   "is shown, the status bar and the log still have each."), role="secondary"))
+                                   "is shown, the status bar and the log still have each.")))
         self.check(form, "notifications", tr("Show notifications (popups)"), current)
-        form.addRow(plain_label(tr("Off (the default): nothing pops up. Questions wait on the Approvals page, the "
+        form.addRow(explanation(tr("Off (the default): nothing pops up. Questions wait on the Approvals page, the "
                                    "number of open ones is shown in the navigation and the tray, and every "
-                                   "notification is written to the log (the log window)."), role="secondary"))
+                                   "notification is written to the log (the log window).")))
         self.check(form, "notify", tr("Desktop notification for each new question"), current)
         self.check(form, "auto_tabs", tr("Open a tab for each session or sandbox that starts"), current)
         self.check(form, "reopen_terminals", tr("At start, also open a terminal for every other running session"), current)
@@ -517,10 +520,10 @@ class SettingsDialog(QDialog):
                 self.fields[key].setEnabled(bool(on))
         self.fields["notifications"].toggled.connect(follow)
         follow(self.fields["notifications"].isChecked())
-        form.addRow(plain_label(tr("In the app's theme: a popup at the corner of the screen in the theme's colours "
+        form.addRow(explanation(tr("In the app's theme: a popup at the corner of the screen in the theme's colours "
                                    "(warnings in its warning colour, errors in its error colour; errors stay until "
                                    "closed). Where a window cannot place itself (Wayland), the desktop's notification "
-                                   "is used."), role="secondary"))
+                                   "is used.")))
         # What the sandboxes themselves show on the desktop (sandbox-ai's defaults: desktop_notifications) - while
         # this app runs they show nothing but a canary's alarm anyway; this is for the time it does not run.
         self.desktop = QComboBox()
@@ -535,10 +538,10 @@ class SettingsDialog(QDialog):
         self.desktop.currentIndexChanged.connect(lambda _: self.save_desktop(self.desktop.currentData()))
         self.fields["desktop_notifications"] = self.desktop
         form.addRow(tr("Desktop notifications of the sandboxes"), self.desktop)
-        form.addRow(plain_label(tr("While this app runs, the sandboxes show none of their own (only a canary's "
+        form.addRow(explanation(tr("While this app runs, the sandboxes show none of their own (only a canary's "
                                    "alarm): the app has them. This says what they show when it does not run, for "
                                    "every start (desktop_notifications in {path}).",
-                                   path=printable(str(sai.sandbox_defaults_file()))), role="secondary"))
+                                   path=printable(str(sai.sandbox_defaults_file())))))
         # Safeguards that refuse or end something in a running sandbox (sandbox-ai safeguards)
         self.check(form, "notify_safeguards", tr("A popup when a safeguard refuses or ends something in a running "
                                                  "sandbox"), current)
@@ -546,22 +549,46 @@ class SettingsDialog(QDialog):
         self.safeguard_mute = SafeguardMute(sai, problem=lambda text: warn(self, tr("Safeguards"), text))
         self.safeguard_mute.changed.connect(lambda: self.changed.emit("safeguard_mute"))
         form.addRow(tr("Safeguards announced"), self.safeguard_mute)
-        form.addRow(plain_label(tr("Unticked kinds are never announced, here or on the desktop, for every start ("
+        form.addRow(explanation(tr("Unticked kinds are never announced, here or on the desktop, for every start ("
                                    "safeguard_mute in {path}); they are still recorded: Activity > Safeguards, "
-                                   "sandbox-ai safeguards.", path=printable(str(sai.sandbox_defaults_file()))),
-                                role="secondary"))
+                                   "sandbox-ai safeguards.", path=printable(str(sai.sandbox_defaults_file())))))
         self.check(form, "debug", tr("Debug mode: log every step (pages, commands, their times and results)"), current)
         from . import applog
         form.addRow(plain_label(tr("The log: {path} (Help > Show the log)", path=breakable(applog.log_path())),
                                 role="secondary"))
+
+        # phone notifications (sandbox-ai notify): questions and alarms to ntfy, Telegram, WhatsApp, a webhook
+        page, form = self.tab(tr("Notifications"))
+        from .notify_view import PhoneChannels
+        self.phone_channels = PhoneChannels(sai)
+        form.addRow(explanation(tr("Questions and alarms to your phone while you are away (sandbox-ai notify): ntfy, "
+                                   "Telegram, WhatsApp or a webhook. Sent by the host the sandboxes run on - never "
+                                   "from inside a sandbox - with the tokens as the names of its secrets.")))
+        form.addRow(self.phone_channels)
 
         # polling
         page, form = self.tab(tr("Polling"))
         self.spin(form, "approvals_interval", tr("Open questions (milliseconds)"), 250, 10000, current)
         self.spin(form, "sandboxes_interval", tr("Running sandboxes (milliseconds)"), 1000, 60000, current)
         self.spin(form, "connections_interval", tr("Connection log (milliseconds)"), 500, 60000, current)
-        form.addRow(plain_label(tr("Questions are refused after {seconds} seconds without an answer: keep the question "
-                                   "interval short.", seconds=sai.approval_seconds), role="secondary"))
+        # How long a sandbox's request waits for the answer (sandbox-ai's defaults: ask_timeout; --ask-timeout wins).
+        defaults, problem = sai.sandbox_defaults()
+        self.ask_timeout = QSpinBox()
+        self.ask_timeout.setRange(5, 3600)
+        self.ask_timeout.setSuffix(" s")
+        value = defaults.get("ask_timeout")
+        self.ask_timeout.setValue(value if isinstance(value, int) and not isinstance(value, bool) and
+                                  5 <= value <= 3600 else 60)
+        self.ask_timeout.setEnabled(not problem)
+        self.ask_timeout.setAccessibleName(tr("Wait for an answer"))
+        self.ask_timeout.editingFinished.connect(lambda: self.save_ask_timeout(self.ask_timeout.value()))
+        self.fields["ask_timeout"] = self.ask_timeout
+        form.addRow(tr("Wait for an answer"), self.ask_timeout)
+        form.addRow(explanation(tr("A sandbox's request waits this long for your answer to its question, for every "
+                                   "start (ask_timeout in {path}; --ask-timeout wins). Unanswered by then, the request "
+                                   "fails and the question stays open (Approvals › Timed out): allowed later, the next "
+                                   "try goes through. Keep the question interval short.",
+                                   path=printable(str(sai.sandbox_defaults_file())))))
 
         # sandbox-ai
         page, form = self.tab(tr("sandbox-ai"))
@@ -570,14 +597,19 @@ class SettingsDialog(QDialog):
         home.changed.connect(lambda text: self.save("sandbox_ai_home", text.strip()))
         self.fields["sandbox_ai_home"] = home
         form.addRow(tr("Use the checkout at"), home)
-        form.addRow(plain_label(tr("Empty: the sandbox-ai command, or $SANDBOX_AI_HOME when it is set (it wins). "
-                                   "Applies at the next start; a folder a sandbox can write is refused then."),
-                                role="secondary"))
+        form.addRow(explanation(tr("Empty: the sandbox-ai command, or $SANDBOX_AI_HOME when it is set (it wins). "
+                                   "Applies at the next start; a folder a sandbox can write is refused then.")))
         self.preset_dirs = PresetDirs(sai)
         form.addRow(tr("Preset directories"), self.preset_dirs)
         self.trusted = TrustedProjects(sai)
         form.addRow(tr("Trusted projects"), self.trusted)
         self.loop_rows(form)
+
+        # updates: the update mode of this machine's sandbox-ai (updates_view.py)
+        page, form = self.tab(tr("Updates"))
+        from .updates_view import UpdatesPanel
+        self.updates = UpdatesPanel(sai, window=parent)
+        form.addRow(self.updates)
 
         # new projects and the board
         page, form = self.tab(tr("New projects"))
@@ -621,10 +653,70 @@ class SettingsDialog(QDialog):
         elif problem:
             form.addRow(plain_label(tr("It stops every start: {problem}", problem=printable_text(problem)),
                                     role="notice-error"))
-        form.addRow(plain_label(tr("Telemetry is always off, for every agent; strict also holds back their other "
+        form.addRow(explanation(tr("Telemetry is always off, for every agent; strict also holds back their other "
                                    "calls. For every start, in {path}; a --telemetry option given at a start wins, "
                                    "the security mode paranoid allows no less than strict.",
-                                   path=breakable(printable(str(sai.sandbox_defaults_file())))), role="secondary"))
+                                   path=breakable(printable(str(sai.sandbox_defaults_file()))))))
+        # The file views (Memory…, Session files…): logins and keys listed and marked by default (user 2026-11-19);
+        # ticked, left out (sandbox-ai's defaults: hide_secrets; also asked of other hosts' views: --hide-secrets).
+        self.hide_secrets = WrapCheckBox(tr("Hide logins and keys in file views"))
+        self.hide_secrets.setChecked(defaults.get("hide_secrets") is True)
+        self.hide_secrets.setEnabled(not problem)
+        self.hide_secrets.toggled.connect(lambda on: self.save_hide_secrets(bool(on)))
+        self.fields["hide_secrets"] = self.hide_secrets
+        form.addRow("", self.hide_secrets)
+        form.addRow(explanation(tr("Off (the default): files that look like logins or keys (~/.git-credentials, an "
+                                   "agent's login, a private key) are listed in Memory… and Session files… and "
+                                   "marked; their text is shown only when you ask. On: they are left out of those "
+                                   "lists, also of other hosts' (hide_secrets in {path}). An export leaves them out "
+                                   "either way unless you take them in.",
+                                   path=breakable(printable(str(sai.sandbox_defaults_file()))))))
+
+        # storage: the storage check (sandbox-ai gc --check) and its automatic rules - sandbox-ai's own defaults, also
+        # read by the command line's gc (storage.py); each rule off unless set
+        page, form = self.tab(tr("Storage"))
+        self.storage_fields = {}
+        check = QComboBox()
+        for value, text in (("off", tr("off")), ("weekly", tr("weekly (the default)")), ("daily", tr("daily"))):
+            check.addItem(text, value)
+        check.setCurrentIndex(max(0, check.findData(defaults.get("storage_check", "weekly"))))
+        check.setEnabled(not problem)
+        check.currentIndexChanged.connect(lambda _: self.save_storage("storage_check", None if check.currentData()
+                                                                      == "weekly" else check.currentData()))
+        self.fields["storage_check"] = check
+        form.addRow(tr("Storage check"), check)
+        for key, label, low, high, default in (
+                ("storage_threshold_gb", tr("Notice when more than this could be freed (GB)"), 1, 10000, 5),
+                ("storage_growth_gb", tr("Name a start that grew more than (GB)"), 1, 10000, 2)):
+            field = QSpinBox()
+            field.setRange(low, high)
+            value = defaults.get(key, default)
+            field.setValue(int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else default)
+            field.setEnabled(not problem)
+            field.valueChanged.connect(lambda number, k=key, d=default: self.save_storage(
+                k, None if number == d else int(number)))
+            self.fields[key] = field
+            form.addRow(label, field)
+        form.addRow(explanation(tr("The app checks what sandbox-ai keeps on this machine at its start and then as "
+                                   "chosen, and says when more than the threshold could be freed; Optimize… on the "
+                                   "Sandboxes page shows the plan ({command}).", command="sandbox-ai gc --check")))
+        for key, label in (("storage_caches_days", tr("Empty the download caches of starts unused for (days)")),
+                           ("storage_compact_days", tr("Compact transcripts older than (days)")),
+                           ("storage_pack_days", tr("Pack stopped kept starts unused for (days)")),
+                           ("storage_logs_days", tr("Remove log folders not written for (days)"))):
+            field = QSpinBox()
+            field.setRange(0, 3650)
+            field.setSpecialValueText(tr("off"))
+            value = defaults.get(key)
+            field.setValue(value if isinstance(value, int) and not isinstance(value, bool) else 0)
+            field.setEnabled(not problem)
+            field.valueChanged.connect(lambda number, k=key: self.save_storage(k, int(number) or None))
+            self.fields[key] = field
+            form.addRow(label, field)
+        form.addRow(explanation(tr("Automatic rules, each off (0) unless set: applied by the storage check and by "
+                                   "sandbox-ai gc, never to a start that runs (compacting transcripts excepted: safe "
+                                   "while it runs); each action is logged and said in the next notice. In {path}.",
+                                   path=breakable(printable(str(sai.sandbox_defaults_file()))))))
 
         # policy
         self.policy_page, form = self.tab(tr("Administrator policy"))
@@ -648,8 +740,7 @@ class SettingsDialog(QDialog):
             view.setReadOnly(True)
             view.setFont(MONO)
             form.addRow(view)
-        form.addRow(plain_label(tr("Only root can change it. What it forbids is greyed out in the app."),
-                                role="secondary"))
+        form.addRow(explanation(tr("Only root can change it. What it forbids is greyed out in the app.")))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText(tr("Close"))
         buttons.rejected.connect(self.reject)
@@ -677,11 +768,10 @@ class SettingsDialog(QDialog):
         self.loop_guard.committed.connect(lambda: self.save_loop_guard(self.loop_guard.values()))
         self.fields["loop_guard"] = self.loop_guard
         form.addRow(tr("Loop guard for local models"), self.loop_guard)
-        form.addRow(plain_label(tr("What sandbox-ai does against a model that repeats itself, for every LLM server "
+        form.addRow(explanation(tr("What sandbox-ai does against a model that repeats itself, for every LLM server "
                                    "(--llm): empty layers keep sandbox-ai's own default; a server's own layers (its "
                                    "Advanced settings… on the LLM servers page) and a start's win (loop_guard in {path}).",
-                                   path=breakable(printable(str(self.sai.sandbox_defaults_file())))),
-                                role="secondary"))
+                                   path=breakable(printable(str(self.sai.sandbox_defaults_file()))))))
 
     def save_loop_guard(self, layers):
         try:
@@ -749,6 +839,8 @@ class SettingsDialog(QDialog):
             applog.set_debug(bool(value))
             if not value:
                 os.environ.pop("SANDBOX_AI_APP_DEBUG", None)
+        if key == "explanations":  # at once, on every page and in this dialog too
+            set_explanations_shown(bool(value))
         if key == "theme":
             theme.apply_soon(value, after=lambda _mode: self.changed.emit(key))  # after the combo box's event
             return
@@ -814,6 +906,14 @@ class SettingsDialog(QDialog):
         self.fields[key] = widget
         return widget
 
+    def save_ask_timeout(self, seconds):
+        try:
+            self.sai.save_sandbox_default("ask_timeout", None if seconds == 60 else int(seconds))
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Wait for an answer"), printable_text(exc))
+            return
+        self.changed.emit("ask_timeout")
+
     def save_desktop(self, level):
         try:
             self.sai.save_sandbox_default("desktop_notifications", None if level == "all" else level)
@@ -821,6 +921,23 @@ class SettingsDialog(QDialog):
             warn(self, tr("Notifications"), printable_text(exc))
             return
         self.changed.emit("desktop_notifications")
+
+    def save_storage(self, key, value):
+        """A storage setting (storage_check, its threshold, a rule) into sandbox-ai's defaults; None: its default."""
+        try:
+            self.sai.save_sandbox_default(key, value)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Storage"), printable_text(exc))
+            return
+        self.changed.emit(key)
+
+    def save_hide_secrets(self, on):
+        try:
+            self.sai.save_sandbox_default("hide_secrets", True if on else None)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Privacy"), printable_text(exc))
+            return
+        self.changed.emit("hide_secrets")
 
     def save_telemetry(self, level):
         try:

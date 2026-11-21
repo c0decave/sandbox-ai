@@ -89,6 +89,9 @@ TELEMETRY_ENV = {
     "OTEL_SDK_DISABLED": "true",  # otel/otlp.rs: disables every signal, a user's endpoint included
     "OTEL_TRACES_EXPORTER": "none", "OTEL_METRICS_EXPORTER": "none", "OTEL_LOGS_EXPORTER": "none",
     "DO_NOT_TRACK": "1",
+    # Its Langfuse tracing (tracing/langfuse_layer.rs) starts with these keys (or the INIT_PROJECT_ pair): empty.
+    "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": "", "LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "",
+    "LANGFUSE_INIT_PROJECT_SECRET_KEY": "",
 }
 TELEMETRY_PINNED = {"GOOSE_TELEMETRY_ENABLED": False}
 # The model catalog Goose downloads at every start (model_catalog.rs, no switch): refused quietly by the proxy unless
@@ -198,19 +201,12 @@ def refused_arg(args, names=()):
 
 def check(a, hooks_active=False, companions=()):
     """Refuse what Goose cannot do in a sandbox (yet), before anything starts."""
-    if getattr(a, "goose_enable", None) and a.agent != "goose":
-        raise ValueError(f"--goose-enable is for Goose (sandbox-ai goose), not {a.agent}")
+    if getattr(a, "goose_enable", None) and a.agent != "goose" and "goose" not in companions:
+        raise ValueError(f"--goose-enable is for Goose (sandbox-ai goose, or --with goose), not {a.agent}")
     if a.agent != "goose" and "goose" not in companions:
         return
-    names = parse(getattr(a, "goose_enable", None)) if a.agent == "goose" else []
-    if a.agent != "goose" or companions:
-        raise ValueError("--with: Goose is not in the team image; give Goose another agent as a helper "
-                         "(sandbox-ai goose --helper claude) or Goose to another agent (--helper goose)")
-    if hooks_active:
-        raise ValueError("rules for the agent's own tools (a ruleset's \"tool\" rules, the security mode "
-                         "paranoid's) are not enforced for Goose yet; start without them, in the mode high or "
-                         "laxer (the network, MCP and device rules hold as for every agent)")
-    refused = refused_arg(getattr(a, "agent_args", None) or [], names)
+    names = parse(getattr(a, "goose_enable", None)) if a.agent == "goose" or "goose" in companions else []
+    refused = refused_arg((getattr(a, "agent_args", None) or []) if a.agent == "goose" else [], names)
     if refused:
         raise ValueError(f"{refused[0]} in Goose's arguments: {refused[1]}")
     check_telemetry(a)
@@ -341,12 +337,42 @@ def managed_config(a, mcp=None):
     return merge(config, TELEMETRY_PINNED)
 
 
-def files(a, config, loop_text=None):
-    """{path in the session directory: content}: the system configuration (JSON, which YAML reads) and the loop
-    guard's text when --llm turns it on (llm.goose_environment points GOOSE_MOIM_MESSAGE_FILE at it)."""
+# The run's hooks in Goose 1.57.0: Goose runs hooks only from plugins (crates/goose/src/hooks: <plugin>/hooks/
+# hooks.json, the Open Plugins format, Claude Code's) in the user's plugin folder (~/.agents/plugins) and the
+# project's (.agents/plugins); no system layer. sandbox-ai's plugin lies read-only in MANAGED_DIR (HOOKS_PLUGIN); the
+# image's goose command (telemetry_guard.goose_hooks) links it into the user's plugin folder at every start and refuses
+# to start Goose while the plugin is disabled, shadowed by the project's or moved away (GOOSE_PATH_ROOT). Goose loads
+# hooks once, when its agent starts. A PreToolUse hook that fails blocks the call (on_failure: block; Goose's default
+# lets it through); Goose's matcher is a regular expression on its own tool names, so "*" is left out (all tools).
+HOOKS_PLUGIN = MANAGED_DIR + "/sandbox-ai-hooks"
+HOOKS_LINK = "/root/.agents/plugins/sandbox-ai-hooks"  # Goose's user plugin folder (config/paths.rs: Plugins)
+HOOK_TIMEOUT = 30  # seconds: Goose's DEFAULT_HOOK_TIMEOUT_SECS
+
+
+def plugin_hooks(groups):
+    """The hooks.json of sandbox-ai's plugin for the launcher's hook GROUPS ({EVENT: [{"matcher", "hooks"}]})."""
+    hooks = {}
+    for event, entries in groups.items():
+        for entry in entries:
+            handlers = [{"type": "command", "command": handler["command"],
+                         "timeout": handler.get("timeout", HOOK_TIMEOUT),
+                         **({"on_failure": "block"} if event == "PreToolUse" else {})} for handler in entry["hooks"]]
+            matcher = entry.get("matcher")
+            hooks.setdefault(event, []).append({**({"matcher": matcher} if matcher not in (None, "", "*") else {}),
+                                                "hooks": handlers})
+    return {"hooks": hooks}
+
+
+def files(a, config, loop_text=None, hooks=None):
+    """{path in the session directory: content}: the system configuration (JSON, which YAML reads), the loop
+    guard's text when --llm turns it on (llm.goose_environment points GOOSE_MOIM_MESSAGE_FILE at it), and with HOOKS
+    (the launcher's hook groups) sandbox-ai's plugin with them (HOOKS_PLUGIN)."""
     found = {f"{SESSION_DIR}/config.yaml": json.dumps(config, indent=2) + "\n"}
     if loop_text:
         found[f"{SESSION_DIR}/{LOOP_FILE.rsplit('/', 1)[1]}"] = loop_text
+    if hooks:
+        found[f"{SESSION_DIR}/{HOOKS_PLUGIN.rsplit('/', 1)[1]}/hooks/hooks.json"] = \
+            json.dumps(plugin_hooks(hooks), indent=2) + "\n"
     return found
 
 

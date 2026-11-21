@@ -356,6 +356,43 @@ def test_team_list_shows_a_damaged_team_and_delete_removes_it(tmp_path, capsys):
     assert ["delete", "t3-claude", "--yes"] in calls and not (team.teams_dir() / "t3").exists()
 
 
+def test_a_start_killed_before_its_record_leaves_a_team_that_can_be_deleted(tmp_path, capsys):
+    """Analysis round 3 (chaos): a `team start` killed between making the team's folder and writing its record (or
+    a record that a full disk never let be written) left a folder that `team start` refused as an existing team,
+    while `team show`, `list` and `delete --yes` all said there was no such team - the name could never be used
+    again without removing the folder by hand."""
+    (team.teams_dir() / "half" / "board").mkdir(parents=True)  # what the killed start left
+    lines = []
+    assert team.main(["list"], out=lines.append) == 0
+    assert any(line.startswith("half ") and "(damaged)" in line and "team delete half --yes" in line
+               for line in lines)
+    assert team.main(["start", "half", "--agents", "claude,codex", "-w", str(tmp_path)], out=lines.append) == 1
+    assert "team delete half --yes" in capsys.readouterr().err
+    states = {agent: "gone" for agent in team.AGENTS}
+    assert team.delete("half", True, lines.append, lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+                       states) == 0
+    assert not (team.teams_dir() / "half").exists()
+
+
+def test_a_record_that_cannot_be_written_leaves_nothing(tmp_path, monkeypatch):
+    """The record is written whole or not at all (a full disk): the start says so, and leaves neither a half record
+    nor the team's folder; nothing started."""
+    real = team.os.replace
+
+    def full(*args):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(team.os, "replace", full)
+    calls = []
+    with pytest.raises(OSError, match="No space"):
+        team.start("full", ["claude", "codex"], tmp_path, [], print,
+                   lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(team.os, "replace", real)
+    assert not calls and not (team.teams_dir() / "full").exists()
+    assert team.start("full", ["claude", "codex"], tmp_path, [], print,
+                      lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")) == 0
+    assert team.record_path("full").stat().st_mode & 0o777 == 0o600 and team.load("full")["name"] == "full"
+
+
 def test_the_namespace_of_team_start_carries_its_options():
     """The app reads team start's parsed namespace (its parity test): "options" holds what follows the --."""
     import argparse

@@ -39,3 +39,8 @@ image variant (`sandbox-ai images recipe hyperframes|playwright`), each checked 
   Apache-2.0) and `superpowers` (obra/superpowers, MIT) are fetched from GitHub at their pinned commits only when you
   install them with `sandbox-ai plugins claude`.
 - `sandbox/public_suffix_list.dat`: the Public Suffix List (Mozilla Public License 2.0).
+- The package guard's lists of known malicious packages (`sandbox-ai packages sync`, kept in
+  `~/.local/share/sandbox-ai/osv-malicious`, never part of a release file): made from the `MAL-...` advisories of the
+  OSV database (https://osv.dev, its dumps at `osv-vulnerabilities.storage.googleapis.com`), which come from the
+  OpenSSF Malicious Packages repository (https://github.com/ossf/malicious-packages, Apache-2.0). A list holds each
+  advisory's id, the package's name and its versions; the advisory itself is at `https://osv.dev/vulnerability/ID`.

@@ -88,7 +88,8 @@ def test_the_overview_lists_everything_with_its_state(page, wait):
     assert rows[("VPN profile", "home")] == "configured"
     assert page.summary.text() == "9 configured, 3 need attention."
     tabs = [page.tabs.tabText(i) for i in range(page.tabs.count())]
-    assert tabs == ["Overview", "Agent logins (3)", "Secrets (2)", "Git logins (2)", "Publish logins (1)", "VPN (1)"]
+    assert tabs == ["Overview", "Agent logins (3)", "Secrets (2)", "Git logins (2)", "Publish logins (1)", "VPN (1)",
+                    "Given to sandboxes"]
     used = dict(zip(cells(page.secrets), cells(page.secrets, 2)))
     assert used == {"GH_PUSH": "Git login https://github.com", "PYPI_TOKEN": "publish login pypi"}
 

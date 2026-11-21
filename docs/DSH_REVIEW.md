@@ -150,10 +150,25 @@ feature matrix's `dsh-telemetry-is-never-switchable`.
 
 - `--with` (not in the team image): `--helper` both ways (`sandbox-ai claude --helper dsh` runs `dsh headless` with
   the task on standard input; `continue` starts a new task: headless resumes only a named session).
-- `--effort` (reasoning efforts are per model route in DSH), rules for its own tools and kit hooks (refused, so not
-  the mode paranoid), teams, the activity feed, `mcp attach --live`.
+- `--effort` (reasoning efforts are per model route in DSH), teams, the activity feed, `mcp attach --live`.
 - A login of its own in `sandbox-ai login`: the DeepSeek account sign-in is the web UI's (OAuth to its own loopback
   server); use it in the sandbox's browser, or an API key.
+
+## Rules for its own tools (2026-11-16)
+
+DeepSeek Harness 0.2.1-rc.5 has no hooks a configuration names, but a `--patch` overlay may insert a plugin by its file
+path (`dsh-app-boot`: anchorInsertedPluginNames), and its tool registry (`docs/subsystems/tools.md`) freezes a call's
+arguments before policy, runs the `tools/pre-execute` waterfall (deny, ask, allow) and then monotonic guards that can
+only deny (`ToolGuard`). `run_code`'s sub-calls re-enter the same pipeline.
+
+- sandbox-ai's patch (read-only, the last overlay; also for a `dsh` typed in the sandbox) inserts the Cordis plugin
+  `/etc/dsh/sandbox-ai-hooks.mjs`. Its `tools/pre-execute` listener asks the supervisor and denies with the
+  `sandbox-ai:` reason; its guard refuses every call that listener did not allow (a policy answering before it, a
+  listener that never ran); `tools/post-execute` records.
+- Tools mapped: `bash` Bash, `read`/`write`/`edit`, `glob`, `grep`, `web_fetch`, `web_search`, `subagent` Task (its
+  arguments already are Claude Code's).
+- Kit hooks: none - DSH's Claude Code hook bridge (`dsh-hooks-claude-code`) is experimental and not in the image.
+- Not covered: should the plugin fail to load, DSH would run without it (to be shown by the live test).
 
 ## Go / No-Go
 

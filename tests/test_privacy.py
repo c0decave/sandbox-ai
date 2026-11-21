@@ -230,7 +230,8 @@ def test_scan_follows_no_symlink_and_runs_nothing_from_the_repository(tmp_path):
         git(repo, "config", key, str(script))
     (repo / "a.txt").write_text("b\n")
     report = p.scan_repository(repo, p.builtin_rules())
-    assert report.findings == [] and not marker.exists()
+    # (the .gitattributes it commits is named as a file that runs where the repository is checked out: a warning)
+    assert [f.pattern.id for f in report.findings] == ["host-trusted-file"] and not marker.exists()
 
 
 @needs_git

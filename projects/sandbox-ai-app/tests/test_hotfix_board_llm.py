@@ -156,6 +156,39 @@ def test_show_thinking_goes_to_the_launcher_and_the_real_sandbox_ai_takes_it(pag
     assert "--show-thinking" not in B.to_argv(page.sai, again)
 
 
+NO_THINKING_SWITCH = ("openhands", "letta", "qwen")  # OpenCode 2, Pi and nanobot have one now (d9b04383)
+
+
+@pytest.mark.parametrize("agent", NO_THINKING_SWITCH)
+def test_show_thinking_of_a_command_line_for_an_agent_without_the_switch_stays_and_is_warned_about(page, agent):
+    """A --show-thinking read from a command line or project file for an agent that has no switch was dropped
+    silently (the launcher refuses the start with it): the Board keeps it, in its command line too, and warns."""
+    argv = ["--show-thinking", "on"]
+    board = B.from_argv(page.sai, agent, argv)
+    assert board.first("agent").props["thinking"] == "on"
+    assert B.to_argv(page.sai, board)[:2] == argv, "not dropped: the command line says what the file said"
+    warned = [p for p in B.problems(page.sai, board) if "--show-thinking" in p.text]
+    assert len(warned) == 1 and warned[0].level == "warning" and warned[0].node == board.first("agent").id
+    assert thinking.reason(agent)[:30] in warned[0].text, "with why: what the launcher says of that agent"
+    # the real launcher refuses it: the warning is true
+    done = subprocess.run([str(ROOT / "sandbox-ai"), agent, *argv, "--dry-run"], capture_output=True, text=True,
+                          timeout=120)
+    assert done.returncode != 0 and "--show-thinking" in done.stderr
+    # in the inspector: the value is shown, with the reason, and can be removed
+    page.board = board
+    page.inspect(board.first("agent"))
+    combo = page.thinking_combo
+    assert combo.currentData() == "on" and combo.isEnabled()
+    combo.setCurrentIndex(combo.findData(""))
+    assert "thinking" not in page.board.first("agent").props or not page.board.first("agent").props["thinking"]
+    assert not [p for p in B.problems(page.sai, page.board) if "--show-thinking" in p.text]
+
+
+def test_show_thinking_of_an_agent_with_a_switch_is_no_warning(page):
+    board = B.from_argv(page.sai, "codex", ["--show-thinking", "off"])
+    assert not [p for p in B.problems(page.sai, board) if "--show-thinking" in p.text]
+
+
 def test_the_guide_asks_show_thinking_and_follows_the_agent(qapp, homes):
     board = B.Board()
     node = board.add("agent", agent="hermes")

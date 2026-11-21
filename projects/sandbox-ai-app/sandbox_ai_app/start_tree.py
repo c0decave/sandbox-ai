@@ -279,6 +279,7 @@ class Cell:
 class StartTree(QTreeWidget):
     """The tree of the Sandboxes page; see the module. FOLDED(bool) after View › Fold all / Unfold all."""
     folded = Signal(bool)
+    row_chosen = Signal()  # selectRow: a row chosen from elsewhere (show_instance, a test), not the page's own
 
     def __init__(self, headers, stretch=None, compact=()):
         super().__init__()
@@ -333,10 +334,12 @@ class StartTree(QTreeWidget):
         return Cell(items[row], column, row)
 
     def selectRow(self, row):  # noqa: N802
-        """Select the ROW-th start row; the groups it is in open."""
+        """Select the ROW-th start row; the groups it is in open. Said by row_chosen (the page: its tab in front) -
+        the page itself selects again with select_item."""
         items = self.start_items()
         if 0 <= row < len(items):
             self.select_item(items[row])
+            self.row_chosen.emit()
 
     def select_item(self, item, open_groups=True):
         """Select ITEM; OPEN_GROUPS: the groups it is in open (shown)."""

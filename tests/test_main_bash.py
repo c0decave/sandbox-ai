@@ -62,13 +62,13 @@ def test_build_all_builds_every_image_and_goes_on_after_a_failure(tmp_path, monk
     assert not m.build_all_wanted(["qwen"]) and not m.build_all_wanted(["--variant", "all"])
     assert m.build_all(["-pu", "unix:///x", "--uv", "0.9", "all", "--no-cache"], run=run, out=said.append) == 1
     names = [call[call.index("--variant") + 1] if "--variant" in call else call[-2] for call in calls]
-    assert names == ["codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose", "team", "cairn", "browser",
-                     "vpn", "tor", "tor"]
+    assert names == ["codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands",
+                     "nanobot", "letta", "pi", "team", "cairn", "browser", "vpn", "tor", "tor"]
     assert all(call[-1] == "--no-cache" for call in calls)
     assert calls[0][:4] == ["--podman-url", "unix:///x", "--uv", "0.9"]
-    assert calls[9] == ["browser", "--no-cache"]  # the browser's build takes none of those options
-    assert calls[12][-3:] == ["--variant", "tor", "--no-cache"]
-    assert "12 of 13 built; failed: qwen" in said[-1]
+    assert calls[14] == ["browser", "--no-cache"]  # the browser's build takes none of those options
+    assert calls[17][-3:] == ["--variant", "tor", "--no-cache"]
+    assert "17 of 18 built; failed: qwen" in said[-1]
     assert m.build_all(["--pin", "1.2.3", "all"], run=run, out=said.append) == 2
 
 

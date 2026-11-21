@@ -26,10 +26,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 VERSION = "1.0.0"
 PROTOCOL = "2025-06-18"
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 LIMIT = 1800          # seconds a task may run
 LOCK = Path(os.environ.get("HOME") or "/root") / ".cache" / "sandbox-ai-helper.lock"
 ANSWER_LIMIT = 200 << 10  # characters of an answer; the rest is cut, and the answer says so
@@ -39,15 +40,26 @@ WORK = "/work"
 # when the lead was started with --dangerously-skip-permissions (the helper's sandbox holds either way).
 SKIP = {"claude": ["--dangerously-skip-permissions"], "codex": ["--dangerously-bypass-approvals-and-sandbox"],
         "opencode": [], "hermes": [],  # Hermes' one-shot mode asks nothing
+        "opencode2": ["--auto"],  # opencode run --auto: what no rule denies runs without a question
         "dsh": [],  # a variable instead (SKIP_ENV): its headless run reads the mode from the environment
         "qwen": ["--yolo"],
-        "goose": []}  # a variable instead (SKIP_ENV): Goose's mode auto
+        "goose": [],  # a variable instead (SKIP_ENV): Goose's mode auto
+        "openhands": [],  # its task runs without confirmation (nobody could answer)
+        "nanobot": [],  # nanobot asks nothing before a tool runs
+        "letta": ["--yolo"],
+        "pi": []}  # Pi asks before nothing
 # Without it Goose keeps the sandbox's smart_approve, which stops a headless run at its first question.
 SKIP_ENV = {"dsh": {"DSH_PERMISSION_MODE": "danger-full-access"}, "goose": {"GOOSE_MODE": "auto"}}
 # Agents that read the task on standard input: DSH's headless run takes it as "-" (an argument that starts with "-"
 # would be one of its options).
 STDIN_PROMPT = {"dsh"}
 DSH_PATCH = "/etc/dsh/sandbox-ai.patch.yml"  # dsh.py's PATCH (this module loads no sibling)
+# nanobot's one-shot run (nanobot agent --message) works in its own workspace (~/.nanobot/workspace): its --workspace
+# would put nanobot's files into the project. So the task says where the project is.
+NANOBOT_PROJECT_NOTE = ("(sandbox-ai: the project is /work, shared with the agent that asks you; work there - your "
+                        "tools' relative paths start in your own workspace.)\n\n")
+NANOBOT_SESSIONS = []  # the helper's nanobot sessions, the newest last ("continue" goes on in it)
+NANOBOT_HEADER = "\N{CAT} nanobot"  # nanobot's header line before its answer (its bot_icon and bot_name)
 
 
 def tools(agent):
@@ -77,6 +89,10 @@ def command(agent, prompt, resume=False, skip=False, last_message=None):
                 *(["resume", "--last"] if resume else []), "--", prompt]
     if agent == "opencode":
         return ["opencode", "run", *(["--continue"] if resume else []), *extra, "--", prompt]
+    if agent == "opencode2":
+        # OpenCode 2's one-shot run (its own server per run: the shared service is off in the sandbox), the prompt
+        # after "--"; "continue" goes on in the project's last session.
+        return ["opencode2", "run", *(["--continue"] if resume else []), *extra, "--", prompt]
     if agent == "hermes":
         # The prompt as the option's own value (--oneshot=...): one that starts with "-" stays the prompt.
         return ["hermes", *(["--continue"] if resume else []), *extra, "--oneshot=" + prompt]
@@ -87,6 +103,26 @@ def command(agent, prompt, resume=False, skip=False, last_message=None):
         # One headless task: goose run, the text as the option's own value (--text=...); "continue" resumes the
         # helper's last session.
         return ["goose", "run", "--quiet", *(["--resume"] if resume else []), *extra, "--text=" + prompt]
+    if agent == "openhands":
+        # One task without the UI (sandbox-ai's openhands task, the SDK in its process), the text as the option's own
+        # value (--text=...); "continue" goes on in the helper's last task conversation.
+        return ["openhands", "task", *(["--resume"] if resume else []), *extra, "--text=" + prompt]
+    if agent == "nanobot":
+        # One task, the text as the option's own value (--message=...); a session of its own per task (nanobot's
+        # one-shot default, cli:direct, would go on in every earlier one), the last one again for "continue".
+        if not (resume and NANOBOT_SESSIONS):
+            NANOBOT_SESSIONS.append(f"sandbox-ai-helper-{time.time_ns()}")
+        return ["nanobot", "agent", "--no-markdown", "--session", NANOBOT_SESSIONS[-1], *extra,
+                "--message=" + NANOBOT_PROJECT_NOTE + prompt]
+    if agent == "letta":
+        # One headless task (-p), the prompt after "--"; "continue" goes on in the project's last conversation,
+        # else a new one (--new).
+        return ["letta", "-p", *([] if resume else ["--new"]), *extra, "--", prompt]
+    if agent == "pi":
+        # One task in print mode (-p), the prompt after "--" (a leading "@" would make it a file to read: a space
+        # keeps it text); "continue" goes on in the project's last session (--continue), else a new one.
+        return ["pi", "-p", *(["--continue"] if resume else []), *extra, "--",
+                " " + prompt if prompt.startswith("@") else prompt]
     if agent == "dsh":
         # One headless task, read from standard input (STDIN_PROMPT); headless resumes only a session it is named,
         # so "continue" starts a new task.
@@ -110,6 +146,11 @@ def answer_of(agent, out, last_message=None):
         except OSError:
             text = ""
         return text or out.strip()
+    if agent == "nanobot":
+        # What follows nanobot's header line (before it: the notes of its first start).
+        lines = out.strip().splitlines()
+        marks = [index for index, line in enumerate(lines) if line.strip() == NANOBOT_HEADER]
+        return "\n".join(lines[marks[-1] + 1:]).strip() if marks else out.strip()
     return out.strip()
 
 

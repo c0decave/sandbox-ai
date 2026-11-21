@@ -20,10 +20,12 @@
     "--mount",
     "{firmware}:/mnt/firmware:ro",
     "--device",
-    "{kvm}"
+    "{kvm}",
+    "--mcp-mount",
+    "binwalk:/work={firmware}:ro"
   ],
   "mcp": [
-    "hub:binwalk"
+    "mcp:binwalk"
   ],
   "values": {
     "firmware": {
@@ -36,5 +38,8 @@
       "optional": true
     }
   },
-  "prompt": "Extract the firmware in /mnt/firmware (binwalk), find the file system, services, hard-coded credentials and versions with known vulnerabilities. Write /work/firmware-report.md."
+  "prompt": "Extract the firmware in /mnt/firmware with binwalk (its MCP server sees the same folder as /work: /mnt/firmware/fw.bin is /work/fw.bin there), find the file system, services, hard-coded credentials and versions with known vulnerabilities. Write /work/firmware-report.md.",
+  "notes": [
+    "binwalk runs in a container of its own and gets the firmware folder read-only at its /work for this start (--mcp-mount binwalk:/work=FOLDER:ro). What it extracts stays in its container's /tmp unless you gave it a writable folder at /out once (sandbox-ai mcp set binwalk --mount /out=DIR:rw); add DIR to the start with --mount DIR:/mnt/extracted:ro to let the agent read the extracted files."
+  ]
 }

@@ -110,6 +110,47 @@ def test_with_is_checked():
     assert s.companions(s.parse_args(["claude", "--with", "codex", "--with", "codex"])) == ["codex"]
 
 
+def test_with_takes_a_comma_list_and_repeats_alike(capsys):
+    """`--with hermes,qwen` was refused (an invalid choice): the comma form and the repeated one are the same."""
+    for argv in (["--with", "hermes,qwen"], ["--with", "hermes", "--with", "qwen"], ["--with=hermes,qwen"],
+                 ["-wa", "hermes,qwen"], ["--with", "hermes, qwen"], ["--with", "hermes,", "--with", "qwen,hermes"]):
+        assert s.companions(s.parse_args(["claude", *argv])) == ["hermes", "qwen"], argv
+    for bad in ("hermes,gemini", ",", "", "hermes,,qwen x"):
+        with pytest.raises(SystemExit):
+            s.parse_args(["claude", "--with", bad])
+        assert "--with" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        s.parse_args(["claude", "--with", "hermes,gemini"])
+    said = capsys.readouterr().err
+    assert "gemini" in said and "qwen" in said, "the bad name and the choices"
+    assert s.experimental_needs(["claude"], ["--with", "hermes,qwen"]) == \
+        s.experimental_needs(["claude"], ["--with", "hermes", "--with", "qwen"])
+
+
+def test_with_comma_list_end_to_end_through_the_command(tmp_path):
+    """./sandbox-ai claude --with hermes,qwen --dry-run: accepted, both join (the plan names them and their
+    providers' hosts); a wrong name in the list is refused with the choices."""
+    env = {**os.environ, "HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "c"),
+           "XDG_STATE_HOME": str(tmp_path / "s"), "XDG_DATA_HOME": str(tmp_path / "d"),
+           "XDG_RUNTIME_DIR": str(tmp_path / "r"), "XDG_CACHE_HOME": str(tmp_path / "k")}
+    env.pop("SANDBOX_AI_RUN", None)
+    (tmp_path / "r").mkdir()
+    (tmp_path / "w").mkdir()
+
+    def run(*args):
+        return subprocess.run([str(ROOT / "sandbox-ai"), "claude", *args, "--dry-run", "--workspace",
+                               str(tmp_path / "w"), "--no-tmux"], capture_output=True, text=True, env=env,
+                              timeout=120, stdin=subprocess.DEVNULL)
+    result = run("--with", "hermes,qwen")
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["companions"] == ["hermes", "qwen"]
+    assert {"portal.nousresearch.com", "chat.qwen.ai"} <= set(plan["https_hosts"])
+    wrong = run("--with", "hermes,gemini")
+    assert wrong.returncode == 2 and "gemini" in wrong.stderr and "--with" in wrong.stderr
+
+
+
 def test_an_old_codex_beside_the_lead_refuses_the_run():
     rt = fm.load("runtime_for_companion_tests", "sandbox/runtime.py") if hasattr(fm, "load") else None
     if rt is None:
@@ -128,8 +169,9 @@ def test_an_old_codex_beside_the_lead_refuses_the_run():
 
 def test_build_the_team_image(tmp_path):
     log = tmp_path / "build.json"
-    (tmp_path / "podman").write_text("#!/usr/bin/python3\nimport json,os,sys\nfrom pathlib import Path\n"
-                                     "Path(os.environ['BUILD_LOG']).write_text(json.dumps(sys.argv[1:]))\n")
+    # Every call one line (the build, then the listing of the team images with layers that are built on it again).
+    (tmp_path / "podman").write_text("#!/usr/bin/python3\nimport json,os,sys\n"
+                                     "open(os.environ['BUILD_LOG'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
     (tmp_path / "npm").write_text("#!/bin/sh\necho 9.8.7\n")  # npm view PACKAGE version
     for name in ("podman", "npm"):
         (tmp_path / name).chmod(0o700)
@@ -137,7 +179,9 @@ def test_build_the_team_image(tmp_path):
     result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "team", "--build-arg", "CODEX_VERSION=1.2.3"],
                             capture_output=True, text=True, env=environment)
     assert result.returncode == 0, result.stderr
-    argv = json.loads(log.read_text())
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    argv = next(call for call in calls if "build" in call[:2])
+    assert any("images" in call[:2] for call in calls), "the layered team images are looked for"
     if not os.path.exists(f"/run/user/{os.getuid()}/bus"):  # no systemd user session: cgroupfs (as for every build)
         assert argv[0] == "--cgroup-manager=cgroupfs" and "no systemd user session" in result.stderr
         argv = argv[1:]

@@ -41,8 +41,9 @@ the commands below as `./sandbox-ai.pyz build all` and so on.
 
 This builds `localhost/codex-sandbox`, `localhost/claude-sandbox` and
 `localhost/opencode-sandbox` with the newest agent releases on the current
-Node.js LTS, and `localhost/hermes-sandbox`, `localhost/dsh-sandbox`,
-`localhost/qwen-sandbox` and `localhost/goose-sandbox` with the releases
+Node.js LTS, and `localhost/opencode2-sandbox` (OpenCode 2), `localhost/hermes-sandbox`, `localhost/dsh-sandbox`,
+`localhost/qwen-sandbox`, `localhost/goose-sandbox`, `localhost/openhands-sandbox`,
+`localhost/nanobot-sandbox`, `localhost/letta-sandbox` and `localhost/pi-sandbox` with the releases
 sandbox-ai reviewed, then the team, Cairn, browser, VPN and Tor images and your
 variants, one build each (one that fails stops none of the others; the end
 says what was built and what failed). Build only what you need with
@@ -182,8 +183,9 @@ Every start works like this; without `--name` it gets a codename such as `brisk-
 (the start prints it, `sandbox-ai list` shows it with its workspace).
 
 ```bash
-./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED (UTC)  WORKSPACE
+./sandbox-ai list                  # NAME  KIND  AGENT  STATE  STARTED  HOME  WORKSPACE
 ./sandbox-ai attach demo           # back in
+./sandbox-ai shell demo            # a shell of yours beside the agent, under its rules
 ./sandbox-ai pause demo            # freeze everything, e.g. to free the CPU
 ./sandbox-ai resume demo           # continue exactly where it was
 ./sandbox-ai stop demo             # end it; files and HOME are kept

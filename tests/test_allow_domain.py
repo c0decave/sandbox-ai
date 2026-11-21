@@ -47,10 +47,9 @@ def test_spellings_of_one_domain(value):
     ("com", "a whole top-level domain"),
     ("*.com", "a whole top-level domain"),
     ("bücher.de", "xn-- form"),
-    ("exa mple.org", "not a domain name"),
+    ("exa_mple.org", "not a domain name"),
     ("a..example.org", "not a domain name"),
     ("*.*.example.org", "not a domain name"),
-    ("", "not a domain name"),
     ("*.", "not a domain name"),
     ("x" * 64 + ".example.org", "not a domain name"),
 ])
@@ -61,6 +60,13 @@ def test_refusals_name_the_option(value, reason):
     assert a.allow_host == []  # nothing expanded: validate() says why
     with pytest.raises(ValueError, match=r"^--allow-domain .*" + reason.replace(".", r"\.")):
         s.validate(a)
+
+
+def test_an_empty_domain_is_refused():
+    with pytest.raises(ValueError, match="^--allow-domain .*not a domain name"):
+        s.domain_of("")
+    with pytest.raises(SystemExit):  # (a list option: a value without any item; tests/test_allow_lists.py)
+        parsed("--allow-domain", "")
 
 
 def test_a_domain_below_a_country_suffix_is_one_domain():
@@ -238,3 +244,21 @@ def test_a_project_file_with_allow_domain_is_marked_before_it_is_trusted():
                                           "--mcp-limits", "demo:memory=8g"])
     assert found == [("--allow-domain", "evil.example"), ("--allow-domain", "x.example"),
                      ("--mcp-limits", "demo:memory=8g")]
+
+
+def test_a_subtree_its_service_runs_itself_through_the_launcher_and_net_allow(m):
+    """User 2026-11-19 (regression): `--allow-host '*.actions.githubusercontent.com'` and `--allow-domain
+    actions.githubusercontent.com` were refused at the start and by `sandbox-ai net allow` during the run, although
+    GitHub runs that subtree itself. Through the launcher's plan and the supervisor's control op (what net allow
+    sends); a public suffix of a shared service (blob.core.windows.net: anyone's storage account) stays refused."""
+    plan = m.plan("--allow-host", "*.actions.githubusercontent.com")
+    assert plan["host_wildcards"] == ["*.actions.githubusercontent.com"]
+    plan = m.plan("--allow-domain", "actions.githubusercontent.com")
+    assert plan["host_wildcards"] == ["*.actions.githubusercontent.com"]
+    try:  # (the supervisor's own set: taken out again, never left for the next test)
+        assert "actions.githubusercontent.com" in s.RUNTIME.change_wildcards({"add": ["*.actions.githubusercontent.com"]})
+    finally:
+        s.RUNTIME.change_wildcards({"remove": ["*.actions.githubusercontent.com"]})
+    m.refused("--allow-host", "*.blob.core.windows.net", match="anyone can have a name of their own")
+    with pytest.raises(ValueError, match="anyone can have"):
+        s.RUNTIME.change_wildcards({"add": ["*.blob.core.windows.net"]})

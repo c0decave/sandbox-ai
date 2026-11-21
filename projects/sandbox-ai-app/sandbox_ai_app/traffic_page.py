@@ -7,7 +7,10 @@ The list comes from `sandbox-ai llm traffic SOURCE --summary --json --tail N [--
 whose output is read as it comes: one short line per request); a request's whole record and its readable view from
 `sandbox-ai llm traffic SOURCE RUN --request N --json`, read and laid out in a thread. Searching asks the command again
 with --grep (the whole run, not only the list). Everything here quotes the agent and the model, so every text is shown
-escaped; long texts are cut on the screen (the export holds them whole)."""
+escaped; long texts are cut on the screen (the export holds them whole).
+
+Host at the top: this machine's sandboxes, or a host's of `sandbox-ai hosts` - its sessions and running starts, each
+read, followed and exported there (`sandbox-ai hosts run HOST -- llm traffic ...`, SandboxAI.host_command)."""
 from __future__ import annotations
 
 import html
@@ -31,6 +34,8 @@ from .files import printable, printable_text
 from .i18n import N_, tr
 from .widgets import MONO, flow, plain_label
 
+LOCAL = "local"  # this machine, as sandbox-ai hosts names it
+
 COLUMNS = (N_("#"), N_("Time"), N_("Model"), N_("Tokens in/out"), N_("Time taken"), N_("Status"), N_("New"),
            N_("Loop guard"))
 TAIL = 2000              # requests read when a run is opened
@@ -41,7 +46,7 @@ HTML_LIMIT = 3 << 20     # characters of the chat's page; beyond, the messages a
 RAW_LIMIT = 1 << 20      # characters of the raw record shown
 DETAIL_SECONDS = 120
 EXPORT_SECONDS = 600
-FILE = re.compile(r"llm-traffic-(\d{8}-\d{6})-([A-Za-z0-9._-]{1,128}?)\.jsonl(?:\.\d{1,3})?")
+FILE = re.compile(r"llm-traffic-(\d{8}-\d{6})-([A-Za-z0-9._-]{1,128}?)\.jsonl(?:\.\d{1,3})?(?:\.gz)?")  # .gz: gc
 ROLE_COLORS = {"user": "accent", "assistant": "ok", "system": "muted", "tool": "muted", "developer": "muted",
                "error": "bad"}
 
@@ -316,6 +321,7 @@ class ChatWindow(QDialog):
 
     def __init__(self, parent, title_text, page_html):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # (closed, it stayed a hidden child of the page)
         self.setWindowTitle(title_text)
         layout = QVBoxLayout(self)
         self.browser = QTextBrowser()
@@ -340,13 +346,19 @@ class TrafficPage(QWidget):
         self.started = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        # Whose traffic: this machine's sandboxes, or a host's of `sandbox-ai hosts` (its starts, read and followed
+        # there: sandbox-ai llm traffic over SSH).
+        from .host_choice import HostChooser
+        self.hosts = HostChooser(sai, tr("The LLM traffic of this machine's sandboxes, or of a host's (over SSH)"))
+        self.hosts.changed.connect(lambda _host: self.host_changed())
         self.source = QComboBox()
         self.source.setAccessibleName(tr("Run or session"))
         widgets.compact_combo(self.source, 34)
         self.source.currentIndexChanged.connect(lambda _=0: self.restart())
         refresh = QPushButton(tr("Refresh"))
         refresh.clicked.connect(lambda: self.refresh_sources())
-        other = QPushButton(tr("Other folder…"))
+        other = self.other_button = QPushButton(tr("Other folder…"))
+        other.setToolTip(tr("A log folder of this machine"))
         other.clicked.connect(self.browse)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("search the run (messages, tools, answers)"))
@@ -372,7 +384,8 @@ class TrafficPage(QWidget):
         self.export_button.setMenu(menu)
         show = QLabel(tr("Show"))
         show.setBuddy(self.source)
-        layout.addWidget(flow(show, self.source, refresh, other, self.search, self.follow, self.export_button))
+        layout.addWidget(flow(self.hosts, show, self.source, refresh, other, self.search, self.follow,
+                              self.export_button))
         split = QSplitter(Qt.Orientation.Horizontal)
         self.model = TrafficModel(self)
         self.table = QTableView()
@@ -468,9 +481,43 @@ class TrafficPage(QWidget):
                              folder=printable(Path(directory).name)), {"args": ["--log-dir", directory], "run": run}))
         return found
 
+    def host(self):
+        return self.hosts.host() or LOCAL
+
+    def host_changed(self):
+        """Another host chosen: its starts as the sources, nothing of the host before (its --follow ends)."""
+        self.stop()
+        self.model.clear()
+        self.clear_detail()
+        self.sources = []
+        self.source.blockSignals(True)
+        self.source.clear()
+        self.source.blockSignals(False)
+        widgets.set_enabled(self.other_button, self.host() == LOCAL,
+                            tr("A log folder of this machine: choose this machine as the host."))
+        if self.started:
+            self.refresh_sources()
+
+    def remote_sources(self, host):
+        """[(title, {"args", "run"})] of HOST (in a thread): its sessions and its runs that run now (sandbox-ai list
+        --json there); each read and followed there."""
+        found = []
+        for instance in self.sai.host_instances(host):
+            if instance.kind == "session":
+                found.append((tr("Session: {name} ({status})", name=printable(instance.name),
+                                 status=printable(instance.state)), {"args": ["--session", instance.name], "run": None}))
+            elif instance.kind == "run" and instance.state == "running":
+                found.append((tr("Run: {run} · {state} ({folder})", run=printable(instance.name), state=tr("running"),
+                                 folder=printable(host)), {"args": [], "run": instance.name}))
+        return found
+
     def refresh_sources(self, select=None):
         self.sources_token += 1
-        token = self.sources_token
+        token, host = self.sources_token, self.host()
+        if host != LOCAL:
+            widgets.background(self.remote_sources, host, owner=self, timeout=120,
+                               done=lambda result, error: self.listed(token, select, result, error))
+            return
         widgets.background(self.read_sources, owner=self, timeout=90,
                            done=lambda result, error: self.listed(token, select, result, error))
 
@@ -526,7 +573,8 @@ class TrafficPage(QWidget):
         self.detail, self.errors = None, ""
         self.clear_detail()
         arguments = self.source_args()
-        if not (Path(self.sai.directory) / "llm_traffic.py").is_file():
+        host = self.host()
+        if host == LOCAL and not (Path(self.sai.directory) / "llm_traffic.py").is_file():
             self.status.setText(tr("This sandbox-ai has no LLM traffic log yet; update it with: sandbox-ai update"))
             return
         if arguments is None:
@@ -536,7 +584,7 @@ class TrafficPage(QWidget):
         query = self.search.text().strip()[:200]
         arguments += ["--summary", "--json", "--tail", str(TAIL), *(["--grep", query] if query else []),
                       *(["--follow"] if self.follow.isChecked() else [])]
-        argv = self.sai.command(*arguments)
+        argv = self.sai.command(*arguments) if host == LOCAL else self.sai.host_command(host, *arguments)
         process = QProcess(self)
         process.setProgram(argv[0])
         process.setArguments(argv[1:])
@@ -608,7 +656,10 @@ class TrafficPage(QWidget):
             self.add_lines([self.buffer])
             self.buffer = b""
         message = self.errors.strip().splitlines()[-1] if self.errors.strip() else ""
-        if code != 0 and message:
+        old = self.sai.too_old_text(self.host(), (code, "", self.errors), "llm traffic") if code == 2 else None
+        if old:
+            self.status.setText(old)
+        elif code != 0 and message:
             self.status.setText(printable_text(message.removeprefix("sandbox-ai llm traffic: ")))
         else:
             self.update_status()
@@ -651,13 +702,14 @@ class TrafficPage(QWidget):
         self.chat.setPlainText(tr("Reading…"))
         token = self.detail_token
         argv = [*arguments, "--request", str(summary["n"]), "--json"]
-        widgets.background(self.fetch, argv, owner=self, timeout=DETAIL_SECONDS,
+        widgets.background(self.fetch, argv, self.host(), owner=self, timeout=DETAIL_SECONDS,
                            done=lambda result, error: self.fetched(token, result, error))
 
-    def fetch(self, argv):
-        """The record and its view (in a thread): `sandbox-ai llm traffic ... --request N --json`, and the raw JSON's
-        text."""
-        code, out, err = self.sai.call(*argv, timeout=DETAIL_SECONDS)
+    def fetch(self, argv, host=LOCAL):
+        """The record and its view (in a thread): `sandbox-ai llm traffic ... --request N --json` (on HOST), and the
+        raw JSON's text."""
+        code, out, err = self.sai.call(*argv, timeout=DETAIL_SECONDS) if host == LOCAL else \
+            self.sai.host_run(host, *argv, timeout=DETAIL_SECONDS)
         if code != 0:
             raise ValueError((err.strip().splitlines() or [tr("no answer")])[-1].removeprefix("sandbox-ai llm traffic: "))
         document = json.loads(out.strip().splitlines()[-1])
@@ -777,7 +829,8 @@ class TrafficPage(QWidget):
             widgets.warn(self, tr("Not exported"), tr("Cannot write {path}: {error}", path=printable(path),
                                                       error=printable_text(exc)))
             return None
-        argv = self.sai.command(*arguments)
+        host = self.host()
+        argv = self.sai.command(*arguments) if host == LOCAL else self.sai.host_command(host, *arguments)
 
         def write():
             try:

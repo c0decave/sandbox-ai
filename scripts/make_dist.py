@@ -2,7 +2,8 @@
 """Build the release files of sandbox-ai into dist/.
 
   sandbox-ai-bundle-X.Y.Z.tar.gz   the tree install.sh installs (reproducible: sorted, fixed owner and time)
-  sandbox_ai-X.Y.Z.tar.gz, *.whl   the PyPI package (python -m build; needs the "build" package)
+  sandbox_ai_app-X.Y.Z.tar.gz,     the PyPI package sandbox-ai-app (python -m build; needs the "build" package):
+  sandbox_ai_app-X.Y.Z-*.whl       the command line, the web interface and the desktop app (its PySide6: [gui])
   sandbox-ai.pyz                   the command line in one file (python3 sandbox-ai.pyz ...; scripts/make_pyz.py)
   install.sh                       the installer, for curl ... | bash style downloads, with the release keys of
                                    sandbox/release-signers embedded (they check the very first install)
@@ -58,6 +59,14 @@ def release_keys():
     return module
 
 
+def release_assets():
+    """sandbox/release_assets.py: the names of a release's files, in one place."""
+    spec = importlib.util.spec_from_file_location("sandbox_release_assets", ROOT / "sandbox" / "release_assets.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def version():
     text = (ROOT / "sandbox" / "agent_sandbox.py").read_text()
     match = re.search(r'^__version__ = "([^"]+)"$', text, re.M)
@@ -77,7 +86,7 @@ MCP_CATALOG_FILES = (MCP_CATALOG, MCP_CATALOG + ".sig", "projects/sandbox-ai-mcp
                      "projects/sandbox-ai-mcp/rootfs.json.sig")
 # The videos about the app's pages: the release file and the names of its members (the app's videos.py NAME and
 # ARCHIVE: it installs nothing else).
-VIDEOS = "sandbox-ai-videos.tar"
+VIDEOS = release_assets().VIDEOS  # sandbox-ai-videos.tar
 VIDEO_NAME = re.compile(r"sandbox-ai-app-(\d{2})-([a-z]+)-([a-z]{2})\.(mp4|vtt)")
 # Internal notes kept in the checkout that no release file carries (MANIFEST.in excludes them from the sdist too):
 # the hosts this checkout's own agent reaches, how the MCP catalog's signing key is handled.
@@ -108,7 +117,7 @@ def source_date():
 
 
 def bundle(out, ver):
-    path = out / f"sandbox-ai-bundle-{ver}.tar.gz"
+    path = out / release_assets().bundle(ver)
     top, mtime = f"sandbox-ai-{ver}", source_date()
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as tar:
@@ -244,7 +253,30 @@ def main(argv=None):
         except (OSError, subprocess.CalledProcessError):
             sys.exit("make_dist: building the PyPI package failed; install the builder with "
                      "`python3 -m pip install build`, or pass --skip-python")
+        problem = python_package_problem(out, ver)
+        if problem:
+            sys.exit(f"make_dist: {problem}")
     return finish(out, a, keys, ver)
+
+
+PYPI_NAME = release_assets().PYPI_NAME  # the PyPI project (release.yml's job pypi uploads its wheel and sdist)
+
+
+def python_package_files(ver):
+    """The wheel and the sdist of the PyPI package of version VER: what release.yml uploads to PyPI, and what a pip
+    installation updates with (release_assets.py)."""
+    return (release_assets().wheel(ver), release_assets().sdist(ver))
+
+
+def python_package_problem(out, ver):
+    """What is wrong with the Python packages built into OUT (exactly python_package_files(VER)), or None."""
+    built = sorted(path.name for path in Path(out).iterdir()
+                   if path.name.endswith(".whl") or (path.name.endswith(".tar.gz")
+                                                     and not path.name.startswith("sandbox-ai-bundle-")))
+    wanted = sorted(python_package_files(ver))
+    if built != wanted:
+        return f"the PyPI package should be {' and '.join(wanted)}, the build made: {', '.join(built) or 'nothing'}"
+    return None
 
 
 def finish(out, a, keys, ver):
@@ -267,6 +299,10 @@ def finish(out, a, keys, ver):
     elif keys:
         print("make_dist: SHA256SUMS is NOT signed, but sandbox/release-signers lists keys: installations refuse "
               "this release until it carries SHA256SUMS.sig (--sign KEY)", file=sys.stderr)
+    lacking = release_assets().missing([path.name for path in out.iterdir()], ver, signed=bool(keys))
+    if lacking:  # (said, not refused: the packages come from CI, the videos and the signature from the maintainer)
+        print(f"make_dist: not a complete release yet, {out} lacks: {', '.join(lacking)} (RELEASING.md; "
+              f"scripts/release_check.py {ver} --dir {out} checks the set)", file=sys.stderr)
     print(f"make_dist: sandbox-ai {ver} in {out}", file=sys.stderr)
     return 0
 

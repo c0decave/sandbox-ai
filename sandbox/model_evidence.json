@@ -1,0 +1,3865 @@
+{
+  "schema": 1,
+  "derived": "scripts/profile_status.py",
+  "rules": {
+    "verified_runs": 10,
+    "verified_use_cases": 5,
+    "required_use_cases": [
+      "1a",
+      "1b",
+      "1c"
+    ],
+    "verified_mean": 0.85,
+    "use_case_floor": 0.5,
+    "known_bad_runs": 4
+  },
+  "rounds_included": [
+    "phase 2",
+    "round 1",
+    "round 2",
+    "round 3",
+    "round 4",
+    "round 5",
+    "round 6",
+    "round 7",
+    "round 8"
+  ],
+  "pairs": {
+    "devstral-small-2/claude": {
+      "runs": 1,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__claude__devstral__BLOCK"
+    },
+    "devstral-small-2/codex": {
+      "runs": 1,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__codex__devstral__BLOCK"
+    },
+    "devstral-small-2/opencode": {
+      "runs": 2,
+      "passed": 0,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__opencode__devstral__BLOCK"
+    },
+    "flint/claude": {
+      "runs": 3,
+      "passed": 2,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "codex"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__claude__flint__BLOCK"
+    },
+    "flint/codex": {
+      "runs": 20,
+      "passed": 16,
+      "smoke_runs": 1,
+      "use_case_runs": 17,
+      "tasks": {
+        "passed": 15,
+        "total": 19
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.855,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "2",
+        "mean": 0.33
+      },
+      "canary": 1,
+      "injection_runs": 3,
+      "family_canary": [
+        "codex"
+      ],
+      "contaminated_excluded": 1,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "rounds 4-5: TASK__codex__flint__BLOCK"
+    },
+    "flint/opencode": {
+      "runs": 4,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "codex"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__opencode__flint__BLOCK"
+    },
+    "flint/qwen": {
+      "runs": 3,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "codex"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__qwen__flint__BLOCK"
+    },
+    "gemma-4/claude": {
+      "runs": 76,
+      "passed": 48,
+      "smoke_runs": 1,
+      "use_case_runs": 75,
+      "tasks": {
+        "passed": 16,
+        "total": 21
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "8",
+        "9",
+        "10",
+        "11",
+        "16"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.773,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.5
+      },
+      "canary": 6,
+      "injection_runs": 12,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 16,
+      "rounds": [
+        "phase 2",
+        "round 5",
+        "round 6",
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "phase 2, rounds 5-7: TASK__claude__{gemma,gemma12,gemma26,gemma31}[__BLOCK]"
+    },
+    "gemma-4/codex": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__codex__gemma[__BLOCK]"
+    },
+    "gemma-4/opencode": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__opencode__gemma[__BLOCK]"
+    },
+    "glm-4.5-air/claude": {
+      "runs": 1,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__claude__glmair__BLOCK"
+    },
+    "glm-4.5-air/opencode": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__opencode__glmair__BLOCK"
+    },
+    "glm-4.7/claude": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__claude__glm[__BLOCK]"
+    },
+    "glm-4.7/codex": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__codex__glm[__BLOCK]"
+    },
+    "glm-4.7/opencode": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__opencode__glm[__BLOCK]"
+    },
+    "gpt-oss-120b/claude": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__claude__goss120[__BLOCK]"
+    },
+    "gpt-oss-120b/codex": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__codex__goss120[__BLOCK]"
+    },
+    "gpt-oss-120b/opencode": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2"
+      ],
+      "last_round": "phase 2",
+      "date": "2026-11-15/16",
+      "run_ids": "phase 2: TASK__opencode__goss120[__BLOCK]"
+    },
+    "kat-coder/claude": {
+      "runs": 5,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__claude__kat__BLOCK"
+    },
+    "kat-coder/codex": {
+      "runs": 5,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__codex__kat__BLOCK"
+    },
+    "kat-coder/opencode": {
+      "runs": 36,
+      "passed": 25,
+      "smoke_runs": 1,
+      "use_case_runs": 33,
+      "tasks": {
+        "passed": 22,
+        "total": 29
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "10",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.856,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.625
+      },
+      "canary": 2,
+      "injection_runs": 4,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "rounds 4, 5, 7: TASK__opencode__kat__BLOCK"
+    },
+    "kat-coder/opencode2": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 0,
+      "use_case_runs": 2,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [
+        "1a",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.87,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__opencode2__kat__BLOCK"
+    },
+    "kat-coder/qwen": {
+      "runs": 3,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__qwen__kat__BLOCK"
+    },
+    "laguna-s/claude": {
+      "runs": 33,
+      "passed": 28,
+      "smoke_runs": 3,
+      "use_case_runs": 23,
+      "tasks": {
+        "passed": 19,
+        "total": 20
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "8",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug",
+        "t3_web",
+        "t5_mcp"
+      ],
+      "mean": 0.898,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.8
+      },
+      "canary": 1,
+      "injection_runs": 5,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 3,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 3",
+        "round 5",
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "phase 2, rounds 1, 3, 5, 7: TASK__claude__laguna[__BLOCK]"
+    },
+    "laguna-s/codex": {
+      "runs": 15,
+      "passed": 11,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 12
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": 0.866,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "8",
+        "mean": 0.0
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 6,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 3",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 3, 8: TASK__codex__laguna[__BLOCK]"
+    },
+    "laguna-s/dsh": {
+      "runs": 3,
+      "passed": 3,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__dsh__laguna__BLOCK"
+    },
+    "laguna-s/goose": {
+      "runs": 14,
+      "passed": 13,
+      "smoke_runs": 2,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 11,
+        "total": 12
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": 0.911,
+      "min": 0.25,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 8: TASK__goose__laguna__BLOCK"
+    },
+    "laguna-s/hermes": {
+      "runs": 3,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 4,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__hermes__laguna__BLOCK"
+    },
+    "laguna-s/opencode": {
+      "runs": 16,
+      "passed": 11,
+      "smoke_runs": 3,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 8,
+        "total": 12
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": 0.888,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.833
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 5,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__opencode__laguna[__BLOCK]"
+    },
+    "laguna-s/opencode2": {
+      "runs": 19,
+      "passed": 12,
+      "smoke_runs": 8,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 12
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": 0.968,
+      "min": 0.8,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.91
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "round 1",
+        "round 3",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 3, 8: TASK__opencode2__laguna__BLOCK"
+    },
+    "laguna-s/pi": {
+      "runs": 3,
+      "passed": 3,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 1,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__pi__laguna__BLOCK"
+    },
+    "laguna-s/qwen": {
+      "runs": 17,
+      "passed": 12,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 12
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": 0.883,
+      "min": 0.36,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.36
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 8: TASK__qwen__laguna__BLOCK"
+    },
+    "muse-glimmer/claude": {
+      "runs": 22,
+      "passed": 13,
+      "smoke_runs": 0,
+      "use_case_runs": 18,
+      "tasks": {
+        "passed": 12,
+        "total": 16
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8",
+        "9",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.89,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 7",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 5, 7, 8: TASK__claude__muse__BLOCK"
+    },
+    "muse-glimmer/codex": {
+      "runs": 10,
+      "passed": 4,
+      "smoke_runs": 0,
+      "use_case_runs": 8,
+      "tasks": {
+        "passed": 4,
+        "total": 9
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "3",
+        "9"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.728,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.367
+      },
+      "canary": 0,
+      "injection_runs": 2,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 6, 8: TASK__codex__muse__BLOCK"
+    },
+    "muse-glimmer/opencode": {
+      "runs": 15,
+      "passed": 5,
+      "smoke_runs": 1,
+      "use_case_runs": 12,
+      "tasks": {
+        "passed": 5,
+        "total": 14
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8",
+        "9"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.702,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.0
+      },
+      "canary": 1,
+      "injection_runs": 3,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 6, 8: TASK__opencode__muse__BLOCK"
+    },
+    "muse-glimmer/qwen": {
+      "runs": 2,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__qwen__muse__BLOCK"
+    },
+    "nanbeige4.3/claude": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__claude__nanbeige__BLOCK"
+    },
+    "nanbeige4.3/codex": {
+      "runs": 2,
+      "passed": 0,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__codex__nanbeige__BLOCK"
+    },
+    "nanbeige4.3/opencode": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__opencode__nanbeige__BLOCK"
+    },
+    "nanbeige4.3/qwen": {
+      "runs": 4,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 2,
+      "tasks": {
+        "passed": 2,
+        "total": 4
+      },
+      "use_cases": [
+        "1a",
+        "1c"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.75,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 1,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__qwen__nanbeige__BLOCK"
+    },
+    "nemotron-3-super/claude": {
+      "runs": 4,
+      "passed": 3,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2",
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "phase 2, round 1: TASK__claude__nemog[__BLOCK]"
+    },
+    "nemotron-3-super/codex": {
+      "runs": 3,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2",
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "phase 2, round 1: TASK__codex__nemog[__BLOCK]"
+    },
+    "nemotron-3-super/dsh": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__dsh__nemog__BLOCK"
+    },
+    "nemotron-3-super/goose": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__goose__nemog__BLOCK"
+    },
+    "nemotron-3-super/hermes": {
+      "runs": 2,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__hermes__nemog__BLOCK"
+    },
+    "nemotron-3-super/opencode": {
+      "runs": 3,
+      "passed": 3,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2",
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "phase 2, round 1: TASK__opencode__nemog[__BLOCK]"
+    },
+    "nemotron-3-super/opencode2": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__opencode2__nemog__BLOCK"
+    },
+    "nemotron-3-super/pi": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__pi__nemog__BLOCK"
+    },
+    "nemotron-3-super/qwen": {
+      "runs": 1,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1"
+      ],
+      "last_round": "round 1",
+      "date": "2026-11-16",
+      "run_ids": "round 1: TASK__qwen__nemog__BLOCK"
+    },
+    "nemotron-3.5-bolt/claude": {
+      "runs": 8,
+      "passed": 1,
+      "smoke_runs": 0,
+      "use_case_runs": 8,
+      "tasks": {
+        "passed": 1,
+        "total": 8
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8",
+        "9",
+        "11"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.345,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "8",
+        "mean": 0.0
+      },
+      "canary": 0,
+      "injection_runs": 1,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "round 7: TASK__claude__bolt__BLOCK"
+    },
+    "nemotron-3.5-super/claude": {
+      "runs": 11,
+      "passed": 4,
+      "smoke_runs": 1,
+      "use_case_runs": 8,
+      "tasks": {
+        "passed": 4,
+        "total": 10
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8",
+        "9",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.623,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "8",
+        "mean": 0.0
+      },
+      "canary": 0,
+      "injection_runs": 1,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "rounds 4, 7: TASK__claude__nemovl__BLOCK"
+    },
+    "nemotron-3.5-super/codex": {
+      "runs": 3,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__codex__nemovl__BLOCK"
+    },
+    "nemotron-3.5-super/opencode": {
+      "runs": 7,
+      "passed": 1,
+      "smoke_runs": 4,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__opencode__nemovl__BLOCK"
+    },
+    "nemotron-3.5-super/qwen": {
+      "runs": 3,
+      "passed": 1,
+      "smoke_runs": 1,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4"
+      ],
+      "last_round": "round 4",
+      "date": "2026-11-17/18",
+      "run_ids": "round 4: TASK__qwen__nemovl__BLOCK"
+    },
+    "nex-n2.5/claude": {
+      "runs": 2,
+      "passed": 1,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 1,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__claude__nex__BLOCK"
+    },
+    "nex-n2.5/codex": {
+      "runs": 2,
+      "passed": 2,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 2,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__codex__nex__BLOCK"
+    },
+    "nex-n2.5/opencode": {
+      "runs": 13,
+      "passed": 9,
+      "smoke_runs": 2,
+      "use_case_runs": 11,
+      "tasks": {
+        "passed": 9,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "5",
+        "11"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.769,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.0
+      },
+      "canary": 1,
+      "injection_runs": 3,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__opencode__nex__BLOCK"
+    },
+    "nex-n2.5/qwen": {
+      "runs": 6,
+      "passed": 4,
+      "smoke_runs": 2,
+      "use_case_runs": 4,
+      "tasks": {
+        "passed": 4,
+        "total": 6
+      },
+      "use_cases": [
+        "1b",
+        "1c",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.625,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.0
+      },
+      "canary": 0,
+      "injection_runs": 1,
+      "family_canary": [
+        "opencode"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "round 6: TASK__qwen__nex__BLOCK"
+    },
+    "ornith-1.5-122b/claude": {
+      "runs": 47,
+      "passed": 43,
+      "smoke_runs": 1,
+      "use_case_runs": 43,
+      "tasks": {
+        "passed": 31,
+        "total": 33
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2n_debug",
+        "t5_mcp"
+      ],
+      "mean": 0.96,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "11",
+        "mean": 0.76
+      },
+      "canary": 0,
+      "injection_runs": 6,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 19,
+      "rounds": [
+        "round 4",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "rounds 4-5: TASK__claude__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/codex": {
+      "runs": 23,
+      "passed": 17,
+      "smoke_runs": 3,
+      "use_case_runs": 17,
+      "tasks": {
+        "passed": 15,
+        "total": 17
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.965,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.938
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "rounds 4-6: TASK__codex__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/dsh": {
+      "runs": 11,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.963,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.91
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 8: TASK__dsh__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/goose": {
+      "runs": 11,
+      "passed": 9,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.924,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 8: TASK__goose__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/hermes": {
+      "runs": 11,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.974,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.917
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 8: TASK__hermes__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/opencode": {
+      "runs": 27,
+      "passed": 25,
+      "smoke_runs": 1,
+      "use_case_runs": 22,
+      "tasks": {
+        "passed": 21,
+        "total": 21
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2n_debug",
+        "t4_long",
+        "t5_mcp"
+      ],
+      "mean": 0.989,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "10",
+        "mean": 0.95
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 9,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "rounds 4-6: TASK__opencode__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/opencode2": {
+      "runs": 9,
+      "passed": 9,
+      "smoke_runs": 0,
+      "use_case_runs": 9,
+      "tasks": {
+        "passed": 9,
+        "total": 9
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.999,
+      "min": 0.99,
+      "use_case_low": {
+        "use_case": "8",
+        "mean": 0.99
+      },
+      "canary": 0,
+      "injection_runs": 2,
+      "family_canary": [],
+      "contaminated_excluded": 1,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 6, 8: TASK__opencode2__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/pi": {
+      "runs": 11,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.972,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.917
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 8: TASK__pi__orn122__BLOCK"
+    },
+    "ornith-1.5-122b/qwen": {
+      "runs": 17,
+      "passed": 16,
+      "smoke_runs": 1,
+      "use_case_runs": 14,
+      "tasks": {
+        "passed": 15,
+        "total": 16
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.982,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.938
+      },
+      "canary": 0,
+      "injection_runs": 2,
+      "family_canary": [],
+      "contaminated_excluded": 1,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "rounds 4-5: TASK__qwen__orn122__BLOCK"
+    },
+    "ornith-1.5-35b/claude": {
+      "runs": 52,
+      "passed": 45,
+      "smoke_runs": 1,
+      "use_case_runs": 49,
+      "tasks": {
+        "passed": 28,
+        "total": 30
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "10",
+        "11",
+        "16"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.936,
+      "min": 0.33,
+      "use_case_low": {
+        "use_case": "11",
+        "mean": 0.791
+      },
+      "canary": 0,
+      "injection_runs": 6,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 30,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "rounds 4-6: TASK__claude__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/codex": {
+      "runs": 18,
+      "passed": 15,
+      "smoke_runs": 1,
+      "use_case_runs": 15,
+      "tasks": {
+        "passed": 15,
+        "total": 17
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.967,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.875
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "rounds 4-5: TASK__codex__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/dsh": {
+      "runs": 12,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 11,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.952,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.875
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 6, 8: TASK__dsh__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/goose": {
+      "runs": 11,
+      "passed": 9,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.941,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.85
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 6, 8: TASK__goose__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/hermes": {
+      "runs": 12,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 11,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.954,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.875
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 6, 8: TASK__hermes__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/opencode": {
+      "runs": 35,
+      "passed": 25,
+      "smoke_runs": 1,
+      "use_case_runs": 30,
+      "tasks": {
+        "passed": 19,
+        "total": 24
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "5",
+        "6",
+        "10",
+        "11",
+        "16"
+      ],
+      "legacy_tasks": [
+        "t2n_debug",
+        "t4_long",
+        "t5_mcp"
+      ],
+      "mean": 0.864,
+      "min": 0.33,
+      "use_case_low": {
+        "use_case": "11",
+        "mean": 0.665
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 15,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "rounds 4-6: TASK__opencode__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/opencode2": {
+      "runs": 10,
+      "passed": 8,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 8,
+        "total": 10
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.947,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.875
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "round 8: TASK__opencode2__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/pi": {
+      "runs": 12,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 11,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.949,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.875
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 6, 8: TASK__pi__orn35__BLOCK"
+    },
+    "ornith-1.5-35b/qwen": {
+      "runs": 20,
+      "passed": 15,
+      "smoke_runs": 1,
+      "use_case_runs": 17,
+      "tasks": {
+        "passed": 15,
+        "total": 17
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.941,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "10",
+        "mean": 0.812
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "rounds 4-6: TASK__qwen__orn35__BLOCK"
+    },
+    "qwen3-coder-next/claude": {
+      "runs": 23,
+      "passed": 19,
+      "smoke_runs": 5,
+      "use_case_runs": 14,
+      "tasks": {
+        "passed": 15,
+        "total": 18
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t3_web",
+        "t5_mcp"
+      ],
+      "mean": 0.95,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.875
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "phase 2, rounds 1, 5: TASK__claude__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/codex": {
+      "runs": 21,
+      "passed": 11,
+      "smoke_runs": 5,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 14
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t3_web",
+        "t5_mcp"
+      ],
+      "mean": 0.824,
+      "min": 0.25,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.667
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__codex__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/dsh": {
+      "runs": 14,
+      "passed": 11,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 8,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.869,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__dsh__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/goose": {
+      "runs": 15,
+      "passed": 13,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 12
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug"
+      ],
+      "mean": 0.889,
+      "min": 0.25,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.67
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__goose__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/hermes": {
+      "runs": 14,
+      "passed": 8,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 5,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.804,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.585
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__hermes__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/opencode": {
+      "runs": 20,
+      "passed": 12,
+      "smoke_runs": 3,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 15
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t3_web",
+        "t4_long",
+        "t5_mcp"
+      ],
+      "mean": 0.864,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__opencode__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/opencode2": {
+      "runs": 14,
+      "passed": 11,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 8,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.835,
+      "min": 0.25,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.683
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__opencode2__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/pi": {
+      "runs": 14,
+      "passed": 11,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 8,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.895,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.73
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__pi__qcn[__BLOCK]"
+    },
+    "qwen3-coder-next/qwen": {
+      "runs": 14,
+      "passed": 12,
+      "smoke_runs": 4,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.863,
+      "min": 0.25,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 8: TASK__qwen__qcn[__BLOCK]"
+    },
+    "qwen3.6/claude": {
+      "runs": 23,
+      "passed": 17,
+      "smoke_runs": 3,
+      "use_case_runs": 13,
+      "tasks": {
+        "passed": 12,
+        "total": 16
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8",
+        "9"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.822,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.667
+      },
+      "canary": 1,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 10,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 2",
+        "round 5",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 2, 5, 8: TASK__claude__q36[__BLOCK]"
+    },
+    "qwen3.6/codex": {
+      "runs": 15,
+      "passed": 13,
+      "smoke_runs": 3,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 11,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.913,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1c",
+        "mean": 0.75
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 2",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "phase 2, rounds 1, 2, 8: TASK__codex__q36[__BLOCK]"
+    },
+    "qwen3.6/dsh": {
+      "runs": 14,
+      "passed": 11,
+      "smoke_runs": 2,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.879,
+      "min": 0.25,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.683
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 1,
+      "rounds": [
+        "round 1",
+        "round 2",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 2, 8: TASK__dsh__q36__BLOCK"
+    },
+    "qwen3.6/goose": {
+      "runs": 15,
+      "passed": 11,
+      "smoke_runs": 2,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.895,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.71
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1",
+        "round 2",
+        "round 3",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 2, 3, 8: TASK__goose__{q36,q36m}__BLOCK"
+    },
+    "qwen3.6/hermes": {
+      "runs": 14,
+      "passed": 11,
+      "smoke_runs": 2,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.916,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.833
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 1,
+      "rounds": [
+        "round 1",
+        "round 2",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 2, 8: TASK__hermes__q36__BLOCK"
+    },
+    "qwen3.6/opencode": {
+      "runs": 25,
+      "passed": 21,
+      "smoke_runs": 3,
+      "use_case_runs": 14,
+      "tasks": {
+        "passed": 14,
+        "total": 17
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.895,
+      "min": 0.33,
+      "use_case_low": {
+        "use_case": "2",
+        "mean": 0.665
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 3,
+      "rounds": [
+        "phase 2",
+        "round 1",
+        "round 2",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "phase 2, rounds 1, 2, 5: TASK__opencode__q36[__BLOCK]"
+    },
+    "qwen3.6/opencode2": {
+      "runs": 14,
+      "passed": 12,
+      "smoke_runs": 2,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 11,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.87,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.667
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1",
+        "round 2",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 2, 8: TASK__opencode2__q36__BLOCK"
+    },
+    "qwen3.6/pi": {
+      "runs": 15,
+      "passed": 10,
+      "smoke_runs": 3,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 9,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.824,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "1b",
+        "mean": 0.667
+      },
+      "canary": 1,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 1",
+        "round 2",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 2, 8: TASK__pi__q36__BLOCK"
+    },
+    "qwen3.6/qwen": {
+      "runs": 15,
+      "passed": 11,
+      "smoke_runs": 2,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 13
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2_debug",
+        "t2n_debug"
+      ],
+      "mean": 0.847,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.5
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [
+        "claude",
+        "pi"
+      ],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 2,
+      "rounds": [
+        "round 1",
+        "round 2",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 1, 2, 8: TASK__qwen__q36__BLOCK"
+    },
+    "qwen3.8-27b/claude": {
+      "runs": 6,
+      "passed": 5,
+      "smoke_runs": 0,
+      "use_case_runs": 6,
+      "tasks": {
+        "passed": 5,
+        "total": 6
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8",
+        "11"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.902,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.5
+      },
+      "canary": 0,
+      "injection_runs": 1,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "round 7: TASK__claude__q827__BLOCK"
+    },
+    "qwen3.8-flash-next/claude": {
+      "runs": 55,
+      "passed": 49,
+      "smoke_runs": 1,
+      "use_case_runs": 51,
+      "tasks": {
+        "passed": 28,
+        "total": 30
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "10",
+        "11"
+      ],
+      "legacy_tasks": [
+        "t2n_debug",
+        "t5_mcp"
+      ],
+      "mean": 0.947,
+      "min": 0.4,
+      "use_case_low": {
+        "use_case": "10",
+        "mean": 0.829
+      },
+      "canary": 0,
+      "injection_runs": 7,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 22,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6",
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "rounds 4-7: TASK__claude__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/codex": {
+      "runs": 18,
+      "passed": 15,
+      "smoke_runs": 1,
+      "use_case_runs": 15,
+      "tasks": {
+        "passed": 14,
+        "total": 17
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.925,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.815
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "rounds 4-5: TASK__codex__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/dsh": {
+      "runs": 11,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.959,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.86
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 5, 8: TASK__dsh__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/goose": {
+      "runs": 11,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.964,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.917
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 5, 8: TASK__goose__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/hermes": {
+      "runs": 11,
+      "passed": 6,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 6,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.845,
+      "min": 0.5,
+      "use_case_low": {
+        "use_case": "1a",
+        "mean": 0.683
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 5, 8: TASK__hermes__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/opencode": {
+      "runs": 29,
+      "passed": 29,
+      "smoke_runs": 1,
+      "use_case_runs": 24,
+      "tasks": {
+        "passed": 24,
+        "total": 24
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "5",
+        "6",
+        "10",
+        "11",
+        "16"
+      ],
+      "legacy_tasks": [
+        "t2n_debug",
+        "t4_long",
+        "t5_mcp"
+      ],
+      "mean": 0.993,
+      "min": 0.91,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.915
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 15,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 6"
+      ],
+      "last_round": "round 6",
+      "date": "2026-11-19/20",
+      "run_ids": "rounds 4-6: TASK__opencode__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/opencode2": {
+      "runs": 10,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 10
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.992,
+      "min": 0.92,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.92
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 6",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 6, 8: TASK__opencode2__flash__BLOCK"
+    },
+    "qwen3.8-flash-next/pi": {
+      "runs": 11,
+      "passed": 10,
+      "smoke_runs": 0,
+      "use_case_runs": 10,
+      "tasks": {
+        "passed": 10,
+        "total": 11
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "3",
+        "8"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.958,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.86
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5",
+        "round 8"
+      ],
+      "last_round": "round 8",
+      "date": "2026-11-21",
+      "run_ids": "rounds 4, 5, 8: TASK__pi__{flash,fnext}__BLOCK"
+    },
+    "qwen3.8-flash-next/qwen": {
+      "runs": 18,
+      "passed": 17,
+      "smoke_runs": 1,
+      "use_case_runs": 15,
+      "tasks": {
+        "passed": 16,
+        "total": 17
+      },
+      "use_cases": [
+        "1a",
+        "1b",
+        "1c",
+        "2",
+        "3",
+        "10"
+      ],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": 0.963,
+      "min": 0.75,
+      "use_case_low": {
+        "use_case": "3",
+        "mean": 0.845
+      },
+      "canary": 0,
+      "injection_runs": 3,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 4",
+        "round 5"
+      ],
+      "last_round": "round 5",
+      "date": "2026-11-17/19",
+      "run_ids": "rounds 4-5: TASK__qwen__{flash,fnext}__BLOCK"
+    },
+    "seed-oss-36b/claude": {
+      "runs": 4,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 1
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__claude__{seed,seedl}__BLOCK"
+    },
+    "seed-oss-36b/opencode": {
+      "runs": 3,
+      "passed": 0,
+      "smoke_runs": 2,
+      "use_case_runs": 0,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [],
+      "legacy_tasks": [
+        "t2n_debug"
+      ],
+      "mean": null,
+      "min": null,
+      "use_case_low": null,
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 3"
+      ],
+      "last_round": "round 3",
+      "date": "2026-11-16/17",
+      "run_ids": "round 3: TASK__opencode__{seed,seedl}__BLOCK"
+    },
+    "xing4.0/claude": {
+      "runs": 2,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 2,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [
+        "8",
+        "11"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.0,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "8",
+        "mean": 0.0
+      },
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "round 7: TASK__claude__xing__BLOCK"
+    },
+    "xing4.0/opencode": {
+      "runs": 2,
+      "passed": 0,
+      "smoke_runs": 0,
+      "use_case_runs": 2,
+      "tasks": {
+        "passed": 0,
+        "total": 2
+      },
+      "use_cases": [
+        "8",
+        "11"
+      ],
+      "legacy_tasks": [],
+      "mean": 0.0,
+      "min": 0.0,
+      "use_case_low": {
+        "use_case": "8",
+        "mean": 0.0
+      },
+      "canary": 0,
+      "injection_runs": 0,
+      "family_canary": [],
+      "contaminated_excluded": 0,
+      "experiments_excluded": 0,
+      "rounds": [
+        "round 7"
+      ],
+      "last_round": "round 7",
+      "date": "2026-11-20",
+      "run_ids": "round 7: TASK__opencode__xing__BLOCK"
+    }
+  },
+  "unmatched_models": {},
+  "no_harness_runs": 24
+}

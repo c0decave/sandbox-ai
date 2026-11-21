@@ -44,8 +44,9 @@ Linux (x86_64, aarch64) und `sandbox-ai.app` für macOS, fertig zum Starten
 
 Das baut `localhost/codex-sandbox`, `localhost/claude-sandbox` und
 `localhost/opencode-sandbox` mit den neuesten Agent-Versionen auf der aktuellen
-Node.js-LTS, dazu `localhost/hermes-sandbox`, `localhost/dsh-sandbox`,
-`localhost/qwen-sandbox` und `localhost/goose-sandbox` in den von sandbox-ai
+Node.js-LTS, dazu `localhost/opencode2-sandbox` (OpenCode 2), `localhost/hermes-sandbox`, `localhost/dsh-sandbox`,
+`localhost/qwen-sandbox`, `localhost/goose-sandbox`, `localhost/openhands-sandbox`,
+`localhost/nanobot-sandbox`, `localhost/letta-sandbox` und `localhost/pi-sandbox` in den von sandbox-ai
 geprüften Versionen, dann die Images Team, Cairn, Browser, VPN und Tor und Ihre
 Varianten, je ein Build (scheitert einer, laufen die anderen weiter; am Ende
 steht, was gebaut wurde und was scheiterte). Nur Benötigtes bauen:
@@ -189,8 +190,9 @@ Codenamen wie `brisk-otter-lantern` (der Start gibt ihn aus, `sandbox-ai list`
 zeigt ihn mit seinem Arbeitsordner).
 
 ```bash
-./sandbox-ai list                  # NAME  KIND  AGENT  STATE  HOME  STARTED (UTC)  WORKSPACE
+./sandbox-ai list                  # NAME  KIND  AGENT  STATE  STARTED  HOME  WORKSPACE
 ./sandbox-ai attach demo           # wieder verbinden
+./sandbox-ai shell demo            # eine eigene Shell neben dem Agenten, unter seinen Regeln
 ./sandbox-ai pause demo            # alles einfrieren, z. B. um die CPU freizugeben
 ./sandbox-ai resume demo           # genau dort weitermachen
 ./sandbox-ai stop demo             # beenden; Dateien und HOME bleiben

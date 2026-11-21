@@ -48,8 +48,18 @@ FEATURES = {
         "hosts": ["github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com",
                   "objects.githubusercontent.com", "registry.npmjs.org"],
         "help": "qwen extensions install|update from GitHub, Git and npm (installed extensions load without it)"},
+    # Qwen Code 0.26.4 runs an event's hooks project, user, system - sandbox-ai's rule hook -, then the extensions'
+    # (HookRegistry.getSourcePriority) and the last updatedInput wins (HookAggregator.mergeWithOrLogic): an
+    # extension's hook could rewrite a call after the check. While rules hold, no extension loads (--extensions none:
+    # extension_args) unless the human trusts them here.
+    "extension-hooks": {
+        "hosts": [],
+        "help": "the installed extensions while rules for Qwen Code's own tools hold, with their hooks - which Qwen "
+                "Code runs after sandbox-ai's rule check, so they could rewrite a call after it; without it a start "
+                "with rules runs Qwen Code with --extensions none"},
 }
 FEATURE_SYNTAX = re.compile(r"[a-z][a-z-]*")
+TRUSTS = ("extension-hooks",)  # features that trust something of the HOME and open no host
 
 # Telemetry is never switchable for Qwen Code (the user's rule): no feature, no --telemetry level and no option of
 # the start turns it on. Its usage statistics (on upstream: Alibaba Cloud RUM) and its OpenTelemetry export are
@@ -179,24 +189,65 @@ def refused_arg(args):
 
 def check(a, hooks_active=False, companions=()):
     """Refuse what Qwen Code cannot do in a sandbox (yet), before anything starts."""
-    if getattr(a, "qwen_enable", None) and a.agent != "qwen":
-        raise ValueError(f"--qwen-enable is for Qwen Code (sandbox-ai qwen), not {a.agent}")
+    if getattr(a, "qwen_enable", None) and a.agent != "qwen" and "qwen" not in companions:
+        raise ValueError(f"--qwen-enable is for Qwen Code (sandbox-ai qwen, or --with qwen), not {a.agent}")
     if a.agent != "qwen" and "qwen" not in companions:
         return
-    names = parse(getattr(a, "qwen_enable", None)) if a.agent == "qwen" else []
-    if a.agent != "qwen" or companions:
-        raise ValueError("--with: Qwen Code is not in the team image; give Qwen Code another agent as a helper "
-                         "(sandbox-ai qwen --helper claude) or Qwen Code to another agent (--helper qwen)")
+    names = parse(getattr(a, "qwen_enable", None)) if a.agent == "qwen" or "qwen" in companions else []
     if hooks_active:
-        raise ValueError("rules for the agent's own tools (a ruleset's \"tool\" rules, the security mode "
-                         "paranoid's) are not enforced for Qwen Code yet; start without them, in the mode high or "
-                         "laxer (the network, MCP and device rules hold as for every agent)")
-    refused = refused_arg(getattr(a, "agent_args", None) or [])
+        off = hooks_off_arg((getattr(a, "agent_args", None) or []) if a.agent == "qwen" else [])
+        if off:
+            raise ValueError(f"{off} in Qwen Code's arguments: it loads no hook at all, and the rules for Qwen "
+                             "Code's own tools (a ruleset's \"tool\" rules) hold only through its hooks; drop it")
+    refused = refused_arg((getattr(a, "agent_args", None) or []) if a.agent == "qwen" else [])
     if refused:
         raise ValueError(f"{refused[0]} in Qwen Code's arguments: {refused[1]}; drop it")
     check_telemetry(a)
     if names and getattr(a, "offline", False):
         raise ValueError(f"--qwen-enable {','.join(names)} needs the network; drop --offline")
+
+
+# Qwen Code's arguments that load no hook at all (0.26.4: Config.getDisableAllHooks is true with --bare and
+# --safe-mode): refused while rules for its own tools hold, which only its hooks enforce.
+HOOKS_OFF_ARGS = ("--bare", "--safe-mode")
+
+
+def extension_args(a, hooks_active=False):
+    """["--extensions", "none"] for Qwen Code while rules for its own tools hold (HOOKS_ACTIVE): no extension
+    loads, nor its hooks, which would run after the rule check (FEATURES "extension-hooks"). Nothing when the human
+    trusts them (--qwen-enable extension-hooks) or names the extensions in its arguments (--extensions, -e)."""
+    if getattr(a, "agent", None) != "qwen" or not hooks_active:
+        return []
+    try:
+        if "extension-hooks" in features(a):
+            return []
+    except ValueError:
+        return []  # (check() refuses the start)
+    for arg in getattr(a, "agent_args", None) or []:
+        if arg == "--":
+            break
+        if isinstance(arg, str) and arg.split("=", 1)[0] in ("--extensions", "-e"):
+            return []
+    return ["--extensions", "none"]
+
+
+def hooks_off_arg(args):
+    """The first of HOOKS_OFF_ARGS (or --NAME=VALUE of one) in Qwen Code's ARGS before a "--", else None."""
+    for arg in args:
+        if arg == "--":
+            return None
+        if isinstance(arg, str) and arg.split("=", 1)[0] in HOOKS_OFF_ARGS:
+            return arg.split("=", 1)[0]
+    return None
+
+
+def hook_settings(groups):
+    """The system settings' part for the run's hooks (GROUPS: {EVENT: [{"matcher", "hooks"}]}, the rule hooks first,
+    then the approved kit hooks): every group sequential - Qwen Code then runs all of an event's hooks one after the
+    other, the project's and the user's before the system's (HookRegistry's source order), each seeing the input the
+    one before rewrote - and hooks never switched off (disableAllHooks, which the system settings decide)."""
+    return {"disableAllHooks": False,
+            "hooks": {event: [{**entry, "sequential": True} for entry in entries] for event, entries in groups.items()}}
 
 
 def host_matches_any(host, pattern):
@@ -274,11 +325,11 @@ def mcp_args(names, bridge_args, timeouts=None):
     return ["--mcp-config", json.dumps({"mcpServers": servers})] if servers else []
 
 
-def managed_settings(a, telemetry="off", llm=None):
+def managed_settings(a, telemetry="off", llm=None, hooks=None):
     """Qwen Code's /etc/qwen-code/settings.json for this start: the sandbox's defaults, the update switch (at every
     level: telemetry is always off), the session's turn limit, what the features turn on again, --effort, --llm's
-    model (LLM: llm.qwen_settings; the loop guard's steps where set), YOLO with -D and, last, the telemetry pins.
-    Later layers win."""
+    model (LLM: llm.qwen_settings; the loop guard's steps where set), YOLO with -D, the run's hooks (HOOKS: the
+    launcher's hook groups, hook_settings) and, last, the telemetry pins. Later layers win."""
     settings = merge(merge(merge({}, BASE_SETTINGS), TELEMETRY_SETTINGS), {"model": {"maxSessionTurns":
                                                                                      MAX_SESSION_TURNS}})
     for name in features(a):
@@ -289,6 +340,8 @@ def managed_settings(a, telemetry="off", llm=None):
         settings = merge(settings, llm)
     if getattr(a, "dangerously_skip_permissions", False):
         settings = merge(settings, DANGER_SETTINGS)
+    if hooks:
+        settings = merge(settings, hook_settings(hooks))
     return merge(settings, TELEMETRY_PINNED)  # after everything: never turned on
 
 

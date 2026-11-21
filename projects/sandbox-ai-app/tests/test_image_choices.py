@@ -254,6 +254,42 @@ def test_the_service_parts_image_list_is_read_again_when_opened(board, home, wai
 
 
 @needs_sai
+@pytest.mark.parametrize("added", [False, True])
+def test_the_opened_image_list_stays_open_when_it_is_read_again(board, home, wait, qapp, added):
+    """Analysis round 3 (chaos): opening the Service part's image list reads your images again, and their answer
+    rebuilt the whole inspector - the list the user had just opened was deleted under the mouse (its popup gone; the
+    flaky "OpeningCombo already deleted" of the test above). The list is filled in place and stays open; the
+    inspector is rebuilt only for a change of your images, and only once the list is closed."""
+    from sandbox_ai_app import board_view
+    record_images(home / "config", ["redis"])
+    board.add_node("service", **{**B.default_service("db"), "image": "redis"})
+    board.load_user_images()
+    assert wait(lambda: board.user_images is not None and not board.user_images_loading, 30)
+    board.inspect(board.board.first("service"))
+    qapp.processEvents()
+    board.show()
+    combo = next(c for c in board.inspector_holder.findChildren(QtWidgets.QComboBox) if c.findData("\x00other") >= 0)
+    if added:
+        record_images(home / "config", ["redis", "valkey"])
+    board.user_images_read_at = 0.0
+    combo.showPopup()
+    assert board.user_images_loading
+    assert wait(lambda: not board.user_images_loading, 30)
+    for _ in range(20):  # (the inspector's timer, had it been started)
+        qapp.processEvents()
+        board.inspect_timer.isActive() and board.inspect_timer.timeout.emit()
+    assert board_view.alive(combo), "the opened list was deleted under the mouse"
+    assert combo.view().isVisible(), "the opened list closed by itself"
+    assert (combo.findData("valkey") >= 0) is added
+    combo.hidePopup()
+    for _ in range(20):
+        qapp.processEvents()
+        board.inspect_timer.isActive() and board.inspect_timer.timeout.emit()
+    assert board_view.alive(combo) is not added, "a change of your images: the inspector anew once the list closed"
+    board.hide()
+
+
+@needs_sai
 @pytest.mark.parametrize("kind, option, field_kind", [("engine", "--image-variant", "variant"),
                                                       ("engine", "--image", "agent_image"),
                                                       ("llm", "--llm", "llm")])

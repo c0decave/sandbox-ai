@@ -4,8 +4,9 @@ background beside sandbox-ai's chat (sandbox-ai dsh --browser; dsh_chat.py runs 
 
 DSH 0.2.1-rc.5 has no chat in the terminal of its own: its shipped profiles are web, headless (one task), acp, sdk and
 sdk-minimal (docs/DSH_REVIEW.md); sandbox-ai's chat (dsh_chat.py) is the default. The web UI runs on the sandbox's
-loopback, which only the sandbox's own browser reaches (--browser: the same pod, the same loopback; the app's Browser
-tab shows it). This wrapper runs `dsh web ...` and:
+loopback: of the browsers only the sandbox's own reaches it (--browser: the same pod, the same loopback; the app's
+Browser tab shows it) - and, as any port there, whatever runs in the pod (DSH itself, the tools it runs), which is why
+it takes its launch URL's token. This wrapper runs `dsh web ...` and:
 
   - says first what DSH offers (the launcher's NOTICE): with --browser that its web UI opens in the session browser,
     without it how to reach it (start with --browser) or how to give it a task (headless);

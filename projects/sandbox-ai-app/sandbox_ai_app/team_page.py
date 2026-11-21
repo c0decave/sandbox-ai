@@ -26,13 +26,13 @@ from PySide6.QtWidgets import (
     QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
-from .backend import AGENTS
+from .backend import TEAM_AGENTS as AGENTS  # sandbox-ai's team.AGENTS, not every agent of the app (backend.AGENTS)
 from .files import printable, printable_text
 from .i18n import N_, tr
 from . import widgets
 from .widgets import (
-    ask_first, background, fill, flow, multi_select, outcome, plain_label, report_each, run_each, safe_tooltip,
-    selected_keys, set_enabled, several, table, warn,
+    ask_first, background, explanation, fill, flow, multi_select, outcome, plain_label, report_each, run_each,
+    safe_tooltip, selected_keys, set_enabled, several, table, warn,
 )
 
 LOCAL = "local"
@@ -113,16 +113,18 @@ def vpn_check(profiles, chosen, shared_openvpn):
 class StartDialog(QDialog):
     """A new team: its name, its agents (the lead first), the shared workspace, the VPN profile in front of every
     member (PROFILES: `vpn list --json` of that host; one per member under "Per member (advanced)") and the launcher
-    options of every member. REMOTE: the workspace is a path on that host."""
+    options of every member. REMOTE: the workspace is a path on that host (HOST: Folder… lists its folders)."""
 
-    def __init__(self, parent, host_label, remote, folder="", profiles=(), profiles_error=None):
+    def __init__(self, parent, host_label, remote, folder="", profiles=(), profiles_error=None, host=None, modes=(),
+                 draft=None):
         super().__init__(parent)
+        self.host = (host or "local") if remote else "local"
         self.profiles = {e["profile"]: e for e in profiles if isinstance(e, dict) and isinstance(e.get("profile"), str)
                          and e["profile"].isprintable()}
         self.setWindowTitle(tr("Start a team on {host}", host=host_label))
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("One sandbox per agent on one workspace; the lead talks to you and hands the "
-                                        "others tasks on the team's board."), role="secondary"))
+        layout.addWidget(explanation(tr("One sandbox per agent on one workspace; the lead talks to you and hands the "
+                                        "others tasks on the team's board.")))
         form = QFormLayout()
         self.name = QLineEdit()
         self.name.setPlaceholderText(NAME_EXAMPLE)
@@ -145,7 +147,7 @@ class StartDialog(QDialog):
         where_row.setContentsMargins(0, 0, 0, 0)
         where_row.addWidget(self.workspace, 1)
         where_row.addWidget(browse)
-        browse.setVisible(not remote)  # (in its row first: else a window of its own for a moment)
+        browse.setVisible(not remote or self.host != "local")  # (in its row first: else a window of its own)
         self.vpn = self.vpn_box(tr("(none)"))
         self.vpn.setAccessibleName(tr("VPN profile"))
         self.vpn.setToolTip(safe_tooltip(tr("The VPN in front of every member: each member is a sandbox of its own "
@@ -169,13 +171,29 @@ class StartDialog(QDialog):
         self.per_member.setToolTip(safe_tooltip(tr("Another VPN profile for a member (sandbox-ai team start "
                                                    "--member-vpn AGENT=PROFILE)")))
         per_form = QFormLayout(self.per_member)
-        self.member_vpn = {}
+        self.member_vpn, self.member_own = {}, {}
         for agent in AGENTS:
             box = self.vpn_box(tr("(the team's)"))
             box.setAccessibleName(tr("VPN profile of {agent}", agent=agent))
             label = plain_label(agent, word_wrap=False)
             per_form.addRow(label, box)
             self.member_vpn[agent] = (label, box)
+            # ... its role (added to its first prompt: team start --role) and its own model, LLM server and mode
+            # (--member-model, --member-llm, --member-mode); team start checks their values
+            role, model, llm = QLineEdit(), QLineEdit(), QLineEdit()
+            for edit, what, placeholder in ((role, tr("Role"), tr("e.g. reviews every change; writes the tests first")),
+                                            (model, tr("Model"), tr("Model (the team's)")),
+                                            (llm, tr("LLM server"), tr("LLM server (the team's)"))):
+                edit.setPlaceholderText(placeholder)
+                edit.setAccessibleName(tr("{what} of {agent}", what=what, agent=agent))
+            mode = QComboBox()
+            mode.setAccessibleName(tr("{what} of {agent}", what=tr("Mode"), agent=agent))
+            mode.addItem(tr("Mode (the team's)"), "")
+            for choice in modes:
+                mode.addItem(str(choice), str(choice))
+            own = flow(role, model, llm, mode)
+            per_form.addRow("", own)
+            self.member_own[agent] = (own, role, model, llm, mode)
         layout.addWidget(self.per_member)
         self.shared_openvpn = QCheckBox(tr("Allow one OpenVPN profile in several members (your server must allow it: "
                                            "duplicate-cn)"))
@@ -200,6 +218,18 @@ class StartDialog(QDialog):
         layout.addWidget(buttons)
         self.lead.currentIndexChanged.connect(lambda _=0: self.lead_changed())
         self.lead_changed()
+        # What was typed and not started (Cancel, a refusal): filled in again on this host (drafts.py) - the lead
+        # before the members (it greys its own box), "Per member" before its rows (greyed while it is off); sharing
+        # one OpenVPN profile is confirmed anew each time.
+        from . import drafts
+        fields = {"name": self.name, "lead": self.lead,
+                  **{f"member:{agent}": box for agent, box in self.members.items()},
+                  "workspace": self.workspace, "vpn": self.vpn, "options": self.options, "per_member": self.per_member}
+        for agent in AGENTS:
+            _own, role, model, llm, mode = self.member_own[agent]
+            fields.update({f"vpn:{agent}": self.member_vpn[agent][1], f"role:{agent}": role,
+                           f"model:{agent}": model, f"llm:{agent}": llm, f"mode:{agent}": mode})
+        self.draft = None if draft is None else drafts.Draft(self, draft, fields)
 
     def vpn_box(self, empty):
         """A picker of the host's VPN profiles, "NAME (TYPE)" each; EMPTY first (no profile, or the team's)."""
@@ -227,7 +257,24 @@ class StartDialog(QDialog):
         for agent, (label, box) in self.member_vpn.items():
             label.setVisible(agent in agents)
             box.setVisible(agent in agents)
+            self.member_own[agent][0].setVisible(agent in agents)
         self.vpn_changed()
+
+    def member_settings(self):
+        """({agent: role}, {agent: {--model/--llm/--mode: value}}) of the team's members, as typed under "Per member
+        (advanced)" (none while it is not ticked); team start checks them."""
+        roles, own = {}, {}
+        if not self.per_member.isChecked():
+            return roles, own
+        for agent in self.agents():
+            _row, role, model, llm, mode = self.member_own[agent]
+            if role.text().strip():
+                roles[agent] = role.text().strip()
+            for option, value in (("--model", model.text().strip()), ("--llm", llm.text().strip()),
+                                  ("--mode", mode.currentData() or "")):
+                if value:
+                    own.setdefault(agent, {})[option] = value
+        return roles, own
 
     def chosen_vpns(self):
         """({agent: profile or None} of every member, {agent: profile} of the overrides)."""
@@ -246,8 +293,8 @@ class StartDialog(QDialog):
         self.problem.setText(problem or "")
 
     def choose(self):
-        from .state import choose_folder
-        path = choose_folder(self, tr("Workspace"), "team")
+        from . import remote_chooser as RC
+        path = RC.choose_folder(self, self.host, tr("Workspace"), "team", start=self.workspace.text().strip())
         if path:
             self.workspace.setText(path)
 
@@ -286,7 +333,8 @@ class StartDialog(QDialog):
 class PostDialog(QDialog):
     """A task for one member of a team, from you."""
 
-    def __init__(self, parent, team, members):
+    def __init__(self, parent, team, members, draft=None):
+        """DRAFT: the key of a task typed and not posted (drafts.py): filled in again."""
         super().__init__(parent)
         self.setWindowTitle(tr("A task for team {name}", name=team))
         form = QFormLayout(self)
@@ -303,6 +351,8 @@ class PostDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+        from . import drafts
+        self.draft = None if draft is None else drafts.Draft(self, draft, {"agent": self.agent, "task": self.task})
 
 
 class TeamPage(QWidget):
@@ -315,10 +365,9 @@ class TeamPage(QWidget):
         self.teams_host = None  # whose teams the rows are
         self.project = None
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("Teams of agents (sandbox-ai team): one sandbox per agent on a shared "
+        layout.addWidget(explanation(tr("Teams of agents (sandbox-ai team): one sandbox per agent on a shared "
                                         "workspace, started and stopped together; the lead hands the others tasks "
-                                        "on the team's board, an MCP server of its own without network."),
-                                     role="secondary"))
+                                        "on the team's board, an MCP server of its own without network.")))
         from .host_choice import HostChooser
         self.hosts = HostChooser(sai, tr("The teams of this machine, or of a host (over SSH)"))
         self.hosts.changed.connect(lambda _host: self.host_changed())
@@ -382,6 +431,18 @@ class TeamPage(QWidget):
     def host(self):
         return self.hosts.host() or LOCAL
 
+    def show_named(self, host, name):
+        """Team NAME of HOST selected (the Board's Team part, Open on the Teams page): that host chosen, its teams
+        read, then NAME selected once they are there."""
+        if valid_team(name) is None:
+            return
+        self.wanted = name
+        self.hosts.set_host(host)
+        if self.hosts.host() != host:
+            self.status.setText(tr("{host} is not a host of sandbox-ai hosts here.", host=printable(host)))
+            return
+        self.refresh()
+
     def set_project(self, path):
         """The window's current project: the workspace a new team on this machine is offered."""
         self.project = path
@@ -397,14 +458,15 @@ class TeamPage(QWidget):
 
     def host_changed(self):
         """Another host: the teams of the one before go at once (Talk to the lead, Stop and Delete never name a team
-        of one host on another), and its answers still on their way are dropped."""
+        of one host on another), and its answers still on their way are dropped. Hidden (the Sandboxes page's host,
+        given as it is about to be shown): read by its show, once."""
         self.token += 1
         self.show_token += 1
         self.teams, self.teams_host = [], None
         fill(self.table, [], keys=[])
         self.clear_details()
         self.update_buttons()
-        if self.loaded_once:
+        if self.loaded_once and self.isVisible():
             self.refresh()
 
     def acting_host(self):
@@ -437,7 +499,7 @@ class TeamPage(QWidget):
             self.update_buttons()
             return
         self.teams, self.teams_host = [t for t in result if valid_team(t.get("name"))], host
-        before = self.chosen()
+        before, self.wanted = getattr(self, "wanted", None) or self.chosen(), None  # (one the Board asked for first)
         fill(self.table, [[t["name"], tr("damaged: its record cannot be read") if t.get("damaged") else
                            ", ".join(t["members"]), t["workspace"]] for t in self.teams],
              keys=[t["name"] for t in self.teams], colors=["bad" if t.get("damaged") else None for t in self.teams])
@@ -555,17 +617,24 @@ class TeamPage(QWidget):
             return
         self.status.setText("")
         folder = self.project if host == LOCAL and self.project else ""
-        dialog = StartDialog(self, self.hosts.label(host), host != LOCAL, folder, profiles, error)
+        from . import board as B
+        modes = getattr(B._options(self.sai).get("--mode"), "choices", None) or ()
+        key = ("team-start", host, folder)  # what was typed and not started: filled in again (drafts.py)
+        dialog = StartDialog(self, self.hosts.label(host), host != LOCAL, folder, profiles, error, host=host,
+                             modes=modes, draft=key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         try:
             name, agents, workspace, options, vpn, member_vpn, shared = dialog.request()
+            roles, member_options = dialog.member_settings()
             argv = self.sai.team_start_argv(host, name, agents, workspace, options, vpn=vpn, member_vpn=member_vpn,
-                                            shared_openvpn=shared)
+                                            shared_openvpn=shared, roles=roles, member_options=member_options)
         except ValueError as exc:
             warn(self, tr("Start a team"), printable_text(exc))
             return
         title = f"sandbox-ai team start {name}" + ("" if host == LOCAL else f" ({host})")
+        from . import drafts
+        drafts.drop(key)  # handed to the terminal, which says how it went: what was typed is done with
         self.terminal(argv, title)
         self.status.setText(tr("Team {name} starts in the terminal; Refresh once it says so.", name=name))
 
@@ -586,7 +655,8 @@ class TeamPage(QWidget):
             return
         members = [m for m in (self.shown or {}).get("members") or [] if m in AGENTS] or \
             next((t["members"] for t in self.teams if t["name"] == name), list(AGENTS))
-        dialog = PostDialog(self, name, members)
+        key = ("team-post", host, name)  # a task typed and not posted: filled in again (drafts.py)
+        dialog = PostDialog(self, name, members, draft=key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         agent, task = dialog.agent.currentData(), dialog.task.toPlainText().strip()
@@ -596,7 +666,7 @@ class TeamPage(QWidget):
             warn(self, tr("Post a task"), tr("A task is at most {count} characters of text.", count=TASK_LIMIT))
             return
         background(lambda: self.sai.team_post(host, name, agent, task), owner=self, work=True, source=self.post_button,
-                   timeout=POST_SECONDS + 15, done=lambda result, error: self.done(name, result, error))
+                   timeout=POST_SECONDS + 15, done=lambda result, error: self.done(name, result, error, draft=key))
 
     def several_teams(self, action):
         """Stop… or Delete… (ACTION "stop" or "delete") with several teams selected: one question naming them (a
@@ -663,8 +733,11 @@ class TeamPage(QWidget):
                                                                                  self.delete_button],
                    timeout=STOP_SECONDS + 30, done=lambda result, error: self.done(name, result, error))
 
-    def done(self, name, result, error):
+    def done(self, name, result, error, draft=None):
         status, out, err = outcome(result, error)
+        if draft is not None and status == 0:
+            from . import drafts
+            drafts.drop(draft)  # posted: the task typed is done with
         said = "\n".join(printable(line) for line in (out + err).strip()[-3000:].splitlines())
         if status != 0:
             warn(self, tr("Team {name}", name=name), said or tr("Failed (exit status {status}).", status=status),

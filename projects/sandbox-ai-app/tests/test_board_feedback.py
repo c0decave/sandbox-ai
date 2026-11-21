@@ -318,17 +318,16 @@ def test_a_change_made_while_apply_writes_stays_unapplied(page, tmp_path, monkey
 
 def test_a_list_typed_into_belongs_to_its_part_when_another_is_selected_at_once(page, qapp):
     """Stability round 1 found it: a list field takes what was typed 600 ms after the typing stops; selecting another
-    part sooner lost the text. Now it is taken for the part it was typed for."""
-    from sandbox_ai_app.board_view import LinesEdit
+    part sooner lost the text. Now it is taken for the part it was typed for. (Since 2026-11-19 the network's lists
+    are one field of kinds, list_fields: a value typed and not added yet is added for its part.)"""
+    from sandbox_ai_app.list_fields import ListFields
     network = page.board.first("network")
     page.items[network.id].setSelected(True)
     page.inspect(network)
-    edits = page.inspector_holder.findChildren(LinesEdit)
-    assert edits, "the network has list fields"
-    edit = edits[0]
-    edit.setPlainText("pypi.org")
-    assert edit.timer.isActive()
+    fields = page.inspector_holder.findChildren(ListFields)
+    assert fields, "the network has list fields"
+    fields[0].value_box.setEditText("pypi.org")
     page.scene.clearSelection()
-    page.items[page.board.first("agent").id].setSelected(True)  # at once, before the 600 ms
+    page.items[page.board.first("agent").id].setSelected(True)  # at once, before anything else
     values = {key: value for key, value in page.board.node(network.id).props.items() if isinstance(value, list)}
     assert ["pypi.org"] in values.values(), values

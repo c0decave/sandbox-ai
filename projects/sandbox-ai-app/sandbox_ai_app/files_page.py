@@ -2,6 +2,23 @@
 folder); right: this machine, starting at HOME. Files go back and forth between the panes (copy, move) and
 are deleted, renamed, given new folders, permissions and owners in either.
 
+Either pane can list somewhere else (Pane.mode: "sandbox", "host" - this machine, the human's own - or "remote"): its
+chooser offers, after the left pane's sandbox folders, This machine (LOCAL: the page's one Root("/"), the folder shown
+last there), sandbox-ai's hosts by name (HOST_PREFIX + name: connected when chosen - FilesPage.connect_host, the
+connection of the same target reused, else connect_remote with its question about an unknown key; the pane stays where
+it was until it is connected) and the remote systems connected with SSH… (beside both choosers; the same choices under
+"Show in this pane" of the context menu). The left chooser also lists the folders of the sandboxes on each of
+sandbox-ai's hosts (HOST_FOLDER: read with one call per host in a thread, FilesPage.read_host_folders - a host that does
+not answer in time is marked, never waited for), opened over that host's connection in that folder; a heading divides
+each section (this machine's sandboxes, the hosts, each host's sandboxes, the remote systems) once there is more than
+this machine, and "Sandboxes of" (FilesPage.host_box) offers one host's alone - the Sandboxes page's host, followed
+as the other pages follow it (ui.FOLLOWERS); the hosts file is followed too (follow_hosts). Both panes may show
+remote systems at once - one connection shared when they
+show the same - so copies and moves go every way through the same transfer_items: this machine -> host, host -> this
+machine, host -> host (remote.relay: fetched into a staging folder of this machine, then sent on; the progress says
+"through this machine"); a move within one connection is a rename there. Into one of sandbox-ai's hosts from anywhere
+else only after a question that names what goes there (sandboxes run there; their agents may read it).
+
 Everything goes through files.py: relative to open directory descriptors, never through a symbolic link (one
 in the middle of a path or as the entry itself), never above the root, within budgets, cancellable, and a copy
 cut short leaves nothing behind. Below a sandbox's folder - and in a folder of the right pane that lies in one, by its
@@ -29,10 +46,12 @@ and so does a click on Name, either way (folders first in both directions); a so
 listed again.
 
 Recent (the arrow at the end of each path bar, Alt+Down in it) lists the folders the pane showed lately (the latest
-first, each once, at most RECENT): the host pane's are kept in the app's state across restarts, a sandbox pane's only
-while its folder is in the chooser. Choosing one goes there through the path bar's own checks (go_path). Below each
-list, the free space of the folder's file system (Root.free_space: os.fstatvfs of the open folder), read with every
-listing - so after a change of folder and after every copy, move or delete.
+first, each once, at most RECENT): this machine's as paths, elsewhere with the place they are in (a host's as
+NAME:/path - choosing one connects again); the right pane's (this machine's and the hosts' by name) are kept in the
+app's state across restarts, the others only while their place is in the chooser. Choosing one goes there through the
+path bar's own checks (go_path). Below each list, the free space of the folder's file system (Root.free_space:
+os.fstatvfs of the open folder), read with every listing - so after a change of folder and after every copy, move or
+delete; a remote folder whose SFTP server does not tell (no statvfs@openssh.com) says it is not known.
 
 A file opens in the app's own editor (file_editor.py: text, or a hex editor for other bytes; a Markdown file
 rendered, markdown_view.py) with a double click or Enter; it is read and written through the pane's Root like
@@ -44,7 +63,7 @@ the sandbox (path_forms: relative to the folder of the running sandbox or sessio
 sees it - backend.sandbox_paths, /work, /workspaces/NAME, /root; one path a line, also quoted for the shell) and
 Properties (file_properties.py).
 
-SSH… shows a remote system in the sandbox pane (remote.RemoteRoot, a Root like the others: the same code path for
+SSH… shows a remote system in its pane (remote.RemoteRoot, a Root like the others: the same code path for
 listing, copies both ways, the editor and Properties): connect_remote in the background, an unknown host's keys trusted
 only after a yes (trust_host), a locked key with a terminal offered; its root is the remote "/", the pane starts in the
 remote HOME, its links are named and never followed, its owners shown as numbers. The files of one of sandbox-ai's
@@ -55,10 +74,18 @@ by default for sandbox-ai's hosts, off for any other system; turned off only aft
 again.
 
 Drag and drop: between the panes and onto a folder of the same pane a drop copies, with Shift it moves - through the
-same copy and move as F5 and F6 (asking before anything is replaced). Files dropped from other programs (local files
+same copy and move as F5 and F6 (asking before anything is replaced), whatever each pane shows (this machine, a
+sandbox's folder, a remote system, a sandbox's folder on a host: two remote systems through this machine). Onto a
+pane's path bar a drop goes into the folder shown; onto its chooser a menu asks where - its places and recent folders
+(chooser_drop) -, the pane goes there and the drop follows once that folder is listed (Pane.pending_drop). Files dropped
+onto an editor open each in an editor of its own (editor_drop). Where a drop cannot go it is not taken (the "no"
+cursor) and the status line says why (DropPlan.refused); a drag that ends without a drop (Esc) says that nothing was
+copied or moved. Files dropped from other programs (local files
 only) are copied in - into an agent's folder, or to a remote system that is one of sandbox-ai's hosts, only after a
 question that names them; a path that goes through a symbolic link in a sandbox's folder is refused, as in the path bar.
-Dragged out to other programs go the host pane's files and folders; from a sandbox's folder only plain files that are
+Dragged out to other programs go the host pane's files and folders - a remote system's not at all (they would have to be
+fetched as the drag begins, holding up the window: they are copied to this machine first, as the status line says
+while they are dragged - drag_out_note); from a sandbox's folder only plain files that are
 not executable (a program dropped on would get folders with hooks or executables as they are, executable bits and all),
 and those as copies made when they are dragged or copied, in a folder of the app's own (handed_out_folder: by their
 path in the agent's folder, the agent could turn one into a link to a file of the human's before the other program
@@ -68,10 +95,13 @@ Keys (in a list): Tab the other pane, Enter open, Backspace up, F3 view, F4 edit
 say it is a folder: Enter opens it), Shift+F4 new file (empty, then edited), F5 copy, F6 move, F7 new folder, F8 or
 Delete delete (macOS: Cmd+Backspace too, as in the Finder), F2 rename, Ctrl+C copy, Ctrl+X cut, Ctrl+V paste, Alt+Enter
 properties, Ctrl+A select all, Ctrl+Shift+C copy relative paths, Ctrl+R refresh, the menu key (or Shift+F10) the
-context menu. On macOS Ctrl is the Cmd key (Qt's naming); the texts name each key as the system writes it (key_text).
+context menu. Ctrl+Shift+F (anywhere in the page; the magnifying glass beside each pane's Refresh; Search below this
+folder in the context menu) searches below the folder a pane shows (file_search_view.py, file_search.py): names with
+wildcards, optionally the content, in the background, never through a link, every limit said. On macOS Ctrl is the Cmd key (Qt's naming); the texts name each key as the system writes it (key_text).
 """
 from __future__ import annotations
 
+import fnmatch
 import grp
 import os
 import posixpath
@@ -84,22 +114,28 @@ import threading
 import time
 import unicodedata
 
-from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QMimeData, QPoint, QSize, QTimer, QUrl, Qt
-from PySide6.QtGui import QColor, QDrag, QGuiApplication, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QMimeData, QPoint, QTimer, QUrl, Qt
+from PySide6.QtGui import (
+    QColor, QCursor, QDrag, QGuiApplication, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QMenu, QPushButton, QSplitter, QStyle, QToolButton, QVBoxLayout, QWidget,
 )
 
+from shiboken6 import isValid
+
 from . import applog
 from . import files, state as app_state, widgets
 from .file_editor import key_text
 from .files import printable
+from .host_choice import follow_hosts, follow_note, valid_host
 from .i18n import N_, language, tr
 from .state import choose_files, choose_folder
 from .widgets import (
-    ModelTable, RowModel, Task, ask_first, background, button, confirm, exec_dropped, fill, find_row, flow, plain_label,
-    row_key, select_keys, selected_rows, set_enabled, table, warn, shown_as_text,
+    ModelTable, RowModel, Task, ask_first, background, button, confirm, exec_dropped, explanation, fill, find_row, flow,
+    nav_button, plain_label, repaint_glyphs, row_key, safe_tooltip, select_keys, selected_rows, set_enabled, table, warn,
+    shown_as_text,
 )
 
 ROOT_KINDS = {
@@ -123,6 +159,12 @@ LIST_TIMEOUT = 120  # s: a listing that never comes back is given up (the pane s
 # connection, and every listing with it.)
 LIST_STUCK = 4
 LIST_SLOW = 1.5
+# A drop onto a chooser goes where a place or recent folder is chosen after it, once the pane shows that folder - not
+# later than PENDING_DROP_WAIT s after it was chosen (a host that connects slowly: the drop is not made unasked later).
+PENDING_DROP_WAIT = 60
+# Files dropped onto an editor open each in an editor of its own: at most so many at once.
+EDITOR_DROP_LIMIT = 10
+DRAG_EVENTS = (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.DragLeave, QEvent.Type.Drop)
 # The first two rows of every folder (never the name of an entry, never selected): the folder shown and the one above.
 HERE, UP = ".", ".."
 # What a drag between the panes and the page's clipboard carry besides the paths: a token of this app's own (what was
@@ -134,6 +176,55 @@ SEED_ROW = ("a-file-name-of-some-length.txt", "", "1023.9 KiB", "2026-12-31 23:5
             "username:groupname", "drwxrwxrwx 0777")
 RECENT = 15  # folders a pane's Recent menu offers
 RECENT_KEY = "files-recent-host"  # the host pane's recent folders in the app's state (state.json)
+# Seconds a host of sandbox-ai's has to list its sandboxes' folders (FilesPage.read_host_folders).
+HOST_FOLDERS_WAIT = 20
+# Where a pane lists besides a sandbox's folders (the data of its chooser's entries; never a path beginning with "/":
+# that is a sandbox's folder of this machine): this machine, one of sandbox-ai's hosts by name (connected
+# over SSH when chosen: FilesPage.connect_host), or a remote system connected with SSH… (its RemoteRoot.key, ssh://...).
+LOCAL = "local:"
+HOST_PREFIX = "host:"
+# A folder of a sandbox or session on one of sandbox-ai's hosts (the left chooser, FilesPage.host_sections): on:NAME:/path,
+# opened over that host's connection (connect_host) starting in that folder - read with one call per host
+# (backend.host_file_roots: `sandbox-ai list --folders --json` there), never a path of this machine (folder_sources).
+HOST_FOLDER = "on:"
+LOCAL_HOST = "local"  # this machine as the page's host filter names it (host_choice.LOCAL: whose sandboxes are offered)
+# The chooser's headings (This machine's sandboxes, Hosts, a host's sandboxes, Remote systems): items of their own,
+# neither enabled nor selectable, marked with this role (the context menu shows them as its sections).
+HEADING_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+def is_place(data):
+    """Whether the chooser's DATA is a place (this machine, a host, a remote system) rather than a sandbox's folder."""
+    return isinstance(data, str) and (data == LOCAL or data.startswith(HOST_PREFIX) or data.startswith("ssh://"))
+
+
+def host_folder(name, path):
+    """The chooser's data of the folder PATH of a sandbox on sandbox-ai's host NAME."""
+    return f"{HOST_FOLDER}{name}:{path}"
+
+
+def host_folder_parts(data):
+    """(host name, absolute path) of a chooser's DATA made by host_folder, else None."""
+    if not isinstance(data, str) or not data.startswith(HOST_FOLDER):
+        return None
+    name, separator, path = data[len(HOST_FOLDER):].partition(":")
+    return (name, path) if separator and name and path.startswith("/") else None
+
+
+def host_of(data):
+    """Whose the chooser's entry DATA is, as the page's host filter names hosts: LOCAL_HOST for this machine and its
+    sandboxes' folders, a host's name for sandbox-ai's host and the folders of its sandboxes, None for another remote
+    system (SSH…) or nothing."""
+    if not isinstance(data, str):
+        return None
+    if data == LOCAL or data.startswith("/"):
+        return LOCAL_HOST
+    if data.startswith(HOST_PREFIX):
+        return data[len(HOST_PREFIX):]
+    folder = host_folder_parts(data)
+    return folder[0] if folder is not None else None
+
+
 # macOS's file systems ignore the case of names (APFS also their Unicode normalisation; HFS+ stores NFD): /users/me/ws
 # is the folder /Users/me/ws there. Whether a folder lies in a sandbox's is decided with names folded so (in the safe
 # direction: on a volume that tells cases apart, a folder of another case counts as the agent's too).
@@ -441,6 +532,19 @@ def same_root(one, other):
     if getattr(one, "remote", False) or getattr(other, "remote", False):
         return one is other
     return (one.path, one.sandbox) == (other.path, other.sandbox)
+
+
+def same_connection(one, other):
+    """Whether ONE and OTHER are folders of one remote system's connection (a move there is a rename)."""
+    return getattr(one, "remote", False) and getattr(other, "remote", False) and \
+        getattr(one, "sftp", None) is getattr(other, "sftp", 0)
+
+
+def item_text(root, relative):
+    """The path of RELATIVE of ROOT as shown: user@host:/path for a remote system's, else this machine's path."""
+    if getattr(root, "remote", False):
+        return root.display(relative)
+    return os.path.join(root.path, relative) if relative else root.path
 
 
 def user_name(uid):
@@ -757,36 +861,6 @@ def on_root(root, work, done, owner=None, timeout=120):
 INTERRUPT_AFTER = 2000  # ms: a remote job that has not stopped this long after Cancel has its request interrupted
 
 
-def nav_button(text, tooltip, slot, glyph=None):
-    """A button that goes somewhere (Home, Up, Refresh): an action, never a toggle, and it takes no focus from a
-    click (a focused button looks pressed in some themes, as if Home stayed on); Tab still reaches it. Where the
-    pane is shows in its path bar. GLYPH (a key of theme.GLYPHS): an icon instead of TEXT, which stays its accessible
-    name (TOOLTIP says what it does); paint_glyphs draws it in the look's text colour."""
-    widget = button("" if glyph else text, tooltip, slot)
-    widget.setCheckable(False)
-    widget.setAutoDefault(False)
-    widget.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-    widget.setAccessibleName(text)
-    if glyph:
-        widget.glyph = glyph
-        paint_glyph(widget)
-    return widget
-
-
-GLYPH_SIZE = 16
-
-
-def paint_glyph(widget):
-    """WIDGET's glyph in the text colour of the look now (again after a change of theme: readable in the dark and
-    high-contrast looks), drawn sharp at twice the size too (a HiDPI screen takes that one)."""
-    from . import theme
-    tint = theme.colors()["text"]
-    icon = theme.glyph(widget.glyph, tint, GLYPH_SIZE)
-    icon.addPixmap(theme.glyph(widget.glyph, tint, 2 * GLYPH_SIZE).pixmap(2 * GLYPH_SIZE, 2 * GLYPH_SIZE))
-    widget.setIcon(icon)
-    widget.setIconSize(QSize(GLYPH_SIZE, GLYPH_SIZE))
-
-
 class FileRows(RowModel):
     """A pane's rows: "." and ".." stay the first two rows, whatever column the list is sorted by. Neither can be
     selected (so no copy, move, delete or rename ever acts on one, Ctrl+A and a Shift+click take only entries); ".."
@@ -840,20 +914,22 @@ class FileTable(ModelTable):
     # double click on an edge fits that column to its content. Widths the human set are kept per pane across restarts
     # (state.State.table: "files", "files-right-table").
     stretch_interactive = True
+    fit_steady = True  # fitted to typical rows first (Pane.seed_columns): a change of folder moves no column
 
     def __init__(self, headers, numeric=(), stretch=None):
         super().__init__(headers, numeric, stretch)
         # (after QTableView's own handler, which fits the column to its content: the human sized it)
-        self.horizontalHeader().sectionHandleDoubleClicked.connect(lambda _column: self.sized_by_hand())
+        self.horizontalHeader().sectionHandleDoubleClicked.connect(self.sized_by_hand)
         self.pane = None  # set by its Pane
         self.press = None  # where the left button went down on a selected row
         self.drop_row = None  # framed while something is dragged over: a row, -1 the whole list, None nothing
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
 
-    def sized_by_hand(self):
-        """A column was fitted by a double click on its edge: the human's width from now on (and kept)."""
-        self.user_sized = True
+    def sized_by_hand(self, column):
+        """COLUMN was fitted by a double click on its edge: the human's width from now on (and kept)."""
+        from .state import sized_by_hand
+        sized_by_hand(self, column)
         remember = getattr(self, "remember_state", None)
         if remember is not None:
             remember(True)
@@ -897,15 +973,15 @@ class FileTable(ModelTable):
             return
         plan = self.plan(event)
         self.show_drop(plan)
-        if plan is not None:
+        if plan is not None and not plan.refused:
             event.setDropAction(plan.action)
         event.accept()  # (also where it cannot be dropped yet: the moves over the list follow)
 
     def dragMoveEvent(self, event):  # noqa: N802
         plan = self.plan(event)
         self.show_drop(plan)
-        if plan is None:
-            event.ignore()
+        if plan is None or plan.refused:
+            event.ignore()  # (the "no" cursor; the status line says why: drop_hint)
             return
         event.setDropAction(plan.action)
         event.accept()
@@ -917,9 +993,12 @@ class FileTable(ModelTable):
     def dropEvent(self, event):  # noqa: N802
         plan = self.plan(event)
         self.show_drop(None)
-        if plan is None:
+        if plan is None or plan.refused:
+            if plan is not None:
+                self.pane.page.refuse_drop(plan)
             event.ignore()
             return
+        self.pane.page.drop_taken = True
         event.setDropAction(plan.action)
         event.accept()
         # After the drop has ended (a question asked inside a drop handler would hold up the program it came from).
@@ -961,6 +1040,7 @@ class Clip:
         self.root, self.items, self.untrusted, self.folder_text, self.cut = root, items, untrusted, folder_text, cut
         self.problems = []  # what was refused before (host_items)
         self.folders = frozenset()  # the names among them that were folders (copy_items: a copy beside, copy_name)
+        self.files = frozenset()  # the names among them that were plain files (a drag: what an editor opens)
 
     def owns(self, mime):
         return mime is not None and mime.hasFormat(MIME) and bytes(mime.data(MIME)).decode("ascii", "replace") == \
@@ -969,24 +1049,67 @@ class Clip:
 
 class DropPlan:
     """What a drop at one place does: copy or move (ACTION) CLIP's items, or copy the host PATHS, into TARGET_DIR of
-    PANE; ROW is framed (-1: the list)."""
+    PANE; ROW is framed (-1: the list, None: no row). REFUSED: why nothing can be dropped there (the drop is not taken,
+    the "no" cursor shows, the status line says it). PLACE: where it was dragged over - None the list, "path" the path
+    bar (into the folder shown), "chooser" the chooser (where it goes is chosen after the drop:
+    FilesPage.chooser_drop)."""
 
-    def __init__(self, pane, target_dir, row, action, clip=None, paths=()):
-        self.pane, self.target_dir, self.row, self.action, self.clip, self.paths = \
-            pane, target_dir, row, action, clip, list(paths)
+    def __init__(self, pane, target_dir, row, action, clip=None, paths=(), refused=None, place=None):
+        self.pane, self.target_dir, self.action, self.clip, self.paths = pane, target_dir, action, clip, list(paths)
+        self.row, self.refused, self.place = None if refused else row, refused, place
 
     @property
     def move(self):
         return self.action == Qt.DropAction.MoveAction
 
     def text(self):
+        if self.refused:
+            return tr("Cannot drop here: {why}", why=self.refused)
         count = len(self.clip.items) if self.clip is not None else len(self.paths)
+        if self.place == "chooser":
+            if self.move:
+                return tr("Drop: choose where to move {count} item(s) - this pane's places and recent folders.",
+                          count=count)
+            if self.clip is not None:
+                return tr("Drop: choose where to copy {count} item(s) - this pane's places and recent folders (with "
+                          "Shift: move).", count=count)
+            return tr("Drop: choose where to copy {count} item(s) - this pane's places and recent folders.",
+                      count=count)
         where = printable(self.pane.path_at(self.target_dir))
         if self.move:
             return tr("Drop: move {count} item(s) into {folder}.", count=count, folder=where)
         if self.clip is not None:
             return tr("Drop: copy {count} item(s) into {folder} (with Shift: move).", count=count, folder=where)
         return tr("Drop: copy {count} item(s) into {folder}.", count=count, folder=where)
+
+
+DELETE_LISTED = 10  # full paths named in the delete question itself (all of them in its details)
+
+
+def full_paths(chosen):
+    """The full path of each item of CHOSEN as the pane shows its folder (its path bar's text, a host's prefix too)."""
+    folder = str(chosen.folder_text or "").rstrip("/")
+    return [f"{folder}/{name}" for name, _ in chosen.items]
+
+
+def delete_question(chosen):
+    """The delete question (user 2026-11-18): WHAT goes, by its full path - never "N items in FOLDER", which read as
+    if the folder itself were deleted. One item: its path and its kind; several: each path, at most DELETE_LISTED."""
+    paths = [printable(path) for path in full_paths(chosen)]
+    kinds = chosen.kinds if len(chosen.kinds) == len(paths) else [None] * len(paths)
+    if len(paths) == 1:
+        kind = kinds[0]
+        if kind == "dir":
+            return tr("Delete this folder with everything in it?\n\n{path}\n\nThis cannot be undone.", path=paths[0])
+        if kind == "link":
+            return tr("Delete this link? It is removed, not what it points to.\n\n{path}\n\nThis cannot be undone.",
+                      path=paths[0])
+        return tr("Delete this file?\n\n{path}\n\nThis cannot be undone.", path=paths[0])
+    shown = "\n".join(paths[:DELETE_LISTED])
+    if len(paths) > DELETE_LISTED:
+        shown += "\n" + tr("… and {count} more (all of them under Details)", count=len(paths) - DELETE_LISTED)
+    return tr("Delete these {count} items? Folders are deleted with everything in them; links are removed, not what "
+              "they point to.\n\n{paths}\n\nThis cannot be undone.", count=len(paths), paths=shown)
 
 
 class Chosen:
@@ -1004,7 +1127,7 @@ class Chosen:
     @classmethod
     def of(cls, pane, entries):
         return cls(pane.root, [(entry.name, pane.path_of(entry)) for entry in entries], pane.relative,
-                   pane.path_text(), pane.untrusted(), pane.side == "sandbox",
+                   pane.path_text(), pane.untrusted(), pane.mode() == "sandbox",
                    any(entry.kind == "dir" for entry in entries), [entry.kind for entry in entries])
 
     def shown_in(self, pane):
@@ -1022,36 +1145,57 @@ class Pane(QWidget):
         self.root, self.relative, self.entries, self.by_name = None, "", [], {}
         self.list_token = 0  # the newest listing: one that comes back after another began is dropped
         self.listing = None  # the token of the listing on its way, or None
+        # A drop onto the chooser waiting for the place chosen after it to be shown (FilesPage.drop_at_place), or None.
+        self.pending_drop = None
         self.on_way = {}  # the listings on their way, by what they list: {key: {root, waiters, began}} (Pane.list)
+        # What the chooser shows now (its data: a sandbox's folder, LOCAL, a host, a remote system) - a host chosen that
+        # is not connected yet leaves it showing this until it is (choose_root); this machine's folder shown last.
+        self.place, self.local_relative = None, host_relative(os.path.realpath(os.path.expanduser("~")))
+        # The sandbox side's folders of this machine as read last ([(kind, label, path)]: refresh_roots) - what its
+        # chooser lists under them, and what folder_sources takes for the sandboxes' folders (also those a host
+        # filter does not list now: their files stay an agent's).
+        self.sandbox_roots = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
-        self.title = QLabel(tr("Sandbox") if side == "sandbox" else tr("This machine"))
+        self.title = QLabel(tr("Sandbox") if side == "sandbox" else tr("Files on"))
         top.addWidget(self.title)
+        # Where the pane lists: the left one a sandbox's folder (or a project's, one chosen), the right one this
+        # machine - and either of them this machine, one of sandbox-ai's hosts by name or a remote system (SSH…).
+        self.roots = QComboBox()
+        self.roots.setAccessibleName(tr("Folder of a sandbox") if side == "sandbox" else tr("Where this pane lists"))
+        self.title.setBuddy(self.roots)
+        # (its entries' length never widens the page: a host's long address made it wider than a small screen - both
+        # panes' rows fit 900 px in German)
+        self.roots.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.roots.setMinimumContentsLength(6)
+        self.roots.setMinimumWidth(190 if side == "sandbox" else 100)
+        self.roots.currentIndexChanged.connect(lambda _=0: self.choose_root())
+        # Files dropped onto it go to a place chosen after the drop (FilesPage.chooser_drop: its places and recent
+        # folders).
+        self.roots.setAcceptDrops(True)
+        top.addWidget(self.roots, 1)
         if side == "sandbox":
-            self.roots = QComboBox()
-            self.roots.setAccessibleName(tr("Folder of a sandbox"))
-            self.title.setBuddy(self.roots)
-            self.roots.setMinimumWidth(240)
-            self.roots.currentIndexChanged.connect(lambda _=0: self.choose_root())
-            top.addWidget(self.roots, 1)
             top.addWidget(nav_button(tr("Refresh"), tr("Look for sandboxes and sessions again"), self.refresh_roots,
                                      "refresh"))
             top.addWidget(nav_button(tr("Other folder…"), tr("Browse another folder as an agent's"), self.add_other))
-            top.addWidget(nav_button(tr("SSH…"), tr("Browse a remote system over SSH and SFTP (keys and your "
-                                                     "ssh-agent only)"), lambda: self.page.remote_dialog()))
-        else:
-            self.roots = None
-            top.addStretch()
-            top.addWidget(nav_button(tr("Home"), tr("Your HOME folder (Alt+Home)"), self.home, "home"))
-            self.root = files.Root("/", label=tr("This machine"), sandbox=False)
-            self.relative = host_relative(os.path.realpath(os.path.expanduser("~")))
+        top.addWidget(nav_button(tr("SSH…"), tr("Browse a remote system over SSH and SFTP in this pane (keys and your "
+                                                 "ssh-agent only)"), lambda: self.page.remote_dialog(self)))
+        if side == "host":
+            self.root, self.relative, self.place = page.local, self.local_relative, LOCAL
+            self.roots.blockSignals(True)
+            self.fill()
+            self.roots.setCurrentIndex(max(0, self.roots.findData(LOCAL)))
+            self.roots.blockSignals(False)
         layout.addLayout(top)
         where = QHBoxLayout()
         where.addWidget(nav_button(tr("Up"), tr("The folder above (Backspace, Alt+Up)"), self.up, "up"))
+        # (beside Up in both panes - where each lists: this machine's HOME, a remote system's, a sandbox folder's top)
+        where.addWidget(nav_button(tr("Home"), tr("HOME of what the pane shows - this machine or a remote system -, or the top of a sandbox's folder "
+                                       "(Alt+Home)"), self.home, "home"))
         self.path = QLineEdit()
         self.path.setAccessibleName(tr("Folder"))
-        self.path.setToolTip(tr("Type a folder and press Enter"))
+        self.path.setToolTip(tr("Type a folder and press Enter; files dropped here go into the folder shown"))
         self.path.returnPressed.connect(self.go_path)
         # The folders visited lately, most recent first: SANDBOX [(root path, relative)], kept while that root is in
         # the chooser; HOST [absolute path], kept in the app's state across restarts. Their menu opens from the arrow
@@ -1072,12 +1216,16 @@ class Pane(QWidget):
         where.addWidget(self.path, 1)
         where.addWidget(nav_button(tr("Refresh"), tr("List the folder again ({shortcut})", shortcut=key_text("Ctrl+R")),
                                    self.list, "refresh"))
+        # The search below the folder shown (file_search_view.py): names with wildcards, content (Ctrl+Shift+F).
+        where.addWidget(nav_button(tr("Search…"), tr("Search below this folder: names with wildcards, optionally the "
+                                                     "content ({shortcut})", shortcut=key_text("Ctrl+Shift+F")),
+                                   lambda: self.page.search_dialog(self), "search"))
         layout.addLayout(where)
         # The Name takes the room. A ModelTable: a folder of 20,000 entries is shown in one step.
         self.table = table([tr(column) for column in COLUMNS], multi=True, stretch=0, many=True,
                            compact=(1, 2, 3, 5, 6), view=FileTable)
         self.table.pane = self
-        self.table.setAccessibleName(tr("Files of the sandbox") if side == "sandbox" else tr("Files of this machine"))
+        self.table.setAccessibleName(tr("Files of the sandbox") if side == "sandbox" else tr("Files of the right pane"))
         self.table.setTabKeyNavigation(False)
         # Always there: a scroll bar coming and going with the length of a folder would change the list's width, and
         # with it the columns', at every change of folder.
@@ -1088,48 +1236,61 @@ class Pane(QWidget):
         self.table.installEventFilter(page)
         self.shown = None  # the folder the list shows (relative): another one is shown from its top
         self.seed_columns()
+        # The quick filter (user 2026-11-19): the rows narrowed to the names holding what is typed (* and ?: wildcards);
+        # what it leaves out is not in the list, so nothing acts on it. Ctrl+F gets here, Escape empties it.
+        quick_row = QHBoxLayout()
+        quick_row.setContentsMargins(0, 0, 0, 0)
+        self.quick = QLineEdit()
+        self.quick.setClearButtonEnabled(True)
+        self.quick.setPlaceholderText(tr("Filter names…"))
+        self.quick.setAccessibleName(tr("Filter names"))
+        self.quick.setToolTip(safe_tooltip(tr("Only the names that hold this text ({shortcut}; * and ? as wildcards; "
+                                              "Escape empties it)", shortcut=key_text("Ctrl+F"))))
+        self.quick.textChanged.connect(lambda _text: self.show_rows())
+        self.quick.installEventFilter(self)
+        quick_row.addWidget(self.quick, 1)
+        self.quick_count = plain_label(role="secondary", word_wrap=False)
+        self.quick_count.hide()
+        quick_row.addWidget(self.quick_count)
+        layout.addLayout(quick_row)
+        self.full_rows = None  # what the last listing found, before the quick filter: show_rows
         layout.addWidget(self.table, 1)
         # The free space of the file system of the folder shown (read with each listing: after a change of folder and
         # after every copy, move or delete).
         self.space = plain_label(role="secondary", word_wrap=False)
         self.space.setAccessibleName(tr("Free space"))
         layout.addWidget(self.space)
-        if side == "sandbox":
-            # A remote system's files: an agent's or the human's own (RemoteRoot.agents) - on for sandbox-ai's hosts,
-            # where sandboxes run and their agents may have written any file (FilesPage.connected); turned off only
-            # after a question (agents_chosen).
-            self.agents_box = QCheckBox(tr("An agent's files"))
-            self.agents_box.setToolTip(tr("Treat the files of this remote system as an agent's: copied to this machine "
-                                          "they are never executable and files that tools run are named; no set-ID or "
-                                          "sticky bit is set there. On for sandbox-ai's hosts, where sandboxes run."))
-            self.agents_box.setAccessibleName(tr("An agent's files"))
-            self.agents_box.toggled.connect(self.agents_chosen)
-            self.agents_box.hide()
-            layout.addWidget(self.agents_box)
+        # A remote system's files (either pane): an agent's or the human's own (RemoteRoot.agents) - on for
+        # sandbox-ai's hosts, where sandboxes run and their agents may have written any file (FilesPage.connected);
+        # turned off only after a question (agents_chosen).
+        self.agents_box = QCheckBox(tr("An agent's files"))
+        self.agents_box.setToolTip(tr("Treat the files of this remote system as an agent's: copied to this machine "
+                                      "they are never executable and files that tools run are named; no set-ID or "
+                                      "sticky bit is set there. On for sandbox-ai's hosts, where sandboxes run."))
+        self.agents_box.setAccessibleName(tr("An agent's files"))
+        self.agents_box.toggled.connect(self.agents_chosen)
+        self.agents_box.hide()
+        layout.addWidget(self.agents_box)
         self.note = plain_label(role="secondary")
         self.note.hide()
         layout.addWidget(self.note)
         # Up and Home by key anywhere in the pane (Backspace too, in its list).
         context = Qt.ShortcutContext.WidgetWithChildrenShortcut
         QShortcut(QKeySequence("Alt+Up"), self, context=context, activated=self.up)
-        if side == "host":
-            QShortcut(QKeySequence("Alt+Home"), self, context=context, activated=self.home)
+        QShortcut(QKeySequence("Alt+Home"), self, context=context, activated=self.home)
+        QShortcut(QKeySequence("Ctrl+F"), self, context=context, activated=self.focus_quick)
         # The pane the toolbar's buttons act on (bold): also the one whose path field, chooser or buttons were used last
         # (a folder typed in the right pane's path field, then New folder: it was made in the left pane, the one whose
         # list had the keyboard before).
         for widget in (self.path, self.roots):
-            if widget is not None:
-                widget.installEventFilter(self)
+            widget.installEventFilter(self)
         for widget in self.findChildren(QPushButton):
             widget.pressed.connect(lambda: self.page.activate(self))
 
     def changeEvent(self, event):  # noqa: N802
         """Another look (theme): the buttons' glyphs in its text colour."""
         super().changeEvent(event)
-        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
-            for widget in self.findChildren(QPushButton):
-                if getattr(widget, "glyph", None):
-                    paint_glyph(widget)
+        repaint_glyphs(self, event)
 
     def seed_columns(self):
         """Fit the columns to rows of the widths they will mostly need (SEED_ROW, in the app's language) before the
@@ -1154,13 +1315,23 @@ class Pane(QWidget):
         """The absolute path (shown) of the folder RELATIVE of this pane."""
         if self.root is None:
             return ""
-        if self.side == "host" or self.remote():
+        if self.mode() != "sandbox":
             return "/" + relative
         return self.root.path + ("/" + relative if relative else "")
 
     def remote(self):
         """Whether the pane shows a remote system (remote.RemoteRoot: its root is the remote "/")."""
         return bool(getattr(self.root, "remote", False))
+
+    def mode(self):
+        """What the pane shows: "remote" (a remote system: remote.RemoteRoot), "host" (this machine, the human's own:
+        the page's Root("/"), walked down to the folder shown) or "sandbox" (a sandbox's folder, a project's, one
+        chosen - an agent may have written everything below it). Without a root: as its side starts."""
+        if self.remote():
+            return "remote"
+        if self.root is None:
+            return "sandbox" if self.side == "sandbox" else "host"
+        return "host" if self.root is getattr(self.page, "local", None) or not self.root.sandbox else "sandbox"
 
     def path_of_entry(self, entry):
         """The absolute path (shown) of ENTRY of the folder shown."""
@@ -1179,7 +1350,7 @@ class Pane(QWidget):
             # (the human's own system unless its files count as an agent's - a host of sandbox-ai's: RemoteRoot.agents;
             # what comes from any remote system into a sandbox's folder counts as the agent's)
             return bool(getattr(self.root, "agents", False))
-        if self.side == "sandbox":
+        if self.mode() == "sandbox":
             return True
         if relative == self.shown and getattr(self, "inside", False):
             return True  # (as its listing found it, in its thread: also a sandbox's folder moved here)
@@ -1214,7 +1385,13 @@ class Pane(QWidget):
             self.table.scrollTo(index)
 
     def home(self):
-        self.go(host_relative(os.path.realpath(os.path.expanduser("~"))))
+        """HOME: this machine's, a remote system's (where it starts), the top of a sandbox's folder."""
+        mode = self.mode()
+        if self.root is None:
+            return False
+        if mode == "remote":
+            return self.go("/".join(files.parts(self.root.home.lstrip("/"))))
+        return self.go(host_relative(os.path.realpath(os.path.expanduser("~"))) if mode == "host" else "")
 
     def go_path(self, text=None, exact=False):
         """Show the folder typed in the path bar (absolute, or relative to the folder shown); EXACT: TEXT is a path as
@@ -1234,7 +1411,7 @@ class Pane(QWidget):
         if self.root is None or not text:
             return False
         try:
-            if self.side == "host":
+            if self.mode() == "host":
                 path = os.path.expanduser(text)
                 path = os.path.normpath(path if os.path.isabs(path) else os.path.join(self.path_text(), path))
                 # (where it leads, in a thread - answered: a path on a file system that hangs held up the window; one
@@ -1274,10 +1451,16 @@ class Pane(QWidget):
 
     # -- the sandbox side's roots --
 
-    def refresh_roots(self, select=None, then=None):
+    def refresh_roots(self, select=None, then=None, hosts=True):
         """The folders of sandboxes, sessions and projects, read in the background (sandbox-ai's registry may ask
-        Podman); the list changes when they are known. SELECT: the folder to show then; THEN() after that."""
-        if self.roots is None:
+        Podman); the list changes when they are known. SELECT: the folder to show then; THEN() after that. HOSTS: those
+        of sandbox-ai's hosts' sandboxes read again too (FilesPage.read_host_folders: one call per host, each in a
+        thread of its own; not when a connection was just made). (The right pane: its places at once - this machine,
+        the hosts, the remote systems connected.)"""
+        if self.side == "host":
+            self.show_places(select)
+            if then is not None:
+                then()
             return
         self.roots_token, self.roots_reading = getattr(self, "roots_token", 0) + 1, True
         token, keep = self.roots_token, select or self.roots.currentData()
@@ -1317,36 +1500,129 @@ class Pane(QWidget):
             if (self.page.folder_sources()[0], set(self.page.identities)) != before:
                 # (the host pane, listed before they were known, said nothing of a sandbox's folder it shows: no note,
                 # its set-ID bits unmarked - until it was listed again by hand)
-                self.page.right.list()
+                for pane in (self.page.left, self.page.right):
+                    if pane.mode() == "host":
+                        pane.list()
             return shown
         background(read, owner=self.page, timeout=60, work=False, done=read_done)
         self.page.read_sandbox_paths()
+        if hosts:
+            self.page.read_host_folders()
 
     def show_roots(self, roots, keep, then=None):
         self.roots_reading = False
+        self.sandbox_roots = list(roots)
         self.roots.blockSignals(True)
-        self.roots.clear()
-        for kind, label, path in roots:
-            self.roots.addItem(root_title(kind, label, path), path)
-        for key, root in self.page.remotes.items():
-            self.roots.addItem(tr("Remote system {name}", name=printable(root.label)), key)
-        remote = self.page.remote_hosts()
-        for name in remote:
-            self.roots.addItem(tr("Sandboxes on {host}: not available here yet", host=printable(name)), None)
-            model = self.roots.model()  # a QStandardItemModel: its items can be disabled
-            item = model.item(self.roots.count() - 1) if hasattr(model, "item") else None
-            if item is not None:
-                item.setEnabled(False)
-        self.note.setText(tr("The files of sandboxes on other hosts cannot be shown here yet; a command line for "
-                             "them comes later.") if remote else "")
-        self.note.setVisible(bool(remote))
+        self.fill()
         index = self.roots.findData(keep) if keep else -1
-        self.roots.setCurrentIndex(index if index >= 0 else 0)
+        if index < 0:
+            index = self.shown_index()  # (this machine, a host or a host's sandbox's folder shown: it stays)
+        self.roots.setCurrentIndex(index if index >= 0 else self.first_choice())
         self.roots.blockSignals(False)
         self.forget_roots()
         self.choose_root()
         if then is not None:
             then()
+
+    def fill(self):
+        """The chooser made anew (its signals held by the caller, who chooses what it shows), in sections: the sandbox
+        side's folders of this machine (sandbox_roots), the hosts - this machine and sandbox-ai's by name (connected
+        when chosen) -, the folders of each host's sandboxes (the sandbox side: FilesPage.host_sections) and the remote
+        systems connected with SSH… (FilesPage.places). A heading above each section once there is more than this
+        machine to tell apart (a host of sandbox-ai's, a remote system); the page's host filter keeps the sandboxes'
+        sections to that host's."""
+        page = self.page
+        # (the host filter's host, and the host of what is shown: its section stays until something else is chosen)
+        only = page.host_filter() if self.side == "sandbox" else None
+        hosts = None if only is None else {only, host_of(self.place) if self.root is not None else only}
+        places = [(text, data, tip, True) for text, data, tip in page.places()]
+        sections = []
+        if self.side == "sandbox" and (hosts is None or LOCAL_HOST in hosts):
+            sections.append((tr("Sandboxes on this machine"), [(root_title(kind, label, path), path, None, True)
+                                                              for kind, label, path in self.sandbox_roots]))
+        sections.append((tr("Hosts"), [place for place in places if not place[1].startswith("ssh://")]))
+        if self.side == "sandbox":
+            sections += page.host_sections(hosts)
+        sections.append((tr("Remote systems"), [place for place in places if place[1].startswith("ssh://")]))
+        headed = any(place[1].startswith((HOST_PREFIX, "ssh://")) for place in places)
+        self.roots.clear()
+        model = self.roots.model()
+        for heading, items in sections:
+            if not items:
+                continue
+            if headed:
+                self.roots.addItem(heading)
+                index = self.roots.count() - 1
+                self.roots.setItemData(index, True, HEADING_ROLE)
+                font = self.roots.font()
+                font.setBold(True)
+                self.roots.setItemData(index, font, Qt.ItemDataRole.FontRole)
+                item = model.item(index) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(False)
+                    item.setSelectable(False)
+            for text, data, tip, enabled in items:
+                self.roots.addItem(text, data)
+                index = self.roots.count() - 1
+                if tip:
+                    self.roots.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
+                item = model.item(index) if hasattr(model, "item") else None
+                if item is not None and not enabled:
+                    item.setEnabled(False)
+
+    def first_choice(self):
+        """The first entry of the chooser that can be chosen (no heading, no note), or -1."""
+        model = self.roots.model()
+        for index in range(self.roots.count()):
+            item = model.item(index) if hasattr(model, "item") else None
+            if self.roots.itemData(index) and (item is None or item.isEnabled()):
+                return index
+        return -1
+
+    def shown_index(self):
+        """The entry of what the pane shows while it is not chosen anew: this machine or a host (is_place), or the
+        folder of a host's sandbox - else, when that folder is no longer listed (its host answers no more, the host
+        filter shows another host), its host's own entry (the same connection: it shows that host's files). -1: none."""
+        if self.root is None:
+            return -1
+        index = self.roots.findData(self.place) if (is_place(self.place) or host_folder_parts(self.place)) else -1
+        folder = host_folder_parts(self.place)
+        if index < 0 and folder is not None:
+            index = self.roots.findData(HOST_PREFIX + folder[0])
+            if index >= 0:
+                self.place = HOST_PREFIX + folder[0]
+        return index
+
+    def show_places(self, select=None):
+        """The chooser's places made anew (a connection made, a host added, a host's sandboxes read); SELECT (its data)
+        shown then - else what is shown stays, without being listed again (a pane that shows the other pane's host
+        stays where it is)."""
+        current = self.roots.currentData()
+        self.roots.blockSignals(True)
+        self.fill()
+        index = self.roots.findData(select if select is not None else current) \
+            if (select if select is not None else current) is not None else -1
+        if index < 0 and current is not None:
+            # (a remote system connected with SSH… that is one of sandbox-ai's hosts chosen by name since: its entry)
+            name = next((name for name, key in self.page.host_keys.items() if key == current), None)
+            index = self.roots.findData(HOST_PREFIX + name) if name is not None else -1
+            if index >= 0:
+                self.place = HOST_PREFIX + name
+        if index < 0 and select is None:
+            index = self.shown_index()
+        chosen = index >= 0
+        self.roots.setCurrentIndex(index if chosen else self.first_choice())
+        self.roots.blockSignals(False)
+        self.forget_roots()
+        if select is not None or not chosen:
+            self.choose_root()
+
+    def show_place(self, data):
+        """The chooser shows DATA again (nothing chosen, nothing listed): a host not connected yet stays unchosen."""
+        index = self.roots.findData(data) if data is not None else -1
+        self.roots.blockSignals(True)
+        self.roots.setCurrentIndex(index)
+        self.roots.blockSignals(False)
 
     def add_other(self):
         path = choose_folder(self, tr("Folder to browse"), "browse")
@@ -1355,11 +1631,45 @@ class Pane(QWidget):
             self.refresh_roots(select=os.path.realpath(path))
 
     def choose_root(self):
-        path = self.roots.currentData() if self.roots is not None else None
+        path = self.roots.currentData()
+        if path is None and self.roots.currentIndex() >= 0:
+            self.show_place(self.place)  # (a heading or a note: nothing to show - what is shown stays)
+            return
+        pending = self.pending_drop
+        if pending is not None and pending["root"] != path:
+            self.pending_drop = None  # (another place chosen meanwhile: the drop onto the chooser was for that one)
+        folder = host_folder_parts(path)
+        if (isinstance(path, str) and path.startswith(HOST_PREFIX)) or folder is not None:
+            # One of sandbox-ai's hosts by name, or the folder of a sandbox there: the host's connection, or one made
+            # now - meanwhile the pane stays where it was (a host whose key is not trusted, or that cannot be reached,
+            # changes nothing here).
+            name = folder[0] if folder is not None else path[len(HOST_PREFIX):]
+            root = self.page.host_root(name)
+            if root is None or not root.alive:
+                self.show_place(self.place)
+                self.page.connect_host(name, self, select=path)
+                return
+        if self.mode() == "host" and self.root is not None:
+            self.local_relative = self.relative  # (this machine chosen again: the folder shown last)
+        after, self.after_connect = getattr(self, "after_connect", None), None
+        self.place = path
         self.root, self.relative, self.shown, self.opening = None, "", None, None
         self.open_token = token = getattr(self, "open_token", 0) + 1
         self.table.clearSelection()
-        if path in self.page.remotes:
+        if path == LOCAL:
+            self.root, self.relative = self.page.local, self.local_relative
+        elif isinstance(path, str) and path.startswith(HOST_PREFIX):
+            self.root = self.page.host_root(path[len(HOST_PREFIX):])
+            # (Recent: a folder of a host not connected then - its folder, once it is; else its HOME)
+            self.relative = after[1] if after is not None and after[0] == path else \
+                "/".join(files.parts(self.root.home.lstrip("/")))
+        elif folder is not None:
+            # A sandbox's folder on that host: its files over the host's connection (an agent's, as all of the host's:
+            # RemoteRoot.agents), from that folder - the pane may go above it, as in the host's own entry.
+            self.root = self.page.host_root(folder[0])
+            self.relative = after[1] if after is not None and after[0] == path else \
+                "/".join(files.parts(folder[1].lstrip("/")))
+        elif path in self.page.remotes:
             root = self.page.remotes[path]
             if root.alive:
                 self.root, self.relative = root, "/".join(files.parts(root.home.lstrip("/")))
@@ -1390,12 +1700,16 @@ class Pane(QWidget):
         self.root_chosen()
 
     def root_chosen(self):
-        """The folder chosen is open (or could not be): the buttons, the notes, its listing."""
+        """The folder chosen is open (or could not be): the buttons, the notes, its listing - and, while the page's
+        host filter offers one host's sandboxes, the chooser without the section of the host shown before."""
+        if self.side == "sandbox" and self.page.host_filter() is not None and self.root is not None:
+            self.show_places()
         if getattr(self.page, "buttons", None):  # (Take ownership: a sandbox's folder only, never a remote system)
             self.page.mark_active()
-        if self.side == "sandbox":  # (the note about other hosts' sandboxes: not under a remote system's files)
-            self.note.setVisible(bool(self.note.text()) and not self.remote())
-            self.show_agents_box()
+        if self.mode() != "host":  # (the note of a sandbox's folder on this machine: not under another place's files)
+            self.note.setText("")
+            self.note.hide()
+        self.show_agents_box()
         self.list()
         return True
 
@@ -1450,15 +1764,16 @@ class Pane(QWidget):
                 then(False)
             return False
         root, relative = self.root, self.relative
-        fallback = "" if self.side == "sandbox" else host_relative(os.path.realpath(os.path.expanduser("~")))
+        side = self.mode()  # (what the folder is: "sandbox", "host" - this machine - or "remote")
+        fallback = "" if side == "sandbox" else host_relative(os.path.realpath(os.path.expanduser("~")))
         remote = self.remote()
         if remote:
             fallback = "/".join(files.parts(root.home.lstrip("/")))
-        ranges, side = self.page.ranges, self.side
+        ranges = self.page.ranges
         # (widgets read here, not in the thread; the folders' paths and identities are read there - on the GUI thread a
         # sandbox's folder on a file system that hangs held up the window with every listing)
-        sources = ([], []) if side == "sandbox" else self.page.folder_sources()
-        kept = {} if side == "sandbox" else dict(self.page.identities)
+        sources = ([], []) if side != "host" else self.page.folder_sources()
+        kept = {} if side != "host" else dict(self.page.identities)
         agents = remote and bool(getattr(root, "agents", False))
 
         def work():
@@ -1590,7 +1905,7 @@ class Pane(QWidget):
         self.inside = inside and not self.remote()  # (untrusted_at: the folder shown, as its thread found it)
         self.by_name = {entry.name: entry for entry in self.entries}
         listed = problem is None
-        self.show_space(space)
+        self.show_space(space, unknown=self.remote())
         if listed:
             self.remember(relative)
         if not listed:
@@ -1619,13 +1934,52 @@ class Pane(QWidget):
                 *([None] * len(self.entries))]
         self.table.rows_model.up_enabled = not top
         moved = relative != self.shown
-        # One paint for the new rows (the model is reset, the columns fitted, the list scrolled): nothing in between
-        # shows for a moment.
+        if moved and self.quick.text():  # another folder: from its top, unfiltered
+            self.quick.blockSignals(True)
+            self.quick.clear()
+            self.quick.blockSignals(False)
+        self.full_rows = (rows, colors, tips, keys, [None, None, *sorts])
+        self.show_rows(moved)
+        self.shown = relative
+        if self.mode() == "host":
+            self.note.setText(tr("This folder belongs to a sandbox: what is copied from here is treated like the "
+                                 "agent's files (never executable, links not followed).") if inside else "")
+            self.note.setVisible(inside)
+        if then is not None:
+            then(listed)
+        if listed and self.pending_drop is not None and self.pending_shown():
+            QTimer.singleShot(0, self, lambda: self.page.run_pending(self))  # (out of the listing's own call)
+        return listed
+
+    def quick_matches(self, name):
+        """Whether NAME is shown under the quick filter's text (none: all; * and ?: wildcards; else held in it;
+        letters' case aside)."""
+        text = self.quick.text().strip().casefold()
+        if not text:
+            return True
+        name = name.casefold()
+        if "*" in text or "?" in text:
+            return fnmatch.fnmatchcase(name, text) or fnmatch.fnmatchcase(name, f"*{text}*")
+        return text in name
+
+    def show_rows(self, moved=False):
+        """The last listing's rows (full_rows) in the list, those the quick filter leaves out not among them ("." and
+        ".." always); the count shown while it filters. One paint for the new rows."""
+        if self.full_rows is None:
+            return
+        rows, colors, tips, keys, sorts = self.full_rows
+        kept = [i for i, key in enumerate(keys) if key in (HERE, UP) or self.quick_matches(key)]
+        filtering = len(kept) != len(keys)
+        if filtering:
+            rows, colors, tips, keys = ([seq[i] for i in kept] for seq in (rows, colors, tips, keys))
+        total = len(self.full_rows[3]) - 2
+        self.quick_count.setText(tr("{shown} of {total}", shown=len(keys) - 2, total=total) if filtering else "")
+        self.quick_count.setVisible(bool(self.quick.text().strip()))
         self.table.setUpdatesEnabled(False)
         try:
             if moved:  # (selected in the rows of the folder before: other files here)
                 self.table.clearSelection()
-            fill(self.table, rows, colors, tooltips=tips, keys=keys, sort=[None, None, *sorts])
+            fill(self.table, rows, colors, tooltips=tips, keys=keys, sort=sorts)
             if moved:  # another folder: from its top (a folder listed again keeps where it was scrolled to)
                 self.table.scrollToTop()
                 if rows:
@@ -1633,14 +1987,18 @@ class Pane(QWidget):
                                                                 QItemSelectionModel.SelectionFlag.NoUpdate)
         finally:
             self.table.setUpdatesEnabled(True)
-        self.shown = relative
-        if self.side == "host":
-            self.note.setText(tr("This folder belongs to a sandbox: what is copied from here is treated like the "
-                                 "agent's files (never executable, links not followed).") if inside else "")
-            self.note.setVisible(inside)
-        if then is not None:
-            then(listed)
-        return listed
+
+    def focus_quick(self):
+        self.page.activate(self)
+        self.quick.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.quick.selectAll()
+
+    def pending_shown(self):
+        """Whether the pane shows now where the drop onto its chooser waits to go (pending_drop)."""
+        kind, value = self.pending_drop["wanted"]
+        if kind == "place":
+            return self.place == value
+        return self.recent_key(self.relative) == value
 
     def path_of(self, entry):
         return f"{self.relative}/{entry.name}" if self.relative else entry.name
@@ -1765,8 +2123,8 @@ class Pane(QWidget):
         elif folder:  # (View, Edit, the hex editor: as on the folder itself - F3 and F4 entered it, "not followed" was
             # said of a link Open follows)
             self.page.message.setText(tr("{name} is a folder.", name=printable(entry.name)))
-        elif plain and self.page.right.root is not None:
-            self.page.open_editor(self.page.right.root, host_relative(real), real, mode, read_only)
+        elif plain:
+            self.page.open_editor(self.page.local, host_relative(real), real, mode, read_only)
         else:
             self.page.message.setText(not_followed)
 
@@ -1775,63 +2133,84 @@ class Pane(QWidget):
 
     # -- the free space, the folders visited recently --
 
-    def show_space(self, space):
-        """SPACE: (free, total) bytes of the file system of the folder shown, or None (not known)."""
+    def show_space(self, space, unknown=False):
+        """SPACE: (free, total) bytes of the file system of the folder shown, or None (not known: said so where UNKNOWN -
+        a remote system's SFTP server that does not tell -, else nothing)."""
         if space is None or space[1] <= 0:
-            self.space.setText("")
+            self.space.setText(tr("Free space: not known (the SFTP server does not tell)") if unknown else "")
             return
         free, total = space
         self.space.setText(tr("{free} free of {total}", free=files.size_text(free), total=files.size_text(total)))
 
     @staticmethod
     def kept_recent():
-        """The host pane's recent folders kept in the app's state (absolute paths; anything else is dropped)."""
+        """The host pane's recent folders kept in the app's state: this machine's (absolute paths) and those of
+        sandbox-ai's hosts ([host:NAME, relative path]); anything else is dropped."""
         kept = app_state.current()
         values = kept.get(RECENT_KEY, [], list) if kept is not None else []
-        found = [value for value in values if isinstance(value, str) and os.path.isabs(value) and len(value) < 4096
-                 and "\0" not in value]
+        found = []
+        for value in values:
+            if isinstance(value, str) and os.path.isabs(value) and len(value) < 4096 and "\0" not in value:
+                found.append(value)
+            elif isinstance(value, (list, tuple)) and len(value) == 2 and all(isinstance(v, str) for v in value) and \
+                    value[0].startswith(HOST_PREFIX) and len(value[0]) + len(value[1]) < 4096 and \
+                    not any(c in "".join(value) for c in "\0\n\r") and ".." not in value[1].split("/"):
+                found.append((value[0], value[1].strip("/")))
         return list(dict.fromkeys(found))[:RECENT]
 
     def recent_key(self, relative):
-        """What the Recent menu keeps of the folder RELATIVE: the host's absolute path; in a sandbox's folder (the
-        root as the chooser has it, relative), the root only while it is in the chooser."""
-        if self.side == "host":
+        """What the Recent menu keeps of the folder RELATIVE: this machine's absolute path; elsewhere (the place as the
+        chooser has it - a sandbox's folder, a host by name, a remote system -, relative), kept while it is in the
+        chooser (the hosts by name: always; so per host)."""
+        if self.mode() == "host":
             return self.path_at(relative)
+        folder = host_folder_parts(self.roots.currentData())
+        if folder is not None:  # (a host's sandbox's folder: a folder of that host, relative to its "/")
+            return (HOST_PREFIX + folder[0], relative)
         return (self.roots.currentData(), relative)
 
     def remember(self, relative):
         """The folder RELATIVE was shown: first in the Recent menu (once, at most RECENT)."""
-        if self.root is None or (self.side == "sandbox" and not self.roots.currentData()):
+        if self.root is None or (self.mode() != "host" and not self.roots.currentData()):
             return
         key = self.recent_key(relative)
         self.recent = [key, *(entry for entry in self.recent if entry != key)][:RECENT]
         if self.side == "host":
             kept = app_state.current()
-            if kept is not None:
-                kept.set(RECENT_KEY, list(self.recent))
+            if kept is not None:  # (this machine's folders and the hosts' by name: a connection's ssh:// key is not)
+                kept.set(RECENT_KEY, [entry if isinstance(entry, str) else list(entry) for entry in self.recent
+                                      if isinstance(entry, str) or entry[0].startswith(HOST_PREFIX)])
 
     def forget_roots(self):
-        """A sandbox's folders that left the chooser leave the Recent menu too."""
-        if self.roots is None:
-            return
-        listed = {self.roots.itemData(i) for i in range(self.roots.count())}
-        self.recent = [entry for entry in self.recent if entry[0] in listed]
+        """A sandbox's folders that left the chooser leave the Recent menu too (this machine's folders stay)."""
+        listed = {self.roots.itemData(i) for i in range(self.roots.count())} | \
+            {path for _kind, _label, path in self.sandbox_roots}  # (also those the host filter does not list now)
+        self.recent = [entry for entry in self.recent if isinstance(entry, str) or entry[0] in listed]
 
     def recent_entries(self):
         """[(text shown, key)] of the Recent menu: the latest first, not the folder shown now; a sandbox's folders only
-        while their root is in the chooser."""
+        while their root is in the chooser; a host's as NAME:/path."""
         here = self.recent_key(self.relative) if self.root is not None else None
         found = []
         for key in self.recent:
             if key == here:
                 continue
-            if self.side == "host":
+            if isinstance(key, str):
                 found.append((printable(key), key))
+            elif key[0].startswith(HOST_PREFIX) and self.roots.findData(key[0]) >= 0:
+                found.append((printable(f"{key[0][len(HOST_PREFIX):]}:/{key[1]}"), key))
             elif self.roots.findData(key[0]) >= 0:  # (a remote system's root ends in "/": ssh://you@host/)
                 found.append((printable(key[0].rstrip("/") + "/" + key[1] if key[1] else key[0]), key))
         return found
 
     def eventFilter(self, watched, event):  # noqa: N802
+        if watched is getattr(self, "quick", None) and event.type() == QEvent.Type.KeyPress and \
+                event.key() == Qt.Key.Key_Escape and not event.modifiers():
+            self.quick.clear()
+            self.table.setFocus(Qt.FocusReason.ShortcutFocusReason)
+            return True
+        if event.type() in DRAG_EVENTS and watched in (getattr(self, "path", None), getattr(self, "roots", None)):
+            return self.page.bar_drag(self, watched, event)  # (onto the path bar or the chooser)
         if event.type() == QEvent.Type.FocusIn and watched in (getattr(self, "path", None), getattr(self, "roots", None)) \
                 and getattr(self.page, "buttons", None):
             self.page.activate(self)
@@ -1859,7 +2238,12 @@ class Pane(QWidget):
     def go_recent(self, key):
         """Show the recent folder KEY through the path bar's own checks (go_path: a link in a sandbox's folder is
         refused, as when it is typed). In a sandbox's folder of another root, that root is chosen first."""
-        if self.side == "host":
+        if isinstance(key, str):
+            if self.mode() != "host":  # (this machine's folder: this machine chosen first)
+                index = self.roots.findData(LOCAL)
+                if index < 0:
+                    return False
+                self.roots.setCurrentIndex(index)
             return self.go_path(key, exact=True)
         root_path, relative = key
         index = self.roots.findData(root_path)
@@ -1868,7 +2252,11 @@ class Pane(QWidget):
             self.page.message.setText(tr("{path} is no longer in the list of folders.", path=printable(root_path)))
             return False
         if self.roots.currentIndex() != index:
+            self.after_connect = (root_path, relative)  # (a host not connected yet: its folder once it is)
             self.roots.setCurrentIndex(index)  # (choose_root: that root, from its top)
+            if self.roots.currentData() != root_path:
+                return False  # (connecting: choose_root shows the folder once it is connected)
+            self.after_connect = None
         if self.root is None:
             if self.opening is not None:
                 # (a folder on a file system slower than a moment is opened in a thread: its folder RELATIVE is listed
@@ -1915,6 +2303,7 @@ class FilesPage(QWidget):
     def __init__(self, sai, projects=lambda: []):
         super().__init__()
         self.sai, self.projects = sai, projects
+        self.workspace_request = None  # the window: (host, path) for a running session (MainWindow.add_workspace_from)
         self.others, self.last_report = [], []
         self.listing_notes, self.before_listing = {}, ""  # (listing_says: the panes' "Listing…" notes, what they replaced)
         # {host folder: its path in the sandbox} of the running sandboxes and sessions (backend.sandbox_paths, read in
@@ -1927,14 +2316,52 @@ class FilesPage(QWidget):
         # Connected remote systems ({key: remote.RemoteRoot}, in the sandbox pane's chooser) and how to reach them:
         # the ssh program (tests: a command that speaks SFTP), the known_hosts and ssh_config files (None: the user's).
         self.remotes, self.ssh_program, self.known_hosts, self.ssh_config = {}, "ssh", None, None
+        # {name: the key of its connection in REMOTES} of sandbox-ai's hosts chosen by name in a pane (connect_host)
+        self.host_keys = {}
+        # The folders of the sandboxes on sandbox-ai's hosts (read_host_folders: one call per host, in threads): {name:
+        # (state, [(kind, label, path)], why)} - "reading" (what was read before stays listed meanwhile), "listed",
+        # "failed" (no answer in time: its section says so and why); a host whose sandbox-ai is older is left out (its
+        # own entry still works). STALE: to be read once the page is shown (no SSH for a page nobody looks at).
+        self.host_folders, self.host_tokens, self.hosts_stale = {}, {}, True
+        self.pending_start = None  # (host, folder) a terminal tab's "File manager" waits for (show_start)
+        # The left pane's host shown once its sandboxes' folders come ((host, the place shown then), or None): its host
+        # filter set to a host whose folders were still on their way (follow_target) - unless another was chosen since.
+        self.follow_waiting = None
+        # Whose sandboxes the left pane offers: all hosts, this machine or one of sandbox-ai's hosts - the Sandboxes
+        # page's host, followed as the other pages follow it (ui.FOLLOWERS, host_choice.HostFollow); shown once there is
+        # a host of sandbox-ai's.
+        self.host_box = QComboBox()
+        self.host_box.setAccessibleName(tr("Sandboxes of"))
+        self.host_box.setToolTip(tr("Whose sandboxes the left pane offers: of all hosts, of this machine or of one of "
+                                    "sandbox-ai's hosts (their folders over SSH)"))
+        self.host_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.host_box.addItem(tr("All hosts"), None)
+        self.host_box.addItem(tr("This machine"), LOCAL_HOST)
+        self.host_box.currentIndexChanged.connect(lambda _=0: self.host_filter_changed())
+        self.follow_note = follow_note()
+        # This machine (the human's own): what the right pane shows first, and either pane when "This machine" is chosen.
+        self.local = files.Root("/", label=tr("This machine"), sandbox=False)
         self.ranges = files.subordinate_ranges()
         self.message = plain_label(selectable=True, log="files")
         # Copied or cut items (Ctrl+C, Ctrl+X), what is dragged now, the editors and dialogs open.
         self.clipboard, self.drag, self.editors, self.dialogs = None, None, [], []
+        # While a drag of this window goes on: what the status line says of what other programs get of it (DRAG_NOTE),
+        # why the last drop was refused (DROP_REFUSED), whether a drop here took it (DROP_TAKEN) - start_drag.
+        self.drag_note, self.drop_refused, self.drop_taken = None, None, False
         self.left = Pane(self, "sandbox")
         self.right = Pane(self, "host")
         self.active = self.left
         layout = QVBoxLayout(self)
+        self.host_row = QWidget()
+        row = QHBoxLayout(self.host_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(tr("Sandboxes of"))
+        label.setBuddy(self.host_box)
+        row.addWidget(label)
+        row.addWidget(self.host_box)
+        row.addWidget(self.follow_note, 1)
+        layout.addWidget(self.host_row)
+        self.fill_host_box()
         # The two panes half and half (a width the human dragged, or the one the app kept from before, stays).
         splitter = self.split = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.left)
@@ -1974,14 +2401,17 @@ class FilesPage(QWidget):
         # Copies (up to 1 GiB), moves, deletes and owner changes run in a thread with Cancel; one at a time.
         self.task = Task()
         self.task.changed.connect(self.running)
+        # The search windows ({pane side: file_search_view.SearchDialog}): Ctrl+Shift+F anywhere in the page, the
+        # panes' search buttons and their context menus.
+        self.searches = {}
+        QShortcut(QKeySequence("Ctrl+Shift+F"), self, context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
+                  activated=lambda: self.search_dialog())
         self.task.cancel_button.clicked.connect(lambda *_: self.cancelling())
         self.job_roots = []  # the roots of the job running (Cancel interrupts a remote one's stalled request)
         layout.addWidget(self.task)
         layout.addWidget(self.message)
-        note = plain_label(tr("Symbolic links are shown but never followed or copied; copies stop at {limit} MiB.",
-                              limit=files.LIMIT >> 20))
-        note.setEnabled(False)
-        layout.addWidget(note)
+        layout.addWidget(explanation(tr("Symbolic links are shown but never followed or copied; copies stop at {limit} "
+                                        "MiB.", limit=files.LIMIT >> 20)))
         self.progress, self.progress_text = None, ""
         self.timer = QTimer(self)
         self.timer.setInterval(PROGRESS_INTERVAL)
@@ -1989,6 +2419,7 @@ class FilesPage(QWidget):
         self.refresh_roots()
         self.right.list()
         self.mark_active()
+        follow_hosts(self, self.hosts_changed)  # a host added, renamed or removed on the Hosts page: here at once
 
     # -- the old page's names: the sandbox pane --
 
@@ -2040,10 +2471,13 @@ class FilesPage(QWidget):
         self.left.add_other()
 
     def showEvent(self, event):  # noqa: N802
-        """Shown with its real width at last: the panes half and half, unless their division was moved or kept."""
+        """Shown with its real width at last: the panes half and half, unless their division was moved or kept. The
+        hosts' sandboxes' folders read now if they were not while it was hidden."""
         super().showEvent(event)
         if not self.keep_split:
             QTimer.singleShot(0, self, self.halve)  # once the layout gave the splitter its width
+        if self.hosts_stale:
+            self.read_host_folders()
 
     def halve(self):
         total = sum(self.split.sizes())
@@ -2058,6 +2492,26 @@ class FilesPage(QWidget):
         """The sandbox side's folders are being read (in the background)."""
         return getattr(self.left, "roots_reading", False)
 
+    def show_start(self, host, folder):
+        """The left pane on a start's folder FOLDER (a terminal tab's "File manager"): on this machine its folder among
+        the sandboxes' folders; on sandbox-ai's host HOST that folder of its sandboxes (`list --folders` there, read
+        first when it has not been: selected once it came; a host that does not list it says so)."""
+        if not folder:
+            return False
+        if host in (None, LOCAL_HOST):
+            self.pending_start = None
+            self.refresh_roots(select=real_folder(folder))
+            return True
+        _state, roots, _why = self.host_folders.get(host, (None, [], None))
+        if any(root[2] == folder for root in roots):
+            self.pending_start = None
+            self.left.show_places(select=host_folder(host, folder))
+            return True
+        self.pending_start = (host, folder)
+        self.message.setText(tr("Asking {host} for its sandboxes' folders…", host=printable(host)))
+        self.read_host_folders()
+        return True
+
     def set_project(self, path):
         """Show the current project's folder (its real path read as real_folder reads it: on a file system that hangs, the
         window waits no longer than a moment)."""
@@ -2071,8 +2525,8 @@ class FilesPage(QWidget):
     def folder_sources(self):
         """(the sandbox side's folders, the projects' and folders chosen as given): what sandbox_folders and
         resolve_folders take - read from the widgets, no file system asked (the GUI thread)."""
-        listed = [path for path in (self.left.roots.itemData(i) for i in range(self.left.roots.count()))
-                  if path and str(path).startswith("/")]
+        # (the folders read last, also those the host filter does not list now: their files stay an agent's)
+        listed = [str(path) for _kind, _label, path in self.left.sandbox_roots if path and str(path).startswith("/")]
         try:
             known = [str(entry[2]) for entry in [*self.projects(), *self.others]
                      if isinstance(entry, (tuple, list)) and len(entry) > 2 and entry[2]]
@@ -2169,6 +2623,154 @@ class FilesPage(QWidget):
             applog.swallowed("files_page", "FilesPage.remote_hosts: an older sandbox-ai, no hosts: none shown", _exc)
             return []
 
+    # -- the sandboxes of sandbox-ai's hosts: their folders in the left chooser, whose are offered --
+
+    def sandbox_hosts(self):
+        """The names of sandbox-ai's hosts whose sandboxes' folders may be listed (remote_hosts, this machine and a name
+        that could read as an option left out)."""
+        return [name for name in self.remote_hosts() if name != LOCAL_HOST and valid_host(name) == name]
+
+    def host_filter(self):
+        """Whose sandboxes the left pane offers: None (all hosts), LOCAL_HOST or a host's name."""
+        box = getattr(self, "host_box", None)
+        return box.currentData() if box is not None and box.count() else None
+
+    def fill_host_box(self):
+        """All hosts, this machine and each host of `sandbox-ai hosts`; the choice stays while its host does (one that
+        left: all hosts). Shown only when there is a host of sandbox-ai's; filled again only when the hosts changed."""
+        names, box = self.sandbox_hosts(), self.host_box
+        shown = [box.itemData(index) for index in range(2, box.count())]
+        if shown != names:
+            chosen = box.currentData()
+            box.blockSignals(True)
+            while box.count() > 2:
+                box.removeItem(2)
+            for name in names:
+                box.addItem(printable(name), name)
+            index = box.findData(chosen) if chosen is not None else 0
+            box.setCurrentIndex(max(index, 0) if names else 0)
+            box.blockSignals(False)
+            if box.currentData() != chosen:
+                self.host_filter_changed()
+        self.host_row.setVisible(bool(names))
+
+    def host_filter_changed(self):
+        """The left pane offers the sandboxes of the host chosen (by the human here, or as the Sandboxes page's host:
+        HostFollow) - and shows that host's: what it shows stays when it is that host's, else that host's first
+        sandbox's folder (this machine's: its first; a host's whose folders are on their way: the host itself until
+        they come, then its first)."""
+        self.follow_waiting = None
+        left = getattr(self, "left", None)
+        if left is None:
+            return
+        left.show_places(select=self.follow_target(self.host_filter()))
+
+    def follow_target(self, host):
+        """The entry of the left chooser to show for HOST chosen as whose sandboxes it offers: its first sandbox's
+        folder. None: what it shows stays - HOST None (all hosts), what it shows is HOST's already, or HOST has no
+        sandbox's folder (its section says so); while HOST's folders are on their way (or not read yet: the page was
+        hidden), its first once they come, unless something else was chosen meanwhile (follow_waiting)."""
+        left = self.left
+        if host is None or host_of(left.place if left.root is not None else None) == host:
+            return None
+        if host == LOCAL_HOST:
+            return left.sandbox_roots[0][2] if left.sandbox_roots else None
+        state, roots, _why = self.host_folders.get(host, (None, [], None))
+        if roots:
+            return host_folder(host, roots[0][2])
+        if state in (None, "reading") and host in self.sandbox_hosts():
+            self.follow_waiting = (host, left.place)
+        return None
+
+    def read_host_folders(self):
+        """The folders of the sandboxes on each of sandbox-ai's hosts, read again: one call per host
+        (backend.host_file_roots), each in a thread of its own with a time limit - a host that does not answer holds up
+        neither the window nor the list (its section says so once its time is up). What a host listed before stays
+        listed while it is read anew. Only while the page is shown (hidden: once it is shown next)."""
+        if not self.isVisible():
+            self.hosts_stale = True
+            return
+        self.hosts_stale = False
+        names = self.sandbox_hosts()
+        reader = getattr(self.sai, "host_file_roots", None)
+        for name in [name for name in self.host_folders if name not in names or reader is None]:
+            del self.host_folders[name]
+        for name in names if reader is not None else []:
+            token = self.host_tokens[name] = self.host_tokens.get(name, 0) + 1
+            _state, roots, _why = self.host_folders.get(name, (None, [], None))
+            self.host_folders[name] = ("reading", roots, None)
+            background(lambda name=name: reader(name, timeout=HOST_FOLDERS_WAIT), owner=self, work=False,
+                       timeout=HOST_FOLDERS_WAIT * 1.5, what=f"the folders of {name}'s sandboxes",
+                       done=lambda found, error, name=name, token=token: self.host_folders_read(name, token, found,
+                                                                                               error))
+        self.left.show_places()
+
+    def host_folders_read(self, name, token, found, error):
+        """Host NAME's sandboxes' folders came (FOUND), or not (ERROR): its section of the left chooser anew."""
+        if self.host_tokens.get(name) != token or name not in self.host_folders:
+            return False  # (read again meanwhile, or the host is gone)
+        if error is None and found is None:
+            del self.host_folders[name]  # (its sandbox-ai is older: the host's own entry only)
+        elif error is not None:
+            why = tr("no answer within {seconds} s", seconds=HOST_FOLDERS_WAIT) if isinstance(error, TimeoutError) \
+                else printable(error)[:300]
+            applog.log("INFO", "files", f"the folders of {name}'s sandboxes: not read ({applog.redact(why)})")
+            self.host_folders[name] = ("failed", [], why)
+        else:
+            self.host_folders[name] = ("listed", list(found), None)
+        waiting, self.follow_waiting = self.follow_waiting, None
+        select = None
+        pending = getattr(self, "pending_start", None)
+        if pending is not None and pending[0] == name:  # a terminal tab's "File manager" waited for this host
+            self.pending_start = None
+            if any(root[2] == pending[1] for root in self.host_folders.get(name, (None, []))[1]):
+                self.left.show_places(select=host_folder(name, pending[1]))
+                self.message.setText("")
+                return True
+            self.message.setText(tr("{host} does not list {folder} among its sandboxes' folders.",
+                                    host=printable(name), folder=printable(pending[1])))
+        if waiting is not None and waiting[0] == name and self.host_filter() == name and \
+                self.left.place == waiting[1] and self.host_folders.get(name, (None, []))[1]:
+            select = host_folder(name, self.host_folders[name][1][0][2])  # (the host's first, as it was followed)
+        elif waiting is not None and waiting[0] != name:
+            self.follow_waiting = waiting
+        self.left.show_places(select=select)
+        return True
+
+    def host_sections(self, hosts=None):
+        """[(heading, [(text, data, tooltip, enabled)])] of the sandboxes' folders of each of sandbox-ai's hosts (HOSTS:
+        a set of the hosts' whose alone; None: all) for the left chooser: "lab: Running sandbox NAME: workspace
+        (/path)", or a note while they are read the first time, when none runs or is kept there, or when the host did
+        not answer (and why)."""
+        sections = []
+        for name in sorted(self.host_folders):
+            if hosts is not None and name not in hosts:
+                continue
+            state, roots, why = self.host_folders[name]
+            host = printable(name)
+            tip = tr("A sandbox's folder on {host}: its files over SSH and SFTP; they count as an agent's", host=host)
+            items = [(tr("{host}: {folder}", host=host, folder=root_title(kind, label, path)), host_folder(name, path),
+                      tip, True) for kind, label, path in roots]
+            if state == "failed":
+                items = [(tr("{host}: its sandboxes are not available ({why})", host=host, why=why), None, why, False)]
+            elif not items:
+                items = [(tr("{host}: reading its sandboxes…", host=host) if state == "reading" else
+                          tr("{host}: no sandbox runs or is kept there", host=host), None, None, False)]
+            sections.append((tr("Sandboxes on {host}", host=host), items))
+        return sections
+
+    def hosts_changed(self):
+        """The list of sandbox-ai's hosts changed (the Hosts page, the hosts file): the host filter, both choosers'
+        places and the hosts' sandboxes' folders anew (read now while the page is shown, else once it is)."""
+        self.fill_host_box()
+        self.right.show_places()
+        self.read_host_folders()
+        if not self.isVisible():
+            names = self.sandbox_hosts()
+            for name in [name for name in self.host_folders if name not in names]:
+                del self.host_folders[name]
+            self.left.show_places()
+
     def mark_active(self):
         for pane in (self.left, self.right):
             font = pane.title.font()
@@ -2176,7 +2778,7 @@ class FilesPage(QWidget):
             pane.title.setFont(font)
         # (not while a job runs: a focus change re-enabled it, which running() had switched off)
         busy = getattr(self, "task", None) is not None and self.task.running
-        set_enabled(self.buttons["own"], self.active.side == "sandbox" and not self.active.remote() and not busy,
+        set_enabled(self.buttons["own"], self.active.mode() == "sandbox" and not busy,
                     tr("Taking ownership works only below a sandbox's folder."))
         set_enabled(self.buttons["chown"], not self.active.remote() and not busy,
                     tr("Owners are not changed on a remote system from here."))
@@ -2417,11 +3019,13 @@ class FilesPage(QWidget):
                     source.path_text())
         return self.transfer_items(clip, target, target.relative, move)
 
-    def transfer_items(self, clip, target, target_dir, move=False, began=None):
+    def transfer_items(self, clip, target, target_dir, move=False, began=None, asked=False):
         """Copy (MOVE: move) the items of CLIP into the folder TARGET_DIR of the TARGET pane, in a thread: through
         files.copy_entry and files.move_entry (links not followed, budgets, Cancel; replacing asks first). BEGAN(): once
         the job has begun - after the question about what exists there, which may come after this returns (a remote
-        target, a file system slower than a moment)."""
+        target, a file system slower than a moment). Into one of sandbox-ai's hosts from anywhere else only after a
+        question that names what goes there (ASKED: copy_paths asked it already); between two remote systems through
+        this machine (remote.relay)."""
         if target.root is None:
             self.message.setText(tr("Choose a folder in both panes first."))
             return False
@@ -2440,7 +3044,7 @@ class FilesPage(QWidget):
         # came executable, as the choice of the moment of Ctrl+C had it; the stricter choice counts)
         untrusted = untrusted or bool(getattr(src_root, "agents", False))
         remote = getattr(src_root, "remote", False) or getattr(dst_root, "remote", False)
-        if target_untrusted and not remote and target.side == "host":
+        if target_untrusted and not remote and target.mode() == "host":
             # (between this machine's folders, a target is an agent's only where a sandbox's folder of now holds it -
             # held_now: one kept from before may be a folder of the human's whose device and inode met one by chance,
             # and what came out of a sandbox's folder went in as within the sandboxes' folders, executable, unnamed)
@@ -2457,6 +3061,25 @@ class FilesPage(QWidget):
         # executables executable, its hooks unnamed (files.copy_entry's AGENTS: that part as the agent's).
         # (read in the job's thread: identities_reader)
         agents = frozenset() if target_untrusted or getattr(src_root, "remote", False) else self.identities_reader()
+        if not asked and getattr(dst_root, "remote", False) and not same_connection(src_root, dst_root) and \
+                self.sandbox_host(dst_root):
+            # Sandboxes run on sandbox-ai's hosts and their agents may read what is copied there (as a drop of another
+            # program's files there asks): named, asked first.
+            host = self.host_name(dst_root)
+            if not confirm(
+                    self, tr("Move to {host}?", host=host) if move else tr("Copy to {host}?", host=host),
+                    tr("{count} item(s) from {source} would go into {folder} on {host}, a host of sandbox-ai's where "
+                       "sandboxes run and agents may read them. Go ahead?", count=len(items),
+                       source=printable(clip.folder_text), folder=printable(target_text), host=host),
+                    tr("Move to {host}", host=host) if move else tr("Copy to {host}", host=host),
+                    details="\n".join(printable(item_text(src_root, path)) for _name, path, _new in items)):
+                self.message.setText(tr("Nothing was copied."))
+                return False
+            if target.root is not dst_root:
+                # (another folder or system chosen while it asked: the answer was about this one)
+                self.message.setText(tr("The folder shown changed meanwhile; nothing was done."))
+                return False
+
         def then(overwrite):
             started = self.start_transfer(src_root, dst_root, items, target_dir, target_text, overwrite, untrusted,
                                           target_untrusted, refused, out, move, agents)
@@ -2492,8 +3115,17 @@ class FilesPage(QWidget):
                     problems.append(f"{printable(name)}: {printable(exc)}")
             return done, problems
         # (the folder's name as every other on the screen: an agent's line break or escape sequence shown escaped)
-        text = (tr("Moving {count} item(s) to {target}…", count=len(items), target=printable(target_text)) if move
-                else tr("Copying {count} item(s) to {target}…", count=len(items), target=printable(target_text)))
+        if getattr(src_root, "remote", False) and getattr(dst_root, "remote", False) and \
+                not (move and same_connection(src_root, dst_root)):
+            # (between two remote systems: fetched to this machine first, then sent on - remote.relay; the progress
+            # counts what came here)
+            where = printable(dst_root.display(target_dir))
+            text = (tr("Moving {count} item(s) to {target} through this machine…", count=len(items), target=where)
+                    if move else tr("Copying {count} item(s) to {target} through this machine…", count=len(items),
+                                    target=where))
+        else:
+            text = (tr("Moving {count} item(s) to {target}…", count=len(items), target=printable(target_text)) if move
+                    else tr("Copying {count} item(s) to {target}…", count=len(items), target=printable(target_text)))
         started = self.run_job([src_root, dst_root], work,
                                lambda result, error: self.transferred(result, error, out, move), text)
         return self.follow(started, progress, text)
@@ -2573,7 +3205,8 @@ class FilesPage(QWidget):
     # -- the old page's copies: the sandbox pane and a host folder chosen in a dialog --
 
     def host(self):
-        return self.right.root
+        """This machine's Root("/") (the old page's copies to the host, and files of another program: host_items)."""
+        return self.local
 
     def download(self, entries, destination):
         """Copy ENTRIES (of the sandbox pane's folder) into the host folder DESTINATION, in a thread."""
@@ -2643,8 +3276,7 @@ class FilesPage(QWidget):
         items, problems, untrusted = found if done else ([], [tr(
             "{path} does not answer (a file system that hangs?); nothing was copied.",
             path=", ".join(printable(path) for path in given[:3]) + (" …" if len(given) > 3 else ""))], True)
-        root = self.right.root if self.right.root is not None else files.Root("/", sandbox=False)
-        clip = Clip(root, items, untrusted, tr("this machine"))
+        clip = Clip(self.local, items, untrusted, tr("this machine"))
         clip.problems = problems
         return clip, problems
 
@@ -2693,7 +3325,7 @@ class FilesPage(QWidget):
             # of that name -, asked about the one before; to a host of sandbox-ai's unasked)
             self.message.setText(tr("The folder shown changed meanwhile; nothing was done."))
             return False
-        return self.transfer_items(clip, target, target_dir)
+        return self.transfer_items(clip, target, target_dir, asked=bool(lab))
 
     def download_dialog(self):
         entries = self.left.chosen()
@@ -2741,7 +3373,8 @@ class FilesPage(QWidget):
         # connected again - the root of the moment the window opened was the old one, closed)
         window = EditorWindow(self, root, relative, shown, mode, read_only, saved=self.refresh_panes,
                               open_file=lambda other, where: self.open_editor(window.root, other, where, "markdown",
-                                                                              True), top=self.markdown_top(root, relative))
+                                                                              True),
+                              top=self.markdown_top(root, relative), dropped=self.editor_drop)
         self.keep(self.editors, window)
         window.show()
         return window
@@ -2793,7 +3426,7 @@ class FilesPage(QWidget):
             return None
         entries = pane.chosen() if entries is None else entries
         items = [(entry.name, pane.path_of(entry)) for entry in entries] or [("", pane.relative)]
-        relative, text, untrusted, sandbox = pane.relative, pane.path_text(), pane.untrusted(), pane.side == "sandbox"
+        relative, text, untrusted, sandbox = pane.relative, pane.path_text(), pane.untrusted(), pane.mode() == "sandbox"
         root = pane.root
         # (the sandboxes' folders' identities read in the thread too: identities_reader)
         reader = None if getattr(root, "remote", False) else self.identities_reader()
@@ -2815,6 +3448,29 @@ class FilesPage(QWidget):
                                       root, shown, relative, text, untrusted, sandbox, folders)))
         self.keep(self.dialogs, dialog)
         dialog.show()
+        return dialog
+
+    # -- the search --
+
+    def search_dialog(self, pane=None):
+        """The search below the folder PANE (the active one) shows: Ctrl+Shift+F, the pane's search button, its context
+        menu. One window a pane, brought to the front again - aimed at the folder shown unless a search runs in it."""
+        from .file_search_view import SearchDialog
+        pane = pane or self.active
+        if pane.root is None:
+            self.message.setText(tr("Choose a folder first."))
+            return None
+        self.activate(pane)
+        dialog = self.searches.get(pane.side)
+        if dialog is None or not isValid(dialog):
+            dialog = self.searches[pane.side] = SearchDialog(self, pane)
+        else:
+            dialog.aim(pane)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.names.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        dialog.names.selectAll()
         return dialog
 
     # -- remote systems (remote.py: SSH and SFTP) --
@@ -2858,6 +3514,56 @@ class FilesPage(QWidget):
         return any(known.host.lower() in names and (any_port or (known.port or 22) in ports)
                    for _name, known in self.sandbox_targets())
 
+    def places(self):
+        """[(text, data, tooltip)] of where a pane may list besides a sandbox's folders: this machine, sandbox-ai's hosts
+        by name (`sandbox-ai hosts`: connected over SSH when chosen), the remote systems connected with SSH…."""
+        found = [(tr("This machine"), LOCAL, tr("This machine's files, from your HOME folder"))]
+        targets = dict(self.sandbox_targets())
+        for name in self.remote_hosts():
+            if name == "local":
+                continue
+            target = targets.get(name)
+            text = tr("Host {name} ({target})", name=printable(name), target=printable(target.text())) if target \
+                else tr("Host {name}", name=printable(name))
+            found.append((text, HOST_PREFIX + name, tr("A host of sandbox-ai's where sandboxes run: its files over SSH "
+                                                       "and SFTP, from its HOME; they count as an agent's")))
+        claimed = set(self.host_keys.values())
+        for key, root in self.remotes.items():
+            if key not in claimed:
+                found.append((tr("Remote system {name}", name=printable(root.label)), key, None))
+        return found
+
+    def host_root(self, name):
+        """The connection of sandbox-ai's host NAME made for a pane (connect_host), or None."""
+        key = self.host_keys.get(name)
+        return self.remotes.get(key) if key is not None else None
+
+    def host_name(self, root):
+        """The remote ROOT as a question names it: "NAME (user@host)" for one of sandbox-ai's hosts, else user@host."""
+        label = printable(root.label)
+        name = next((name for name, key in self.host_keys.items() if key == getattr(root, "key", None)), None)
+        if name is None:
+            name = next((name for name, target in self.sandbox_targets() if target == getattr(root, "target", None)),
+                        None)
+        return f"{printable(name)} ({label})" if name else label
+
+    def connect_host(self, name, pane, select=None):
+        """Sandbox-ai's host NAME for PANE: a connection to it that is there already (also one made with SSH…), else one
+        made now in the background (connect_remote: its key trusted only after a yes) - PANE shows it once it is (SELECT:
+        that entry of its chooser - a folder of a sandbox there -, else the host's own)."""
+        target = dict(self.sandbox_targets()).get(name)
+        if target is None:
+            self.message.setText(tr("{name} has no SSH address among sandbox-ai's hosts (sandbox-ai hosts).",
+                                    name=printable(name)))
+            return False
+        found = next((key for key, root in self.remotes.items() if root.alive and root.target == target), None)
+        if found is not None:
+            self.host_keys[name] = found
+            self.other(pane).show_places()
+            pane.refresh_roots(select=select or HOST_PREFIX + name, hosts=False)
+            return True
+        return self.connect_remote(target, pane, name, select)
+
     def remote_choices(self):
         """[(text shown, remote.Target)]: sandbox-ai's hosts, then the Host entries of ~/.ssh/config."""
         from . import remote
@@ -2867,18 +3573,20 @@ class FilesPage(QWidget):
             found.append((tr("{name} (~/.ssh/config)", name=alias), remote.Target(alias)))
         return found
 
-    def remote_dialog(self):
-        """SSH…: which remote system (a sandbox-ai host, a Host of ~/.ssh/config, or user@host[:port] typed)."""
+    def remote_dialog(self, pane=None):
+        """SSH…: which remote system (a sandbox-ai host, a Host of ~/.ssh/config, or user@host[:port] typed), shown in
+        PANE (default: the left one)."""
         choices = self.remote_choices()
         text, ok = QInputDialog.getItem(self, tr("Remote system"), shown_as_text(tr(
             "Connect to (user@host, host:port, or a host below). Keys and your ssh-agent only: no password is asked "
             "for or kept.")), [label for label, _ in choices], 0, True)
         if not ok or not text.strip():
             return False
-        return self.connect_remote(dict(choices).get(text) or text.strip())
+        return self.connect_remote(dict(choices).get(text) or text.strip(), pane)
 
-    def connect_remote(self, target):
-        """Connect to TARGET (a remote.Target or its text) in the background; the sandbox pane shows it once it is."""
+    def connect_remote(self, target, pane=None, name=None, select=None):
+        """Connect to TARGET (a remote.Target or its text) in the background; PANE (default: the left one) shows it once
+        it is - as sandbox-ai's host NAME where it was chosen by name (SELECT: that entry of its chooser then)."""
         from . import remote
         try:
             target = target if isinstance(target, remote.Target) else remote.Target.parse(target)
@@ -2899,14 +3607,15 @@ class FilesPage(QWidget):
         # (no time limit as a whole: each step has its own - ssh's ConnectTimeout, REQUEST_TIMEOUT a request, 10 s for
         # each `ssh -G`; 120 s for all of them said "No answer" to a connection that was still being made, which nobody
         # took once it was: its ssh ran on unused)
-        background(connect, owner=self, work=False, done=lambda root, error: self.connected(target, root, error))
+        background(connect, owner=self, work=False,
+                   done=lambda root, error: self.connected(target, root, error, pane, name, select))
         return True
 
-    def connected(self, target, root, error):
+    def connected(self, target, root, error, pane=None, name=None, select=None):
         from . import remote
         if isinstance(error, remote.HostKeyUnknown):
             background(self.scan_keys, target, self.known_hosts, self.ssh_config, owner=self, timeout=60, work=False,
-                       done=lambda found, problem: self.trust_host(target, found, problem))
+                       done=lambda found, problem: self.trust_host(target, found, problem, pane, name, select))
             return False
         if isinstance(error, remote.AuthenticationNeeded):
             self.message.setText(printable(error))
@@ -2940,9 +3649,16 @@ class FilesPage(QWidget):
             for clip in (self.clipboard, self.drag):
                 if clip is not None and clip.root is old:
                     clip.root = root
+            for each in (self.left, self.right):  # (a pane that shows it: the same folder, through the new one)
+                if each.root is old:
+                    each.root = root
         self.remotes[root.key] = root
+        if name:
+            self.host_keys[name] = root.key
         self.message.setText(tr("Connected to {host}.", host=printable(root.label)))
-        self.refresh_roots(select=root.key)
+        pane = pane or self.left
+        self.other(pane).show_places()  # (offered there too; what it shows stays)
+        pane.refresh_roots(select=select or (HOST_PREFIX + name if name else root.key), hosts=False)
         return True
 
     @staticmethod
@@ -2953,9 +3669,9 @@ class FilesPage(QWidget):
         lines = remote.scan_host(target)
         return lines, remote.fingerprints(lines), known or remote.known_hosts_file(target, config)
 
-    def trust_host(self, target, found, problem):
+    def trust_host(self, target, found, problem, pane=None, name=None, select=None):
         """The host's keys, shown; added to known_hosts (FOUND: (lines, fingerprints, the known_hosts file), read in a
-        thread) and connected again only after a yes."""
+        thread) and connected again only after a yes (for PANE, as NAME: connect_remote)."""
         from . import remote
         if problem is not None:
             self.message.setText(printable(problem))
@@ -2973,7 +3689,7 @@ class FilesPage(QWidget):
         except (OSError, ValueError) as exc:
             self.message.setText(printable(exc))
             return False
-        return self.connect_remote(target)
+        return self.connect_remote(target, pane, name, select)
 
     def open_terminal(self, argv, title):
         """ARGV (ssh, interactive) in a terminal window of its own; without a terminal, the command to run."""
@@ -3012,7 +3728,7 @@ class FilesPage(QWidget):
             relative = os.path.relpath(path, pane.path_text())
         elif base is not None:
             relative = relative_to(path, base[0])
-        elif pane.side == "sandbox" and pane.root is not None:
+        elif pane.mode() == "sandbox" and pane.root is not None:
             relative = os.path.relpath(path, pane.root.path)
         else:
             relative = os.path.relpath(path, pane.path_text())
@@ -3136,11 +3852,89 @@ class FilesPage(QWidget):
             action = quoted.addAction(text)
             action.setEnabled(enabled)
             action.triggered.connect(lambda *_, form=form: run(lambda: self.copy_path(pane, entries, form, True)))
+        source = self.workspace_source(pane, one) if has_root and (not entries or one is not None) else None
+        add(tr("Add to a running session…"), lambda: self.add_to_session(source), None,
+            source is not None and getattr(self, "workspace_request", None) is not None,
+            tr("Mount it into a session that runs: as a workspace, until the session ends (asked first)")
+            if source is not None else tr("Choose one folder or file (or none: the folder shown)"))
         if not entries:
             add(tr("Refresh"), lambda: pane.list(), "Ctrl+R", has_root)
         add(tr("Properties…"), lambda: self.properties(pane, entries), "Alt+Return", has_root,
             None if entries else tr("Of the folder shown"))
+        add(tr("Search below this folder…"), lambda: self.search_dialog(pane), "Ctrl+Shift+F", has_root)
+        self.places_menu(menu, pane)
         return menu
+
+    def workspace_source(self, pane, entry=None):
+        """(host, path) for Add to a running session…: ENTRY (else the folder shown) as `sandbox-ai workspace add` of
+        that host takes it - this machine's path for this machine's sessions, a sandbox-ai host's path for that host's,
+        a remote system's as sshfs://[user@]machine[:port]/path for this machine's; None for nothing usable."""
+        path = pane.path_of_entry(entry) if entry is not None else pane.path_text()
+        if not path or not str(path).startswith("/"):
+            return None
+        if not pane.remote():
+            return "local", path
+        host = self.sandbox_host_name(pane.root)
+        if host is not None:
+            return host, path
+        target = getattr(pane.root, "target", None)
+        if target is None:
+            return None
+        who = f"{target.user}@" if target.user else ""
+        port = f":{target.port}" if target.port else ""
+        return "local", f"sshfs://{who}{target.host}{port}{path}"
+
+    def sandbox_host_name(self, root):
+        """The name in `sandbox-ai hosts` of the remote ROOT when it is one of sandbox-ai's hosts, else None."""
+        if not self.sandbox_host(root):
+            return None
+        target = getattr(root, "target", None)
+        endpoint = getattr(root, "endpoint", None)
+        names = {target.host.lower(), *([endpoint[0]] if endpoint else [])} if target is not None else set()
+        for name, known in self.sandbox_targets():
+            if known.host.lower() in names or name.lower() in names:
+                return name
+        return None
+
+    def add_to_session(self, source):
+        if source is not None and getattr(self, "workspace_request", None) is not None:
+            self.workspace_request(*source)
+
+    def places_menu(self, menu, pane):
+        """The pane's chooser and its buttons (Other folder…, SSH…) as a submenu of MENU: where PANE lists."""
+        menu.addSeparator()
+        where = menu.addMenu(tr("Show in this pane"))
+        where.setToolTipsVisible(True)
+        model = pane.roots.model()
+        for index in range(pane.roots.count()):
+            data = pane.roots.itemData(index)
+            if pane.roots.itemData(index, HEADING_ROLE):
+                where.addSection(pane.roots.itemText(index).replace("&", "&&"))  # (a heading of the chooser)
+                continue
+            action = where.addAction(pane.roots.itemText(index).replace("&", "&&"))
+            item = model.item(index) if hasattr(model, "item") else None
+            action.setEnabled(bool(data) and (item is None or item.isEnabled()))
+            tip = pane.roots.itemData(index, Qt.ItemDataRole.ToolTipRole)
+            if tip:
+                action.setToolTip(tip)
+            action.triggered.connect(lambda *_, data=data: self.show_in(pane, data))
+        where.addSeparator()
+        if pane.side == "sandbox":
+            where.addAction(tr("Other folder…")).triggered.connect(lambda *_: pane.add_other())
+        where.addAction(tr("SSH…")).triggered.connect(lambda *_: self.remote_dialog(pane))
+        return where
+
+    def show_in(self, pane, data):
+        """PANE lists DATA of its chooser (a host by name: once it is connected)."""
+        index = pane.roots.findData(data)
+        if index < 0:
+            self.message.setText(tr("{path} is no longer in the list of folders.", path=printable(data)))
+            return False
+        if index == pane.roots.currentIndex():
+            pane.choose_root()  # (chosen again: from its start, as a click on the chooser's entry does not)
+        else:
+            pane.roots.setCurrentIndex(index)
+        return True
 
     # -- the clipboard: Ctrl+C, Ctrl+X, Ctrl+V --
 
@@ -3209,11 +4003,7 @@ class FilesPage(QWidget):
         if same and clip.cut:
             self.message.setText(tr("They are in this folder already."))
             return False
-        if same and getattr(pane.root, "remote", False):
-            self.message.setText(tr("Copies from one remote folder to another are not made here; move works within "
-                                    "one remote system."))
-            return False
-        if same:  # a copy beside the original, under a name of its own (a local root: a remote one is refused above)
+        if same:  # a copy beside the original, under a name of its own (a remote system's: through this machine)
             # (on_root: done at once - or, on a file system that hangs, when the names are read: its result came back
             # as True then, and unpacking it failed)
             root, names = pane.root, [copy_name(name, n, name in clip.folders) for name, _, _ in clip.items
@@ -3344,14 +4134,18 @@ class FilesPage(QWidget):
     # -- drag and drop --
 
     def start_drag(self, pane):
-        """Drag what is selected in PANE: to the other pane or onto a folder (the drop copies; with Shift it moves),
-        or to another program (export_urls)."""
+        """Drag what is selected in PANE: to the other pane, onto a folder, a chooser or a path bar (the drop copies;
+        with Shift it moves), onto an editor (opens the files), or to another program (export_urls - what it does not
+        get is said in the status line while the drag goes on: drag_out_note). A drag that ends without a drop (Esc,
+        or let go where nothing takes it) says so - or why the drop was refused there."""
         entries = pane.chosen()
         if not entries or pane.root is None:
             return None
         clip = Clip(pane.root, [(entry.name, pane.path_of(entry), None) for entry in entries], pane.untrusted(),
                     pane.path_text())
         clip.pane, clip.folder = pane, pane.relative
+        clip.folders = frozenset(entry.name for entry in entries if entry.kind == "dir")
+        clip.files = frozenset(entry.name for entry in entries if entry.kind == "file")
         mime = QMimeData()
         mime.setData(MIME, clip.token.encode("ascii"))
         urls = self.export_urls(pane, entries)
@@ -3360,15 +4154,39 @@ class FilesPage(QWidget):
         drag = QDrag(pane.table)
         drag.setMimeData(mime)
         drag.setPixmap(self.drag_picture(entries))
-        self.drag = clip
+        note = self.drag_out_note(pane, entries, urls)
+        self.drag, self.drag_note, self.drop_refused, self.drop_taken = clip, note, None, False
+        if note:
+            self.message.setText(note)
+        result = None
         try:
-            return self.exec_drag(drag)
+            result = self.exec_drag(drag)
+            return result
         finally:
             self.drag = None
             self.drop_hint(None)
+            self.drag_note = None
+            if not self.drop_taken and result in (None, Qt.DropAction.IgnoreAction):
+                self.message.setText(self.drop_refused or note or tr(
+                    "The drag ended without a drop (Esc, or let go where nothing takes it): nothing was copied or "
+                    "moved."))
 
     def exec_drag(self, drag):
         return drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.CopyAction)
+
+    @staticmethod
+    def drag_out_note(pane, entries, urls):
+        """What the status line says while ENTRIES of PANE are dragged, when other programs get less than all of them
+        (URLS: what they get), else None. A remote system's files go to no other program (a drag would have to fetch
+        them before it began, holding up the window: they are copied to this machine first)."""
+        if pane.remote():
+            return tr("Other programs get nothing of a remote system's files: copy them to this machine first (F5 into "
+                      "a folder of this machine), then drag them from there.")
+        if len(urls) < len(entries):
+            return tr("Other programs get {count} of the {total} item(s) dragged: never a link, a special file or a "
+                      "folder that holds a sandbox's folder; out of an agent's folder only plain files that are not "
+                      "executable (as copies).", count=len(urls), total=len(entries))
+        return None
 
     def drag_picture(self, entries):
         """What moves with the mouse: the first name, and how many there are."""
@@ -3386,16 +4204,58 @@ class FilesPage(QWidget):
         painter.end()
         return picture
 
+    def drop_source(self, mime):
+        """What MIME brings: (the items dragged in this window - a Clip -, the local files of another program, why none
+        of it can be dropped). (None, [], None): nothing for the page (text, say - the path bar's own)."""
+        if mime is None:
+            return None, [], None
+        if self.drag is not None and self.drag.owns(mime):
+            return self.drag, [], None
+        if mime.hasFormat(MIME):
+            # (another window's - or forged: what is dragged is kept in the page, never read back from the data)
+            return None, [], tr("these items were dragged in another window of the app (or that drag has ended); copy "
+                                "and paste them instead.")
+        paths = [path for path in map(local_path, mime.urls()) if path] if mime.hasUrls() else []
+        if paths:
+            return None, paths, None
+        if mime.hasUrls():
+            return None, [], tr("only files of this machine can be dropped here (not web addresses or files of other "
+                                "systems).")
+        return None, [], None
+
+    def plan_into(self, pane, target_dir, row, move=False, clip=None, paths=(), place=None):
+        """The DropPlan of CLIP's items (MOVE: moved) or the host PATHS into TARGET_DIR of PANE - refused, with the
+        reason, where it cannot go: no folder shown yet, a job running, the folder still being listed, where they are
+        already, a folder into itself."""
+        action = Qt.DropAction.MoveAction if move and clip is not None else Qt.DropAction.CopyAction
+
+        def refused(why):
+            return DropPlan(pane, target_dir, row, action, clip, paths, refused=why, place=place)
+        if pane.root is None and place != "chooser":  # (onto the chooser: a place is chosen after the drop)
+            return refused(tr("no folder is shown in this pane yet."))
+        if self.task.running:  # (said while it is dragged: dropped, it asked nothing and said "Wait until…")
+            return refused(tr("a copy, move or delete is running; drop once it has finished (or cancel it)."))
+        if place != "chooser":
+            if pane.changing():  # (while the rows are another folder's: no row to drop onto)
+                return refused(tr("the folder is still being listed; drop once it is shown."))
+            if clip is not None and same_root(clip.root, pane.root):
+                if target_dir == getattr(clip, "folder", None):
+                    return refused(tr("they are already in this folder."))
+                if any(target_dir == path or target_dir.startswith(path + "/") for _, path, _ in clip.items):
+                    return refused(tr("a folder cannot go into itself."))
+        return DropPlan(pane, target_dir, row, action, clip, paths, place=place)
+
     def drop_plan(self, pane, mime, point, modifiers):
-        """What a drop of MIME at POINT of PANE's list does (DropPlan), or None where it does nothing: into the folder
-        of the row at POINT ("." the folder shown, ".." the one above - at the top of the pane: the folder shown), else
-        into the folder shown. Items dragged in this window are copied, with Shift moved; local files of another
-        program are copied."""
-        if pane.root is None or mime is None or pane.changing():
-            return None  # (while the rows are another folder's: no row to drop onto)
-        index = pane.table.indexAt(point)
+        """What a drop of MIME at POINT of PANE's list does (DropPlan - refused where it cannot be made, with the
+        reason), or None where it is nothing for the list: into the folder of the row at POINT ("." the folder shown,
+        ".." the one above - at the top of the pane: the folder shown), else into the folder shown. Items dragged in
+        this window are copied, with Shift moved; local files of another program are copied."""
+        clip, paths, why = self.drop_source(mime)
+        if clip is None and not paths and why is None:
+            return None
         target_dir, row = pane.relative, -1
-        if index.isValid():
+        index = pane.table.indexAt(point) if pane.root is not None and not pane.changing() else None
+        if index is not None and index.isValid():
             entry = pane.entry_at(index.row())
             if pane.is_up(index.row()) and pane.can_go_up():
                 target_dir, row = "/".join(files.parts(pane.relative)[:-1]), index.row()
@@ -3403,29 +4263,24 @@ class FilesPage(QWidget):
                 row = index.row()  # "." is the folder shown
             elif entry is not None and entry.kind == "dir":
                 target_dir, row = pane.path_of(entry), index.row()
-        clip = self.drag if self.drag is not None and self.drag.owns(mime) else None
-        if clip is not None:
-            if getattr(clip, "pane", None) is pane:
-                if target_dir == clip.folder:
-                    return None  # where they are
-                if any(target_dir == path or target_dir.startswith(path + "/") for _, path, _ in clip.items):
-                    return None  # into itself
-            move = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-            return DropPlan(pane, target_dir, row, Qt.DropAction.MoveAction if move else Qt.DropAction.CopyAction,
-                            clip=clip)
-        if mime.hasFormat(MIME):
-            return None  # another window's, or a drag that has ended
-        paths = [path for path in map(local_path, mime.urls()) if path] if mime.hasUrls() else []
-        if not paths:
-            return None
-        return DropPlan(pane, target_dir, row, Qt.DropAction.CopyAction, paths=paths)
+        if why:
+            return DropPlan(pane, target_dir, row, Qt.DropAction.CopyAction, refused=why)
+        return self.plan_into(pane, target_dir, row, bool(modifiers & Qt.KeyboardModifier.ShiftModifier), clip, paths)
 
     def drop_hint(self, plan):
-        """While something is dragged over a list: what a drop there does."""
+        """While something is dragged over a list, a path bar or a chooser: what a drop there does, or why it cannot be
+        made there (None: it left - what the drag said of other programs again)."""
         if plan is not None:
             self.message.setText(plan.text())
-        elif self.message.text().startswith(tr("Drop: {rest}", rest="")):
-            self.message.setText("")
+            return
+        text = self.message.text()
+        if text.startswith(tr("Drop: {rest}", rest="")) or text.startswith(tr("Cannot drop here: {why}", why="")):
+            self.message.setText(self.drag_note or "")
+
+    def refuse_drop(self, plan):
+        """A drop that cannot be made was let go: not taken, and the status line keeps saying why."""
+        self.drop_refused = plan.text()
+        self.message.setText(self.drop_refused)
 
     def run_drop(self, plan):
         """Do what PLAN says (after the drop has ended)."""
@@ -3434,6 +4289,192 @@ class FilesPage(QWidget):
         if plan.clip is not None:
             return self.transfer_items(plan.clip, plan.pane, plan.target_dir, move=plan.move)
         return self.copy_paths(plan.paths, plan.pane, plan.target_dir, foreign=True)
+
+    # -- dropped onto a path bar or a chooser --
+
+    def bar_drag(self, pane, widget, event):
+        """A drag event over PANE's path bar (WIDGET: a drop goes into the folder shown) or its chooser (where it goes
+        is chosen after the drop: chooser_drop). True when it was handled here; text dragged onto the path bar is
+        the field's own (typed in)."""
+        kind = event.type()
+        if kind == QEvent.Type.DragLeave:
+            self.mark_drop(widget, False)
+            self.drop_hint(None)
+            return False
+        chooser = widget is pane.roots
+        clip, paths, why = self.drop_source(event.mimeData())
+        if clip is None and not paths and why is None:
+            return False
+        place = "chooser" if chooser else "path"
+        if why:
+            plan = DropPlan(pane, pane.relative, None, Qt.DropAction.CopyAction, refused=why, place=place)
+        else:
+            move = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            plan = self.plan_into(pane, pane.relative, None, move, clip, paths, place)
+        if kind == QEvent.Type.Drop:
+            self.mark_drop(widget, False)
+            self.drop_hint(None)
+            if plan.refused:
+                self.refuse_drop(plan)
+                event.ignore()
+                return True
+            self.drop_taken = True
+            event.setDropAction(plan.action)
+            event.accept()
+            # (after the drop has ended: a menu or a question inside a drop handler would hold up where it came from)
+            QTimer.singleShot(0, self, lambda: self.chooser_drop(plan) if chooser else self.run_drop(plan))
+            return True
+        self.mark_drop(widget, not plan.refused)
+        self.drop_hint(plan)
+        if plan.refused:
+            if kind == QEvent.Type.DragEnter:
+                event.accept()  # (the moves over it follow: each is refused, the "no" cursor shows)
+            else:
+                event.ignore()
+            return True
+        event.setDropAction(plan.action)
+        event.accept()
+        return True
+
+    @staticmethod
+    def mark_drop(widget, on):
+        """WIDGET (a path bar, a chooser) framed in the look's highlight colour while a drop there would be taken."""
+        if bool(widget.property("dropTarget")) == on:
+            return
+        widget.setProperty("dropTarget", on)
+        if on:
+            widget.setProperty("styleBeforeDrop", widget.styleSheet())
+            color = widget.palette().color(QPalette.ColorRole.Highlight).name()
+            kind = "QComboBox" if isinstance(widget, QComboBox) else "QLineEdit"
+            widget.setStyleSheet(f"{kind} {{ border: 2px solid {color}; }}")
+        else:
+            widget.setStyleSheet(widget.property("styleBeforeDrop") or "")
+
+    def chooser_drop(self, plan):
+        """After a drop onto a pane's chooser: a menu of where it goes - the chooser's places (as the pane opens them:
+        a sandbox's folder at its top, a host or a remote system at its HOME, this machine at the folder shown there
+        last) and the pane's recent folders. Chosen, the pane goes there (a host connected first), and once it shows
+        that folder the drop goes into it as onto its list (drop_at_place); closed with Esc, nothing happens."""
+        pane = plan.pane
+        count = len(plan.clip.items) if plan.clip is not None else len(plan.paths)
+        menu = QMenu(self)
+        menu.setAccessibleName(tr("Where the drop goes"))
+        title = tr("Move {count} item(s) into…", count=count) if plan.move else \
+            tr("Copy {count} item(s) into…", count=count)
+        menu.addAction(title).setEnabled(False)
+        picked = []
+
+        def add(where, text, wanted, tip=None):
+            action = where.addAction(text.replace("&", "&&"))
+            if tip:
+                action.setToolTip(tip)
+            action.triggered.connect(lambda *_: picked.append(wanted) or self.drop_at_place(plan, wanted))
+        model = pane.roots.model()
+        for index in range(pane.roots.count()):
+            data, text = pane.roots.itemData(index), pane.roots.itemText(index)
+            item = model.item(index) if hasattr(model, "item") else None
+            if pane.roots.itemData(index, HEADING_ROLE):
+                menu.addSection(text)
+            elif data and (item is None or item.isEnabled()):
+                add(menu, text, ("place", data), pane.roots.itemData(index, Qt.ItemDataRole.ToolTipRole))
+        recent = pane.recent_entries()
+        if recent:
+            menu.addSection(tr("Recent folders"))
+            for text, key in recent:
+                add(menu, text, ("recent", key))
+        self.exec_menu(menu, QCursor.pos())
+        if not picked:
+            self.message.setText(tr("Nothing was dropped: no place was chosen."))
+            return False
+        return True
+
+    def drop_at_place(self, plan, wanted):
+        """The drop of PLAN goes where WANTED is - ("place", the chooser's data) or ("recent", a Recent key): its pane
+        goes there, and the drop follows once that folder is listed (Pane.listed: run_pending) - not when another place
+        is chosen meanwhile, nor after PENDING_DROP_WAIT."""
+        pane = plan.pane
+        kind, value = wanted
+        root = value if kind == "place" else LOCAL if isinstance(value, str) else value[0]
+        pane.pending_drop = {"plan": plan, "wanted": wanted, "root": root, "began": time.monotonic()}
+        if kind == "place":
+            return self.show_in(pane, value)
+        return pane.go_recent(value)
+
+    def run_pending(self, pane):
+        """PANE shows the folder a drop onto its chooser waited for: the drop goes into it now (asked, refused, done
+        as one onto its list)."""
+        pending, pane.pending_drop = pane.pending_drop, None
+        if pending is None or pane.root is None:
+            return False
+        if time.monotonic() - pending["began"] > PENDING_DROP_WAIT:
+            self.message.setText(tr("Nothing was dropped: {path} was shown too late.",
+                                    path=printable(pane.path_text())))
+            return False
+        plan = pending["plan"]
+        again = self.plan_into(pane, pane.relative, -1, plan.move, plan.clip, plan.paths)
+        if again.refused:
+            self.message.setText(again.text())
+            return False
+        return self.run_drop(again)
+
+    # -- dropped onto an editor --
+
+    def editor_drop(self, mime):
+        """What a drop of MIME onto an editor window does: None - nothing of the page's (text: the editor's own) -, else
+        (why the files cannot be opened, or None; OPEN(window): each file in an editor of its own, after the drop). A
+        folder, a link or a special file is not opened (said in the window)."""
+        clip, paths, why = self.drop_source(mime)
+        if clip is None and not paths and why is None:
+            return None
+        if why:
+            return why, None
+        if clip is not None:
+            chosen = [(name, path) for name, path, _new in clip.items if name in getattr(clip, "files", ())]
+            others = [name for name, _path, _new in clip.items if name not in getattr(clip, "files", ())]
+            if not chosen:
+                return tr("only files open in the editor - {names}: a folder, a link or a special file.",
+                          names=", ".join(printable(name) for name in others[:5])), None
+            root, folder = clip.root, clip.folder_text
+
+            def open_items(window):
+                return self.open_dropped(window, root, [(path, os.path.join(folder, name)) for name, path in chosen],
+                                         others)
+            return None, open_items
+
+        def open_paths(window):
+            found, problems = self.host_items(paths)
+            items = [("/" + relative, relative) for _name, relative, _new in found.items]
+
+            def kinds():  # (in a thread - answered: a file system that hangs held up the window)
+                found = []
+                for path, _relative in items:
+                    try:
+                        found.append(stat.S_ISREG(os.lstat(path).st_mode))
+                    except OSError:
+                        found.append(False)
+                return found
+            done, regular = answered(kinds, key=answer_key("dropped-kinds", [path for path, _ in items]))
+            if not done:
+                regular = [False] * len(items)
+            chosen = [(relative, path) for (path, relative), plain in zip(items, regular) if plain]
+            others = [os.path.basename(path) for (path, _relative), plain in zip(items, regular) if not plain]
+            return self.open_dropped(window, self.local, chosen, others, problems)
+        return None, open_paths
+
+    def open_dropped(self, window, root, chosen, others=(), problems=()):
+        """The files CHOSEN [(relative, shown)] of ROOT dropped onto the editor WINDOW, each in an editor of its own (at
+        most EDITOR_DROP_LIMIT); what was not opened - OTHERS, not files, and PROBLEMS - said in WINDOW."""
+        said = list(problems)
+        if others:
+            said.append(tr("Only files open in the editor - {names}: a folder, a link or a special file.",
+                           names=", ".join(printable(name) for name in list(others)[:5])))
+        if len(chosen) > EDITOR_DROP_LIMIT:
+            said.append(tr("{count} more file(s) not opened: at most {limit} at once.",
+                           count=len(chosen) - EDITOR_DROP_LIMIT, limit=EDITOR_DROP_LIMIT))
+        opened = [self.open_editor(root, relative, shown) for relative, shown in chosen[:EDITOR_DROP_LIMIT]]
+        if said and window is not None and isValid(window):
+            window.say("\n".join(said), True)
+        return opened
 
     # -- delete --
 
@@ -3444,11 +4485,8 @@ class FilesPage(QWidget):
             pane.waiting() or self.message.setText(tr("Select files or folders first."))
             return False
         chosen = Chosen.of(pane, entries)
-        if not ask_first(self, "files-delete", tr("Delete?"),
-                         tr("Delete {count} item(s) in {folder}? Folders are deleted with everything in them; links "
-                            "are removed, not what they point to. This cannot be undone.", count=len(chosen.items),
-                            folder=printable(chosen.folder_text)),
-                         tr("Delete"), details="\n".join(printable(name) for name, _ in chosen.items)):
+        if not ask_first(self, "files-delete", tr("Delete?"), delete_question(chosen), tr("Delete"),
+                         details="\n".join(printable(path) for path in full_paths(chosen))):
             return False
         return self.delete_items(chosen)
 
@@ -3697,7 +4735,7 @@ class FilesPage(QWidget):
         """Make you the owner of what is selected in the sandbox pane, also of what the sandbox wrote as one of
         your subordinate UIDs (files.take_ownership: podman unshare chown), in a thread."""
         pane = pane or self.active
-        if pane.side != "sandbox" or pane.root is None or pane.remote():
+        if pane.mode() != "sandbox" or pane.root is None:
             self.message.setText(tr("Taking ownership works only below a sandbox's folder."))
             return False
         entries = pane.chosen()

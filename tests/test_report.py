@@ -647,10 +647,10 @@ def test_the_command_through_sandbox_ai(tmp_path):
                             capture_output=True, text=True, env=env, timeout=120)
     assert result.returncode == 1 and "no run or start named nothing-here" in result.stderr
     main = load("main_for_report_test", "main.py")
-    assert main.PYTHON_COMMANDS["report"] == ("report.py",) and "sandbox-ai report" in main.__doc__
+    assert main.PYTHON_COMMANDS["report"] == ("report.py",) and "\n  report " in main.help_text()
     help_text = subprocess.run([sys.executable, "-I", str(ROOT / "sandbox" / "main.py"), "report", "--help"],
                                capture_output=True, text=True, env=env, timeout=120).stdout
-    assert help_text.startswith("usage: sandbox-ai report ") and "--format" in help_text
+    assert help_text.startswith("Usage:  sandbox-ai report ") and "--format" in help_text
 
 
 def test_every_text_of_the_logs_is_shown_escaped(tmp_path):
@@ -692,3 +692,19 @@ def test_the_llm_traffic_section_only_when_asked_and_never_the_conversation(tmp_
     assert since["llm_traffic"][0]["requests"] == 1
     for kind in ("html", "pdf"):
         assert R.render(data, kind)
+
+
+def test_a_wildcard_below_a_shared_service_is_a_finding(tmp_path):
+    """User 2026-11-20: a wildcard below a shared service (*.blob.core.windows.net) is allowed after the human confirms
+    its risk; the report lists it as a finding with that risk (an own domain's wildcard is none)."""
+    logs = make_logs(tmp_path / "logs", ended=False)
+    wild = "*.blob.core.windows.net"
+    register(tmp_path, RUN, logs, allow_wildcards=[wild, "*.example.org"],
+             shared_wildcards={wild: "blob.core.windows.net"})
+    data = R.gather(R.resolve("web-run"))
+    risks = found(data, "shared-wildcard")
+    assert [f["what"] for f in risks] == [f"host wildcard {wild}"]
+    assert "could open any server anyone rents below blob.core.windows.net" in risks[0]["why"]
+    assert risks[0]["severity"] == "medium"
+    text = R.render(data, "md")
+    assert "a wildcard below a shared service" in text and "blob.core.windows.net" in text

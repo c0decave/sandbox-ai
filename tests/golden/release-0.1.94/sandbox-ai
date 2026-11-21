@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+# (dirname without a process of its own: the app reads other hosts through this script every few seconds)
+script_dir=${script_path%/*}
+exec python3 -I "$script_dir/sandbox/main.py" "$@"

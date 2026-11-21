@@ -118,7 +118,13 @@ def test_the_page_follows_the_active_tab(env, qapp, page, wait):
     page.header.changed.emit()
     settle(qapp, page, wait)
     assert {row[1] for row in rows(page.blocked.table)} == {"opencode-1", "opencode-2"}
-    assert "Blocked (" in page.sections.tabText(page.sections.indexOf(page.blocked))
+    # (Blocked is no section of its own any more: its refusals are rows of the one table's Refused tab.)
+    assert page.sections.indexOf(page.blocked) == -1
+    assert [page.state_tabs.tabText(i).split(" (")[0] for i in range(page.state_tabs.count())] == \
+        ["Open", "Allowed", "Refused", "Timed out", "All"]
+    page.show_all()
+    refused = int(page.state_tabs.tabText(2).split("(")[1].rstrip(")"))
+    assert refused >= 2, page.state_tabs.tabText(2)
 
 
 def test_blocked_lists_every_kind_newest_first_with_why(env, qapp, page, wait):
@@ -338,15 +344,14 @@ def test_enter_allows_for_the_run_and_delete_denies_in_the_list(env, qapp, page,
     enter = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
     delete = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)
     assert pages.shortcut_of(enter) == "allow-run" and pages.shortcut_of(delete) == "deny-key"
-    assert pages.in_question_list(page.open.viewport()) and not pages.in_question_list(page.scope)
+    assert pages.in_question_list(page.open.viewport()) and not pages.in_question_list(page.allow_button)
     page.shortcut("allow-run")
     assert answers[-1] == ("allow", "run")
     monkeypatch.setattr(page.deny_button, "click", lambda: answers.append(("deny", "run")))
     page.shortcut("deny-key")
     assert answers[-1] == ("deny", "run")
-    # The Allow button says how long; nothing waiting says so.
-    page.scope.setCurrentIndex(page.scope.findData("run"))
-    assert page.allow_button.text() == "Allow for this run"
+    # The Allow buttons say how long, one per scope; nothing waiting says so.
+    assert [page.allow_button.text(), page.allow_run_button.text()] == ["Allow once", "Always allow"]
     (run / "approvals" / "1762855200-7-9.done").write_text(json.dumps({"decision": "deny", "reason": "answered"}))
     page.poll()
     assert page.none_waiting.text() == "Nothing is waiting for an answer." and not page.none_waiting.isHidden()

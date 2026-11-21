@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import home_guard  # noqa: E402
 
 _REAL_LOGINS = home_guard.fingerprint(home_guard.login_files()) if not os.environ.get(home_guard.MARKER) else {}
-home_guard.ensure()
+_TEST_HOME = home_guard.ensure()  # (None: a HOME moved before this session, by whoever moved it)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--no-sandbox --disable-gpu")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
@@ -27,6 +27,10 @@ os.environ["SANDBOX_AI_APP_LANGUAGE"] = "en"
 # The launcher's dry runs ask Podman for no image (the tests' starts name images nobody built here; as the core
 # tests' conftest does).
 os.environ.setdefault("SANDBOX_AI_MCP_NO_IMAGE_CHECK", "1")
+# Secrets the tests keep in private files need no primary password (test_primary_password.py turns that off).
+os.environ.setdefault("SANDBOX_AI_SECRETS_PLAIN", "1")
+# A start compacts no logs in the background (the core's tests check that).
+os.environ.setdefault("SANDBOX_AI_AUTO_COMPACT", "0")
 
 try:  # noqa: SIM105 - must happen before a QApplication is created
     import PySide6.QtWebEngineWidgets  # noqa: F401
@@ -72,6 +76,34 @@ def pytest_make_collect_report(collector):
     report = outcome.get_result()
     if skipped_for_qt(report):  # a module-level importorskip (tests/test_ui.py)
         fail_instead(report)
+
+
+_REAL_HOST_LOGGED_IN = []  # backend.SandboxAI.host_logged_in as the app has it (kept at the first test)
+
+
+@pytest.fixture(autouse=True)
+def agents_logged_in(monkeypatch):
+    """A start in the app asks to log in first when its host has no login of the start's agent (prerequisites.py). The
+    tests' HOMEs hold no agent's login, and a test that starts something is not about that question: here every
+    agent counts as logged in. The tests of the question itself (test_remote_session_start.py) take the real answer
+    back (real_logins)."""
+    try:
+        from sandbox_ai_app import backend
+    except ImportError:
+        return
+    if not _REAL_HOST_LOGGED_IN:
+        _REAL_HOST_LOGGED_IN.extend([backend.SandboxAI.host_logged_in, backend.SandboxAI.logged_in_here])
+    monkeypatch.setattr(backend.SandboxAI, "host_logged_in",
+                        lambda self, host, agents, session=None: set(agents))
+    monkeypatch.setattr(backend.SandboxAI, "logged_in_here", lambda self, agents, session=None: set(agents))
+
+
+@pytest.fixture
+def real_logins(agents_logged_in, monkeypatch):
+    """The logins a host really has (see agents_logged_in)."""
+    from sandbox_ai_app import backend
+    monkeypatch.setattr(backend.SandboxAI, "host_logged_in", _REAL_HOST_LOGGED_IN[0])
+    monkeypatch.setattr(backend.SandboxAI, "logged_in_here", _REAL_HOST_LOGGED_IN[1])
 
 
 @pytest.fixture(scope="session")
@@ -209,12 +241,39 @@ def no_mouse_buttons_held():
 
 
 @pytest.fixture(autouse=True)
+def no_drafts_left():
+    """What a dialog kept of what was typed (drafts.py, this app session's memory) goes with the test that typed it."""
+    yield
+    drafts = sys.modules.get("sandbox_ai_app.drafts")
+    if drafts is not None:
+        drafts.DRAFTS.clear()
+
+
+@pytest.fixture(autouse=True)
 def short_notices_on():
     """Short notices are shown in every test (a window made from settings with them off switched them off for the
     whole process: short_notices.set_enabled is the app's, not a window's)."""
     yield
     if "sandbox_ai_app.short_notices" in sys.modules:
         sys.modules["sandbox_ai_app.short_notices"].set_enabled(True)
+
+
+@pytest.fixture(autouse=True)
+def explanations_off():
+    """The info texts are off again after every test, as by default (a window made from settings with them on
+    switched them on for the whole process: widgets.set_explanations_shown is the app's, not a window's)."""
+    yield
+    if "sandbox_ai_app.widgets" in sys.modules:
+        sys.modules["sandbox_ai_app.widgets"].set_explanations_shown(False)
+
+
+@pytest.fixture(autouse=True)
+def button_texts_off():
+    """The icon buttons show their icons alone again after every test, as by default (a window made from settings with
+    button_texts on switched the texts on for the whole process: button_icons.set_texts_shown is the app's)."""
+    yield
+    if "sandbox_ai_app.button_icons" in sys.modules:
+        sys.modules["sandbox_ai_app.button_icons"].set_texts_shown(False)
 
 
 @pytest.fixture(autouse=True)
@@ -244,6 +303,20 @@ def wait(qapp):
 
 
 
+@pytest.fixture(autouse=True)
+def no_fake_host_process_outlives_the_test():
+    """Nothing of a fake host (tests/live_fakes.Host) a test made runs on after it: ended by its exact PID, and the
+    test fails - it stops what it started (`sandbox-ai mcp stop NAME`; the same guard as sandbox-ai's own tests)."""
+    fakes = sys.modules.get("live_fakes")
+    before = len(fakes.HOSTS) if fakes is not None else 0
+    yield
+    fakes = sys.modules.get("live_fakes")
+    problems = fakes.guard_since(before) if fakes is not None else []
+    if problems:
+        pytest.fail("the test left processes of its fake host running (ended now; stop what the test started, e.g. "
+                    "`sandbox-ai mcp stop NAME`):\n" + "\n".join(problems), pytrace=False)
+
+
 def pytest_sessionfinish(session, exitstatus):
     """The real logins must be as they were (see home_guard at the top); the exit status is kept for
     pytest_unconfigure, which ends the process with it when Qt is loaded."""
@@ -266,6 +339,8 @@ def pytest_unconfigure(config):
     if "PySide6.QtWidgets" in sys.modules and hasattr(config, "qt_exit_status"):
         sys.stdout.flush()
         sys.stderr.flush()
+        if _TEST_HOME is not None:  # (os._exit runs no atexit: the session's HOME stayed behind in TMPDIR)
+            home_guard.remove(_TEST_HOME)
         os._exit(config.qt_exit_status)
 
 

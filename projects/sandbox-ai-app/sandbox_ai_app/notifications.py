@@ -45,6 +45,7 @@ TEXT_LIMIT = 500
 MAX_SHOWN = 4
 MARGIN = 16  # pixels from the screen's edge and between toasts
 WIDTH = 380
+LONG_ACTION = 18  # characters: a toast's button with a longer text takes a row of its own (half the toast cut it)
 LEVEL_NAMES = {"info": N_("Information"), "success": N_("Done"), "warning": N_("Warning"), "error": N_("Error")}
 
 
@@ -344,8 +345,9 @@ class Toast(QFrame):
             label.copy_all.connect(self.copy_all)
         texts.addWidget(self.title)
         texts.addWidget(self.text)
-        # ACTION: (label, callback), or a list of them (a question's answers: Allow, Allow always…, Block, Block
-        # always…, then the way to its page), two to a row.
+        # ACTION: (label, callback), or a list of them (a question's answers: Allow once, Always allow, Always, also
+        # for later sessions, Block, Block always, then the way to its page), two to a row - a long one (wider than
+        # half the toast) in a row of its own, never cut.
         actions = [action] if isinstance(action, tuple) else list(action or [])
         self.action, self.actions = None, []
         if actions:
@@ -353,12 +355,20 @@ class Toast(QFrame):
             grid.setContentsMargins(0, 4, 0, 0)
             grid.setHorizontalSpacing(6)
             grid.setVerticalSpacing(4)
-            for index, (label, callback) in enumerate(actions):
+            row, column = 0, 0
+            for label, callback in actions:
                 button = QPushButton(clean(label, 60))
                 button.setObjectName("toastAction")
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
                 button.clicked.connect(lambda _=False, c=callback: self.act(c))
-                grid.addWidget(button, index // 2, index % 2)
+                if len(button.text()) > LONG_ACTION:
+                    if column:
+                        row, column = row + 1, 0
+                    grid.addWidget(button, row, 0, 1, 2)
+                    row += 1
+                else:
+                    grid.addWidget(button, row, column)
+                    row, column = (row + 1, 0) if column else (row, 1)
                 self.actions.append(button)
             self.action = self.actions[0]
             texts.addLayout(grid)

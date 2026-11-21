@@ -75,6 +75,33 @@ def test_the_state_column_shows_the_cut(window, monkeypatch, wait):
     assert found["run:codex-2"].text(6) == "running"
 
 
+def test_the_kill_switch_menu_opened_again_says_what_holds(window, monkeypatch, wait):
+    """Live (2026-11-16, the bug class of Erlauben…): the kill switch's menu opened again showed nothing of the cut
+    that holds, as if the first choice was lost. Opened, it ticks the mode that holds (each part of several), Lift
+    the cut only when something is cut; two starts with different cuts: none ticked."""
+    work = backend.Instance("session", "session:work", "work", session="work", state="running", run="claude-abc",
+                            record={"cut": "remote+api", "net_cut": 1})
+    other = backend.Instance("run", "run:codex-1", "codex-1", run="codex-1", state="running",
+                             record={"cut": "all", "net_cut": 1})
+    plain = backend.Instance("run", "run:codex-2", "codex-2", run="codex-2", state="running", record={"net_cut": 1})
+    monkeypatch.setattr(window.sai, "instances", lambda: ([work, other, plain], []))
+    monkeypatch.setattr(window.sai, "remote_hosts", lambda: [])
+    page = window.sandboxes
+    read_now(page)
+    assert wait(lambda: "session:work" in items(page))
+    found = items(page)
+
+    def shown(*keys):
+        select_items(page.table, [found[key] for key in keys])
+        page.cut_menu.aboutToShow.emit()
+        return {mode for mode, item in page.cut_actions.items() if item.isChecked()}, page.cut_actions["off"].isEnabled()
+    assert shown("session:work") == ({"remote", "api"}, True)
+    assert "(holds now)" in page.cut_actions["api"].toolTip()
+    assert shown("run:codex-1") == ({"all"}, True)
+    assert shown("run:codex-2") == (set(), False), "nothing cut: nothing ticked, nothing to lift"
+    assert shown("run:codex-1", "session:work")[0] == set(), "different cuts: none ticked"
+
+
 def test_the_kill_switch_cuts_the_selected_sandboxes_at_once(window, monkeypatch, wait):
     page = sandboxes_tree(window, monkeypatch)
     assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
@@ -410,3 +437,15 @@ def test_ctrl_shift_x_cuts_also_in_a_dialog_that_blocks_the_window(window, monke
     assert file_dialog(apart) == [Qt.WindowModality.WindowModal, 4]
     apart.deleteLater()
     assert cuts == ["all"] * 4
+
+
+def test_the_kill_switch_reaches_an_orphaned_start(window, monkeypatch, wait):
+    """A start whose supervisor is gone while its pod runs on (orphaned) runs: the button said "It does not run." for
+    it, and sandbox-ai net cut refused it. Now both reach it (its control socket, else its pod is stopped)."""
+    page = sandboxes_tree(window, monkeypatch)
+    assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
+    orphan = backend.Instance("session", "session:lost", "lost", session="lost", state="orphaned",
+                              run="claude-0e7d6eda", record={"net_cut": 1})
+    assert page.cut_why(orphan) is None and page.cut_run_of(orphan) == "claude-0e7d6eda"
+    ended = backend.Instance("session", "session:old", "old", session="old", state="stopped", run="claude-11111111")
+    assert page.cut_why(ended) == "It does not run."

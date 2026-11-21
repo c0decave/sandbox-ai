@@ -126,10 +126,39 @@ BUILTIN = [
 ]
 
 
+# Invisible and bidirectional characters in what is published (Trojan Source, GlassWorm's variation selectors,
+# ASCII smuggled in tag characters): a warning, shown escaped. A copy of lint.PUSH_REGEX (the hidden-text checker,
+# which this file cannot import: it runs alone in the sandbox's hooks and in the proxy); tests/test_hidden_text.py
+# keeps both the same.
+HIDDEN_UNICODE = (r"(?<![\U0001F3F4\U000E0000-\U000E007F])[\U000E0000-\U000E007F]"
+                  r"|[\u200b\u2060-\u2064\u180e\u115f\u1160\u3164\uffa0\u202a-\u202e\u2066-\u2069]"
+                  r"|(?<=.)\ufeff|[\U000E0100-\U000E01EF]|[\ufe00-\ufe0f]{2,}")
+HIDDEN_ID = "hidden-unicode"
+HIDDEN_REASON = "invisible or bidirectional characters (the text reads otherwise than it displays)"
+_HIDDEN = re.compile(HIDDEN_UNICODE)
+
+
+# Files a push publishes that run or are trusted elsewhere - in CI, in the editors and agents of whoever checks the
+# repository out: a warning, by the file's path (the part of the workspace review that travels with the repository).
+TRUSTED_PATH = re.compile(r"(?:^|/)(?:\.github/workflows/|\.github/actions/|\.gitlab-ci\.yml$|\.circleci/|"
+                          r"\.vscode/(?:tasks|launch|settings|extensions)\.json$|\.devcontainer/|\.idea/runConfigurations/|"
+                          r"\.claude/settings[^/]*\.json$|\.mcp\.json$|\.cursor/mcp\.json$|\.envrc$|\.husky/|"
+                          r"\.pre-commit-config\.yaml$|\.gitattributes$|\.gitmodules$)")
+TRUSTED = Pattern("host-trusted-file", TRUSTED_PATH, WARN,
+                  "a file that runs or is trusted where the repository is checked out (a CI workflow, an editor task, "
+                  "agent settings, Git attributes): look at the change before it is published")
+
+
+def trusted_path(path, where):
+    """A warning about PATH (a file a push publishes) when it is one of TRUSTED_PATH's."""
+    return [Finding(where, path, TRUSTED, path)] if TRUSTED_PATH.search(path) else []
+
+
 def builtin_rules():
     rules = Rules(sources=["built-in"])
     for id_, regex, severity, reason in BUILTIN:
         rules.patterns.append(Pattern(id_, re.compile(regex), severity, reason, secret=True))
+    rules.patterns.append(Pattern(HIDDEN_ID, _HIDDEN, WARN, HIDDEN_REASON))
     return rules
 
 
@@ -664,6 +693,8 @@ def shown(line, rules):
     for pattern in rules.patterns:
         if pattern.secret:
             line = pattern.regex.sub(f"[{pattern.id}]", line)
+    line = _HIDDEN.sub(lambda m: "".join(f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\U{ord(c):08x}"
+                                         for c in m.group()), line)
     line = "".join(c if c.isprintable() else " " for c in line.strip())
     return line if len(line) <= TEXT_WIDTH else line[:TEXT_WIDTH - 1] + "…"
 
@@ -736,6 +767,7 @@ def scan_commits(git, rules, revisions, report, budget, limit=None):
     names = sorted({(path, commit) for _, _, path, commit in changes})
     for path, commit in names:
         report.add(scan_text(path, rules, path, lambda n, c=commit[:10], p=path: f"file name {p} (commit {c})"))
+        report.add(trusted_path(path, f"file name {path} (commit {commit[:10]})"))
     contents, skipped = read_blobs(git, [oid for change in changes for oid in change[:2] if oid], budget, limit)
     seen = set()
     for oid, before, path, commit in changes:
@@ -769,6 +801,8 @@ def scan_staged(git, rules, report, budget, label=" (staged)"):
     index, staged = staged_changes(git)
     contents, skipped = read_blobs(git, [oid for pair in staged.values() for oid in pair if oid], budget)
     for path, (oid, before) in staged.items():
+        if oid is not None and oid != before:
+            report.add(trusted_path(path, f"file name {path}{label}"))
         text = decode(contents.get(oid, b"")) if oid not in skipped else None
         if text is not None:
             report.scanned += 1
@@ -820,6 +854,7 @@ def scan_repository(repo, rules, everything=False):
             continue
         report.scanned += 1
         label = "untracked" if oid is None else "not staged"
+        report.add(trusted_path(path, f"file name {path} ({label})"))
         report.add(scan_text(text, rules, path, lambda n, p=path, l=label: f"{p}:{n} ({l})",
                              lines_of(contents, oid)))
     return report

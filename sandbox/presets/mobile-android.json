@@ -3,11 +3,11 @@
   "version": 1,
   "id": "mobile-android",
   "title": "Mobile: Android",
-  "description": "An Android device through the adb server on the host (port 5037); APK analysis in the workspace.",
+  "description": "An Android device through the adb server on the host (port 5037); APK analysis in the workspace and with jadx as an MCP server.",
   "translations": {
     "de": {
       "title": "Mobil: Android",
-      "description": "Ein Android-Gerät über den adb-Server auf dem Host (Port 5037); APK-Analyse im Arbeitsordner."
+      "description": "Ein Android-Gerät über den adb-Server auf dem Host (Port 5037); APK-Analyse im Arbeitsordner und mit jadx als MCP-Server."
     }
   },
   "category": "hardware",
@@ -20,8 +20,12 @@
     "--allow-host-port",
     "5037"
   ],
+  "mcp": [
+    "mcp:jadx"
+  ],
   "notes": [
     "Start the adb server on the host first: adb start-server. In the sandbox: adb -H 127.0.0.1 -P 5037 devices.",
-    "Podman only (pasta forwards the host's port)."
+    "Podman only (pasta forwards the host's port).",
+    "jadx decompiles the APKs of the folder its server was added with (sandbox-ai mcp add mcp:jadx --mount /work=APKS:ro): classes, Java source, smali, cross references, the manifest and resources; no network, 2g memory (the catalog's limits)."
   ]
 }

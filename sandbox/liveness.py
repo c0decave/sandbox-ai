@@ -45,7 +45,7 @@ POD_NAME = re.compile(r"agent-[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
 # sandbox-ai's own pods: agent-AGENT-HEX (a run, a session's run, a VPN's pod) and agent-mcp-NAME (an MCP server);
 # newer ones also carry RUN_LABEL. Nothing else is ever removed as a leftover.
-OWN_POD = re.compile(r"agent-(?:(?:claude|codex|opencode|hermes|dsh|qwen|goose)-[0-9a-f]{8,12}|mcp-[A-Za-z0-9_-]{1,32})")
+OWN_POD = re.compile(r"agent-(?:(?:claude|codex|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi)-[0-9a-f]{8,12}|mcp-[A-Za-z0-9_-]{1,32})")
 RUN_LABEL = "sandbox-ai.run"
 SESSION_LABEL = "sandbox-ai.session"
 # Container states in which a sandbox still lives (a paused pod too: `sandbox-ai pause`).
@@ -209,12 +209,72 @@ def remove_ended_pod(record):
     return done.returncode == 0
 
 
+def remove_ended_volumes(record):
+    """macOS: remove the Podman volume of Cairn's relay (cairn.relay_volume) of the ended run RECORD - a run with
+    --cairn whose sockets were in podman machine's VM (run.json "container") - that its killed launcher left behind;
+    without --force: a volume a container still uses stays. True if removed."""
+    run = record.get("run")
+    if record.get("backend") != "podman" or not record.get("cairn") or not record.get("container") or \
+            not isinstance(run, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", run):
+        return False
+    url = record.get("podman_url") if isinstance(record.get("podman_url"), str) else None
+    volume = f"sandbox-ai-cairn-{run}"  # (cairn.relay_volume of a run id this check let through)
+    try:
+        done = LOG.run("liveness", f"remove the volume {volume} of an ended run", podman(url, "volume", "rm", volume),
+                       runner=RUNNER, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                       timeout=PODMAN_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
+
+
+CAIRN_VOLUME_PREFIX = "sandbox-ai-cairn-"  # (cairn.relay_volume)
+CAIRN_VOLUME_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def leftover_cairn_volumes(alive, remove=True, url=None):
+    """`sandbox-ai gc`: the Podman volumes of Cairn's relay (cairn.relay_volume: macOS) of runs that have ended -
+    ALIVE(run) False; one it cannot judge (it raises) stays - removed unless REMOVE is False, without --force, which
+    Podman refuses while a container uses one (it stays for a later gc). The runs' names. An ended run's cleanup
+    (remove_ended_volumes) tries once; a volume Podman refused then (its pod not removed yet, Podman not answering)
+    had nothing left to name it once the run's directory went. Podman that does not answer: nothing."""
+    try:
+        done = RUNNER(podman(url, "volume", "ls", "--format", "{{.Name}}"), capture_output=True, text=True,
+                      stdin=subprocess.DEVNULL, timeout=PODMAN_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if done.returncode != 0 or not isinstance(done.stdout, str):
+        return []
+    found = []
+    for name in dict.fromkeys(done.stdout.split()):
+        run = name[len(CAIRN_VOLUME_PREFIX):]
+        if not name.startswith(CAIRN_VOLUME_PREFIX) or not CAIRN_VOLUME_RUN.fullmatch(run):
+            continue
+        try:
+            if alive(run):
+                continue
+        except Exception:  # noqa: BLE001 - what cannot be judged is never removed
+            continue
+        if remove:
+            try:
+                gone = LOG.run("liveness", f"remove the volume {name} of an ended run",
+                               podman(url, "volume", "rm", name), runner=RUNNER, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                               timeout=PODMAN_TIMEOUT, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if gone.returncode != 0:
+                continue  # (a container uses it: a later gc)
+        found.append(run)
+    return found
+
+
 TEMPORARY_PREFIX = "agent-sandbox-"  # the launcher's temporary folders (its session's and its proxy's)
 
 
 def discard(directory):
-    """Remove the run directory DIRECTORY of an ended run, its browser directory (RUN.browser) and the folder of its
-    sandbox browser's VNC socket (RUN.browser-vnc, browser.vnc_dir) beside it, and the temporary folders its run.json
+    """Remove the run directory DIRECTORY of an ended run, its browser directory (RUN.browser), the folder of its
+    sandbox browser's VNC socket (RUN.browser-vnc, browser.vnc_dir) and that of its Cairn relay (RUN.cairn,
+    cairn.relay_dir: the socket and the log of the workers' calls) beside it, and the temporary folders its run.json
     names (a launcher killed with SIGKILL left them for good: the proxy's proxy.json holds the --api-key keys and the
     Git and LLM tokens in plain text, the session's folder the tokens given at run time)."""
     directory = Path(directory)
@@ -225,9 +285,22 @@ def discard(directory):
     if isinstance(record, dict):
         for key in ("session_dir", "proxy_dir"):
             remove_temporary(record.get(key))
+    release_remote(directory.name)
     shutil.rmtree(directory, ignore_errors=True)
-    for suffix in (".browser", ".browser-vnc"):
+    for suffix in (".browser", ".browser-vnc", ".cairn"):
         shutil.rmtree(directory.with_name(directory.name + suffix), ignore_errors=True)
+
+
+def release_remote(run):
+    """Unmount the remote folders (sshfs://) of the ended run RUN that its launcher left mounted (killed, or its
+    sandbox outlived it): remotefs.release; never raises."""
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_remotefs_liveness", HERE / "remotefs.py")
+        remote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(remote)
+        return remote.release(run)
+    except Exception:  # noqa: BLE001 - the run's cleanup goes on (gc tries again)
+        return []
 
 
 def remove_temporary(path):
@@ -241,6 +314,92 @@ def remove_temporary(path):
         return
     if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
         shutil.rmtree(path, ignore_errors=True)
+
+
+# Why a run's supervisor ended while its sandbox ran on, and what was done about it: written once (the first, most
+# precise word wins) by the launcher whose pod Podman could not remove (agent_sandbox.sandbox_outlived), by the
+# sandbox's own watch of its launcher (runtime.SUPERVISOR_END: the same name and fields) in the run directory, and by
+# the terminal that started a session and reaped its supervisor (sessions.reap_supervisor) in the session directory.
+# {"time", "why", "cut": the kill switch's mode that holds now or None, "cut_error", "by", "run", "pod", "status"}.
+SUPERVISOR_END = "supervisor-ended.json"
+SUPERVISOR_END_LIMIT = 16 << 10
+END_TEXT_LIMIT = 400
+
+
+def record_supervisor_end(directory, why, by, **fields):
+    """Keep in DIRECTORY (SUPERVISOR_END) that the run's supervisor ended while its sandbox runs on: WHY, BY whom it
+    was seen (launcher, sandbox, terminal), FIELDS (cut, cut_error, run, pod, status). Never over a record that is
+    there, never through a link; True if written. Never raises (a full disk loses it: the terminal still says it)."""
+    entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "why": str(why)[:END_TEXT_LIMIT],
+             "by": str(by), **{key: value for key, value in fields.items() if value is not None}}
+    try:
+        fd = os.open(Path(directory) / SUPERVISOR_END, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o600)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(entry))
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def supervisor_end(directory, run=None):
+    """The record of DIRECTORY (record_supervisor_end), or None: read without following a link, at most
+    SUPERVISOR_END_LIMIT bytes, only its known fields of plain types (the sandbox's own watch writes it too). RUN: only
+    a record of that run (a session's directory outlives its runs)."""
+    if not directory:
+        return None
+    try:
+        fd = os.open(Path(directory) / SUPERVISOR_END, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, SUPERVISOR_END_LIMIT)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        found = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(found, dict) or not isinstance(found.get("why"), str):
+        return None
+    end = {key: found[key][:END_TEXT_LIMIT] for key in ("time", "why", "cut", "cut_error", "by", "run", "pod")
+           if isinstance(found.get(key), str)}
+    if isinstance(found.get("status"), int) and not isinstance(found.get("status"), bool):
+        end["status"] = found["status"]
+    if run is not None and end.get("run") not in (None, run):
+        return None
+    return end
+
+
+def end_text(end):
+    """What the record END (supervisor_end) says, in words: when the supervisor ended, why, and whether the sandbox's
+    network was cut. Control characters escaped."""
+    when = str(end.get("time") or "")
+    when = when[:16].replace("T", " ") + " UTC" if len(when) >= 16 else "an unknown time"
+    text = f"its supervisor ended at {when}: {end.get('why') or 'no reason given'}"
+    if end.get("cut"):
+        text += f"; the sandbox's network was cut (kill switch {end['cut']})"
+    elif end.get("cut_error"):
+        text += f"; its network could not be cut ({end['cut_error']})"
+    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}"
+                   for c in text)
+
+
+def orphan_text(name, end=None):
+    """Why the start NAME is orphaned and what to do: its record END (supervisor_end) in words, else the general
+    reason; then stop and resume."""
+    shown = "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256 else f"\\u{ord(c):04x}"
+                    for c in str(name))
+    why = end_text(end) if end else ("its supervisor (the launcher on the host) is gone while its pod still runs; "
+                                     "approvals, net allow, workspace add and the kill switch do not reach it")
+    return f"{why}. Save your work in it, then: sandbox-ai stop {shown}, then: sandbox-ai resume {shown}"
 
 
 def stop_pod(pod, url=None, wait=30):

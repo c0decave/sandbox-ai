@@ -76,6 +76,16 @@ KINDS = {
     "device": ("medium", "device refused"),
     "approval-denied": ("medium", "a question answered with no"),
     "killswitch": ("medium", "cut by the kill switch"),
+    "bridge": ("medium", "a session bridge: an observer's alert or action, a write, a suspension"),
+    # The package guard (the proxy): a known malicious version refused is high (from_safeguard), the rest medium.
+    "package": ("medium", "package guard: a download held, a new or unknown package name"),
+    # The secret guard (the proxy): a secret the run was given, or what looks like a credential, in a request to a
+    # host it was not given for (passed and recorded, or held); and one that went to the provider with the conversation.
+    "secret-send": ("high", "secret guard: a secret on its way to another host"),
+    "secret-context": ("medium", "secret guard: a secret entered the model's context"),
+    # A host wildcard below a shared service (*.blob.core.windows.net), allowed after the human confirmed its risk: the
+    # agent could open any server anyone rents there (run.json shared_wildcards, the start's options, net allow).
+    "shared-wildcard": ("medium", "a wildcard below a shared service, allowed after your confirmation"),
     "approval-timeout": ("low", "refused without an answer"),
     "network": ("low", "connection refused by the proxy"),
     "tls": ("low", "TLS refused"),
@@ -90,7 +100,8 @@ KINDS = {
 ALLOWED_EVENTS = ("http", "tls", "tcp", "tls-passthrough", "upgraded")
 REFUSED_EVENTS = ("denied", "tls-refused", "cut")
 FAILED_EVENTS = ("error", "tls-upstream-failed")
-CONNECTION_LOG = re.compile(r"connections-(\d{8}-\d{6})-(.+)\.jsonl")
+# (NAME.N.gz: an older part the run rotated; NAME.gz: compressed by gc once the run ended)
+CONNECTION_LOG = re.compile(r"connections-(\d{8}-\d{6})-(.+?)\.jsonl(?:\.\d{1,3})?(?:\.gz)?")
 CUT_MARK = "cut by the kill switch"
 # What differs between equal refusals: left out when they are counted as one (derive()).
 VOLATILE = {"time", "connection", "source", "bytes_in", "bytes_out", "ms", "request", "response", "id", "status",
@@ -390,14 +401,15 @@ def settings_of(argv, agent=None, session_data=None):
         if namespace is None and argv:
             launcher = module("logs").launcher()
             words = list(argv)
-            if words and words[0] not in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose") and agent:
+            if words and words[0] not in ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi") and agent:
                 words = [agent, *words]
             namespace, _ = launcher.build_parser().parse_known_args(words)
     if namespace is None:
         return found
     for key in ("presets", "allow_host", "frontier", "llm", "no_inspect", "allow_tcp", "allow", "dns",
                 "egress_all_allow", "mode", "preset", "vpn", "vpn_check", "ask", "telemetry", "memory", "cpus",
-                "pids", "device", "gpu", "offline", "canaries", "no_canaries", "proxy", "no_proxy", "token_proxy",
+                "pids", "device", "gpu", "offline", "canaries", "no_canaries", "no_package_guard", "allow_package", "allow_send",
+                "proxy", "no_proxy", "token_proxy", "allow_shared_wildcard",
                 "allow_host_port", "backend"):
         value = getattr(namespace, key, None)
         if value not in (None, [], False, ""):
@@ -448,10 +460,16 @@ def run_from_record(run, record, role="run", part_of=None):
         data = json.loads((Path(str(directory)) / "cut.json").read_text())
         entry["cut_since"] = data.get("since") if entry["cut"] else None
     argv = launcher_argv(record)
-    entry["options"] = shown_options(argv[1:] if argv and argv[0] in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+    entry["options"] = shown_options(argv[1:] if argv and argv[0] in ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
                                      else argv)
     entry["settings"] = settings_of(argv, record.get("agent"))
     entry["run_dir"] = directory
+    # Its host wildcards (the start's and those net allow added) and those below a shared service it confirmed.
+    with contextlib.suppress(Exception):
+        entry["wildcards"] = module("net").run_wildcards({**record, "directory": directory})
+    shared = record.get("shared_wildcards")
+    if isinstance(shared, dict):
+        entry["shared_wildcards"] = sorted(w for w in shared if isinstance(w, str))
     return entry
 
 
@@ -592,6 +610,14 @@ def resolve(name=None, session=None, every=False, project=None, log_dir=None, pa
                 add_dir(scope, record.get("log_dir"))
         return scope
     if log_dir or project:
+        # (a typo gave a whole report of 0 runs: "Nothing was refused, held or reported")
+        if project and not Path(project).expanduser().is_dir() and not module("activity").default_log_dir(
+                Path(project).expanduser().resolve()).is_dir():
+            # (a project deleted since keeps its logs: reported as before)
+            raise ValueError(f"no project {printable(str(project))}: no such folder, and no runs of it logged here "
+                             "(--project names the project's folder; sandbox-ai list shows the starts' workspaces)")
+        if log_dir and not Path(log_dir).expanduser().is_dir():
+            raise ValueError(f"no log folder {printable(str(log_dir))} (sandbox-ai logs names a project's)")
         directory = Path(log_dir).expanduser() if log_dir else \
             module("activity").default_log_dir(Path(project).expanduser().resolve())
         scope = new_scope("directory", f"the runs of {directory}")
@@ -816,6 +842,7 @@ class Gatherer:
                     self.live_state(run, entry)
         for directory, filt in list(self.scope["dirs"].items()):
             self.read_dir(Path(directory), filt)
+        self.shared_wildcards()
         for server in dict.fromkeys(self.scope["mcp_state"]):
             if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(server)):
                 path = state_root() / "mcp" / server / "mcp-calls.jsonl"
@@ -849,11 +876,11 @@ class Gatherer:
                     handle(record, run)
         logs = []
         with contextlib.suppress(OSError):
-            for path in directory.glob("connections-*.jsonl"):
+            for path in module("logs").connection_logs(directory):
                 match = CONNECTION_LOG.fullmatch(path.name)
                 if match and (filt["runs"] is None or match.group(2) in filt["runs"]):
                     logs.append((match.group(1), match.group(2), path))
-        for _, run, path in sorted(logs, reverse=True):  # the newest first: the budget goes to them
+        for _, run, path in logs:  # the newest first (connection_logs): the budget goes to them
             self.run_entry(run)
             for record in self.sources.records(path, "connection proxy"):
                 if self.in_period(record):
@@ -865,7 +892,7 @@ class Gatherer:
                     self.dns(record, run)
         for record in self.sources.records(directory / "files.jsonl", "file changes", SMALL_TAIL):
             if self.in_period(record) and self.owner(record, filt) is not None and record.get("action"):
-                self.files[str(record["action"])] += 1
+                self.files[str(record["action"])] += module("logs").events_of(record)
         for record in self.sources.records(directory / "processes.jsonl", "processes started", SMALL_TAIL):
             if self.in_period(record) and self.owner(record, filt) is not None and record.get("command"):
                 self.processes += 1
@@ -908,11 +935,35 @@ class Gatherer:
             return
         if kind == "approval":
             self.approval(record, details, run)
+        elif kind == "network" and details.get("event") == "oauth-callback":
+            # A login's callback relayed into the sandbox after an allowed browser question (oauth_relay.py): listed
+            # with the questions, not counted as one.
+            if len(self.approvals["items"]) < APPROVALS_LIMIT:
+                self.approvals["items"].append({"time": record.get("time"), "run": run,
+                                                "question": str(record.get("summary") or "login callback"),
+                                                "answer": "relayed" if details.get("outcome") == "relayed"
+                                                else "not relayed", "scope": "once", "automatic": False,
+                                                "reason": details.get("outcome")})
         elif kind in ("prompt", "reply", "tool", "command", "mcp"):
             self.agent[kind] += 1
         elif kind == "file":
             count = details.get("count") if isinstance(details.get("count"), int) else 1
             self.agent["file changes"] += count
+        elif kind == "bridge":  # sandbox-ai bridge: its calls are counted; what the human should see is a finding
+            self.agent["bridge"] += 1
+            event = details.get("event")
+            if event in ("alert", "net-cut", "pause", "suspended", "write"):
+                severity = {"alert": "critical" if details.get("severity") == "critical" else "medium",
+                            "net-cut": "high", "pause": "high", "suspended": "medium", "write": "low"}[event]
+                self.finding("bridge", str(record.get("summary") or f"bridge {event}"),
+                             "an observer acted" if event in ("alert", "net-cut", "pause") else
+                             "a write across a bridge, allowed by you" if event == "write" else
+                             "a kill switch, a canary or an observer suspended the bridge", run, record.get("time"),
+                             verdict={"alert": "you were alerted", "net-cut": "the session's network was cut",
+                                      "pause": "the session was paused", "suspended": "the bridge was suspended",
+                                      "write": "written"}[event],
+                             fix=f"sandbox-ai bridge show {details.get('bridge') or 'ID'}", severity=severity,
+                             source="bridge")
 
     def approval(self, record, details, run):
         answer = str(details.get("answer") or "?")
@@ -1183,8 +1234,24 @@ class Gatherer:
                          "the server's certificate was not accepted"), run, record.get("time"), by=who,
                          verdict="refused", fix="a server with a certificate the system does not trust is not "
                          "reached; it stays refused", source="proxy")
-        elif event in ("denied", "tls-refused") or isinstance(push, dict):
+        elif event in ("denied", "tls-refused") or isinstance(push, dict) or self.package_noted(record) or \
+                self.secret_noted(record):
             self.derive(getattr(self.safeguards, "from_connection", None), record, run)
+
+    @staticmethod
+    def secret_noted(record):
+        """RECORD is a request that passed and in which the secret guard found something (safeguards.from_secret:
+        said once per finding and host; a secret in the model's context)."""
+        secret = record.get("secret") if record.get("event") == "http" else None
+        return isinstance(secret, dict) and bool(secret.get("found")) and not secret.get("repeat")
+
+    @staticmethod
+    def package_noted(record):
+        """RECORD is a request that passed and that the package guard noted all the same: a name the registry does
+        not know, a brand-new package, a young version that was only recorded (safeguards.from_package)."""
+        package = record.get("package") if record.get("event") == "http" else None
+        return isinstance(package, dict) and bool(package.get("missing") or package.get("reported") or (
+            package.get("metadata") and package.get("new_name_days") is not None))
 
     def allowed_reason(self, record, entry, target):
         """Why the connection of RECORD (of the run ENTRY) was let through, as far as the records say."""
@@ -1221,6 +1288,30 @@ class Gatherer:
         if settings.get("preset"):
             return f"the run's network options (preset {settings['preset']})"
         return "the run's network options"
+
+    def shared_wildcards(self):
+        """A finding for each host wildcard of a run below a shared service (its risk confirmed at the start or with
+        net allow): the agent could open any server anyone rents there. From run.json, the run's wildcards and its
+        start's options."""
+        runtime = None
+        with contextlib.suppress(Exception):
+            runtime = module("logs").launcher().RUNTIME
+        if runtime is None:
+            return
+        for run, entry in list(self.scope["runs"].items()):
+            settings = entry.get("settings") or {}
+            candidates = [*listed(entry.get("shared_wildcards")), *listed(entry.get("wildcards")),
+                          *listed(settings.get("allow_shared_wildcard")), *listed(settings.get("allow_host"))]
+            for wildcard in dict.fromkeys(str(w).lower() for w in candidates if str(w).startswith("*.")):
+                try:
+                    risk = runtime.shared_wildcard_risk(wildcard)
+                except Exception:  # noqa: BLE001 - no finding then
+                    risk = None
+                if risk:
+                    self.finding("shared-wildcard", f"host wildcard {wildcard}", risk, run, entry.get("started"),
+                                 verdict="allowed after your confirmation",
+                                 fix=f"sandbox-ai net revoke {run} --allow-host {wildcard} takes it back (a running "
+                                     "run); name the hosts one by one instead", source="sandbox-ai")
 
     def live_state(self, run, entry):
         """What a running sandbox's supervisor says was allowed during the run (sandbox-ai net show), its taint and
@@ -1325,11 +1416,21 @@ class Gatherer:
             verdict = "the run is held to the rules for tainted runs"
         elif kind == "canary":
             verdict = "reported"
+        elif kind == "package" and (not str(record.get("what") or "").startswith(("download of", "GET "))
+                                    or "(recorded only)" in str(record.get("why") or "")):
+            # a name the registry does not know, a brand-new package, a young version only recorded: nothing refused
+            verdict = "recorded"
+        elif kind == "secret-context":
+            verdict = "recorded (nothing was held or changed)"
+        elif kind == "secret-send" and (record.get("details") or {}).get("decision") == "report":
+            verdict = "recorded: the request passed"
         else:
             verdict = "refused" + (" (it stays refused)" if record.get("stays") else "")
+        # A known malicious package version (the record's level: error) is a high finding, whatever its kind's.
+        severity = "high" if kind == "package" and record.get("level") == "error" else None
         return {"kind": kind, "what": record.get("what"), "why": record.get("why"), "run": record.get("run") or run,
                 "time": record.get("time"), "by": record.get("process"), "verdict": verdict, "fix": record.get("fix"),
-                "severity": None, "source": record.get("source"), "last": record.get("last"),
+                "severity": severity, "source": record.get("source"), "last": record.get("last"),
                 "count": record.get("count") if isinstance(record.get("count"), int) else 1}
 
     # -- the result --
@@ -1483,10 +1584,46 @@ def llm_traffic_data(runs, directories=(), since=None, until=None):
     return found
 
 
+def spend_data(runs, directories=(), since=None, until=None):
+    """The section on what the runs' model requests cost (spend.py: the proxy's spend logs in their log directories or
+    DIRECTORIES): per run its cost, tokens, budgets and how much of each was used, and the sum; None when there is
+    no spend log of any of them."""
+    spend = module("spend")
+    table = spend.price_table()
+    wanted = {run.get("run") for run in runs}
+    found, seen = [], set()
+    places = [d for d in [*(run.get("log_dir") for run in runs), *directories] if isinstance(d, str) and d]
+    for directory in dict.fromkeys(places):
+        for run, paths in spend.spend_files(directory).items():
+            if run not in wanted or run in seen:
+                continue
+            seen.add(run)
+            entry = spend.read_run(paths, directory)
+            entry["id"] = run
+            entry["requests"] = [r for r in entry["requests"] if (since is None or r["time"] >= since)
+                                 and (until is None or r["time"] <= until)]
+            state = spend.run_state(entry, table)
+            found.append({**{key: state[key] for key in ("run", "requests", "in", "cached", "write", "out",
+                                                         "reasoning", "usd", "unknown", "unknown_models",
+                                                         "subscription", "local", "raised", "refused", "budgets")},
+                          "cost": spend.cost_text(state),
+                          "models": [{"model": row["key"], "requests": row["requests"], "usd": row["usd"],
+                                      "cost": spend.cost_text(row)} for row in spend.rows_of([entry], "model", table)]})
+    if not found:
+        return None
+    total = spend.totals([{**row, "unknown_models": []} for row in found])
+    return {"runs": sorted(found, key=lambda r: -r["usd"]), "total": {**total, "cost": spend.cost_text(total)},
+            "prices": table.get("date")}
+
+
 def gather(scope, since=None, until=None, sources=None, live=True, traffic=False):
     """The report's data (scrubbed) of SCOPE (resolve()); TRAFFIC: with the section on the LLM traffic log."""
     gatherer = Gatherer(scope, since, until, sources, live).read()
     data = gatherer.result()
+    try:
+        data["spend"] = spend_data(data["runs"], list(scope["dirs"]), since, until)
+    except Exception:  # noqa: BLE001 - the report goes on without it
+        data["spend"] = None
     if traffic:
         data["llm_traffic"] = gatherer.redact.deep(llm_traffic_data(data["runs"], list(scope["dirs"]), since, until))
     return data
@@ -1539,6 +1676,7 @@ def build(data):
     blocks, outline, taken = [], [], set()
     sections = [("summary", "Summary"), ("runs", "Runs"), ("statistics", "Statistics"), ("network", "Network"),
                 ("security", "Security report"),
+                *([("spend", "Model spend")] if data.get("spend") is not None else []),
                 *([("llm_traffic", "LLM traffic")] if data.get("llm_traffic") is not None else []),
                 ("appendix", "Appendix")]
     anchors = {key: slug(title, taken) for key, title in sections}
@@ -1814,6 +1952,9 @@ def build(data):
     if data["findings_left_out"]:
         blocks.append(("para", [t(f"… and {data['findings_left_out']} more findings (the least severe) not listed.")]))
 
+    if data.get("spend") is not None:
+        spend_blocks(data["spend"], blocks, heading, anchors["spend"], run_anchors, data["runs"])
+
     if data.get("llm_traffic") is not None:
         llm_traffic_blocks(data["llm_traffic"], blocks, heading, anchors["llm_traffic"], run_anchors, data["runs"])
 
@@ -1835,6 +1976,29 @@ def build(data):
     blocks.append(("para", [b("What sandbox-ai does not record (so this report cannot show it)")]))
     blocks.append(("list", [[t(text)] for text in data["not_recorded"]]))
     return blocks, outline
+
+
+def spend_blocks(spend, blocks, heading, anchor, run_anchors, runs):
+    """The section on what the model requests cost (sandbox-ai spend)."""
+    heading(1, "Model spend", anchor)
+    blocks.append(("para", [t("What the runs' model requests cost, counted by the connection proxy from each answer "
+                              f"and priced with sandbox-ai's table (of {spend.get('prices') or '?'}, with your own "
+                              "prices over it; sandbox-ai spend prices). A model without a price is counted in tokens "
+                              "only; a subscription (Claude Pro/Max, a ChatGPT plan) has no price per token. In all: "
+                              f"{spend['total']['cost']}.")]))
+    rows = []
+    for entry in spend["runs"]:
+        run = next((r for r in runs if r["run"] == entry["run"]), None)
+        title = run_title(run) if run else entry["run"]
+        budgets = joined([f"{round(b['share'] * 100)} % of USD {b['usd']:.2f} ({b['label']})" for b in entry["budgets"]],
+                         3)
+        rows.append([cell(link(title, run_anchors[run["run"]]) if run else t(title)), cell(entry["cost"]),
+                     cell(entry["requests"]), cell(f"{entry['in'] + entry['cached'] + entry['write']} / "
+                                                   f"{entry['cached']} / {entry['out']}"),
+                     cell(joined([f"{m['model']} ({m['cost']})" for m in entry["models"]], 4)),
+                     cell(budgets + (" - refused requests" if entry["refused"] else "")
+                          + (f" - raised by USD {entry['raised']:.2f}" if entry["raised"] else ""))])
+    blocks.append(("table", ["Run", "Cost", "Requests", "Tokens in / cached / out", "Models", "Budgets"], rows))
 
 
 def llm_traffic_blocks(traffic, blocks, heading, anchor, run_anchors, runs):
@@ -1968,6 +2132,9 @@ table.facts td:first-child { width: 13em; color: var(--muted); }
 """
 
 
+HTML_POLICY = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+
+
 def html_segments(segments):
     out = []
     for segment in segments:
@@ -1984,7 +2151,11 @@ def html_segments(segments):
 
 
 def html_document(blocks, title):
+    # The page's own policy, whatever opens it: nothing is loaded from anywhere, no script runs, no form is sent - its
+    # one style sheet is the one below. Every text of the logs is escaped as well (html_segments); this holds if one
+    # ever is not.
     parts = [f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+             f"<meta http-equiv=\"Content-Security-Policy\" content=\"{HTML_POLICY}\">\n"
              f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
              f"<meta name=\"generator\" content=\"sandbox-ai report\">\n<title>{html.escape(title)}</title>\n"
              f"<style>{HTML_STYLE}</style>\n</head>\n<body>\n<main>"]
@@ -2098,6 +2269,8 @@ def parser():
     p.add_argument("-j", "--json", action="store_true", help="The gathered data as JSON instead of a report")
     p.add_argument("--llm-traffic", action="store_true", help="A section on the LLM traffic log: each model request's "
                    "model, tokens, time, status and the loop guard (not the conversation)")
+    p.add_argument("--user", metavar="USER", help="root only: the report of USER's start NAME (also USER:NAME), "
+                   "made as USER with root's own sandbox-ai copy (sandbox-ai list --all-users shows them)")
     return p
 
 
@@ -2113,6 +2286,8 @@ def cli(argv, out=None, err=None):
     out = out or sys.stdout
     err = err or sys.stderr
     a = parser().parse_args(argv)
+    if a.user is not None:  # (sandbox-ai's dispatcher runs another user's as that user: main.py, allusers.py)
+        raise ValueError("--user USER goes through sandbox-ai (as root): sandbox-ai report --user USER NAME")
     if a.name and (a.all or a.project or a.log_dir):
         raise ValueError("name a run or use --all, --project or --log-dir, not both")
     if a.name and a.session:

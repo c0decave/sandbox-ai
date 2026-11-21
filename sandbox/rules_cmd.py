@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sandbox-ai rules check|show|reload: the rulesets of the starts (README "Rulesets").
+"""sandbox-ai rules check|show|reload|builtin|audit: the rulesets of the starts (README "Rulesets").
 
   sandbox-ai rules check [FILE ...] [--project DIR] [--json]
         check rulesets: the FILEs (as --rules reads them), else yours (~/.config/sandbox-ai/rules.json), the
@@ -12,12 +12,18 @@
         the running start NAME reads its HTTP rules anew: your rules.json, its --rules files and its trusted project
         file's "rules" as they are now; the administrator's policy, the security mode, --publish, --telemetry and
         --allow-http stay as the start had them
+  sandbox-ai rules builtin [NAME [--audit]] [--json]
+        sandbox-ai's own rulesets (--rules builtin:NAME): github-persistence, destructive, mcp-no-credentials,
+        secret-files; NAME prints one (--audit: with "mode": "audit", to save and try first)
+  sandbox-ai rules audit [--project DIR | --log-dir DIR] [--run RUN] [--json]
+        what the rulesets with "mode": "audit" would have decided in the project's runs (nothing of it was enforced)
 
 Each ruleset decides on its own and the strictest decision wins: a reload can loosen your own rules, never what
 the policy or the security mode decide. MCP, tool and device rules are read at a start only (they are named when a
 reload sees them).
 """
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -67,7 +73,14 @@ def summary(source):
     if found["untrusted"]:
         text += f", {found['untrusted']} untrusted source{'s' if found['untrusted'] != 1 else ''}"
     strict = [f"{key} {value}" for key, value in source.get("defaults", {}).items() if value != "allow"]
-    return text + (f"; defaults: {', '.join(strict)}" if strict else "")
+    text += f"; defaults: {', '.join(strict)}" if strict else ""
+    # its "packages" section: what it has the package guard decide (the strictest of all rulesets holds)
+    packages = source.get("packages") if isinstance(source.get("packages"), dict) else {}
+    text += "; package guard: " + ", ".join(f"{key} {packages[key]}" for key in sorted(packages)) if packages else ""
+    # its "secrets" section: what it has the secret guard do about a secret on its way to another host
+    secrets = source.get("secrets") if isinstance(source.get("secrets"), dict) else {}
+    return text + ("; secret guard: " + ", ".join(f"{key} {secrets[key]}" for key in sorted(secrets))
+                   if secrets else "")
 
 
 # --- check ---------------------------------------------------------------------------------------------------------
@@ -94,9 +107,14 @@ def check(files=(), project=None):
         results.append({**entry, "ok": True, "counts": counts(source), "defaults": source["defaults"],
                         "summary": summary(source)})
     if files:
-        for path in files:
-            checked(f"--rules {Path(path).name}", Path(path).expanduser().absolute(),
-                    lambda path=path: l.read_ruleset(Path(path).expanduser(), f"--rules {Path(path).name}"))
+        for given in files:
+            try:
+                path = l.rules_file(given)
+            except Exception as exc:  # noqa: BLE001 - builtin:NAME that does not exist (argparse's error type)
+                results.append({"name": str(given), "path": None, "ok": False, "error": str(exc)})
+                continue
+            checked(l.ruleset_label(path), Path(path).expanduser().absolute(),
+                    lambda path=path: l.read_ruleset(Path(path).expanduser(), l.ruleset_label(path)))
         return results
     user = l.user_rules_file()
     if user.exists() or user.is_symlink():
@@ -186,7 +204,7 @@ def start_rulesets(agent, options=(), directory=None):
             where = str(l.POLICY_FILE)
         elif name.startswith("mode "):
             where = f"the security mode {name[5:]}"
-        elif name.startswith((l.RULES_NAME, "--rules")) and files:
+        elif name.startswith((l.RULES_NAME, "--rules", "builtin:")) and files:
             where = files.pop(0)
         elif name == "project":
             where = a.project_config
@@ -292,8 +310,7 @@ def reloaded_sources(record):
         raise ValueError("this sandbox was started by an older sandbox-ai, which did not record its rulesets: stop it "
                          "and start it again")
     files = [(l.user_rules_file(), l.RULES_NAME)] if l.user_rules_file().exists() else []
-    files += [(Path(path), f"--rules {Path(path).name}") for path in recorded.get("files") or []
-              if isinstance(path, str)]
+    files += [(Path(path), l.ruleset_label(path)) for path in recorded.get("files") or [] if isinstance(path, str)]
     sources, taken = [], {"policy", "--allow-http", "project", "publish", "telemetry"}
     for path, name in files:
         unique, number = name, 2
@@ -333,11 +350,148 @@ def reload(name, out, as_json):
     return show_held(record, answer, out, as_json, said)
 
 
+# --- builtin: sandbox-ai's own rulesets --------------------------------------------------------------------------
+
+def builtin(name=None, audit=False, out=print, as_json=False):
+    """Without NAME: sandbox-ai's own rulesets with what each does. NAME: the ruleset itself (AUDIT: with
+    "mode": "audit", to be saved as a file of yours and tried before it holds)."""
+    l = launcher()
+    names = l.builtin_ruleset_names()
+    if name is None:
+        rows = []
+        for item in names:
+            source = l.read_ruleset(l.BUILTIN_RULESETS / f"{item}.json", f"builtin:{item}")
+            document = json.loads((l.BUILTIN_RULESETS / f"{item}.json").read_text())
+            rows.append({"name": item, "option": f"--rules builtin:{item}", "summary": summary(source),
+                         "description": document.get("description", "")})
+        if as_json:
+            out(json.dumps(rows, indent=2))
+            return 0
+        for row in rows:
+            out(f"builtin:{row['name']}  ({row['summary']})")
+            out(f"  {row['description']}")
+        out("Use one with --rules builtin:NAME (opt-in); try it first with: sandbox-ai rules builtin NAME --audit > "
+            "FILE, then --rules FILE (records what it would decide: sandbox-ai rules audit)")
+        return 0
+    if name not in names:
+        raise ValueError(f"no built-in ruleset {name!r}; there are: {', '.join(names)}")
+    document = json.loads((l.BUILTIN_RULESETS / f"{name}.json").read_text())
+    if audit:
+        document = {"version": document["version"], "mode": "audit", **{k: v for k, v in document.items()
+                                                                          if k != "version"}}
+    out(json.dumps(document, indent=2, ensure_ascii=False))
+    return 0
+
+
+# --- audit: what audit rulesets would have decided ---------------------------------------------------------------
+
+AUDIT_READ_LIMIT = 64 << 20  # bytes read of one log file
+AUDIT_EXAMPLES = 3
+
+
+def audit_logs(log_dir):
+    """[(path, layer)]: the logs of LOG_DIR whose records carry "audit": the hooks' tools.jsonl, the relays'
+    mcp-calls.jsonl, the proxy's connection logs."""
+    log_dir = Path(log_dir)
+    found = [(log_dir / "tools.jsonl", "tool"), (log_dir / "mcp-calls.jsonl", "mcp")]
+    with contextlib.suppress(OSError):
+        found += [(path, "http") for path in sorted(log_dir.glob("connections-*.jsonl"))]
+    return [(path, layer) for path, layer in found if path.is_file() and not path.is_symlink()]
+
+
+def audited_what(record, layer):
+    if layer == "http":
+        return f"{record.get('method', '?')} {record.get('url') or record.get('host', '?')}"
+    if layer == "mcp":
+        return f"{record.get('server', '?')}: {record.get('tool', '?')} {str(record.get('arguments', ''))[:120]}"
+    return f"{record.get('agent', '?')}: {record.get('tool', '?')} {str(record.get('input', ''))[:120]}"
+
+
+def audit_report(log_dir, run=None):
+    """{"log_dir", "hits": [{"ruleset", "rule", "would", "layer", "count", "first", "last", "reason", "examples"}],
+    "records"}: what the audit rulesets would have decided in LOG_DIR's runs (RUN: only that run)."""
+    hits, records = {}, 0
+    for path, layer in audit_logs(log_dir):
+        try:
+            with open(path, "rb") as stream:
+                data = stream.read(AUDIT_READ_LIMIT)
+        except OSError:
+            continue
+        for line in data.decode("utf-8", "replace").splitlines():
+            if '"audit"' not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(record, dict) or not isinstance(record.get("audit"), list):
+                continue
+            if run and record.get("run") not in (None, run):
+                continue
+            records += 1
+            for entry in record["audit"]:
+                if not isinstance(entry, dict):
+                    continue
+                key = (str(entry.get("ruleset")), str(entry.get("rule")), str(entry.get("would")), layer)
+                hit = hits.setdefault(key, {"ruleset": key[0], "rule": key[1], "would": key[2], "layer": layer,
+                                            "count": 0, "unread_body": 0, "first": record.get("time"), "last": None,
+                                            "reason": str(entry.get("reason") or "")[:300], "examples": []})
+                hit["count"] += 1
+                # matched without the request body (no enforcing rule needed it read: the proxy reads none for audit)
+                hit["unread_body"] += entry.get("body") == "not read"
+                hit["last"] = record.get("time")
+                if len(hit["examples"]) < AUDIT_EXAMPLES:
+                    hit["examples"].append({"time": record.get("time"), "what": audited_what(record, layer),
+                                            "decided": record.get("decision")})
+    ordered = sorted(hits.values(), key=lambda hit: (-hit["count"], hit["ruleset"], hit["rule"]))
+    return {"log_dir": str(log_dir), "records": records, "hits": ordered}
+
+
+def show_audit(report, out, as_json):
+    if as_json:
+        out(json.dumps(report, indent=2))
+        return 0
+    if not report["hits"]:
+        out(f"No audit ruleset would have decided anything in {printable(report['log_dir'])} (a ruleset with "
+            "\"mode\": \"audit\" records what it would decide; sandbox-ai rules builtin NAME --audit writes one)")
+        return 0
+    out(f"What the audit rulesets would have decided ({printable(report['log_dir'])}; nothing of it was enforced):")
+    for hit in report["hits"]:
+        out(f"  {printable(hit['ruleset'])} / {printable(hit['rule'])}: would {hit['would']} {hit['count']} "
+            f"{hit['layer']} action(s), {printable(hit['first'])} .. {printable(hit['last'])}")
+        if hit.get("unread_body"):
+            out(f"    {hit['unread_body']} of them matched without the request body (no enforcing rule needed it "
+                "read; the proxy reads none for an audit rule): its body condition was not checked")
+        if hit["reason"]:
+            out(f"    {printable(hit['reason'])}")
+        for example in hit["examples"]:
+            out(f"    {printable(example['time'])}  {printable(example['what'])[:200]}")
+    out("Let a ruleset enforce: remove its \"mode\": \"audit\" (or use --rules builtin:NAME itself).")
+    return 0
+
+
+def audit_log_dir(project=None, log_dir=None):
+    if log_dir:
+        return Path(log_dir).expanduser()
+    return launcher().default_log_dir(Path(project or os.getcwd()).expanduser().resolve())
+
+
 # --- the command -------------------------------------------------------------------------------------------------
+
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
 
 def parser():
     p = argparse.ArgumentParser(prog="sandbox-ai rules", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
+                                formatter_class=help_style, allow_abbrev=False,
                                 epilog="\n\n".join(__doc__.split("\n\n")[1:]))
     commands = p.add_subparsers(dest="command", required=True)
     checking = commands.add_parser("check", help="check rulesets: files, or yours, the policy's and the project's",
@@ -348,7 +502,7 @@ def parser():
     showing = commands.add_parser("show", help="the rulesets of a start here, or what a running start holds",
                                   allow_abbrev=False)
     showing.add_argument("name", nargs="?", metavar="NAME", help="a running start (sandbox-ai list)")
-    showing.add_argument("-a", "--agent", choices=("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"),
+    showing.add_argument("-a", "--agent", choices=("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"),
                          help="the agent of the start (default: the project file's, else claude)")
     showing.add_argument("-p", "--project", metavar="DIR", help="the project folder (default: here)")
     showing.add_argument("-j", "--json", action="store_true", help="as JSON")
@@ -357,6 +511,18 @@ def parser():
     reloading.add_argument("name", nargs="?", metavar="NAME", help="a running start (default: the only one, or the "
                                                                   "one of this folder)")
     reloading.add_argument("-j", "--json", action="store_true", help="as JSON")
+    building = commands.add_parser("builtin", help="sandbox-ai's own rulesets (--rules builtin:NAME)",
+                                   allow_abbrev=False)
+    building.add_argument("name", nargs="?", metavar="NAME", help="print this one (to save a copy of it)")
+    building.add_argument("--audit", action="store_true", help='with "mode": "audit": it records what it would '
+                                                                "decide, and decides nothing")
+    building.add_argument("-j", "--json", action="store_true", help="the list as JSON")
+    auditing = commands.add_parser("audit", help="what the audit rulesets would have decided in a project's runs",
+                                   allow_abbrev=False)
+    auditing.add_argument("-p", "--project", metavar="DIR", help="the project (its log directory; default: here)")
+    auditing.add_argument("-l", "--log-dir", metavar="DIR", help="this log directory instead")
+    auditing.add_argument("--run", metavar="RUN", help="only this run (its id)")
+    auditing.add_argument("-j", "--json", action="store_true", help="as JSON")
     return p
 
 
@@ -367,7 +533,7 @@ def project_agent(directory):
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None
     agent = document.get("agent") if isinstance(document, dict) else None
-    return agent if agent in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose") else None
+    return agent if agent in ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi") else None
 
 
 def main(argv, out=print):
@@ -381,6 +547,10 @@ def main(argv, out=print):
             return show_check(check(args.files, args.project), out, args.json)
         if args.command == "reload":
             return reload(args.name, out, args.json)
+        if args.command == "builtin":
+            return builtin(args.name, args.audit, out, args.json)
+        if args.command == "audit":
+            return show_audit(audit_report(audit_log_dir(args.project, args.log_dir), args.run), out, args.json)
         if args.name is not None:
             if options or args.agent or args.project:
                 raise ValueError("NAME shows a running start's rules: it goes without --agent, --project and options")

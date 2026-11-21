@@ -1,0 +1,32 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "coding-nanobot",
+  "title": "Coding with nanobot",
+  "description": "nanobot on your project with Anthropic's API (your key stays outside the sandbox), PyPI, npm and GitHub open for the project's packages and code, the agent's memory of this project kept between sessions; everything else stays closed.",
+  "translations": {
+    "de": {
+      "title": "Programmieren mit nanobot",
+      "description": "nanobot an Ihrem Projekt mit der API von Anthropic (Ihr Schlüssel bleibt außerhalb der Sandbox), PyPI, npm und GitHub offen für die Pakete und den Code des Projekts, das Gedächtnis des Agenten zu diesem Projekt bleibt zwischen den Sitzungen; alles andere bleibt zu."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "nanobot"
+  ],
+  "options": [
+    "--api-key",
+    "api.anthropic.com=ANTHROPIC_API_KEY",
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github"
+  ],
+  "notes": [
+    "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once). nanobot sees a placeholder, the connection proxy puts the key in on the wire, and nanobot starts with its provider anthropic (its model: --model NAME). Another provider: --api-key api.openai.com=OPENAI_API_KEY, openrouter.ai=OPENROUTER_API_KEY or api.deepseek.com=DEEPSEEK_API_KEY, or a model server of yours with --llm (the preset nanobot-local-llm).",
+    "PyPI, npm and GitHub are open for the project's dependencies; everything else is refused or asked (--ask). Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy.",
+    "Memory: ~/.nanobot/workspace/memory/MEMORY.md (nanobot's long-term memory) belongs to this project only and is kept between runs (not with --no-memory).",
+    "nanobot runs its commands without asking (its exec tool has no approvals); this sandbox is the boundary, its own bubblewrap sandbox stays off. Its scheduled turns (heartbeat, Dream), Telegram channel, keyless web search, Jina Reader and update check stay off unless --nanobot-enable names them.",
+    "nanobot sends no telemetry; its tracing stays off and the proxy refuses Langfuse, PostHog and Sentry.",
+    "nanobot is not live-tested yet (a start says so); its image first: sandbox-ai build nanobot."
+  ]
+}

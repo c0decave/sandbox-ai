@@ -1,0 +1,14 @@
+{
+  "$comment": "Built-in kit 'superpowers-plugin': enables upstream's Superpowers plugin (obra/superpowers 7.0.1, pinned in sandbox-ai's marketplace) for claude. Install with: sandbox-ai plugins claude --kit superpowers-plugin; use with: sandbox-ai claude --kit superpowers-plugin.",
+  "marketplaces": {
+    "sandbox-ai": {
+      "source": {
+        "source": "directory",
+        "path": "/sandbox/marketplace"
+      }
+    }
+  },
+  "plugins": [
+    "superpowers@sandbox-ai"
+  ]
+}

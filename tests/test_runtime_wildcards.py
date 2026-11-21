@@ -118,8 +118,8 @@ def test_lookups_below_a_wildcard_do_not_use_up_the_runs_questions(tmp_path, mon
     # Each wildcard its own budget; the human's questions untouched by all of them.
     assert asking.ask("dns", {"name": "a.other.org", "wildcard": "other.org"}, wait=False) is None
     for n in range(3):
-        assert asking.ask("dns", {"name": f"real{n}.example"}, wait=False) is None
-    assert asking.ask("dns", {"name": "real9.example"}, wait=False)["reason"] == "too many questions"
+        assert asking.ask("dns", {"name": f"real{n}.example.org"}, wait=False) is None
+    assert asking.ask("dns", {"name": "real9.example.org"}, wait=False)["reason"] == "too many questions"
     ids = sorted(json.loads(p.read_text())["id"] for p in (tmp_path / "approvals").glob("*.json"))
     assert len(ids) == len(set(ids)) == 9  # one numbering for both: IDs stay unique
 
@@ -206,3 +206,19 @@ def test_without_the_list_file_the_built_in_suffixes_stand_in(tmp_path):
         with pytest.raises(ValueError, match="anyone can have"):
             rt.wildcard_suffix(value, missing)
     assert rt.wildcard_suffix("*.example.com", missing) == "example.com"
+
+
+def test_a_subtree_its_service_runs_itself_may_be_a_wildcard():
+    """User 2026-11-19: `--allow-host '*.actions.githubusercontent.com'` was refused ("it reaches
+    githubusercontent.com, where anyone can have a name of their own") - but GitHub runs that subtree itself for
+    Actions (pipelines., results-receiver., vstoken. ...): nobody rents a name there. Only the subtrees in
+    OPERATED_SUBTREES are let through; the rest of the hosting service, and a public suffix such as
+    blob.core.windows.net (anyone's storage account), stay refused."""
+    assert rt.wildcard_suffix("*.actions.githubusercontent.com") == "actions.githubusercontent.com"
+    assert rt.wildcard_suffix("*.pipelines.actions.githubusercontent.com") == "pipelines.actions.githubusercontent.com"
+    for value in ("*.githubusercontent.com", "*.raw.githubusercontent.com", "*.blob.core.windows.net",
+                  "*.actionsgithubusercontent.com.evil.example.githubusercontent.com"):
+        with pytest.raises(ValueError, match="anyone can have"):
+            rt.wildcard_suffix(value)
+    for subtree in rt.OPERATED_SUBTREES:  # each is below a shared suffix (else it needs no entry) and named exactly
+        assert "*" not in subtree and subtree.count(".") >= 2

@@ -91,6 +91,8 @@ LEXICON = {
     "Hermes": "/hˈɜːmiːz/", "Qwen Code": "/kwˈɛn kˈəʊd/", "DeepSeek Harness": "deep seek harness", "Goose": "goose",
     "Monitoring": "monitoring", "Chromium": "chromium", "VNC": "V N C", "Shift": "shift", "Chats": "chats",
     "Bot": "bot",
+    # 0.1.98: the system monitor
+    "CPU": "/sˌiːpˌiːjˈuː/", "Limits": "limits", "top": "top", "stats": "stats", "usage": "usage",
 }
 
 # Words of the German narration that English texts share, said the German way on purpose (German words, names

@@ -18,7 +18,7 @@ from . import state as app_state
 from .files import printable, printable_text
 from .i18n import N_, tr
 from .short_notices import short_notice
-from .widgets import ask_first, background, inform, plain_label, warn
+from .widgets import ask_first, background, explanation, inform, plain_label, warn
 
 FORMATS = (("pdf", N_("PDF: bookmarks and links, to print or pass on")),
            ("html", N_("HTML: one page for a browser, light and dark")),
@@ -41,17 +41,22 @@ def file_name(label, kind):
 class ReportDialog(QDialog):
     """The format, the file, the period, whether the parts of a start go with it, and whether to open it."""
 
-    def __init__(self, parent, title, what, label, parts=True, traffic=False):
+    def __init__(self, parent, title, what, label, parts=True, traffic=False, host=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.label = label
         layout = QVBoxLayout(self)
         layout.addWidget(plain_label(what))
+        if host not in (None, "local"):  # made there, from its logs; brought here as text
+            layout.addWidget(explanation(tr("Made on {host} by its sandbox-ai, from its logs, and saved here as HTML "
+                                            "or Markdown (a PDF does not come over the connection).",
+                                            host=printable(host))))
         form = QFormLayout()
         self.format = QComboBox()
         self.format.setAccessibleName(tr("Format"))
         for key, text in FORMATS:
-            self.format.addItem(tr(text), key)
+            if host in (None, "local") or key != "pdf":
+                self.format.addItem(tr(text), key)
         self.format.currentIndexChanged.connect(lambda _=0: self.format_changed())
         form.addRow(tr("Format"), self.format)
         self.path = QLineEdit()
@@ -61,7 +66,7 @@ class ReportDialog(QDialog):
         if current is not None:
             folder = current.folder(FOLDER_KEY)
         folder = folder or str(Path.home())
-        self.path.setText(os.path.join(folder, file_name(label, "pdf")))
+        self.path.setText(os.path.join(folder, file_name(label, self.kind())))
         choose = QPushButton(tr("Choose…"))
         choose.setAccessibleName(tr("Choose the file"))
         choose.clicked.connect(lambda _=False: self.choose())
@@ -126,15 +131,19 @@ class ReportDialog(QDialog):
 
 
 def make_report(parent, sai, label, what, names=(), log_dir=None, parts=True, owner=None, source=None,
-                notice=None):
+                notice=None, host="local"):
     """Ask (ReportDialog), then write the report of the starts NAMES (or of every run of the log folder LOG_DIR) in
-    the background and open it. NOTICE(level, title, text): how a page tells that it is written (else a message)."""
-    title = tr("Report of {name}", name=printable(label))
-    if not sai.has_report():
+    the background and open it. NOTICE(level, title, text): how a page tells that it is written (else a message).
+    HOST: the starts of a host of sandbox-ai hosts (the report is made there: SandboxAI.host_report)."""
+    remote = host not in (None, "local")
+    title = tr("Report of {name} on {host}", name=printable(label), host=printable(host)) if remote else \
+        tr("Report of {name}", name=printable(label))
+    if not remote and not sai.has_report():
         inform(parent, title, tr("This sandbox-ai writes no reports yet: update it (sandbox-ai update)."), modal=False)
         return None
     # (the LLM traffic section: only a sandbox-ai that has the LLM traffic log knows --llm-traffic)
-    dialog = ReportDialog(parent, title, what, label, parts, (Path(sai.directory) / "llm_traffic.py").is_file())
+    dialog = ReportDialog(parent, title, what, label, parts,
+                          not remote and (Path(sai.directory) / "llm_traffic.py").is_file(), host=host)
     try:
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
@@ -165,6 +174,10 @@ def make_report(parent, sai, label, what, names=(), log_dir=None, parts=True, ow
             short_notice(parent, title, text)
         if values["open"]:
             opener(result)
+    if remote:
+        return background(sai.host_report, host, path, values["kind"], list(names), values["parts"] if parts else True,
+                          values["since"], values.get("traffic", False), owner=owner, source=source, timeout=630,
+                          work=True, done=done)
     return background(sai.report, path, values["kind"], list(names), log_dir, values["parts"] if parts else True,
                       values["since"], values.get("traffic", False), owner=owner, source=source, timeout=630,
                       work=True, done=done)

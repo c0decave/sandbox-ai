@@ -1,7 +1,9 @@
 """sandbox-ai net against a real control socket (the supervisor's control_server, firewall mocked)."""
 import importlib.util
+import base64
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -39,6 +41,9 @@ def sandbox(tmp_path, monkeypatch):
     supervisor binds there, and socket paths are limited to 107 bytes)."""
     short = Path(tempfile.mkdtemp(prefix="net-", dir="/tmp"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(short))
+    # The supervisor's wildcards are its process's set; here the supervisor is a thread of the test process, so
+    # each run gets a set of its own (an earlier test's `net allow *.X` stayed in it otherwise).
+    monkeypatch.setattr(rt, "WILDCARDS", set())
     session = tmp_path / "session"
     session.mkdir()
     (session / "hosts").write_text("127.0.0.1 localhost\n192.0.2.1 api.openai.com\n")
@@ -73,8 +78,12 @@ def run_net(argv):
 
 def test_list_and_show(sandbox, tmp_path):
     status, lines = run_net(["list"])
-    assert status == 0 and lines[0].split() == ["RUN", "NAME", "AGENT", "SINCE", "WORKSPACE"]
-    assert lines[1].split() == ["codex-1234abcd", "-", "codex", "now", str(tmp_path / "app")]
+    assert status == 0 and lines[0].split() == ["NAME", "AGENT", "MODE", "PROFILE", "VPN", "APPROVALS", "ADDED",
+                                                "STARTED"]
+    assert lines[1].split() == ["codex-1234abcd", "codex", "-", "-", "-", "-", "-", "-"]  # (an older run.json)
+    status, lines = run_net(["list", "--wide"])
+    assert lines[0].split()[-2:] == ["RUN", "WORKSPACE"] and lines[1].split()[-2:] == ["codex-1234abcd",
+                                                                                     str(tmp_path / "app")]
     status, lines = run_net(["show"])
     assert status == 0 and "allowed during this run" in lines[0] and "0 destinations" in lines[0]
     assert "nothing beyond its start options" in lines[1]
@@ -110,7 +119,7 @@ def test_allow_host_reaches_firewall_proxy_and_hosts_in_place(sandbox):
 def test_refusals(sandbox, capsys):
     assert run_net(["allow"])[0] == 1
     assert "nothing to allow" in capsys.readouterr().err
-    assert run_net(["allow", "--allow-host", "bad host"])[0] == 1
+    assert run_net(["allow", "--allow-host", "good.example bad!host"])[0] == 1  # (a list: one bad item refuses it)
     assert run_net(["allow", "--allow", "10.0.0.0/8; flush ruleset"])[0] == 1
     assert run_net(["revoke", "--allow-host", "never.example.org"])[0] == 1
     assert "was not allowed during this run" in capsys.readouterr().err
@@ -195,14 +204,24 @@ def child():
 
     def start(launcher=True):
         extra = [str(ROOT / "sandbox/agent_sandbox.py"), "claude"] if launcher else []
-        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *extra])
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", *extra],
+                                   stderr=subprocess.PIPE)
         started.append(process)
+        # Running as itself before a test looks at it (a loaded machine in the full suite once showed a process
+        # without those arguments: never a test's guess) - or why it is not.
+        deadline = time.monotonic() + 10
+        while b"time.sleep(60)" not in Path(f"/proc/{process.pid}/cmdline").read_bytes() if sys.platform.startswith(
+                "linux") else False:
+            assert process.poll() is None, f"the child ended: {process.stderr.read().decode(errors='replace')}"
+            assert time.monotonic() < deadline, "the child did not start"
+            time.sleep(0.01)
         return process
     yield start
     for process in started:
         if process.poll() is None:
             process.kill()
         process.wait()
+        process.stderr.close()
 
 
 def test_running_finds_runs_registered_under_another_runtime_dir(tmp_path, monkeypatch):
@@ -314,7 +333,7 @@ def test_mode_records():
     presets = [f"--allow-{p}" for p in net.launcher().PRESETS]
     for name in ("high", "paranoid"):
         record = mode_record(name)
-        assert record["refuses"] == ["--allow", "--allow-host", "--allow-domain", "--allow-tcp", "--dns", "--allow-host-port",
+        assert record["refuses"] == ["--allow", "--allow-host", "--allow-domain", "--allow-shared-wildcard", "--allow-tcp", "--dns", "--allow-host-port",
                                      *presets]
         assert record["origin"] == "--mode" and record["approval_scope"] == {"high": "run", "paranoid": "once"}[name]
     for name in ("lax", "low", "medium"):
@@ -507,9 +526,30 @@ TOKEN = "gitea_0123456789abcdef"
 
 
 def git_ready(sandbox, **fields):
+    """A run WITHOUT the connection proxy (or of an older sandbox-ai): a Git login given to it can only go into its
+    session directory for the sandbox's Git helper - with IN_SANDBOX, the human's word that the agent may read it.
+    Returns that file."""
     record = json.loads((sandbox["run"] / "run.json").read_text())
     (sandbox["run"] / "run.json").write_text(json.dumps({**record, "runtime_git_tokens": True, **fields}))
     return Path(record["session_dir"]) / net.launcher().RUNTIME_GIT_TOKENS
+
+
+IN_SANDBOX = "--git-token-in-sandbox"
+
+
+def git_proxy_ready(sandbox, tmp_path, monkeypatch, **fields):
+    """A run with the connection proxy, as a start records it now: a Git login given to it goes to the proxy through
+    its supervisor (the control_server thread writes the proxy's run directory, PROXY_RUN - here a directory of the
+    test). Returns (the proxy's file of them, the session directory's file the sandbox would read)."""
+    record = json.loads((sandbox["run"] / "run.json").read_text())
+    proxy = tmp_path / "proxy-run"
+    proxy.mkdir(mode=0o700, exist_ok=True)
+    monkeypatch.setattr(rt, "PROXY_RUN", proxy)
+    monkeypatch.setattr(rt, "_added_git_logins", {"stamp": None, "entries": []})
+    (sandbox["run"] / "run.json").write_text(json.dumps({**record, "proxy": True, "version": "0.1.92",
+                                                         "runtime_git_tokens": True, "proxy_git_logins": True,
+                                                         **fields}))
+    return proxy / rt.ADDED_GIT_LOGINS, Path(record["session_dir"]) / net.launcher().RUNTIME_GIT_TOKENS
 
 
 def git_fill(tokens, url, extra_config=()):
@@ -531,9 +571,17 @@ def git_fill(tokens, url, extra_config=()):
 def test_allow_git_token_gives_the_running_sandbox_a_login(sandbox, monkeypatch, capsys):
     tokens = git_ready(sandbox)
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
-    status, lines = run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])
+    # Without the human's word nothing is put where the agent can read it: refused, naming the run and the way.
+    assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])[0] == 1
+    refusal = capsys.readouterr().err
+    assert "codex-1234abcd cannot be given the Git login for http://localhost:3080 through its connection proxy" \
+        in refusal and "it runs without the connection proxy" in refusal
+    assert "the agent can read the token" in refusal and "--git-token-in-sandbox" in refusal
+    assert not tokens.exists()
+    status, lines = run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN", IN_SANDBOX])
     text = "\n".join(lines)
     assert status == 0, capsys.readouterr().err
+    assert "IN THE SANDBOX" in text and "the agent can read it" in text, "said plainly where the token is"
     # Listed by server and user, never the token; a loopback server needs its port forwarded from the start.
     assert "http://localhost:3080" in text and "x-access-token" in text and TOKEN not in text
     assert "--allow-host-port 3080" in text and "start with: --git-token-env http://localhost:3080=GITEA_TOKEN" in text
@@ -542,7 +590,8 @@ def test_allow_git_token_gives_the_running_sandbox_a_login(sandbox, monkeypatch,
                                                          "token": TOKEN}]
     assert sandbox["applied"] == []  # nothing opened: the loopback is not the firewall's
     status, lines = run_net(["show", "--json"])
-    assert json.loads("\n".join(lines))["git"] == [{"url": "http://localhost:3080", "user": "x-access-token"}]
+    assert json.loads("\n".join(lines))["git"] == [{"url": "http://localhost:3080", "user": "x-access-token",
+                                                      "in_sandbox": True}]
     # Git in the sandbox: the helper answers for that server (path and default ports do not matter) and no other.
     assert git_fill(tokens, "http://localhost:3080/ch/repo.git") == \
         (0, {"protocol": "http", "host": "localhost:3080", "username": "x-access-token",
@@ -566,7 +615,7 @@ def test_allow_git_token_for_github_opens_its_hosts(sandbox, monkeypatch, tmp_pa
     token_file = tmp_path / "gh-token"
     token_file.write_text("ghp_" + "a" * 36 + "\n")
     token_file.chmod(0o600)
-    status, lines = run_net(["allow", "--git-token-file", f"https://github.com={token_file}"])
+    status, lines = run_net(["allow", "--git-token-file", f"https://github.com={token_file}", IN_SANDBOX])
     assert status == 0
     # As at the start: a token for github.com opens the GitHub preset (pinned names, TCP/443).
     assert "tcp dport 443 accept" in sandbox["applied"][-1]
@@ -574,12 +623,12 @@ def test_allow_git_token_for_github_opens_its_hosts(sandbox, monkeypatch, tmp_pa
     assert json.loads(tokens.read_text())["logins"][0]["token"] == "ghp_" + "a" * 36
     # Another login is added beside it; the same server again replaces its token.
     monkeypatch.setenv("OTHER", "glpat-" + "b" * 20)
-    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 0
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER", IN_SANDBOX])[0] == 0
     assert [entry["url"] for entry in json.loads(tokens.read_text())["logins"]] == \
         ["https://github.com", "https://git.example.org"]
     assert "git.example.org" in sandbox["hosts"].read_text()
     monkeypatch.setenv("OTHER", "glpat-" + "c" * 20)
-    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER"])[0] == 0
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=OTHER", IN_SANDBOX])[0] == 0
     logins = json.loads(tokens.read_text())["logins"]
     assert len(logins) == 2 and logins[-1]["token"] == "glpat-" + "c" * 20
 
@@ -587,8 +636,8 @@ def test_allow_git_token_for_github_opens_its_hosts(sandbox, monkeypatch, tmp_pa
 def test_allow_git_token_refusals(sandbox, monkeypatch, capsys):
     tokens = git_ready(sandbox, runtime_git_tokens=False)
     monkeypatch.setenv("GITEA_TOKEN", TOKEN)
-    # A run started with --token-proxy or by an older sandbox-ai has no helper to read it.
-    assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])[0] == 1
+    # A run without the proxy that has no helper either (started by a very old sandbox-ai) takes none at all.
+    assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN", IN_SANDBOX])[0] == 1
     assert "takes no Git login during the run" in capsys.readouterr().err
     git_ready(sandbox)
     for argv, message in (
@@ -598,10 +647,10 @@ def test_allow_git_token_refusals(sandbox, monkeypatch, capsys):
             (["--git-token-env", "https://a.example=GITEA_TOKEN", "--git-token-env", "https://a.example=OTHER"],
              "given twice"),
             (["--git-token-secret", "https://a.example=NO_SUCH_SECRET_HERE"], "no secret NO_SUCH_SECRET_HERE")):
-        assert run_net(["allow", *argv])[0] == 1, argv
+        assert run_net(["allow", *argv, IN_SANDBOX])[0] == 1, argv
         assert message in capsys.readouterr().err, argv
     monkeypatch.setenv("BAD", "two words")
-    assert run_net(["allow", "--git-token-env", "https://a.example=BAD"])[0] == 1
+    assert run_net(["allow", "--git-token-env", "https://a.example=BAD", IN_SANDBOX])[0] == 1
     assert "does not look like an access token" in capsys.readouterr().err
     assert not tokens.exists() and sandbox["applied"] == []  # nothing written, nothing opened
     # The administrator's policy forbids the option at the start: then during the run too.
@@ -616,9 +665,171 @@ def test_allow_git_token_keeps_to_the_mode_of_the_run(sandbox, monkeypatch, caps
     refused as well (no login written)."""
     tokens = git_ready(sandbox, mode=mode_record("high"))
     monkeypatch.setenv("GH", "ghp_" + "a" * 36)
-    assert run_net(["allow", "--git-token-env", "https://github.com=GH"])[0] == 1
+    assert run_net(["allow", "--git-token-env", "https://github.com=GH", IN_SANDBOX])[0] == 1
     assert "widens the security mode" in capsys.readouterr().err
     assert not tokens.exists() and sandbox["applied"] == []
+
+
+# --- a Git login given during the run goes to the run's connection proxy (credentials-verify A1, A2 = B6) -------------
+
+def test_a_git_login_given_during_the_run_goes_to_the_proxy_and_never_into_the_sandbox(sandbox, tmp_path, monkeypatch,
+                                                                                    capsys):
+    """Regression (reviews A2, B6): the token was written into the run's session directory (/sandbox/session), where
+    the agent can read it. It goes to the proxy through the supervisor now, as a login of sandbox-ai git-logins does
+    at a start: the proxy adds it on the wire, the sandbox holds nothing."""
+    given, inside = git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    status, lines = run_net(["allow", "--git-token-env", "https://alice@git.example.org=GITEA_TOKEN"])
+    text = "\n".join(lines)
+    assert status == 0, capsys.readouterr().err
+    assert "its connection proxy logs in with it on the wire" in text and "does not enter the sandbox" in text
+    assert TOKEN not in text
+    assert not inside.exists(), "nothing in what the sandbox sees"
+    assert given.stat().st_mode & 0o777 == 0o600
+    assert json.loads(given.read_text())["git_logins"] == [{"host": "git.example.org", "port": 443, "user": "alice",
+                                                            "loopback": False, "token": TOKEN}]
+    session = Path(json.loads((sandbox["run"] / "run.json").read_text())["session_dir"])
+    assert not [path for path in session.rglob("*") if path.is_file() and TOKEN in path.read_text(errors="replace")]
+    # The run's own list (its run directory: yours, hidden from the agent) is what revoke starts from.
+    kept = sandbox["run"] / "git-logins.json"
+    assert kept.stat().st_mode & 0o777 == 0o600 and json.loads(kept.read_text())["logins"][0]["url"] == \
+        "https://git.example.org"
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["git"] == [{"url": "https://git.example.org", "user": "alice"}]
+    assert "git.example.org" in sandbox["hosts"].read_text(), "the server is allowed as at a start"
+    # The proxy: the login on the wire for Git's requests to that server, and to no other.
+    server = rt.ProxyServer.__new__(rt.ProxyServer)
+    server.config = {}
+    ask = lambda origin, destination="192.0.2.50:443": server.git_token(  # noqa: E731
+        "https", origin, {"destination": destination}, "GET", "/o/r.git/info/refs",
+        "/o/r.git/info/refs?service=git-receive-pack", [])
+    assert base64.b64decode(ask("git.example.org")) == f"alice:{TOKEN}".encode()
+    assert ask("evil.example.org") is None and ask("git.example.org", "192.0.2.50:8443") is None
+    assert TOKEN in server.own_secrets(), "masked in the log and in an answer that echoes it"
+    # Taken back: the proxy has none, the run's list is empty.
+    assert run_net(["revoke", "--git-token-env", "https://git.example.org=ANY"])[0] == 0
+    assert json.loads(given.read_text())["git_logins"] == [] and ask("git.example.org") is None
+    assert json.loads(kept.read_text())["logins"] == []
+    assert run_net(["revoke", "--git-token-env", "https://git.example.org=ANY"])[0] == 1
+    assert "no Git login for https://git.example.org" in capsys.readouterr().err
+
+
+def test_a_git_login_given_during_the_run_wins_over_the_one_the_run_was_started_with(sandbox, tmp_path, monkeypatch):
+    """Regression (review A1): for a server the proxy already had a login for (sandbox-ai git-logins, an identity,
+    --token-proxy) a login given during the run was never used - the proxy added its own to Git's first request. The
+    given one wins now, as a start's --git-token-* option wins over the list; revoked, the start's is back."""
+    git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    started, pushed = "ghp_" + "r" * 36, "ghp_" + "w" * 36
+    monkeypatch.setenv("GH_PUSH", pushed)
+    server = rt.ProxyServer.__new__(rt.ProxyServer)
+    server.config = {"git_tokens": [{"host": "github.com", "port": 443, "user": "x-access-token", "loopback": False,
+                                     "token": started}]}
+    sent = lambda: base64.b64decode(server.git_token(  # noqa: E731
+        "https", "github.com", {"destination": "140.82.121.4:443"}, "POST", "/o/r.git/git-receive-pack",
+        "/o/r.git/git-receive-pack", []))
+    assert sent() == f"x-access-token:{started}".encode()
+    assert run_net(["allow", "--git-token-env", "https://github.com=GH_PUSH"])[0] == 0
+    assert sent() == f"x-access-token:{pushed}".encode(), "the login given during the run"
+    assert run_net(["revoke", "--git-token-env", "https://github.com=X"])[0] == 0
+    assert sent() == f"x-access-token:{started}".encode(), "taken back: the run's own again"
+
+
+def test_a_run_started_with_token_proxy_takes_a_login_for_its_proxy(sandbox, tmp_path, monkeypatch, capsys):
+    """Such a run refused every login during the run (it has no Git helper): its proxy takes one now."""
+    given, inside = git_proxy_ready(sandbox, tmp_path, monkeypatch, runtime_git_tokens=False)
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    assert run_net(["allow", "--git-token-env", "http://localhost:3080=GITEA_TOKEN"])[0] == 0, capsys.readouterr().err
+    assert json.loads(given.read_text())["git_logins"] == [{"host": "localhost", "port": 3080, "loopback": True,
+                                                            "user": "x-access-token", "token": TOKEN}]
+    assert not inside.exists()
+
+
+def test_a_server_the_run_does_not_inspect_takes_a_login_only_into_the_sandbox_when_said_so(sandbox, tmp_path,
+                                                                                           monkeypatch, capsys):
+    """--no-inspect HOST: the proxy does not open that server's requests, so it cannot log in there. The login is
+    refused (naming the run and the reason) unless the human says it may go where the agent can read it."""
+    given, inside = git_proxy_ready(sandbox, tmp_path, monkeypatch, no_inspect=["git.example.org"])
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=GITEA_TOKEN"])[0] == 1
+    refusal = capsys.readouterr().err
+    assert "--no-inspect git.example.org" in refusal and "codex-1234abcd" in refusal
+    assert not given.exists() and not inside.exists() and sandbox["applied"] == []
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=GITEA_TOKEN", IN_SANDBOX])[0] == 0
+    assert json.loads(inside.read_text())["logins"][0]["token"] == TOKEN and not given.exists()
+    status, lines = run_net(["show", "--json"])
+    assert json.loads("\n".join(lines))["git"] == [{"url": "https://git.example.org", "user": "x-access-token",
+                                                      "in_sandbox": True}]
+
+
+def test_a_supervisor_that_knows_no_git_logins_changes_nothing(sandbox, tmp_path, monkeypatch, capsys):
+    """A run whose record says its proxy takes logins, but whose supervisor refuses the request (or does not know
+    it): nothing is written, nothing opened, and the message names the run."""
+    given, inside = git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    monkeypatch.setenv("GITEA_TOKEN", TOKEN)
+    real_ask = net.ask
+
+    def old_supervisor(directory, request, *args, **kwargs):
+        if request.get("op") == "git-logins":
+            raise ValueError("the sandbox refused: op must be allow, revoke, show or untaint")
+        return real_ask(directory, request, *args, **kwargs)
+    monkeypatch.setattr(net, "ask", old_supervisor)
+    assert run_net(["allow", "--git-token-env", "https://git.example.org=GITEA_TOKEN"])[0] == 1
+    assert "codex-1234abcd takes no Git login for its proxy during the run" in capsys.readouterr().err
+    assert not given.exists() and not inside.exists() and not (sandbox["run"] / "git-logins.json").exists()
+    assert sandbox["applied"] == [] and "git.example.org" not in sandbox["hosts"].read_text()
+
+
+def test_the_supervisor_holds_a_given_git_login_to_the_policy_and_its_form(sandbox, tmp_path, monkeypatch):
+    """A request written by hand reaches the control socket too: a login that is no login (a token with a line
+    break, a user with a colon), too many, or of a kind the administrator forbids is refused there."""
+    given, _ = git_proxy_ready(sandbox, tmp_path, monkeypatch)
+    good = {"host": "git.example.org", "port": 443, "user": "alice", "loopback": False, "token": TOKEN}
+    for bad in ({**good, "token": "two\nlines-of-token"}, {**good, "user": "a:b"}, {**good, "port": 0},
+                {**good, "host": "evil host"}, {**good, "token": "short"}, "nothing"):
+        with pytest.raises(ValueError, match="every login has a host, port, user and a token"):
+            rt.give_git_logins([bad], given)
+    with pytest.raises(ValueError, match="at most 64"):
+        rt.give_git_logins([good] * 65, given)
+    assert not given.exists()
+    assert rt.give_git_logins([good], given) == [{"host": "git.example.org", "port": 443, "user": "alice"}]
+    # a damaged file of the proxy's is read as no logins, never a crash
+    given.write_text("{not json")
+    assert rt.added_git_logins(given) == []
+    given.unlink()
+    # The policy and the run's security mode, held by the supervisor itself (a request written by hand names what
+    # it likes): a forbidden kind is refused, and every kind when all three are forbidden; taking logins back
+    # (an empty list) is never refused.
+    short = Path(tempfile.mkdtemp(prefix="net-pol-", dir="/tmp"))
+    stop = threading.Event()
+    network = rt.RuntimeNetwork({"loopback": []}, tmp_path / "allow-policy.json", lambda *a: None)
+    kinds = ("--git-token-env", "--git-token-file", "--git-token-secret")
+    servers = []
+    try:
+        for name, forbid, mode in (("one", ("--git-token-env",), None), ("all", kinds, None),
+                                   ("mode", (), {"name": "paranoid", "refuses": list(kinds)})):
+            directory = short / name
+            directory.mkdir()
+            thread = threading.Thread(target=rt.control_server, args=(directory / "control.sock", network, stop,
+                                                                      forbid, mode), daemon=True)
+            thread.start()
+            servers.append(thread)
+            deadline = time.monotonic() + 5
+            while not (directory / "control.sock").exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+        request = {"op": "git-logins", "git_logins": [good]}
+        with pytest.raises(ValueError, match="--git-token-env is not allowed by the administrator's policy"):
+            net.ask_socket(short / "one", {**request, "options": ["--git-token-env"]}, 10)
+        assert net.ask_socket(short / "one", {**request, "options": ["--git-token-secret"]}, 10)["ok"]
+        with pytest.raises(ValueError, match="not allowed by the administrator's policy"):
+            net.ask_socket(short / "all", request, 10)
+        with pytest.raises(ValueError, match="widens the security mode paranoid"):
+            net.ask_socket(short / "mode", {**request, "options": ["--git-token-secret"]}, 10)
+        assert net.ask_socket(short / "all", {"op": "git-logins", "git_logins": []}, 10)["git_logins"] == []
+    finally:
+        stop.set()
+        for thread in servers:
+            thread.join(5)
+        shutil.rmtree(short, ignore_errors=True)
 
 
 # --- host ports relayed during the run (sandbox-ai net allow --allow-host-port) --------------------------------
@@ -808,10 +1019,28 @@ def test_the_supervisor_refuses_relays_it_must_not_open(tmp_path):
 def test_the_web_interfaces_port_is_never_relayed(sandbox, monkeypatch, capsys):
     """As at the start: sandbox-ai web controls every sandbox, so no sandbox reaches its port, not during a run."""
     relay_ready(sandbox, monkeypatch)
-    monkeypatch.setattr(net.launcher(), "web_service_port", lambda: 8443)
+    monkeypatch.setattr(net.launcher(), "web_service_ports", lambda: [8443, 9443])
     assert run_net(["allow", "--allow-host-port", "8443"])[0] == 1
     assert "the web interface (sandbox-ai web) listens there" in capsys.readouterr().err
+    assert run_net(["allow", "--allow-host-port", "9443"])[0] == 1  # a second one's port too (two at once)
+    assert "--allow-host-port 9443: the web interface" in capsys.readouterr().err
     assert net.relay_running(sandbox["run"], 8443) is None and sandbox["network"].relays == {}
+
+
+def test_a_loopback_port_of_the_sandboxs_own_is_never_relayed(sandbox, monkeypatch, capsys):
+    """As at the start (dsh_web_port, a service's ports): DSH's web UI listens on the sandbox's 127.0.0.1:3080 (the
+    session browser reaches it there), a --service on its ports. `net allow --allow-host-port 3080` was not refused:
+    the relay's redirect took the sandbox's 127.0.0.1:3080 to the host's port - the browser and the agent reached
+    the host instead of DSH. Refused, naming what listens there; another port is relayed as before."""
+    relay_ready(sandbox, monkeypatch, dsh_web_port=3080, services=[{"name": "db", "ports": [5432]}])
+    assert run_net(["allow", "--allow-host-port", "3080"])[0] == 1
+    said = capsys.readouterr().err
+    assert "--allow-host-port 3080" in said and "DeepSeek Harness' web UI" in said, said
+    assert run_net(["allow", "--allow-host-port", "5432"])[0] == 1
+    assert "the service db listens there" in capsys.readouterr().err
+    assert sandbox["network"].relays == {}
+    assert run_net(["allow", "--allow-host-port", "3081"])[0] == 0
+    assert set(sandbox["network"].relays) == {3081}
 
 
 def project_file(tmp_path):
@@ -1075,7 +1304,7 @@ def test_one_host_in_any_case_is_allowed_once(tmp_path):
     """Host names are case-insensitive: EXAMPLE.org and example.org are one pin and one allow-list entry, at the
     start and during the run (and one --keep option)."""
     args = net.parser().parse_args(["allow", "run-1", "--allow-host", "EXAMPLE.org", "-A", "example.ORG"])
-    assert args.allow_host == ["example.org", "example.org"]
+    assert args.allow_host == ["example.org"]  # (a list option: each item once)
     l = net.launcher()
     workspace = tmp_path / "w"
     workspace.mkdir()
@@ -1289,6 +1518,23 @@ def test_concurrent_wildcard_changes_lose_nothing(sandbox, monkeypatch):
     wanted = sorted(["*.first.example"] + [f"*.n{n}.example" for n in range(8)])
     assert json.loads(net.wildcards_file(record).read_text()) == wanted == net.run_wildcards(record)
     assert not list(sandbox["run"].glob(".wildcards.*"))  # no temporary file left behind
+
+
+def test_a_wildcard_allowed_in_one_test_is_not_in_the_next_ones_supervisor_1_of_2(sandbox):
+    """With the next test: the fixture's supervisor is a thread of this process, and its wildcards were the module's
+    set (rt.WILDCARDS) - one test's `net allow *.X` stayed in the next one's (test_allow_domain after
+    test_allow_lists failed). Each sandbox starts with a set of its own."""
+    record = wildcard_sandbox(sandbox)
+    status, lines = run_net(["allow", "--allow-host", "*.leak.example"])
+    assert status == 0, lines
+    assert net.run_wildcards(record) == ["*.leak.example"]
+
+
+def test_a_wildcard_allowed_in_one_test_is_not_in_the_next_ones_supervisor_2_of_2(sandbox):
+    record = wildcard_sandbox(sandbox)
+    status, lines = run_net(["allow", "--allow-host", "*.next.example"])
+    assert status == 0, lines
+    assert net.run_wildcards(record) == ["*.next.example"]  # not "*.leak.example" too
 
 
 def keep_project(tmp_path, monkeypatch):
@@ -1619,3 +1865,56 @@ def test_a_key_for_a_host_below_an_uninspected_wildcard_is_refused(sandbox, tmp_
     keys = proxy_ready(sandbox, tmp_path, monkeypatch, no_inspect=["*.example.com"])
     assert run_net(["allow", "--api-key", "api.example.com=K"])[0] == 1
     assert "--no-inspect api.example.com" in capsys.readouterr().err and not keys.exists()
+
+
+def test_net_list_says_in_short_what_each_running_sandbox_may_reach(tmp_path, monkeypatch):
+    """`net list`: one line per running sandbox, the newest first - its mode, profiles, VPN, approvals (questions
+    waiting), the hosts added since its start, CUT while a kill switch holds somewhere; colour on a terminal only;
+    --json keeps its keys; nothing runs: said so."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    lines = []
+    assert net.main(["list"], out=lines.append) == 0
+    assert lines == ["No sandbox is running. Start one with: sandbox-ai claude (or another agent: sandbox-ai --help)"]
+    runs = net.launcher().runs_dir()
+    now = time.time()
+
+    def register(run, ago, **fields):
+        (runs / run).mkdir(parents=True)
+        record = {"run": run, "agent": "claude", "pid": os.getpid(), "workspace": str(tmp_path / "home/src/app"),
+                  "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - ago)), "session": None, **fields}
+        (runs / run / "run.json").write_text(json.dumps(record))
+        return runs / run
+    register("claude-0000aaaa", 7200, name="old", mode={"name": "medium"}, profiles=[], ask="on", proxy=True)
+    new = register("codex-1111bbbb", 300, agent="codex", name="new", mode={"name": "high"}, profiles=["development"],
+                   vpn_profile="home-tor", vpn_type="tor", ask="allow", proxy=True)
+    (new / "names.json").write_text(json.dumps({"pypi.org": {"addresses": ["192.0.2.1"]},
+                                                "example.org": {"addresses": ["192.0.2.2"]}}))
+    (new / "wildcards.json").write_text(json.dumps(["*.example.net"]))
+    (new / "approvals").mkdir()
+    for ident, answered in (("1731751234-12-1", False), ("1731751234-12-2", True), ("not-a-question", False)):
+        (new / "approvals" / f"{ident}.json").write_text("{}")
+        if answered:
+            (new / "approvals" / f"{ident}.done").write_text("{}")
+    lines = []
+    assert net.main(["list"], out=lines.append) == 0
+    assert "\x1b" not in "".join(lines), "no colour in a pipe"
+    assert lines[0].split() == ["NAME", "AGENT", "MODE", "PROFILE", "VPN", "APPROVALS", "ADDED", "STARTED"]
+    assert [line.split()[0] for line in lines[1:]] == ["new", "old"], "the newest first"
+    assert re.fullmatch(r"new +codex +high +development +home-tor \(tor\) +allow all, 1 waiting +3 hosts +5 minutes ago",
+                        lines[1]), lines[1]
+    assert re.fullmatch(r"old +claude +medium +provider +- +on +- +2 hours ago", lines[2]), lines[2]
+    (new / "cut.json").write_text(json.dumps({"mode": "api"}))
+    lines = []
+    assert net.main(["list", "--wide"], out=lines.append) == 0
+    assert lines[0].split() == ["NAME", "AGENT", "MODE", "PROFILE", "VPN", "APPROVALS", "ADDED", "CUT", "STARTED",
+                                "RUN", "WORKSPACE"]
+    assert lines[1].split()[-6:] == ["api", "5", "minutes", "ago", "codex-1111bbbb", "~/src/app"]
+    assert lines[2].split()[-6:] == ["-", "2", "hours", "ago", "claude-0000aaaa", "~/src/app"]
+    coloured = []
+    net.list_table(net.running(), coloured.append, colour=True)
+    assert "\x1b[31mallow all, 1 waiting\x1b[0m" in coloured[1] and "\x1b[31mapi\x1b[0m" in coloured[1]
+    lines = []
+    assert net.main(["list", "--json"], out=lines.append) == 0
+    assert [sorted(entry) for entry in json.loads("\n".join(lines))] == [sorted(
+        ["run", "name", "agent", "workspace", "started", "session", "kind", "cut", "killswitch"])] * 2

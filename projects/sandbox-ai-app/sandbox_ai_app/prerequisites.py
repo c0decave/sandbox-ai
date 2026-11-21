@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -21,14 +22,17 @@ LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 
 # The slow part of preparing a start (an image built, MCP servers added: their images pulled), run in a terminal tab
 # of the app so that it is seen as it goes: each step said with its number, its own output (podman's build and pull
-# output bounded by sandbox-ai's progress.py), how long it took, and the end. Arguments: [STATUS] [[title, argv], ...]
-# (the steps always last). With STATUS (a file) it also writes there what it sees of each step - its state, when it
-# began, its last line and the last that named its step ("(stage 2/2, step 9/14)") - for the app's progress
-# (preparing.Preparation.read); each step then runs on a pseudo-terminal of its own when the tab is a terminal (its
-# questions and its way of printing as before), else through a pipe.
+# output bounded by sandbox-ai's progress.py), how long it took, and the end. Arguments: [--end=TEXT] [STATUS]
+# [[title, argv], ...] (the steps always last; TEXT: what its last line says comes next - which tab the start goes on
+# in, or that nothing starts by itself). With STATUS (a file) it also writes there what it sees of each step - its
+# state, when it began, its last line and the last that named its step ("(stage 2/2, step 9/14)") - for the app's
+# progress (preparing.Preparation.read); each step then runs on a pseudo-terminal of its own when the tab is a
+# terminal (its questions and its way of printing as before), else through a pipe.
 CHAIN = r"""
 import json, os, re, subprocess, sys, time
 *rest, steps = sys.argv[1:]
+end = next((word[len("--end="):] for word in rest if word.startswith("--end=")), "the start goes on")
+rest = [word for word in rest if not word.startswith("--end=")]
 steps, begun, path = json.loads(steps), time.monotonic(), rest[0] if rest else None
 state = [{"state": "waiting", "begun": None, "took": None, "status": None, "mark": "", "last": ""} for _ in steps]
 MARK = re.compile(r"\bstep \d+/\d+\)")
@@ -113,7 +117,7 @@ for number, (title, argv) in enumerate(steps, 1):
     entry["state"] = "done"
     write(True)
     print(f"agent-sandbox: {title}: done in {took(since)}", flush=True)
-print(f"agent-sandbox: prepared in {took(begun)}; the start goes on", flush=True)
+print(f"agent-sandbox: prepared in {took(begun)}; {end}", flush=True)
 """
 # The same check of what a start needs, more often than this within LOOP_SECONDS, is a loop (a bug: in 0.1.95 the
 # check remembered the wrong thing as done and ran again every 0.15 s, and Start did nothing): it is stopped, said.
@@ -128,8 +132,23 @@ def done_said():
         tr("The notes here say when it is done.")
 
 
-def start_mounts(argv, name):
-    """The folders the start ARGV gives its MCP server NAME (--mcp-mount NAME:TARGET=HOST[:MODE]): [TARGET=HOST...]."""
+# Where a sandbox sees its folders (mcp.SANDBOX_PLACES): a start's --mcp-mount whose folder is one of these and that this
+# machine does not have is the agent's view of a folder, never handed to `mcp add` as this machine's (user report
+# 2026-11-20: "--mount /work=/work:rw: /work is not there and cannot be created"); the folder is asked for instead.
+SANDBOX_PLACES = ("/work", "/workspaces")
+
+
+def sandbox_path(folder):
+    """True for FOLDER (an --mcp-mount's HOST, MODE stripped) that is where a sandbox sees a folder and is not a folder
+    of this machine."""
+    folder = str(folder)[:-3] if str(folder).endswith((":ro", ":rw")) else str(folder)
+    return any(folder == place or folder.startswith(place + "/") for place in SANDBOX_PLACES) and \
+        not os.path.isdir(folder)
+
+
+def start_mounts(argv, name, host=None):
+    """The folders the start ARGV gives its MCP server NAME (--mcp-mount NAME:TARGET=HOST[:MODE]): [TARGET=HOST...].
+    HOST LOCAL: without one whose folder is a sandbox's view of a folder this machine does not have (sandbox_path)."""
     mounts = []
     for index, token in enumerate(argv):
         option, equals, value = token.partition("=")
@@ -138,18 +157,22 @@ def start_mounts(argv, name):
         value = value if equals else (argv[index + 1] if index + 1 < len(argv) else "")
         server, colon, rest = value.partition(":")
         if colon and server == name and "=" in rest and not B.PLACEHOLDER.search(rest):
+            if host == LOCAL and sandbox_path(rest.partition("=")[2]):
+                applog.log("WARNING", "board", f"MCP server {name}: --mcp-mount {printable(rest)} names a folder as "
+                                               "a sandbox sees it, not one of this machine: asked for instead")
+                continue
             mounts.append(rest)
     return mounts
 
 
-def mcp_add_args(argv, name, folders=(), entry=None, network=False):
+def mcp_add_args(argv, name, folders=(), entry=None, network=False, host=None):
     """`sandbox-ai mcp add NAME` for a server the start ARGV uses, with the folders the start gives it (--mcp-mount
     NAME:TARGET=HOST[:MODE]) and FOLDERS (TARGET=HOST, asked for: ask_mcp_folders) as its --mount: a catalog server
     that must have a folder (engram, memory, exiftool) is not added without one, and the start's is the one it
     asked for. ENTRY: the catalog entry a preset names for it (hub:binwalk), added as NAME. NETWORK: with the outside
-    network (--network full), which a server whose entry lists the hosts it needs must be given (ask_mcp_network)."""
+    network (--network full; a server whose entry lists the hosts it needs gets only those without it)."""
     mounts = []
-    for value in [*start_mounts(argv, name), *folders]:
+    for value in [*start_mounts(argv, name, host), *folders]:
         mounts += ["--mount", value]
     return ("mcp", "add", entry or name, *mounts, *(["--network", "full"] if network else []))
 
@@ -164,6 +187,21 @@ def catalog_entry(entries, name):
         if isinstance(entry, dict) and entry.get("name") == bare and (not prefix or found_prefix == prefix):
             return entry
     return None
+
+
+def catalog_prefixes(entries, name):
+    """The catalogs (their prefixes, in order, each once) of ENTRIES that have NAME ("radare2", or "hub:radare2": that
+    catalog's only)."""
+    prefix, _, bare = str(name).rpartition(":")
+    found = []
+    for item in entries or []:
+        found_prefix, entry = item if isinstance(item, tuple) and len(item) == 2 else \
+            ((item or {}).get("prefix"), item)
+        if isinstance(entry, dict) and entry.get("name") == bare and (not prefix or found_prefix == prefix):
+            found_prefix = found_prefix if isinstance(found_prefix, str) else ""  # ("": a catalog not named)
+            if found_prefix not in found:
+                found.append(found_prefix)
+    return found
 
 
 def required_folders(entries, name):
@@ -198,12 +236,64 @@ def start_workspace(argv):
     return None
 
 
+# The login of the start's agent (and of each agent --with): asked for on the start's host as an option's value is,
+# under this name in the needs ({LOGIN: [agents]}). An agent `sandbox-ai login` takes; not when the start configures
+# its login otherwise (LOGIN_ELSEWHERE: these options).
+LOGIN = "login"
+LOGIN_AGENTS = ("claude", "codex", "opencode", "hermes", "qwen", "pi")
+LOGIN_ELSEWHERE = frozenset({"--no-auth", "--copy-auth", "--auth-file", "--import-codex-auth", "--auth-from-session",
+                             "--llm", "--api-key", "--local-config", "--offline", "--state-dir", "--binary",
+                             "--probe", "--dry-run"})
+
+
+KEY_VARIABLE = re.compile(r"API_KEY|AUTH_TOKEN|OAUTH_TOKEN|ACCESS_TOKEN")  # a variable's name that holds a login
+
+
+def start_agents(agent, argv):
+    """AGENT and the agents the start ARGV runs beside it (--with A[,B...], repeatable), each once."""
+    found = [agent]
+    for index, token in enumerate(argv):
+        option, equals, value = str(token).partition("=")
+        if option != "--with":
+            continue
+        value = value if equals else (argv[index + 1] if index + 1 < len(argv) else "")
+        found += [name.strip() for name in str(value).split(",") if name.strip()]
+    return list(dict.fromkeys(found))
+
+
+def login_needs(agent, argv, skipped=()):
+    """The agents of the start (AGENT, ARGV: its launcher options) whose login the start's host must have: those
+    `sandbox-ai login` takes, unless the start configures its login otherwise (LOGIN_ELSEWHERE) - then none - or the
+    human said to start without it (SKIPPED)."""
+    if any(str(token).partition("=")[0] in LOGIN_ELSEWHERE for token in argv):
+        return []
+    for index, token in enumerate(argv):
+        # A key or token handed in as a variable (--env ANTHROPIC_API_KEY=..., --secret-env OPENAI_API_KEY=NAME): the
+        # agent signs in with that.
+        option, equals, value = str(token).partition("=")
+        if option in ("--env", "--secret-env"):
+            value = value if equals else (str(argv[index + 1]) if index + 1 < len(argv) else "")
+            if KEY_VARIABLE.search(value.partition("=")[0]):
+                return []
+    return [name for name in start_agents(agent, argv) if name in LOGIN_AGENTS and name not in skipped]
+
+
+def service_image(value):
+    """The image the --service VALUE names (NAME[:image=IMAGE,...]; without image= its name), else None."""
+    name, _, rest = str(value).partition(":")
+    image = next((item.partition("=")[2].strip() for item in rest.split(",") if item.strip().startswith("image=")),
+                 name.strip())
+    return image or None
+
+
 def need_word(option, name, agent):
     """What the start needs (OPTION NAME, for AGENT) in words: "image variant tor of claude"."""
     return {"--identity": tr("identity {name}", name=name),
+            "--service": tr("service image {name}", name=name),
             "--image-variant": tr("image variant {name} of {agent}", name=name, agent=agent),
             "--vpn": tr("VPN profile {name}", name=name),
-            "--mcp": tr("MCP server {name}", name=name)}.get(option, f"{option} {name}")
+            "--mcp": tr("MCP server {name}", name=name),
+            LOGIN: tr("login of {name}", name=name)}.get(option, f"{option} {name}")
 
 
 def busy_now(page):
@@ -226,31 +316,70 @@ def agent_name(page):
 class Prerequisites:
     """The mixin (see the module's docstring)."""
 
-    PREREQUISITES = ("--identity", "--image-variant", "--vpn", "--mcp")
+    PREREQUISITES = ("--identity", "--image-variant", "--vpn", "--mcp", "--service")
 
     def board_needs(self):
         """{option: [names]} of what the start uses that must exist on its host first: --identity, --image-variant,
-        --vpn, --mcp (placeholders left out: they are asked for first)."""
+        --vpn, --mcp, and the images of its services (--service) that are sandbox-ai's own Containerfiles - built
+        first when they are not (placeholders left out: they are asked for first)."""
         argv = self.prerequisite_argv()
         own = set(self.prerequisite_own_servers())
         needs = {}
+        templates = None
         for index, token in enumerate(argv):
-            option, _, value = token.partition("=")
+            option, has_value, value = token.partition("=")
             if option in self.PREREQUISITES:
-                value = value if "=" in token else (argv[index + 1] if index + 1 < len(argv) else "")
+                value = value if has_value else (argv[index + 1] if index + 1 < len(argv) else "")
                 if value and not B.PLACEHOLDER.search(value):
                     if option == "--mcp" and value in own:
                         continue  # the project's own server: defined by its project file, nothing to add
+                    if option == "--mcp" and ":" in value:
+                        continue  # (no server's name: hub:radare2 - the board says so; added, it was never found)
+                    if option == "--service":
+                        templates = self.prerequisite_templates() if templates is None else templates
+                        value = service_image(value)
+                        if value not in templates or value in needs.get(option, []):
+                            continue  # (an image of yours: the board's check and the launcher's say what is missing)
                     needs.setdefault(option, []).append(value)
         return needs
+
+    def prerequisite_templates(self):
+        """The names of sandbox-ai's own Containerfiles for services (images build-image NAME --builtin NAME) a start
+        may need built: this installation's, and those of the page's host where it read them (image_templates)."""
+        found = set(self.__dict__.get("image_templates") or ())
+        try:
+            found |= set(self.sai.module("services").builtin_images())
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: none of its own
+            applog.swallowed("prerequisites", "Prerequisites.prerequisite_templates: none known here", _exc)
+        return found
 
     def prerequisite_own_servers(self):
         """The MCP servers the start's project defines itself (none known: a page may say)."""
         return set()
 
+    def prerequisite_login_agents(self):
+        """The agents whose login the start's host must have (login_needs: the start's agent and those --with; a
+        page that starts several - the Board's Team part, each member - says which)."""
+        return login_needs(self.prerequisite_agent(), self.prerequisite_argv())
+
     def prerequisite_context(self):
         """What the start is about (a board, a project, a host): a continuation made for another is dropped."""
         return self.host()
+
+    def prerequisites_made(self, host):
+        """Something was made on HOST for the start (a page that keeps lists of that host reads them again)."""
+
+    def mcp_entry_of(self, server):
+        """The catalog entry SERVER is added from: the one the start names (hub:binwalk), the one chosen of several
+        (resolve_mcp_entries), else its name."""
+        return self.__dict__.get("mcp_entries_chosen", {}).get(server) or \
+            self.prerequisite_mcp_entries().get(server) or server
+
+    def prerequisite_workspace(self, host, argv):
+        """The start's workspace (of its options ARGV) when it is a folder of HOST, the start's host - offered as the
+        folder of an MCP server there; None for none (a page whose workspace may be this machine's folder on another
+        host says so: the Board)."""
+        return start_workspace(argv)
 
     def prerequisite_mcp_entries(self):
         """{server: catalog entry} for the MCP servers the start's preset names by their catalog (hub:binwalk): added
@@ -263,10 +392,27 @@ class Prerequisites:
         say - read in the background, then provided (provide()). THEN runs after it all is there (the start goes on);
         nothing is left for the launcher to refuse. True while that is under way."""
         needs = self.board_needs()
+        host = self.host()
+        if why == "start" and then is not None and hasattr(self.sai, "host_logged_in") and \
+                self.login_terminal() is not None:  # (no terminal for a login: the launcher says what is missing)
+            # The login of the start's agent (and of those --with) on its host: asked for before the start, not left
+            # for the launcher's "the host has no codex login" in the terminal - with a login there first, on request.
+            logins = [name for name in self.prerequisite_login_agents() if name not in self.logins_skipped(host)]
+            if logins and host == LOCAL and hasattr(self.sai, "logged_in_here"):
+                # This machine's own: read here and now from the login files (no process). With every login there the
+                # start is held up by nothing; one that is missing is asked about below.
+                try:
+                    there = self.sai.logged_in_here(logins, self.prerequisite_session())
+                except Exception as exc:  # noqa: BLE001 - not read: the launcher says what is missing
+                    applog.log("INFO", "prerequisites", f"{why}: this machine's logins could not be read "
+                                                        f"({applog.error_text(exc)}): the launcher checks them")
+                    there = set(logins)
+                logins = [name for name in logins if name not in there]
+            if logins:
+                needs = {**needs, LOGIN: logins}
         if not needs or not hasattr(self.sai, "host_image_variants"):
             applog.log("DEBUG", "prerequisites", f"{why}: nothing to check first (needs {needs or 'none'})")
             return False
-        host = self.host()
         context = self.prerequisite_context()
         busy = self.__dict__.setdefault("preparing_contexts", set())
         stages = self.__dict__.setdefault("preparing_stages", {})  # {context: (since, what is under way)}
@@ -283,7 +429,9 @@ class Prerequisites:
             return True
         key = (host, json.dumps(needs, sort_keys=True))
         if getattr(self, "prerequisites_done", None) == key:
-            applog.log("DEBUG", "prerequisites", f"{why} on {printable(host)}: its needs were found there before: "
+            # (only while the start that found them there goes on: every Start reads its host again - a server
+            # removed there, a host made anew, was taken as there for good, and the launcher refused the start)
+            applog.log("DEBUG", "prerequisites", f"{why} on {printable(host)}: its needs were found there just now: "
                        f"{needs_text(needs)}")
             return False
         if self.prerequisite_loop(key, needs):
@@ -294,6 +442,7 @@ class Prerequisites:
         applog.log("INFO", "prerequisites", f"{why} on {printable(host)} needs {needs_text(needs)}: read there first "
                                             f"(agent {agent_name(self)})")
         agent = self.prerequisite_agent()  # (the start's, also when the page shows another one by the answer)
+        session = self.prerequisite_session()  # (its session's name: one that has a login of its own needs no other)
 
         def same():
             return self.prerequisite_context() == context
@@ -313,16 +462,23 @@ class Prerequisites:
                 data = self.sai.host_json(host, "images", "--json", timeout=90)
                 return {(str(e["target"]).partition("@")[0], str(e.get("agent") or "")): bool(e.get("present"))
                         for e in data if isinstance(e, dict) and e.get("variant") and isinstance(e.get("target"), str)}
+            def service_images():
+                # {image: built}: your images there (built), sandbox-ai's own templates there not built (False)
+                mine = {str(row.get("name")): True for row in self.sai.user_images(host) if isinstance(row, dict)}
+                return {**{str(row["image"]): False for row in self.sai.service_templates(host)}, **mine}
             readers = {"--identity": lambda: self.sai.identities() if host == LOCAL else self.sai.host_identities(host),
+                       "--service": service_images,
                        "--image-variant": variants,
                        "--vpn": lambda: [e["profile"] for e in self.sai.host_vpn_profiles(host)],
-                       "--mcp": lambda: [row[0] for row in self.sai.host_mcp_servers(host)]}
+                       "--mcp": lambda: [row[0] for row in self.sai.host_mcp_servers(host)],
+                       LOGIN: lambda: self.sai.host_logged_in(host, needs[LOGIN], session)}
             have = {}
             for option in needs:
                 began = time.monotonic()
                 try:
                     found = readers[option]()
-                    have[option] = found if isinstance(found, dict) and option == "--image-variant" else set(found)
+                    have[option] = found if isinstance(found, dict) and option in ("--image-variant", "--service") \
+                        else set(found)
                     applog.log("DEBUG", "prerequisites", f"{option} on {host}: {len(have[option])} there, read in "
                                                          f"{applog.seconds(time.monotonic() - began)}")
                 except Exception as exc:  # noqa: BLE001 - not answered: the launcher says what is missing at the start
@@ -330,7 +486,9 @@ class Prerequisites:
                                f"{applog.seconds(time.monotonic() - began)}; the launcher checks it at the start): "
                                f"{applog.error_text(exc)}")
                     have[option] = None
+                    unread[option] = printable_text(str(exc)).strip()[-300:] or type(exc).__name__
             return have
+        unread = self.prerequisite_unread = {}  # {option: why it could not be read on the host} (said, not silent)
 
         def done(have, error):
             self.prerequisite_reading = None
@@ -357,6 +515,10 @@ class Prerequisites:
                 if there is None:
                     continue
                 for name in names:
+                    if option == "--service":  # sandbox-ai's own there, not built: built first
+                        if name in there and not there[name]:
+                            missing.setdefault(option, []).append(name)
+                        continue  # (yours, or none there: the board's check and the launcher say it)
                     # (not `key`: that is what check_prerequisites remembers as done - overwritten here, every start
                     # with a prerequisite read its needs again and started itself again, without end)
                     wanted = (name, agent) if option == "--image-variant" else name
@@ -367,19 +529,31 @@ class Prerequisites:
                     elif option == "--image-variant" and not there[wanted]:
                         unbuilt.append(name)
             self.prerequisite_report(host, agent, key, needs, have, missing, unbuilt)
+            if unread and why == "start":  # (said, never only in the log: the launcher has the last word now)
+                self.prerequisite_notice(tr("{host} did not say what it has of {list} ({error}): the launcher checks "
+                                            "it at the start.", host=printable(host), list=printable(", ".join(
+                                                need_word(o, n, agent) for o in unread for n in needs.get(o, []))),
+                                            error=printable(next(iter(unread.values())))), "notice-warn")
             if not missing and not unbuilt:
-                if complete:  # (one that could not be read is read again at the next start)
-                    self.prerequisites_done = key
+                # Found there (or not answered: the launcher checks it): the start goes on now, and its own check
+                # within that is not read again (it read, went on, read again ... without end while a host did not
+                # answer); the next Start reads the host again (a server removed there meanwhile was taken as there
+                # for good, and the launcher refused every start).
+                self.prerequisites_done = key
                 applog.log("INFO", "prerequisites", f"{why} on {printable(host)}: everything it needs is there"
                            + ("" if complete else " (as far as it could be read)")
                            + ("; the start goes on" if then is not None and same() else ""))
                 busy.discard(context)
                 stages.pop(context, None)
                 waiter = self.__dict__.get("preparing_waiters", {}).pop(context, None)
-                go_on()
-                if then is None and waiter is not None and same():  # (a Start pressed while this was read)
-                    applog.log("INFO", "prerequisites", f"{why}: the start that waited for this check goes on")
-                    waiter()
+                try:
+                    go_on()
+                    if then is None and waiter is not None and same():  # (a Start pressed while this was read)
+                        applog.log("INFO", "prerequisites", f"{why}: the start that waited for this check goes on")
+                        waiter()
+                finally:
+                    if getattr(self, "prerequisites_done", None) == key:
+                        self.prerequisites_done = None
                 return
             applog.log("INFO", "prerequisites", f"{why} on {printable(host)}: missing "
                        f"{needs_text(missing) or 'nothing'}"
@@ -406,8 +580,16 @@ class Prerequisites:
         its question ("build", "mcp", "vpn": a button of the Board's note said so already)."""
         agent = agent or self.prerequisite_agent()
         argv = self.prerequisite_argv()  # (the folders the start gives its MCP servers: --mcp-mount)
+        self.mcp_entries_chosen = {}  # (the catalog chosen for a server in several: for this preparation only)
         context = context if context is not None else self.prerequisite_context()
         busy = self.__dict__.setdefault("preparing_contexts", set())
+        logins = list(missing.get(LOGIN, []))
+        if logins:
+            # The login first (asked): in a terminal on the start's host, the start going on when it ends with one;
+            # or the start without it (said); or not at all. What else is missing is read again afterwards.
+            self.provide_login(logins, {k: v for k, v in missing.items() if k != LOGIN}, unbuilt, host, key, then,
+                               why, context, agent, yes)
+            return
         recipes = set()
         try:
             recipes = set(self.sai.module("images").RECIPES)
@@ -417,6 +599,7 @@ class Prerequisites:
         variants = [v for v in missing.get("--image-variant", []) if v in recipes]
         no_recipe = [v for v in missing.get("--image-variant", []) if v not in recipes]
         vpns, servers = list(missing.get("--vpn", [])), list(missing.get("--mcp", []))
+        images = list(dict.fromkeys(missing.get("--service", [])))
         # [(what is not made, [(button, function)])]: said, and on the Board each with the button that makes it.
         problems = []
 
@@ -458,6 +641,15 @@ class Prerequisites:
                              [(tr("Build now"), again("--image-variant", variants,
                                                       built=[n for n in to_build if n not in variants]))]))
             to_build = []
+        if images and "build" not in yes and not confirm(self, tr("Service image"), tr(
+                "This start needs the service image {names}: sandbox-ai's own Containerfile, not built on {host} yet. "
+                "Build it now? Its FROM is pulled once and pinned by digest, its RUN steps get no network; the output "
+                "goes to the tab Preparing the start, and the start goes on when it is built. Like your images it is "
+                "UNCHECKED.", names=", ".join(images), host=host), tr("Build")):
+            problems.append((tr("Service image {names}: not built (sandbox-ai images build-image NAME --builtin "
+                                "NAME).", names=", ".join(images)),
+                             [(tr("Build now"), again("--service", images))]))
+            images = []
         if servers and "mcp" not in yes and not confirm(self, tr("MCP servers"), tr(
                 "This start uses the MCP servers {names}, which are not added on {host}. Add them from their catalogs "
                 "now (their images are pulled)?", names=", ".join(servers), host=host), tr("Add")):
@@ -485,37 +677,207 @@ class Prerequisites:
                 if error is not None:
                     applog.log("WARN", "board", f"the MCP catalogs could not be read for the folders of "
                                                 f"{', '.join(servers)}: {error}")
-                folders, dropped = self.ask_mcp_folders(host, servers, argv, None if error is not None else entries)
-                networks, declined = self.ask_mcp_network(host, [n for n in servers if n not in dropped],
-                                                          None if error is not None else entries)
+                read = None if error is not None else entries
+                # Each server by its catalog entry first: one no catalog there has is not tried (`mcp add` would
+                # only refuse it), one in several catalogs (radare2 of mcp and hub) is asked for - `mcp add NAME`
+                # refused it as ambiguous (user report 2026-11-19).
+                chosen, unknown = self.resolve_mcp_entries(host, servers, read)
+                if chosen:
+                    self.mcp_entries_chosen = {**self.__dict__.get("mcp_entries_chosen", {}), **chosen}
+                left = [n for n in servers if n not in unknown]
+                folders, dropped = self.ask_mcp_folders(host, left, argv, read)
+                networks, declined = self.ask_mcp_network(host, [n for n in left if n not in dropped], read)
                 dropped.update(declined)
                 self.provide_rest(identities, variants, to_build, tor_profiles,
-                                  [n for n in servers if n not in dropped], folders,
+                                  [n for n in left if n not in dropped], folders,
                                   problems + [(text, [(tr("Add MCP server"), again("--mcp", [name]))])
-                                              for name, text in dropped.items()],
-                                  host, key, then, why, context, agent, argv, networks)
+                                              for name, text in dropped.items()]
+                                  + [(text, [(tr("Open the MCP servers page"), lambda: self.open_page("mcp"))])
+                                     for name, text in unknown.items()],
+                                  host, key, then, why, context, agent, argv, networks, images=images)
             self.__dict__.setdefault("preparing_stages", {})[context] = (
                 time.monotonic(), f"reading the MCP catalogs for the folders of {', '.join(servers)}")
             background(read_catalog, owner=self, timeout=200, done=catalog_read,
                        what=f"reading the MCP catalogs of {host} for the servers {', '.join(servers)}")
             return
         self.provide_rest(identities, variants, to_build, tor_profiles, servers, {}, problems, host, key, then, why,
-                          context, agent, argv)
+                          context, agent, argv, images=images)
+
+    # -- the agent's login on the start's host --
+
+    def prerequisite_session(self):
+        """The session's name the start is made under (None: none, or not known): the page's start() notes it."""
+        return self.__dict__.get("starting_session") or None
+
+    def logins_skipped(self, host):
+        """The agents the human chose to start without a login of on HOST (until the app ends): not asked again."""
+        return {agent for where, agent in self.__dict__.get("login_skipped", set()) if where == host}
+
+    def login_terminal(self):
+        """run(argv, title, ended) -> bool: a command in a terminal (a tab of the app or a window, as the setting
+        says) whose end is told - the window's in_terminal, else the page's own terminal function; None: none."""
+        window = self.window() if hasattr(self, "window") else None
+        in_terminal = getattr(window, "in_terminal", None) if window is not self else None
+        if callable(in_terminal):
+            return lambda argv, title, ended: in_terminal(argv, title, ended=ended)
+        return None
+
+    def ask_login(self, host, agents):
+        """"login" (log in now, in a terminal on HOST), "without" (start without it) or None (Cancel) for the agents
+        AGENTS whose login HOST does not have."""
+        from .widgets import choose
+        names = printable(", ".join(agents))
+        place = tr("on this machine") if host == LOCAL else tr("on {host}", host=printable(host))
+        text = tr("There is no login for {agents} {place}: the sandbox would start without one, and the agent asks "
+                  "for it in its terminal. Log in to {agents} {place} now? `sandbox-ai login` runs in a terminal "
+                  "there - a sign-in with a one-time code opens its page in your browser - and the start goes on "
+                  "when it ends with a login, kept for every later sandbox of that agent there.", place=place,
+                  agents=names)
+        return choose(self, tr("Log in to {agents}", agents=names), text,
+                      [("login", tr("Log in now")), ("without", tr("Start without a login"))])
+
+    def provide_login(self, agents, missing, unbuilt, host, key, then, why, context, agent, yes=()):
+        """The logins of AGENTS, which HOST lacks, before the start: asked (ask_login) - "Log in now" runs `sandbox-ai
+        login AGENT` on HOST in a terminal, one agent after the other, and the start's needs are read again when the
+        last ended well (the start goes on with a login there); "Start without a login" is remembered for this run
+        of the app and said, and the start goes on with what else it needs; Cancel: not started."""
+        busy = self.__dict__.setdefault("preparing_contexts", set())
+        stages = self.__dict__.setdefault("preparing_stages", {})
+        place = tr("on this machine") if host == LOCAL else tr("on {host}", host=printable(host))
+
+        def over():
+            busy.discard(context)
+            stages.pop(context, None)
+
+        def again():
+            """The needs read once more (without the logins that are there now, or left out), then THEN."""
+            over()
+            self.prerequisites_done = None
+            if self.prerequisite_context() != context:
+                self.drop_waiter(context, why)
+                return
+            if then is not None and not self.check_prerequisites(then=then, why=why):
+                then()
+        run = self.login_terminal()
+        answer = self.ask_login(host, agents) if why == "start" else None
+        if answer == "login" and run is None:
+            warn(self, tr("Not started"), tr("No terminal could be opened for the login. Run it yourself, then start "
+                                             "again: {command}", command="sandbox-ai login " + printable(agents[0])))
+            answer = None
+        if answer is None:
+            applog.log("INFO", "prerequisites", f"{why}: not started - no login of {', '.join(agents)} on "
+                                                f"{printable(host)}, and none was asked for")
+            self.prerequisite_notice(tr("Not started: there is no login for {agents} {place}.", place=place,
+                                        agents=printable(", ".join(agents))), "notice-warn")
+            self.show_missing(tr("Not started: the start needs what is not there yet."), [(
+                tr("There is no login for {agents} {place}.", place=place, agents=printable(", ".join(agents))),
+                [(tr("Start again"), lambda: then() if then is not None and self.prerequisite_context() == context
+                  else None)])])
+            over()
+            self.drop_waiter(context, why)
+            return
+        if answer == "without":
+            self.__dict__.setdefault("login_skipped", set()).update((host, name) for name in agents)
+            applog.log("INFO", "prerequisites", f"{why}: started without a login of {', '.join(agents)} on "
+                                                f"{printable(host)} (chosen; not asked again until the app ends)")
+            self.prerequisite_notice(tr("Started without a login of {agents} {place}: the agent asks for it in its "
+                                        "terminal (Codex: its device sign-in runs there first).",
+                                        agents=printable(", ".join(agents)), place=place), "notice-warn", status=True)
+            again()
+            return
+        left = list(agents)
+
+        def next_login():
+            name = left.pop(0)
+            stages[context] = (time.monotonic(), f"the login of {name} in a terminal on {host}")
+            try:
+                argv = self.sai.login_argv(host, name)
+            except Exception as exc:  # noqa: BLE001 - said; the start waits
+                warn(self, tr("Not started"), printable_text(exc))
+                over()
+                self.drop_waiter(context, why)
+                return
+            title = (f"{printable(host)}: " if host != LOCAL else "") + tr("Log in to {agents}", agents=name)
+            applog.log("INFO", "prerequisites", f"{why}: the login of {name} on {printable(host)} runs in a terminal; "
+                                                "the start goes on when it ends with a login")
+            self.prerequisite_notice(tr("Log in to {agent} in its terminal ({place}): the start goes on when it "
+                                        "ends with a login.", agent=name, place=place), "secondary", status=True)
+
+            def ended(status):
+                applog.log("INFO" if status == 0 else "WARNING", "prerequisites",
+                           f"{why}: the login of {name} on {printable(host)} ended with exit status {status}")
+                if status != 0:
+                    text = tr("The login of {agent} {place} did not end with a login (exit status {status}): not "
+                              "started.", agent=name, place=place, status=status)
+                    self.prerequisite_notice(text, "notice-warn", toast=True)
+                    self.show_missing(tr("Not started: the start needs what is not there yet."), [(text, [
+                        (tr("Start again"), lambda: then() if then is not None
+                         and self.prerequisite_context() == context else None)])])
+                    over()
+                    self.drop_waiter(context, why)
+                    return
+                if left:
+                    next_login()
+                    return
+                self.prerequisites_made(host)
+                again()
+            if not run(argv, title, ended):
+                ended(-1)
+        busy.add(context)
+        next_login()
+
+    def resolve_mcp_entries(self, host, servers, entries):
+        """({server: "prefix:name"} chosen, {server: why it is not added}) for SERVERS, by the catalogs of HOST
+        ENTRIES (None: not read - nothing is said, `mcp add` has the last word): a server whose catalog entry the
+        start names (hub:binwalk) or that one catalog has is added as before; one in no catalog is not tried, and
+        said (the MCP servers page defines one of your own); one in several is asked for - Cancel: not added."""
+        from .widgets import choose
+        chosen, unknown = {}, {}
+        if entries is None:
+            return chosen, unknown
+        named = {**self.prerequisite_mcp_entries(), **self.__dict__.get("mcp_entries_chosen", {})}
+        for server in servers:
+            if named.get(server) and catalog_entry(entries, named[server]) is not None:
+                continue
+            prefixes = catalog_prefixes(entries, named.get(server) or server)
+            if len(prefixes) == 1 or "" in prefixes:  # (one catalog has it, or one that names none: as before)
+                continue
+            if not prefixes:
+                unknown[server] = tr("MCP server {name}: no catalog of {host} has it (sandbox-ai mcp catalog there), so "
+                                     "it is not added and the start does not go on - define it on the MCP servers "
+                                     "page, or take it off the start.", name=printable(server),
+                                     host=printable(host))
+                applog.log("INFO", "board", f"MCP server {server}: in no catalog of {host}: not added")
+                continue
+            title = tr("MCP server {name}", name=printable(server))
+            answer = choose(self, title, tr(
+                "{name} is in several catalogs of {host}: {list}. Which one is added?", name=printable(server),
+                host=printable(host), list=", ".join(f"{p}:{server}" for p in prefixes)),
+                [(prefix, f"{prefix}:{server}") for prefix in prefixes])
+            if answer not in prefixes:
+                unknown[server] = tr("MCP server {name}: not added - it is in several catalogs and none was chosen "
+                                     "(the MCP servers page adds the one you want).", name=printable(server))
+                continue
+            chosen[server] = f"{answer}:{server}"
+            applog.log("INFO", "board", f"MCP server {server}: added from {answer}:{server} (chosen)")
+        return chosen, unknown
 
     def ask_mcp_folders(self, host, servers, argv, entries):
         """({server: [TARGET=HOST]}, {server: why it is not added}) for the folders the catalog entries of SERVERS
         require (ENTRIES: the catalogs read, None: not read) that the start ARGV does not give them (--mcp-mount):
-        each asked for - the start's workspace, another folder (chosen; on another host typed), or Cancel (that server
-        is not added, and said)."""
-        from PySide6.QtWidgets import QInputDialog
+        each asked for - the start's workspace (when it is a folder of HOST: prerequisite_workspace), another folder
+        (chosen; on another host from that host's folders, remote_chooser, starting in the workspace there or its
+        HOME - never at a path of this machine; New folder… makes one there), or Cancel (that server is not added,
+        and said)."""
+        from . import remote_chooser as RC
         from .state import file_dialog, run_dialog
-        from .widgets import choose, shown_as_text
+        from .widgets import choose
         folders, dropped = {}, {}
-        workspace = start_workspace(argv)
+        workspace = self.prerequisite_workspace(host, argv)
         for server in servers:
-            entry = self.prerequisite_mcp_entries().get(server) or server
+            entry = self.mcp_entry_of(server)
             required = required_folders(entries, entry) if entries is not None else None
-            given = {value.partition("=")[0] for value in start_mounts(argv, server)}
+            given = {value.partition("=")[0] for value in start_mounts(argv, server, host)}
             for target in [t for t in required or [] if t not in given]:
                 title = tr("MCP server {name}", name=printable(server))
                 choices = ([("workspace", tr("The start's workspace: {path}", path=printable(workspace)))]
@@ -529,10 +891,7 @@ class Prerequisites:
                     chosen = run_dialog(file_dialog(self, title, workspace or "", "folder"))
                     path = chosen[0] if chosen else None
                 elif answer == "other":
-                    text, ok = QInputDialog.getText(self, title, shown_as_text(tr("A folder on {host}",
-                                                                                  host=printable(host))),
-                                                    text=workspace or "")
-                    path = text.strip() if ok and text.strip() else None
+                    path = RC.choose_folder(self, host, title, "mcp-folder", start=workspace or "") or None
                 if not path:
                     dropped[server] = tr("MCP server {name}: not added - it needs a folder for {target} (the MCP page "
                                          "adds it with one).", name=printable(server), target=printable(target))
@@ -543,41 +902,30 @@ class Prerequisites:
         return folders, dropped
 
     def ask_mcp_network(self, host, servers, entries):
-        """({servers added with the outside network}, {server: why it is not added}) for SERVERS whose catalog entry
-        (of ENTRIES, None: not read) lists the hosts it needs: sandbox-ai cannot limit a server to them yet, so
-        `mcp add` refuses it without --network full - asked for each, the hosts named; no: not added, and said."""
-        networks, dropped = set(), {}
-        mapped = self.prerequisite_mcp_entries()
+        """({servers added with the outside network}, {server: why it is not added}) for SERVERS: nothing is asked
+        any more. A server whose catalog entry (of ENTRIES, None: not read) lists the hosts it needs is added with
+        exactly those (`mcp add`'s default for such an entry: network allowlist, held in its namespace) - before,
+        sandbox-ai could not limit it to them and the Board asked whether to give it the whole outside network."""
         for server in servers:
-            hosts = needed_hosts(entries, mapped.get(server) or server) if entries is not None else []
-            if not hosts:
-                continue
-            if confirm(self, tr("MCP server {name}", name=printable(server)), tr(
-                    "The MCP server {name} needs {hosts}. sandbox-ai cannot limit a server to these hosts yet: it is "
-                    "added with the outside network (--network full), or not at all. Give it the outside network?",
-                    name=printable(server), hosts=printable(", ".join(hosts))), tr("Give it the network")):
-                networks.add(server)
-                applog.log("INFO", "board", f"MCP server {server}: added with the outside network (it needs "
-                                            f"{', '.join(hosts)})")
-            else:
-                dropped[server] = tr("MCP server {name}: not added - it needs the outside network for {hosts} "
-                                     "(the MCP page adds it with --network full).", name=printable(server),
-                                     hosts=printable(", ".join(hosts)))
-                applog.log("INFO", "board", f"MCP server {server}: not added (the outside network it needs for "
-                                            f"{', '.join(hosts)} was declined)")
-        return networks, dropped
+            hosts = needed_hosts(entries, self.mcp_entry_of(server)) if entries is not None else []
+            if hosts:
+                applog.log("INFO", "board", f"MCP server {server}: added with only the hosts its catalog entry "
+                                            f"needs ({', '.join(hosts)})")
+        return set(), {}
 
     def provide_rest(self, identities, variants, to_build, tor_profiles, servers, folders, problems, host, key, then,
-                     why, context, agent, argv, networks=()):
+                     why, context, agent, argv, networks=(), images=()):
         """provide(), once the MCP servers' folders are known (FOLDERS: {server: [TARGET=HOST]}). PROBLEMS: [(what
-        is not made, [(button, function)])]. NETWORKS: the servers added with the outside network (a yes to it)."""
+        is not made, [(button, function)])]. NETWORKS: the servers added with the outside network (a yes to it).
+        IMAGES: the services' images of sandbox-ai's own Containerfiles to build (images build-image --builtin)."""
+        images = list(images)
         busy = self.__dict__.setdefault("preparing_contexts", set())
         problems = [p if isinstance(p, tuple) else (p, []) for p in problems]
         stages = self.__dict__.setdefault("preparing_stages", {})
         if problems and why == "start":
             warn(self, tr("Not started"), "\n".join(text for text, _ in problems))
             self.show_missing(tr("Not started: the start needs what is not there yet."), problems)
-            if not (identities or variants or to_build or tor_profiles or servers):
+            if not (identities or variants or to_build or tor_profiles or servers or images):
                 applog.log("INFO", "prerequisites", f"{why}: not started, nothing can be made for it here")
                 busy.discard(context)
                 self.drop_waiter(context, why)
@@ -593,14 +941,16 @@ class Prerequisites:
                  *(tr("image variant {name} (made and built: some minutes)", name=n) for n in to_build),
                  *(tr("image variant {name}", name=n) for n in variants if n not in to_build),
                  *(tr("Tor profile {name}", name=n) for n in tor_profiles),
-                 *(tr("MCP server {name}", name=n) for n in servers)]
+                 *(tr("MCP server {name}", name=n) for n in servers),
+                 *(tr("service image {name} (built: a minute or two)", name=n) for n in images)]
         if not steps:  # nothing to make here (each part said above why): no "Preparing: ." whose end never came
             applog.log("INFO", "prerequisites", f"{why}: nothing is made (each part declined or not possible)")
             busy.discard(context)
             self.drop_waiter(context, why)
             stages.pop(context, None)
             return
-        entries = self.prerequisite_mcp_entries()  # (a preset's hub:binwalk: never `mcp add binwalk`, in two catalogs)
+        # (a preset's hub:binwalk: never `mcp add binwalk`, in two catalogs; one chosen of several: resolve_mcp_entries)
+        entries = {**self.prerequisite_mcp_entries(), **self.__dict__.get("mcp_entries_chosen", {})}
         stages[context] = (time.monotonic(), "making " + ", ".join(steps))
         applog.log("INFO", "prerequisites", f"{why} on {printable(host)}: making " + printable(", ".join(steps)))
         self.prerequisite_notice(tr("Preparing what the start needs: {list}.", list=printable(", ".join(steps))) + " "
@@ -609,15 +959,18 @@ class Prerequisites:
         slow = [("build", name, tr("building the image variant {name}", name=name),
                  ("build", "--variant", self.variant_target(name, agent))) for name in to_build] + \
             [("mcp", name, tr("adding the MCP server {name} (its image is pulled)", name=name),
-              mcp_add_args(argv, name, folders.get(name, ()), entries.get(name), name in networks))
-             for name in servers]
+              mcp_add_args(argv, name, folders.get(name, ()), entries.get(name), name in networks,
+                           host))
+             for name in servers] + \
+            [("service", name, tr("building the service image {name} (sandbox-ai's own Containerfile)", name=name),
+              ("images", "build-image", name, "--builtin", name)) for name in images]
         in_tab = self.prerequisite_terminal() if slow else None
         if in_tab is not None:
-            to_build, servers = [], []
+            to_build, servers, images = [], [], []
         # What is made, in the order it is made (work() here, then the tab): the Board's progress and its line.
         order = [*(("identity", n) for n in identities), *(("recipe", n) for n in variants),
                  *(("build", n) for n in to_build), *(("vpn", n) for n in tor_profiles),
-                 *(("mcp", n) for n in servers)]
+                 *(("mcp", n) for n in servers), *(("service", n) for n in images)]
         tab = [(kind, name) for kind, name, _, _ in slow] if in_tab is not None else []
         preparation = P.Preparation([P.Item(kind, name) for kind, name in order] +
                                     [P.Item(kind, name, in_tab=True) for kind, name in tab])
@@ -673,8 +1026,11 @@ class Prerequisites:
                 said.append(("vpn", name, status, text))
             for name in servers:
                 said.append(("mcp", name, *step("mcp", name, *mcp_add_args(argv, name, folders.get(name, ()),
-                                                                           entries.get(name), name in networks),
+                                                                           entries.get(name), name in networks, host),
                                                 timeout=900)))
+            for name in images:
+                said.append(("service", name, *step("service", name, "images", "build-image", name, "--builtin", name,
+                                                    timeout=3600)))
             return said
 
         def quick_done(said, error):
@@ -684,7 +1040,12 @@ class Prerequisites:
                 return
             steps_ = [[title, self.sai.command(*args) if host == LOCAL else self.sai.host_terminal(host, *args)]
                       for _, _, title, args in slow]
-            argv = self.chain_argv(preparation, steps_)
+            # Its last line says what comes next: the start in a tab of its own, or - prepared for a preset or a
+            # button, no start waiting - that nothing starts by itself (it said "the start goes on" either way).
+            argv = self.chain_argv(preparation, steps_, end=tr("the start goes on in a tab of its own")
+                                   if then is not None else
+                                   tr("nothing starts by itself: Start starts it (a Start pressed meanwhile goes on "
+                                      "now, in a tab of its own)"))
 
             def ended(status):
                 applog.log("INFO" if status == 0 else "ERROR", "prerequisites", f"{why}: the terminal tab Preparing "
@@ -734,8 +1095,10 @@ class Prerequisites:
                 warn(self, tr("Preparing the start"), printable_text(error))
                 return
             words = {"identity": tr("identity"), "variant": tr("image variant"), "build": tr("built"),
-                     "vpn": tr("Tor profile"), "mcp": tr("MCP server")}
+                     "vpn": tr("Tor profile"), "mcp": tr("MCP server"), "service": tr("service image")}
             ok = [f"{words[kind]} {name}" for kind, name, status, _ in said if status == 0]
+            if ok:
+                self.prerequisites_made(host)  # (the page's lists of that host read again: the Board's MCP servers)
             failed = [f"{words[kind]} {name}: {printable(text.splitlines()[-1] if text else '')[-300:]}"
                       for kind, name, status, text in said if status != 0]
             if ok:
@@ -824,10 +1187,11 @@ class Prerequisites:
         return tr("Still preparing what the start needs: a question about it is open, or the MCP catalogs are "
                   "read for the folders of its MCP servers.")
 
-    def chain_argv(self, preparation, steps):
+    def chain_argv(self, preparation, steps, end=None):
         """The terminal tab's command for STEPS ([[title, argv]]): CHAIN, writing its status to a file of a private
-        folder that PREPARATION reads (none when no folder can be made: it runs all the same)."""
-        argv = [sys.executable, "-I", "-c", CHAIN, json.dumps(steps)]
+        folder that PREPARATION reads (none when no folder can be made: it runs all the same). END: what its last line
+        says comes next (default: the start goes on)."""
+        argv = [sys.executable, "-I", "-c", CHAIN, *([f"--end={printable(end)}"] if end else []), json.dumps(steps)]
         try:
             folder = tempfile.mkdtemp(prefix="sandbox-ai-app-preparing.")
         except OSError:

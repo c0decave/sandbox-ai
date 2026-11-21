@@ -69,7 +69,7 @@ in the app's Hermes section of the start): each opens only its own hosts and sho
 | Skills Hermes writes itself (`skill_manage` into `~/.hermes/skills`; the curator archives stale ones; `!cmd` snippets) | on; snippets off | on, kept with the start's HOME (`sandbox-ai resume`); snippets pinned off; the kits' skills read-only in `~/.agents/skills` | - |
 | Hermes' own egress proxy (for its Docker backend) | off | off, pinned | none |
 | API server and webhooks (gateway ports 8642, 8644) | off unless configured | off; unreachable from outside the sandbox anyway | - |
-| Shell hooks (`hooks:` in config.yaml) | the user's | not used by sandbox-ai; rules for Hermes' own tools (a ruleset's `tool` rules) are not enforced yet, so such a start is refused | - |
+| Shell hooks (`hooks:` in config.yaml) | the user's | the user's; while rules for Hermes' own tools or approved kit hooks hold, the managed configuration's (and only those): see "Rules for its own tools and kit hooks" | - |
 | Dangerous-command approvals | on | on; `--dangerously-skip-permissions` sets `HERMES_YOLO_MODE=1` | `--dangerously-skip-permissions` |
 | Secret managers (Bitwarden, 1Password, a command) | off | off (their CLIs are not in the image) | none |
 | Desktop app, voice and local speech models, wake word, computer use | optional | not in the image | none |
@@ -160,10 +160,32 @@ with upstream's defaults and with sandbox-ai's; with the OpenRouter provider Her
 
 - `--with` (Hermes is not in the team image): use `--helper` in either direction (`sandbox-ai hermes --helper
   claude`, `sandbox-ai claude --helper hermes`, which runs `hermes -z`).
-- Rules for the agent's own tools and kit hooks (refused, never silently unenforced - so not in the security mode
-  paranoid, whose ruleset holds such rules); Claude-style plugins.
+- Claude-style plugins.
 - Teams (`sandbox-ai team start`), the activity feed of Hermes' turns, `mcp attach --live`.
 - `hermes kanban` boards shared between sandboxes (the board lives in the start's HOME).
+
+## Rules for its own tools and kit hooks (2026-11-16)
+
+Hermes v0.22.5 has shell hooks (`agent/shell_hooks.py`): `hooks:` in its configuration, each `{command, matcher,
+timeout, fail_closed}` under an event of `VALID_HOOKS`; exit status 2 blocks a `pre_tool_call` with standard error as
+the reason; a hook needs consent (an allowlist in the HOME, `--accept-hooks`, `HERMES_ACCEPT_HOOKS` or
+`hooks_auto_accept`). The managed configuration at `/etc/hermes` is laid over the user's leaf by leaf (a list is one
+leaf: `managed_scope.apply_managed_overlay`).
+
+- The rule hooks go in there as `pre_tool_call` (`fail_closed: true`) and `post_tool_call`, the approved kit hooks
+  after them under Hermes' names (`kits.HERMES_EVENTS`), with `hooks_auto_accept: true`. Every other shell-hook event
+  is an empty list there, so the user's own shell hooks do not run while these hold (as Claude Code's
+  `allowManagedHooksOnly`) and nothing unreviewed is auto-accepted.
+- sandbox-ai's guard (`hermes_guard.py`, in every process of Hermes' Python) keeps them while the marker
+  `/etc/hermes/sandbox-ai-hooks.json` is there: `--safe-mode` (no shell hook registered) is refused,
+  `HERMES_SAFE_MODE` dropped, and `hermes_cli.plugins._dispatch_pre_tool_call_hooks` is wrapped: Hermes runs every
+  `pre_tool_call` hook on the same arguments and applies a plugin's or shell hook's `modify` after them
+  (`model_tools._pre_dispatch_guards`), so arguments changed that way are asked of the rules again before the call.
+- Its tools are mapped to Claude Code's names (`terminal` Bash, `read_file`/`write_file` Read/Write, `patch` Edit or,
+  in its patch mode, `apply_patch`, `search_files` Grep, `web_extract` WebFetch, `delegate_task` Task); `path`
+  becomes `file_path`.
+- Not covered: tool-execution middleware of a plugin can still change arguments after the check; a Hermes run with
+  `python -S` (no site packages, so no guard) has neither the telemetry guard nor this one.
 
 ## Go / No-Go
 
@@ -180,5 +202,5 @@ with upstream's defaults and with sandbox-ai's; with the OpenRouter provider Her
   third-party tool with PostHog telemetry, the optional macOS computer-use driver cua-driver, is turned off by
   Hermes and is not in the image.
 - Against: the code base is large and moves fast (231 commits between v0.22.4 and v0.22.5), the gateway, Kanban
-  workers and curator run processes in the background, and Hermes is not live-tested in a sandbox yet; tool rules
-  are not enforced for it. Hence experimental, and the review is to be repeated for every new release taken in.
+  workers and curator run processes in the background, and Hermes is not live-tested in a sandbox yet (its tool
+  rules neither). Hence experimental, and the review is to be repeated for every new release taken in.

@@ -258,11 +258,15 @@ def test_nothing_in_a_kit_or_a_project_approves_itself(m, tmp_path):  # noqa: F8
         m.run("--kit", "mine")
 
 
-def test_approvals_where_a_sandbox_can_write_stop_the_start(m, monkeypatch):  # noqa: F811
-    """XDG_CONFIG_HOME inside the workspace: the agent could write its own approvals (and rules): refused."""
+def test_approvals_where_a_sandbox_can_write_are_given_with_a_warning(m, monkeypatch):  # noqa: F811
+    """XDG_CONFIG_HOME inside the workspace: the agent could write its own kit hook approvals (and rules). Was
+    refused; mounts: you decide - the start goes on and the warning names it (and that the agent can change it)."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(m.work / "config"))
-    with pytest.raises(ValueError, match="XDG_CONFIG_HOME"):
-        m.run()
+    said = []
+    monkeypatch.setattr(fm.s, "warner", lambda warn=None: warn or said.append)
+    m.run()
+    assert any(text.startswith("Approved kit hooks (XDG_CONFIG_HOME)") and "the agent can change" in text
+               for text in said), said
 
 
 # --- the launcher: approved kit hooks join the managed configuration ---------------------------------------
@@ -537,3 +541,50 @@ console.log(JSON.stringify(results));
     assert asked == [["PreToolUse", {"command": "ls"}],                                   # same: asked once
                      ["PreToolUse", {"command": "ls"}], ["PreToolUse", {"command": "ls -la"}],
                      ["PreToolUse", {"command": "ls"}], ["PreToolUse", {"command": "curl x"}]]
+
+
+# --- the newer agents: their kit hooks where their own hook API takes them ----------------------------------
+
+@pytest.mark.parametrize("agent", ("qwen", "letta", "hermes", "goose", "pi", "opencode2"))
+def test_newer_agents_install_approved_kit_hooks_with_the_rules(agent, tmp_path, monkeypatch, capsys):
+    """A kit's approved hooks reach each newer agent through its own configuration, next to the rule hooks: a script
+    from hooks.json for Qwen Code, Letta Code, Hermes and Goose (its PreToolUse run through the wrapper that checks
+    a rewrite), a module that sandbox-ai's extension or plugin loads after its check for Pi and OpenCode 2."""
+    m = fm.make_matrix(agent, "podman", tmp_path, monkeypatch, capsys)
+    modules = agent in ("pi", "opencode2")
+    assert ctl("new", "mine", "--agent", agent)[0] == 0
+    hook = script(tmp_path, "guard.mjs", "export default {}\n") if modules else script(tmp_path)
+    assert ctl("add-hook", "mine", str(hook), *([] if modules else ["--matcher", "Bash"]))[0] == 0
+    assert ctl("trust-hooks", "mine", "--yes")[0] == 0
+    rules = tmp_path / "rules.json"
+    rules.write_text(json.dumps(RULES))
+    run = m.run("--kit", "mine", "--rules", str(rules))
+    assert "1 approved hook(s)" in run.err
+    target = s.KIT_HOOKS_TARGET + "/1"
+    rule = f"/usr/bin/python3 -I /sandbox/runtime.py --internal-hook {agent} PreToolUse"
+    kit = f"/usr/bin/python3 -I /sandbox/runtime.py --internal-kit-hook {agent} 60 {target}/check.sh"
+    if agent == "qwen":
+        groups = json.loads(run.managed["qwen"]["settings.json"])["hooks"]["PreToolUse"]
+        assert [g["hooks"][0]["command"] for g in groups] == [rule, kit] and groups[1]["matcher"] == "Bash"
+    elif agent == "letta":
+        groups = json.loads(run.managed["letta"]["sandbox-ai-start.json"])["hooks"]["PreToolUse"]
+        assert [g["hooks"][0]["command"] for g in groups] == [kit, rule]  # the rule hook's input wins after
+    elif agent == "hermes":
+        hooks = json.loads(run.hermes["config.yaml"])["hooks"]["pre_tool_call"]
+        assert [h["command"] for h in hooks] == [rule, kit] and hooks[1]["matcher"] == "Bash"
+    elif agent == "goose":
+        groups = json.loads(run.managed["goose"]["sandbox-ai-hooks/hooks/hooks.json"])["hooks"]["PreToolUse"]
+        assert [g["hooks"][0]["command"] for g in groups] == [rule, kit]
+    elif agent == "pi":
+        assert json.loads(run.managed["pi"]["sandbox-ai.json"])["hooks"] == {"rules": True,
+                                                                             "modules": [f"{target}/guard.mjs"]}
+    else:
+        assert json.loads(run.managed["opencode2"]["sandbox-ai-hooks/config.json"]) == {
+            "rules": True, "modules": [f"{target}/guard.mjs"]}
+
+
+@pytest.mark.parametrize("agent", ("dsh", "openhands", "nanobot"))
+def test_agents_without_kit_hooks_skip_them_when_added(agent, host, tmp_path):
+    assert ctl("new", "mine", "--agent", agent, "--agent", "claude")[0] == 0
+    status, lines = ctl("add-hook", "mine", str(script(tmp_path)))
+    assert status == 0 and any(f"{agent}: skipped: " in line for line in lines)

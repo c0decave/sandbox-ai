@@ -87,10 +87,10 @@ def test_the_panes_show_a_sandbox_and_this_machine(setup):
     assert page.left.table.item(row, files_page.LINK_COLUMN).text().startswith("→ ")
     row = widgets.find_row(page.left.table, "run.sh")
     assert page.left.table.item(row, 6).text().startswith("-rwxr-xr-x") and ":" in page.left.table.item(row, 5).text()
-    # Another host's sandboxes: listed, not available.
+    # Another host of sandbox-ai's: offered by name, to be chosen (test_files_hosts.py), after this machine.
     texts = [page.roots.itemText(i) for i in range(page.roots.count())]
-    assert texts[-1] == "Sandboxes on lab: not available here yet"
-    assert not page.roots.model().item(page.roots.count() - 1).isEnabled() and "comes later" in page.left.note.text()
+    assert texts[-2:] == ["This machine", "Host lab"]
+    assert page.roots.model().item(page.roots.count() - 1).isEnabled() and page.left.note.isHidden()
     # The old page's names stand for the sandbox pane.
     assert page.table is page.left.table and page.relative == "" and page.entries is page.left.entries
 

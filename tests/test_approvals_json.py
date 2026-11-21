@@ -2,6 +2,7 @@
 and offer scopes by (on any host: computed where the question is, so another machine's clock does not matter)."""
 import calendar
 import importlib.util
+import json
 from pathlib import Path
 import time
 
@@ -52,7 +53,7 @@ def test_the_json_carries_them(monkeypatch):
     now = time.time()
     question = {"id": "q1", "kind": "browser", "url": "https://login.example.org/x", "time": stamp(now - 5),
                 "timeout": 60}
-    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: [("r1", {"run": "r1"}, question)])
+    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False, late=False: [("r1", {"run": "r1"}, question)])
     monkeypatch.setattr(ap, "policy_scope", lambda: "always")
     lines = []
     assert ap.main(["list", "--json"], out=lines.append) == 0
@@ -63,7 +64,7 @@ def test_the_json_carries_them(monkeypatch):
 
 
 def listed(monkeypatch, *pending, widest="always"):
-    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: list(pending))
+    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False, late=False: list(pending))
     monkeypatch.setattr(ap, "policy_scope", lambda: widest)
     lines = []
     assert ap.main(["list", "--json"], out=lines.append) == 0
@@ -113,3 +114,27 @@ def test_the_host_shown_is_the_one_a_browser_opens():
     assert ap.url_host("https://Login.Example.org:8443/x") == "login.example.org"
     assert ap.url_host("https://a.example\\.b.example/") == "a.example"
     assert ap.url_host("https:///evil.example/") == ap.url_host("https://\\evil.example/") == "evil.example"
+
+
+def test_allowing_a_name_that_has_no_address_says_so_in_words(monkeypatch, tmp_path):
+    """Live 2026-11-17 (coding-101): allowing the lookup of proxy.example.org printed only
+    "sandbox-ai approvals: [Errno -5] No address associated with hostname" - the answer resolves the name on the host
+    to pin it, and a name without an address raised the resolver's own error. It says what that means in words; since
+    2026-11-20 ("und doch gibt es das als Freigabe-Frage, wie gehen wir damit um?") the answer closes the question
+    (denied for the run) instead of leaving it open to deny - nothing is pinned (test_approvals_no_address.py)."""
+    import socket
+    now = time.time()
+    record = {"directory": str(tmp_path), "workspace": str(tmp_path)}
+    (tmp_path / "approvals").mkdir()
+    question = {"id": "1-1-2", "kind": "dns", "name": "proxy.example.org", "time": stamp(now), "timeout": 60}
+    listed(monkeypatch, ("r1", record, question))
+
+    def nothing(name):
+        raise socket.gaierror(socket.EAI_NODATA if hasattr(socket, "EAI_NODATA") else -5,
+                              "No address associated with hostname")
+    lines = []
+    reply = ap.answer("1-1-2", "allow", "run", resolver=nothing, out=lines.append)
+    text = "\n".join(lines)
+    assert "proxy.example.org" in text and "no address" in text and "Errno" not in text
+    assert reply["decision"] == "deny" and "question is closed" in text
+    assert json.loads((tmp_path / "approvals" / "1-1-2.answer").read_text())["decision"] == "deny"

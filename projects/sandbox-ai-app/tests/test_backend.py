@@ -110,6 +110,30 @@ def test_connection_log_reading_and_summary(tmp_path):
     assert len(backend.read_connections(log, limit=2)) == 2
 
 
+def test_a_connection_log_compressed_by_gc(tmp_path):
+    """sandbox-ai gc compresses the logs of runs that ended (NAME.gz): read as they are, only their newest part."""
+    import gzip
+    lines = [json.dumps({"time": f"t{i}", "event": "http", "url": f"https://a/{i}"}) for i in range(500)]
+    log = tmp_path / "connections-20261101-100000-run.jsonl.gz"
+    log.write_bytes(gzip.compress(("\n".join(lines) + "\n").encode()))
+    records = backend.read_connections(log)
+    assert [r["time"] for r in records[-2:]] == ["t498", "t499"] and len(records) == 500
+    newest = backend.read_connections(log, max_bytes=200)
+    assert newest and newest[-1]["time"] == "t499" and len(newest) < 10  # its end only, the cut line skipped
+    found, position, appended = backend.read_connections(log, track=True)
+    assert len(found) == 500 and appended is False and position[0] == log.stat().st_ino
+    log.write_bytes(gzip.compress(("\n".join(lines) + "\n").encode())[:-40])  # damaged: what was read
+    assert backend.read_connections(log)[0]["time"] == "t0"
+    # listed newest first: a long run's log, the parts it rotated while it ran (.1 the newest), then older runs
+    for name in ("connections-20261112-094036-r2.jsonl", "connections-20261112-094036-r2.jsonl.1.gz",
+                 "connections-20261112-094036-r2.jsonl.2.gz", "connections-x.jsonl", "other.jsonl"):
+        (tmp_path / name).write_text("")
+    assert [p.name for p in backend.connection_logs(tmp_path)] == [
+        "connections-x.jsonl", "connections-20261112-094036-r2.jsonl", "connections-20261112-094036-r2.jsonl.1.gz",
+        "connections-20261112-094036-r2.jsonl.2.gz", "connections-20261101-100000-run.jsonl.gz"]
+    assert backend.connection_logs(tmp_path / "missing") == []
+
+
 def test_state_readers_work_on_an_empty_host(sai):
     assert sai.runs() == {} and sai.sessions() == [] and sai.log_directories() == []
     assert any(name == "demo" for name, _, _ in sai.mcp_servers())
@@ -223,12 +247,13 @@ def test_secrets_round_trip_with_the_file_store(sai, tmp_path, monkeypatch):
 
 def test_login_status_rows(sai):
     rows = sai.login_status()
-    # The agents `sandbox-ai login` takes (Hermes and Qwen Code too; DSH and Goose have none), in the launcher's order:
+    # The agents `sandbox-ai login` takes (Hermes and Qwen Code too; DSH, Goose and OpenHands have none), in the
+    # launcher's order:
     # a row offers Log in, which runs `sandbox-ai login AGENT`.
     takes = sai.module("login").AGENTS
     assert set(backend.LOGIN_AGENTS_ANYWHERE) == set(takes), "the app's list for another host is login.py's"
     assert [r[0] for r in rows] == [agent for agent in sai.agents if agent in takes]
-    assert {"hermes", "qwen"} <= {r[0] for r in rows} and not {"dsh", "goose"} & {r[0] for r in rows}
+    assert {"hermes", "qwen"} <= {r[0] for r in rows} and not {"dsh", "goose", "openhands", "nanobot"} & {r[0] for r in rows}
     assert all(r[1] in ("store", "host", "?") for r in rows)
     with pytest.raises(ValueError):
         sai.login_argv("ct1", "goose")  # `sandbox-ai login goose` is no command there either
@@ -780,7 +805,7 @@ def test_the_open_questions_of_another_host_are_checked_and_count_down():
     calls = []
     s = backend.SandboxAI(runner=json_runner(calls, {"approvals": (0, json.dumps(items), "")}))
     found = s.host_questions("ct1")
-    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "approvals", "list", "--json"]
+    assert calls[-1][3:] == ["hosts", "run", "ct1", "--", "approvals", "list", "--state", "all", "--json"]
     assert [q["id"] for q in found] == ["1700000000-1-1", "1700000000-1-2", "1-2-4"], "ids and runs that read as options go"
     assert all(isinstance(q, backend.RemoteQuestion) and q.host == "ct1" for q in found)
     assert "\x1b" not in found[0]["question"] and found[0]["max_scope"] == "run"
@@ -1127,3 +1152,27 @@ def test_the_start_form_writes_no_value_a_project_file_may_not_hold(sai, tmp_pat
     assert loaded["options"] == ["--allow-pypi"]
     values.update({"--telemetry": "strict", "--llm-traffic": "off"})
     assert set(sai.project_document("codex", options, values)[0]["options"]) >= {"--allow-pypi", "strict", "off"}
+
+
+def test_the_sandbox_ai_installed_beside_the_app_comes_first(tmp_path, monkeypatch):
+    """The PyPI package sandbox-ai-app installs sandbox_ai beside sandbox_ai_app: the app takes that one (the command
+    line of its own release), never another sandbox-ai that comes first on PATH; SANDBOX_AI_HOME still wins."""
+    monkeypatch.delenv("SANDBOX_AI_HOME", raising=False)
+    site = tmp_path / "site-packages"
+    (site / "sandbox_ai_app").mkdir(parents=True)
+    (site / "sandbox_ai").mkdir()
+    other = tmp_path / "other"
+    (other / "sandbox").mkdir(parents=True)
+    for tree in (site / "sandbox_ai", other / "sandbox"):
+        for name in ("agent_sandbox.py", "main.py"):
+            (tree / name).write_text("")
+    found = backend.locate(which=lambda name: pytest.fail("looked up on PATH"),
+                           run=lambda *a, **k: pytest.fail("ran something"), package=site / "sandbox_ai_app")
+    assert found == site / "sandbox_ai"
+    monkeypatch.setenv("SANDBOX_AI_HOME", str(other))
+    assert backend.locate(package=site / "sandbox_ai_app") == other / "sandbox"
+    monkeypatch.delenv("SANDBOX_AI_HOME")
+    # Not installed that way (a checkout, install.sh: projects/sandbox-ai-app/sandbox_ai_app): PATH as before.
+    (other / "sandbox-ai").write_text("#!/bin/sh\n")
+    assert backend.locate(which=lambda name: str(other / "sandbox-ai"), forbidden=[],
+                          package=tmp_path / "projects" / "sandbox_ai_app") == other / "sandbox"

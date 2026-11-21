@@ -70,7 +70,8 @@ def test_every_list_of_the_app_offers_its_pages_actions(window):
                    *s.transfer_buttons.values(), *s.manage_buttons.values()]:
         assert widgets.button_text(button) in found, widgets.button_text(button)
     a = window.approvals
-    assert texts(a.open)[:4] == button_texts(a.allow_button, a.deny_button, a.deny_once_button, a.block_button)
+    assert texts(a.open)[:6] == button_texts(a.allow_button, a.allow_run_button, a.allow_always_button, a.deny_button,
+                                             a.deny_once_button, a.block_button)
     assert texts(a.always)[0] == "Forget…"
     assert texts(a.blocked.table)[:4] == button_texts(*a.blocked.buttons.values())
     assert texts(a.allowed.table)[0] == "Revoke…"
@@ -88,13 +89,25 @@ def test_every_list_of_the_app_offers_its_pages_actions(window):
     h = window.hosts
     assert texts(h.table)[:2] == ["Show starts", "Show questions"] and "Remove…" in texts(h.table)
     c = window.credentials
-    assert texts(c.git.list)[:4] == ["Add…", "Remove…", "Check", "Give to a running sandbox…"]
-    assert texts(c.publish.list)[:3] == ["Add…", "Remove…", "Check"]
-    assert texts(c.secrets) == ["Add", "Remove…", "Give to a running sandbox…"]
-    assert texts(c.logins)[:3] == ["Log in…", "Log out…", "Refresh"]
-    assert texts(c.vpn.profiles)[:4] == ["Add…", "Show", "Check", "Remove…"]
+    # (every credentials tab: Edit… and Give to a running sandbox… - greyed out with the reason where a kind cannot
+    # be given to a sandbox that runs: publish logins, identities, VPN profiles)
+    # (Give to a sandbox on another host… is on the right click and in the Give dialog, not in the button row: the
+    # row must fit a small window)
+    assert texts(c.git.list)[:6] == ["Add…", "Edit…", "Remove…", "Check", "Give to a running sandbox…",
+                                     "Give to a sandbox on another host…"]
+    assert c.git.give_far_button not in [c.git.button_row.itemAt(i).widget() for i in range(c.git.button_row.count())]
+    assert texts(c.publish.list)[:6] == ["Add…", "Edit…", "Remove…", "Check", "Kinds", "Give to a running sandbox…"]
+    # (the fifth: the primary password's step that is due - Set password…, Unlock… or Lock)
+    assert texts(c.secrets) == ["Add", "Edit…", "Remove…", "Give to a running sandbox…", "Unlock…",
+                                "Give to a sandbox on another host…"]
+    # (Refresh: on the right click - the row's Refresh is the one of the sessions' logins below, which reads both)
+    assert texts(c.logins)[:3] == ["Log in…", "Log out…", "Give to a running sandbox…"] and "Refresh" in texts(c.logins)
+    assert texts(c.vpn.profiles)[:6] == ["Add…", "Edit…", "Show", "Check", "Remove…", "Give to a running sandbox…"]
+    assert texts(c.given.list) == ["Revoke…", "Refresh"]
+    assert texts(c.session_logins.list)[:4] == ["Details…", "Import as central login…", "Use for a new start…",
+                                                "Give to a running sandbox…"]
     if c.identities is not None:
-        assert texts(c.identities.list)[:3] == ["Add…", "Edit…", "Remove…"]
+        assert texts(c.identities.list)[:5] == ["Add…", "Edit…", "Remove…", "Check", "Give to a running sandbox…"]
     k = window.kits
     assert widgets.button_text(k.use_button) in texts(k.table)
     act = window.activity

@@ -280,7 +280,8 @@ def test_check_and_models_show_what_the_host_says(qapp, sai):
     assert sai.asked[-1] == ("local", models)
     assert page.models_title.text().startswith("Models of lm (local (this machine)): 2"), "in the page's table"
     cells = [[page.model_table.item(r, c).text() for c in range(page.model_table.columnCount())] for r in range(2)]
-    assert cells == [["qwen2.5-coder:7b", "yes", "4.5 GB"], ["llama3.1:8b", "", ""]]
+    assert cells == [["qwen2.5-coder:7b", "yes", "4.5 GB", "? not tested"], ["llama3.1:8b", "", "", "? not tested"]], \
+        "the traffic light last: neither model is in the research's table"
     args = parsed(sai, list(check))
     assert (args.command, args.name, args.agent) == ("check", "lm", "claude")
     args = parsed(sai, list(models))

@@ -106,23 +106,24 @@ def folder_cases(host):
 @pytest.mark.parametrize("case", ["home", "own"])
 def test_mcp_add_refuses_a_folder_the_server_could_never_start_with(host, case):
     """`mcp add hub:binwalk --mount /work=$HOME` added the server (and pulled its image); every start then failed late,
-    after the workspace was made, with 'is or holds ... sandbox-ai's runs (their control sockets)'. Refused at once:
-    the launcher's host-path policy for a server's folders, read-only too."""
+    after the workspace was made, with 'is or holds ... sandbox-ai's runs (their control sockets)'. Then it was
+    refused at once; now (you decide what a sandbox gets) it is added, and `mcp add` says the risk at once - the
+    launcher's host-path policy for a server's folders, read-only too - and a start gives it, said again."""
     folder = folder_cases(host)[case]
     folder.mkdir(parents=True, exist_ok=True)
     (host.home / ".local/state/sandbox-ai/runs").mkdir(parents=True, exist_ok=True)
     result = host.run("mcp", "add", BINWALK, "--no-pull", "--mount", f"/work={folder}")
-    assert result.returncode == 1, result.stdout
+    assert result.returncode == 0, result.stderr
     assert "Traceback" not in result.stderr
-    assert "sandbox-ai's" in result.stderr, result.stderr
-    assert not (host.home / ".config/sandbox-ai/mcp.json").exists() or \
-        "binwalk" not in json.loads((host.home / ".config/sandbox-ai/mcp.json").read_text())
+    assert "sandbox-ai mcp: warning:" in result.stdout and "sandbox-ai's own folder" in result.stdout, result.stdout
+    assert "binwalk" in json.loads((host.home / ".config/sandbox-ai/mcp.json").read_text())
 
 
 @pytest.mark.parametrize("case", ["home", "own"])
 def test_a_start_whose_mcp_folder_breaks_the_policy_is_refused_before_anything_is_made(host, tmp_path, case):
     """`claude --mcp binwalk --mcp-mount binwalk:/work=$HOME`: the dry run said all was well, and the start went on to
-    the workspace and an instance folder before the server refused it. Now among the problems checked first."""
+    the workspace and an instance folder before the server refused it. Now the dry run says what the start will say:
+    the folder is given (you decide), with the warning that names its risk."""
     project = tmp_path / "project"
     project.mkdir()
     assert host.run("mcp", "add", BINWALK, "--no-pull", "--mount", f"/work={project}").returncode == 0
@@ -131,11 +132,8 @@ def test_a_start_whose_mcp_folder_breaks_the_policy_is_refused_before_anything_i
     folder = folder_cases(host)[case]
     (host.home / ".local/state/sandbox-ai/runs").mkdir(parents=True, exist_ok=True)
     dry = host.run("claude", "--dry-run", "--mcp", "binwalk", "--mcp-mount", f"binwalk:/work={folder}")
-    assert dry.returncode == 1 and "sandbox-ai's" in dry.stderr, dry.stderr
-    start = host.run("claude", "--mcp", "binwalk", "--mcp-mount", f"binwalk:/work={folder}")
-    assert start.returncode == 1 and "sandbox-ai's" in start.stderr, start.stderr
-    assert "starting the MCP server" not in start.stderr
-    assert not list((host.home / ".local/state/sandbox-ai/mcp").glob("binwalk.*"))
+    assert dry.returncode == 0, dry.stderr
+    assert "warning:" in dry.stderr and "sandbox-ai's own folder" in dry.stderr, dry.stderr
     fine = host.run("claude", "--dry-run", "--mcp", "binwalk")
     assert fine.returncode == 0, fine.stderr
 
@@ -189,7 +187,9 @@ def test_llm_traffic_end_to_end_every_view_skips_a_damaged_line(host, tmp_path):
 
 # --- telemetry always off, default presets, stop --all: end to end (features without an e2e test) -----------------
 
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose", "opencode2", "openhands", "nanobot",
+          "letta", "pi")
+NEVER_SWITCHABLE = ("hermes", "dsh", "qwen", "goose", "opencode2", "openhands", "nanobot", "letta", "pi")
 
 
 @pytest.mark.parametrize("agent", AGENTS)
@@ -199,7 +199,7 @@ def test_telemetry_on_is_ignored_with_a_note_and_the_run_is_off(host, agent):
     assert "telemetry is always off since 0.1.95; 'on' is ignored" in result.stderr
     plan = json.loads(result.stdout)
     assert plan["telemetry"]["level"] == "off"
-    if agent in ("hermes", "dsh", "qwen", "goose"):  # never switchable: pinned, their hosts refused by the proxy
+    if agent in NEVER_SWITCHABLE:  # never switchable: pinned, their hosts refused by the proxy
         assert plan[agent]["telemetry"]["switchable"] is False
         assert "telemetry" in [source["name"] for source in plan["rulesets"]]
     strict = json.loads(host.run(agent, "--dry-run", "--telemetry", "strict").stdout)

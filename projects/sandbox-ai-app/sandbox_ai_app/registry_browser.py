@@ -20,7 +20,7 @@ from .files import printable, printable_text
 from .i18n import N_, tr
 from . import package_search
 from .package_search import Offline, json_of, short
-from .widgets import background, button, fill, plain_label, selected_keys, set_notice, table
+from .widgets import background, button, fill, list_menu, plain_label, selected_keys, set_notice, table
 
 # (host, name, search: "dockerhub", "quay" or None)
 REGISTRIES = (
@@ -221,6 +221,9 @@ class RegistryBrowser(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        # A right click on a repository or a tag: Add…, as the dialog's button (enabled as it is).
+        list_menu(self.results, lambda: [self.ok])
+        list_menu(self.tags, lambda: [self.ok])
         self.resize(820, 640)
         self.registry_changed()
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Make sandbox/Containerfile.AGENT.lock: the hash-pinned npm install of a reviewed Node.js agent.
 
-  scripts/agent_npm_lock.py dsh|qwen [--out FILE]
+  scripts/agent_npm_lock.py dsh|qwen|openhands|letta|pi [--out FILE]
 
-The agent's package and version come from its module (sandbox/dsh.py, sandbox/qwen.py: PACKAGE, VERSION, LOCK_BEFORE;
-the review: docs/DSH_REVIEW.md, docs/QWEN_CODE_REVIEW.md). npm resolves the package's dependency ranges with
+The agent's package and version come from its module (sandbox/dsh.py, sandbox/qwen.py, sandbox/openhands.py,
+sandbox/letta.py, sandbox/pi.py: PACKAGE, VERSION, LOCK_BEFORE; the reviews: docs/DSH_REVIEW.md,
+docs/QWEN_CODE_REVIEW.md, docs/OPENHANDS_REVIEW.md, docs/LETTA_REVIEW.md, docs/PI_REVIEW.md). npm resolves the package's dependency ranges with
 `--before LOCK_BEFORE`, so every version in the lock was published at least 14 days before the review (sandbox-ai's
 rule for third-party releases), and records each package's sha512 integrity; nothing is installed and no script
 runs (--package-lock-only --ignore-scripts). The image then installs exactly this lock with `npm ci --ignore-scripts`
@@ -19,7 +20,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-AGENTS = ("dsh", "qwen")
+AGENTS = ("dsh", "qwen", "openhands", "letta", "pi")
 
 
 def agent_module(agent):
@@ -45,8 +46,10 @@ def check(lock, agent, package, version):
         raise ValueError(f"the lock is not of {package}@{version}")
     if packages.get(f"node_modules/{package}", {}).get("version") != version:
         raise ValueError(f"the lock does not hold {package}@{version}")
+    # A bundled dependency (inBundle) ships inside its parent's tarball: the parent's integrity covers it.
     missing = sorted(path for path, entry in packages.items()
-                     if path and not entry.get("link") and not str(entry.get("integrity", "")).startswith("sha512-"))
+                     if path and not entry.get("link") and not entry.get("inBundle")
+                     and not str(entry.get("integrity", "")).startswith("sha512-"))
     if missing:
         raise ValueError(f"no sha512 integrity for {', '.join(missing[:5])}")
     return len(packages) - 1

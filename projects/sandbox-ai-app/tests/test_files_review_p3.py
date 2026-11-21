@@ -341,11 +341,12 @@ def test_a_remote_save_keeps_the_owner_or_asks_to_write_in_place(served_here, tm
 
 
 def test_no_note_about_other_hosts_under_a_remote_system(served):
+    """(Since 0.1.98 the hosts are chosen in the panes themselves: no note about them at all.)"""
     page, home, ws, host = served
     assert page.left.remote() and page.left.note.isHidden(), page.left.note.text()
     page.left.roots.setCurrentIndex(page.left.roots.findData(str(ws)))
     settle(page.left)
-    assert not page.left.remote() and not page.left.note.isHidden()
+    assert not page.left.remote() and page.left.note.isHidden()
 
 
 def test_properties_of_a_remote_item_show_its_owners_as_numbers(served, wait):

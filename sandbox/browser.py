@@ -37,7 +37,8 @@ It runs as the pod's root (your user on the host, as the agent's processes; no c
 read-only root, /tmp a tmpfs), so that a folder of yours (its profile, the VNC socket's) stays yours. Chromium
 refuses its own sandbox as root: the container is the boundary. SysV shared memory - the pod's IPC namespace is
 shared with the agent - is not used: Xvfb has no MIT-SHM, x11vnc runs with -noshm, Chromium keeps its shared memory
-in /tmp (--disable-dev-shm-usage).
+in /tmp (--disable-dev-shm-usage). The pod's /dev/shm is the agent's too: the browser's container has one of its own
+(a tmpfs, SHM_OPTIONS), where Firefox - which has no such switch - keeps the POSIX shared memory it makes there.
 
 Linux: the app reaches the socket directly. macOS (podman machine): the socket lives in the machine's VM, which
 macOS cannot connect to through a shared folder, so the live view is Linux-only for now; --browser-control agent
@@ -75,6 +76,7 @@ VNC_SOCKET = "vnc.sock"
 OPEN_REQUEST = "open.url"
 OPEN_URL = re.compile(r"https?://[!-~]{1,4000}")
 LIMITS = {"memory": "2g", "cpus": "2", "pids": 1024}
+SHM_OPTIONS = "rw,nosuid,nodev,noexec,size=512m,mode=1777"  # the browser's own /dev/shm (create_command)
 READY_TIMEOUT = 90  # agent and both: the agent starts once the DevTools port answers
 TOR_NOTE = ("behind Tor this is {name}, not Tor Browser: sites can fingerprint it and link its visits to each other "
             "(and to you, if you sign in); use Tor Browser for anonymity")
@@ -234,6 +236,11 @@ def notes(a):
                      "credentials redacted")
     if launcher_tor(a):
         found.append("browser: " + TOR_NOTE.format(name=name))
+    if getattr(a, "agent", None) == "openhands" and not getattr(a, "cairn_container", None):
+        canvas = start_url(a)
+        if canvas:
+            found.append(f"browser: it starts on OpenHands' Agent Canvas ({canvas.rstrip('/')}): the app's Browser "
+                         "button shows it")
     kind, path = parse_profile(getattr(a, "browser_profile", None))
     if kind == "dir":
         found.append(f"browser: its profile (logins, cookies, history) is kept in {path}")
@@ -271,8 +278,29 @@ def profile_dir(a, l=None):
 def config(a):
     """MOUNT/config.json of the browser's runtime (browser_runtime.py)."""
     kind, _ = parse_profile(getattr(a, "browser_profile", None))
-    return {"kind": a.browser, "control": control_of(a), "screen": SCREEN, "display": DISPLAY,
-            "cdp_port": CDP_PORT if agent_drives(a) else None, "profile": kind, "tor": launcher_tor(a)}
+    found = {"kind": a.browser, "control": control_of(a), "screen": SCREEN, "display": DISPLAY,
+             "cdp_port": CDP_PORT if agent_drives(a) else None, "profile": kind, "tor": launcher_tor(a)}
+    start = start_url(a)
+    return {**found, "start_url": start} if start else found
+
+
+def start_url(a):
+    """The page the browser starts on (browser_runtime.START_URL): Cairn's board with --cairn, OpenHands' Agent Canvas
+    for an OpenHands start whose browser you see, else None."""
+    if getattr(a, "cairn_container", None):
+        return _module("cairn").browser_start(a)
+    if getattr(a, "agent", None) == "openhands" and human_sees(a):
+        return _module("openhands").browser_start(a)
+    return None
+
+
+def _module(name):
+    """sandbox/NAME.py, loaded from beside this file."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"{name}_for_browser", HERE / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def prepare_folders(a, l=None):
@@ -385,6 +413,9 @@ def create_command(a, pod, service, session, l=None, limits=None):
                             "--user", USER, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--init",
                             "--read-only", "--log-driver=k8s-file", "--log-opt", "max-size=10mb",
                             "--image-volume=tmpfs", "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
+                            # A /dev/shm of its own: the pod's (its IPC namespace's) is the agent's too. Chromium keeps
+                            # its shared memory in /tmp; Firefox has no such switch.
+                            "--tmpfs", f"/dev/shm:{SHM_OPTIONS}",
                             "--env", "HOME=/tmp/home")
     if "memory" in limits:
         argv += ["--memory", service["memory"]]
@@ -437,7 +468,8 @@ def plan(a, l=None):
             "tcp_ports": [CDP_PORT] if agent_drives(a) else [],
             "cdp": CDP_URL if agent_drives(a) else None, "profile": profile,
             "config": config(a), "settings": settings_text(a),
-            "tor": TOR_NOTE.format(name=NAMES[a.browser]) if launcher_tor(a) else None}
+            "tor": TOR_NOTE.format(name=NAMES[a.browser]) if launcher_tor(a) else None,
+            "start_url": start_url(a)}
 
 
 def settings_text(a):

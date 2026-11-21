@@ -75,12 +75,21 @@ def test_a_state_is_said_once_across_processes(tmp_path, monkeypatch):
 
 
 def test_the_kept_states_are_bounded(tmp_path, monkeypatch):
+    """Past STATES_KEPT the states said longer ago than STATES_AGE go, the oldest first, and never more than
+    STATES_MOST are kept whatever their age. (Until review leaks-perf-2 the oldest went for each new one past
+    STATES_KEPT: with more states than that still polled, each poll said every one of them again.)"""
     log = fresh_log(tmp_path, monkeypatch, "log_bounded")
     monkeypatch.setattr(log, "STATES_KEPT", 20)
+    monkeypatch.setattr(log, "STATES_MOST", 30)
     for number in range(50):
         log.changed(("poll", number), "failed", "x", None)
     kept = json.loads(log.states_path().read_text())
-    assert len(kept) == 20 and oct(log.states_path().stat().st_mode & 0o777) == "0o600"
+    assert len(kept) == 30 and oct(log.states_path().stat().st_mode & 0o777) == "0o600"
+    later = log.time.time() + log.STATES_AGE + 60
+    monkeypatch.setattr(log.time, "time", lambda: later)
+    log.changed(("poll", "new"), "failed", "x", None)
+    kept = json.loads(log.states_path().read_text())
+    assert len(kept) == 20 and '["poll", "new"]' in kept
 
 
 def test_a_long_error_keeps_its_first_and_last_lines(tmp_path, monkeypatch):
@@ -168,18 +177,18 @@ def test_podman_failing_at_the_lookup_says_why(host):
 
 
 def test_an_mcp_server_that_does_not_come_up_says_which_and_why_once(host):
-    """The demo server's sandbox needs the codex image, which is not there: its own start says which image, the
-    start says which server, and the long error is not repeated in every line."""
+    """The demo server's sandbox needs the codex image, which is not there: the start's check of its servers says
+    which server, which image and its build, before anything starts (it used to start the server's sandbox, which
+    failed on the image: "MCP server sandbox failed to start", the long error in every line); said once."""
     host.add_image("localhost/mcp-demo:latest")
     result = host.run("claude", "--mcp", "demo", env={"FAKE_PODMAN_RUN": "0:0"})
     assert result.returncode == 1
+    said = ("MCP server demo: it runs in the image of codex (localhost/codex-sandbox:latest), which is not built here: "
+            "sandbox-ai build codex")
+    assert result.stderr.count(said) == 1, result.stderr
     log = written(host)
-    assert "start: checked: agent codex" in log and "an MCP server's sandbox, name agent-mcp-demo" in log
-    assert "WARNING pod: the start is refused: the image localhost/codex-sandbox:latest of codex is not on this host" \
-        in log
-    assert "mcp: demo: did not come up after" in log
-    assert "WARNING mcp: the MCP server demo did not come up for the start (RuntimeError, said above)" in log
-    assert log.count("MCP server sandbox failed to start") == 2  # mcp.py's line and the start's end
+    assert said in log and "MCP server sandbox failed to start" not in log
+    assert "an MCP server's sandbox, name agent-mcp-demo" not in log  # (nothing was started)
 
 
 # --- sessions -------------------------------------------------------------------------------------------------------
@@ -188,7 +197,8 @@ def test_an_mcp_server_that_does_not_come_up_says_which_and_why_once(host):
 def session(host):
     """The session q1 of qwen, running (its sandbox runs 60 s; its terminal relay is there): (host, env)."""
     env = {"FAKE_PODMAN_RUN": "0:60"}
-    socket_path = host.home / ".local/state/sandbox-ai/sessions/q1/tmux/attach.sock"
+    # (a start of 0.1.117: its relays lie in tmux/relay, where the supervisor binds them - sessions.relay_socket)
+    socket_path = host.home / ".local/state/sandbox-ai/sessions/q1/tmux/relay/attach.sock"
     start = host.popen("qwen", "--session", "q1", env=env)
     wait_for(lambda: any(call[:2] == ["pod", "create"] for call in host.calls()))  # (its tmux folder made anew)
     relay = Relay(socket_path)

@@ -8,6 +8,7 @@ import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from sandbox_ai_app import backend, board as B, guide, labels  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
@@ -94,11 +95,12 @@ def test_the_wizards_network_page(qapp, tmp_path, monkeypatch):
         page = wizard.network_page
         page.node("network").props["--allow-domain"] = ["example.org"]
         page.initializePage()
-        assert page.domains.values() == ["example.org"]
-        page.domains.setPlainText("example.org\nexample.com")
+        assert page.lists.values("--allow-domain") == ["example.org"]
+        assert page.lists.add("example.com", key="--allow-domain")
         assert page.validatePage()
         assert page.node("network").props["--allow-domain"] == ["example.org", "example.com"]
-        page.domains.setPlainText("")
+        for chip in list(page.lists.chips["--allow-domain"]):
+            page.lists.remove("--allow-domain", chip.value)
         assert page.validatePage() and "--allow-domain" not in page.node("network").props
     finally:
         wizard.deleteLater()
@@ -117,7 +119,9 @@ def test_a_policy_that_forbids_it_greys_the_wizards_field_out(qapp, tmp_path, mo
     wizard = SandboxWizard(sai, lambda: {"default_agent": "claude", "default_template": "development"})
     try:
         page = wizard.network_page
-        assert not page.domains.isEnabled()
+        index = page.lists.kind_box.findData("--allow-domain")
+        assert not page.lists.kind_box.model().item(index).isEnabled()
+        assert "forbids --allow-domain" in page.lists.kind_box.itemData(index, Qt.ItemDataRole.ToolTipRole)
         page.node("network").props["--allow-domain"] = ["example.org"]
         page.initializePage()
         assert page.validatePage() and page.node("network").props["--allow-domain"] == ["example.org"]

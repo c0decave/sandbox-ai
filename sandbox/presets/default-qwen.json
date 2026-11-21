@@ -3,11 +3,11 @@
   "version": 1,
   "id": "default-qwen",
   "title": "Qwen Code (default)",
-  "description": "Qwen Code on your project with sandbox-ai's defaults and nothing more: only its maker's model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "description": "Qwen Code on your project with sandbox-ai's defaults and nothing more: only its model is reachable, everything else is refused or asked; its telemetry is always off.",
   "translations": {
     "de": {
       "title": "Qwen Code (Standard)",
-      "description": "Qwen Code an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur das Modell seines Herstellers ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+      "description": "Qwen Code an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur sein Modell ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
     }
   },
   "category": "agents",
@@ -16,8 +16,8 @@
   ],
   "options": [],
   "notes": [
-    "The model: Qwen OAuth and DashScope (your login: sandbox-ai login qwen, or a key: --api-key dashscope.aliyuncs.com=DASHSCOPE_API_KEY). Its hosts are open by default; nothing else of the provider's.",
-    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-qwen (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "The model: Qwen OAuth (your login: sandbox-ai login qwen once) or DashScope with a key (--api-key dashscope.aliyuncs.com=DASHSCOPE_API_KEY); its hosts are open by default. A server of yours instead: the preset qwen-local-llm.",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-qwen or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on.",
     "Qwen Code is not live-tested yet (a start says so); its image first: sandbox-ai build qwen (a start builds it when it is missing)."
   ]

@@ -163,7 +163,8 @@ def test_net_keep_privacy_check_doctor_and_the_mcp_catalog_on_a_host(sai):
     sai.answers[("mcp", "catalog")] = (0, "hub:binwalk  [none]  binwalk  unsigned\n"
                                           "hub:crtsh  [allowlist crt.sh:443]  crt.sh  (not published yet)  signed\n", "")
     entries, problems = sai.host_mcp_catalog("ct1", ["/srv/catalog.json"])
-    assert sai.asked[-1] == ("ct1", "mcp", "catalog", "--catalog=/srv/catalog.json") and not problems
+    # (asked for the whole entries first, --json; what answers with its lines is read as before: an older host)
+    assert sai.asked[-1] == ("ct1", "mcp", "catalog", "--catalog=/srv/catalog.json", "--json") and not problems
     assert entries == [("hub", {"name": "binwalk", "network": "none", "hosts": [], "title": "binwalk", "digest":
                                 "published", "_signature": {"state": "unsigned"}, "_listed": True,
                                 "_catalog_name": "axross-mcp-hub (github.com/c0decave)"}),
@@ -184,7 +185,8 @@ def test_hosts_add_with_its_command_and_sudo_and_profiles_with_their_host(sai, m
     said = []
     monkeypatch.setattr(sai, "checked", lambda *args, timeout=120: said.append(args) or "")
     sai.host_add("ct1", "admin@192.0.2.10", 22, "", "", command="/opt/sai/bin/sandbox-ai", update_sudo=True)
-    assert said[-1][-2:] == ("--command=/opt/sai/bin/sandbox-ai", "--update-sudo")
+    assert said[-1] == ("hosts", "add", "--port=22", "--command=/opt/sai/bin/sandbox-ai", "--update-sudo", "--", "ct1",
+                        "admin@192.0.2.10")
     with pytest.raises(ValueError):
         sai.host_add("ct1", "admin@192.0.2.10", command="sandbox-ai")
     sai.save_profile("far", "claude", ["--mode", "high"], host="ct1")
@@ -253,7 +255,8 @@ def test_the_start_page_starts_on_a_host_with_its_launchers_options(ui, sai, mon
     assert page.form.widgets["--workspace"].value() == [], "this machine's folder is no folder there"
     memory = page.form.widgets["--memory"]
     assert not memory.isEnabled() and "does not know --memory" in memory.toolTip()
-    assert not page.form.widgets["--workspace"].add_button.isEnabled(), "that host's paths: typed in"
+    workspace = page.form.widgets["--workspace"]
+    assert workspace.add_button.isEnabled() and workspace.host == "ct1", "that host's paths: its folders listed"
     assert not page.write_button.isEnabled() and "ct1" in page.host_note.text()
     page.form.widgets["--workspace"].set_value(["/srv/work"])
     memory.setText("8g")
@@ -287,10 +290,10 @@ def test_resume_with_and_stop_with_wait_on_a_host(ui, sai, monkeypatch):
 
     def fill(dialog):
         dialog.workspaces.set_value(["/srv/more"])
-        dialog.mounts.setPlainText("/srv/data:/mnt/data:rw\n/srv/ro:/mnt/ro")
+        dialog.mounts.set_value([("/srv/data", "/mnt/data", "rw"), ("/srv/ro", "/mnt/ro", "ro")])
         dialog.servers.setText("fetch")
         assert dialog.restart.isChecked(), "a running start is restarted for it"
-        assert not dialog.workspaces.add_button.isEnabled()
+        assert dialog.workspaces.host == "ct1", "+ lists ct1's folders"
         return QtWidgets.QDialog.DialogCode.Accepted
     monkeypatch.setattr(ui.ResumeDialog, "exec", fill)
     page.resume_with(instance)
@@ -352,8 +355,11 @@ def test_mcp_servers_on_a_host_listed_started_and_added_from_its_catalog(ui, sai
     assert ran(sai, "ct1", "mcp", "start") == ("ct1", "mcp", "start", "--backend=bwrap", "--vpn=mv", "--for=api", "--json", "--restart",
                              "demo") and ui.asked[-1][0] == "start-restart"
     page.catalog_source.setText("/srv/catalog.json")
+    # An older host's lines (mcp catalog --json since 0.1.95: tests/test_mcp_copy_app.py); the folders this machine's
+    # catalog names for the entry are read for the dialog (none here)
+    monkeypatch.setattr(sai, "mcp_catalog", lambda *a, **k: ([], []))
     page.load_catalog()
-    assert sai.asked[-1] == ("ct1", "mcp", "catalog", "--catalog=/srv/catalog.json")
+    assert sai.asked[-1] == ("ct1", "mcp", "catalog", "--catalog=/srv/catalog.json", "--json")
     page.catalog.selectRow(0)
 
     def add(dialog):
@@ -377,7 +383,7 @@ def test_privacy_check_version_update_and_demo_device_on_the_system_page(ui, sai
 
     def fill(dialog):
         chosen(dialog.host_choice, "ct1")
-        assert not dialog.paths.add_button.isEnabled()
+        assert dialog.paths.host == "ct1" and dialog.rules.host == "ct1", "+ and … list ct1's folders"
         dialog.paths.set_value(["/srv/repo"])
         dialog.project.setText("web")
         dialog.every.setChecked(True)
@@ -543,7 +549,7 @@ def test_restore_home_is_offered_when_a_reviewed_start_is_not_resumed(ui, sai, m
     assert ran(sai, "ct1", "resume") == ("ct1", "resume", "api", "--restore-home", "--yes", "--json", "--path",
                                           ".bashrc")
     title, text, _ = widgets.SHOWN[-1]
-    assert title == "Restore the HOME of api" and "Put back: .bashrc" in text and ".zshrc (added since" in text
+    assert title == "Restore the HOME of api on ct1" and "Put back: .bashrc" in text and ".zshrc (added since" in text
     # Nothing that could be put back: not offered.
     asked.clear()
     page.home_reviewed("ct1", "api", {**review, "review": {**review["review"], "changes": review["review"]["changes"][1:]}},
@@ -558,7 +564,7 @@ def test_reload_rules_of_a_running_sandbox(ui, sai, monkeypatch):
     sai.answers[("rules", "reload")] = (0, json.dumps({"rules": [
         {"name": "policy", "http": ["no-paste"], "kept": True}, {"name": "rules.json", "http": ["a", "b"], "kept": False}],
         "reloaded": "2026-11-10T09:00:00Z", "not_reloaded": ["rules.json"]}), "")
-    assert page.run_named["rules"].text() == "Reload rules"
+    assert widgets.button_text(page.run_named["rules"]) == "Reload rules"  # (an icon: its text in the tooltip, the menu)
     page.reload_rules()
     assert ran(sai, "ct1", "rules") == ("ct1", "rules", "reload", "api", "--json") and ui.asked[-1][0] == "rules-reload"
     from sandbox_ai_app import short_notices

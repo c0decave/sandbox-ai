@@ -92,6 +92,15 @@ class Web:
         hosts.save({"ct1": hosts.check("ct1", REMOTE)})
         self.processes, self.clock = Processes(), [1000.0]
         self.processes.answers[("list", "--history")] = (0, "[]", "")  # a list (the JSON echo is an object)
+        self.processes.answers[("login", "--status", "--sessions")] = (0, json.dumps({"sessions": [], "central": {}}),
+                                                                       "")
+        # a bundle and an import's plan (the JSON echo is neither)
+        self.processes.answers[("board", "export")] = (0, json.dumps({"schema": "sandbox-ai-bundle", "version": 1}), "")
+        self.processes.answers[("board", "import")] = (0, json.dumps({"problems": [], "board": "copy"}), "")
+        # a search in a start's session files (the JSON echo has no "search")
+        for pattern in ("*.jsonl", ".claude/**/s?.jsonl"):
+            self.processes.answers[("session", "files", "web", "--json", f"--search={pattern}")] = (
+                0, json.dumps({"name": "web", "files": [], "search": {"pattern": pattern}}), "")
         api = w.Api(lambda host, args, timeout=120, input=None:
                     hosts.run(host, args, input=input, timeout=timeout, runner=self.processes))
         self.svc = w.Service({HOST}, api=api, sessions=w.Sessions(clock=lambda: self.clock[0]))
@@ -175,7 +184,12 @@ def web():
 
 # (method, path below /api/hosts/HOST, body, the sandbox-ai commands it runs on that host); the page's own calls
 # (app.js) are among them: test_every_call_of_the_page_is_in_the_matrix keeps it so.
+BUNDLE = {"schema": "sandbox-ai-bundle", "version": 1, "name": "demo"}
 ACTIONS = [
+    # what a start's model requests cost, its budgets, and a raise (sandbox-ai spend)
+    ("GET", "/spend/web", None, [["spend", "run", "web", "--json"]]),
+    ("POST", "/spend/web/raise", {"usd": "2.5", "confirm": True}, [["spend", "raise", "web", "2.5"]]),
+    ("POST", "/spend/web/raise", {"usd": 10, "confirm": True}, [["spend", "raise", "web", "10"]]),
     ("GET", "/starts", None, [["list", "--json"]]),
     ("POST", "/starts/web/pause", {}, [["pause", "web"]]),
     ("POST", "/starts/web/resume", {}, [["resume", "web"]]),
@@ -191,12 +205,17 @@ ACTIONS = [
      [["approvals", "deny", "1700000000-1-2", "--scope", "always"]]),
     ("POST", "/approvals/1700000000-1-2", {"decision": "allow", "scope": "run", "no_open": True},
      [["approvals", "allow", "1700000000-1-2", "--scope", "run", "--no-open"]]),
+    ("POST", "/approvals/1700000000-1-2", {"decision": "allow"}, [["approvals", "allow", "1700000000-1-2"]]),
+    ("POST", "/approvals/1700000000-1-2/ask-again", {}, [["approvals", "ask-again", "1700000000-1-2"]]),
     ("GET", "/doctor", None, [["doctor", "--json"]]),
     ("GET", "/llm", None, [["llm", "list", "--json"]]),
     ("POST", "/llm", {"name": "gpu", "kind": "vllm", "url": "http://100.100.1.5:8000", "model": "qwen3"},
      [["llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--model", "qwen3"]]),
+    ("POST", "/llm", {"name": "gpu", "kind": "vllm", "url": "http://100.100.1.5:8000", "memory_gb": 128},
+     [["llm", "add", "gpu", "--kind", "vllm", "--url", "http://100.100.1.5:8000", "--memory=128"]]),
     ("GET", "/llm/gpu/models", None, [["llm", "models", "gpu", "--json"]]),
     ("GET", "/llm-status", None, [["llm", "status", "--json"]]),
+    ("GET", "/llm-recommend", None, [["llm", "recommend", "--json"]]),
     ("GET", "/llm/gpu/status", None, [["llm", "status", "gpu", "--json"]]),
     ("POST", "/llm-models", {"kind": "ollama", "url": "http://100.100.1.5:11434"},
      [["wizard", "models", "--kind=ollama", "--url=http://100.100.1.5:11434", "--json"]]),
@@ -213,6 +232,9 @@ ACTIONS = [
     ("POST", "/defaults", {"key": "telemetry", "value": None}, [["defaults", "show", "--json"],
                                                                ["defaults", "unset", "telemetry"]]),
     ("POST", "/defaults", {"key": "mode", "value": "lax", "confirm": True}, [["defaults", "set", "mode", '"lax"']]),
+    # Settings: Hide logins and keys in file views (hiding protects; listing them again is the default: no question)
+    ("POST", "/defaults", {"key": "hide_secrets", "value": True}, [["defaults", "set", "hide_secrets", "true"]]),
+    ("POST", "/defaults", {"key": "hide_secrets", "value": None}, [["defaults", "unset", "hide_secrets"]]),
     ("GET", "/net/web", None, [["net", "show", "web", "--json"]]),
     ("POST", "/net/web", {"op": "allow", "allow_host": ["pypi.org"], "allow_tcp": [], "host_ports": [3000],
                           "dns": False, "git_login": {"url": "https://github.com", "kind": "secret", "ref": "GH_PUSH"},
@@ -221,6 +243,20 @@ ACTIONS = [
        "--git-token-secret=https://github.com=GH_PUSH"]]),
     ("POST", "/net/web", {"op": "revoke", "allow_host": ["pypi.org"], "allow_tcp": [], "host_ports": [], "dns": False},
      [["net", "revoke", "web", "--allow-host=pypi.org"]]),
+    # remote parity: a secret of that host as an API key of its start, and what the start was refused (blocked)
+    ("POST", "/net/web", {"op": "allow", "allow_host": [], "allow_tcp": [], "host_ports": [], "dns": False,
+                          "api_key": {"host": "api.github.com", "name": "GH_TOKEN", "secret": "GH_PUSH"},
+                          "confirm": True},
+     [["net", "allow", "web", "--api-key=api.github.com=GH_TOKEN=GH_PUSH"]]),
+    # a wildcard below a shared service: after its own confirmation, passed as that confirmation (user 2026-11-20);
+    # taken back without one
+    ("POST", "/net/web", {"op": "allow", "allow_host": ["*.blob.core.windows.net", "*.example.org"], "allow_tcp": [],
+                          "host_ports": [], "dns": False, "confirm": True, "confirm_shared_wildcard": True},
+     [["net", "allow", "web", "--allow-shared-wildcard=*.blob.core.windows.net", "--allow-host=*.example.org"]]),
+    ("POST", "/net/web", {"op": "revoke", "allow_host": ["*.blob.core.windows.net"], "allow_tcp": [], "host_ports": [],
+                          "dns": False},
+     [["net", "revoke", "web", "--allow-host=*.blob.core.windows.net"]]),
+    ("GET", "/blocked/web", None, [["approvals", "blocked", "web", "--json"]]),
     ("GET", "/workspaces/web", None, [["workspace", "list", "web", "--json"]]),
     ("POST", "/workspaces/web", {"directory": "/home/u/src/lib", "read_only": True},
      [["workspace", "add", "web", "/home/u/src/lib", "--ro"]]),
@@ -230,6 +266,13 @@ ACTIONS = [
      [["workspace", "remove", "web", "/workspaces/lib", "--force"]]),
     ("POST", "/workspaces/web", {"path": "/home/u/notes.md", "name": "notes", "read_only": True},
      [["workspace", "add", "web", "/home/u/notes.md", "--name=notes", "--ro"]]),
+    # a folder of another machine (sshfs://): that host mounts it, in its canonical spelling (remotefs.parse)
+    ("POST", "/workspaces/web", {"path": "sshfs://dev@build1/srv/data/", "read_only": False, "confirm": True},
+     [["workspace", "add", "web", "sshfs://dev@build1/srv/data"]]),
+    ("POST", "/workspaces/web/remove", {"workspace": "sshfs://dev@build1/srv/data"},
+     [["workspace", "remove", "web", "sshfs://dev@build1/srv/data"]]),
+    ("POST", "/workspaces/web", {"path": "smb://alice@nas/share/docs?secret=NAS_PW", "read_only": True},
+     [["workspace", "add", "web", "smb://alice@nas/share/docs?secret=NAS_PW", "--ro"]]),
     ("POST", "/starts/web/mcp-live", {"server": "files", "confirm": True},
      [["mcp", "attach", "files", "web", "--live", "--json"]]),
     ("POST", "/starts/web/mcp-live", {"helper": "claude", "confirm": True},
@@ -238,9 +281,30 @@ ACTIONS = [
      [["mcp", "detach", "files", "web", "--live", "--json"]]),
     ("POST", "/starts/web/mcp-live/remove", {"helper": "codex", "confirm": True},
      [["mcp", "detach", "--helper=codex", "web", "--live", "--json"]]),
+    # skills, subagents, commands and plugins for the running start (kits_live.py), its agent started again inside
+    ("POST", "/starts/web/kits-live", {"kit": "review", "keep": True, "confirm": True},
+     [["kits", "attach", "web", "review", "--keep", "--json"]]),
+    ("POST", "/starts/web/kits-live", {"skill": "/home/u/skills/fresh", "confirm": True},
+     [["kits", "attach", "web", "--skill=/home/u/skills/fresh", "--json"]]),
+    ("POST", "/starts/web/kits-live", {"command": "/home/u/review.md", "restart": True, "confirm": True},
+     [["kits", "attach", "web", "--command=/home/u/review.md", "--restart", "--json"]]),
+    ("POST", "/starts/web/kits-live", {"agent_file": "/home/u/tester.md", "confirm": True},
+     [["kits", "attach", "web", "--agent-file=/home/u/tester.md", "--json"]]),
+    ("POST", "/starts/web/kits-live", {"plugin": "sandcastle@sandbox-ai", "confirm": True},
+     [["plugins", "attach", "web", "sandcastle@sandbox-ai", "--json"]]),
+    ("POST", "/starts/web/kits-live", {"skill": "/home/u/skills/notes", "allow_findings": True, "confirm": True},
+     [["kits", "attach", "web", "--skill=/home/u/skills/notes", "--allow-findings", "--json"]]),
+    ("POST", "/starts/web/kits-live", {"plugin": "sandcastle@sandbox-ai", "allow_findings": True, "confirm": True},
+     [["plugins", "attach", "web", "sandcastle@sandbox-ai", "--allow-findings", "--json"]]),
+    ("POST", "/starts/web/kits-live/remove", {"name": "fresh", "kind": "skills", "confirm": True},
+     [["kits", "detach", "web", "fresh", "--kind=skills", "--json"]]),
+    ("POST", "/starts/web/kits-live/remove", {"plugin": "sandcastle@sandbox-ai", "confirm": True},
+     [["plugins", "detach", "web", "sandcastle@sandbox-ai", "--json"]]),
+    ("POST", "/starts/web/agent-restart", {"confirm": True}, [["kits", "restart-agent", "web", "--json"]]),
     # review 6 W-F3: out of a stopped or paused start (its later starts)
     ("POST", "/starts/web/mcp/remove", {"server": "files", "confirm": True}, [["mcp", "detach", "files", "web", "--json"]]),
     ("GET", "/devices/web", None, [["devices", "list", "web", "--json"]]),
+    ("GET", "/device-scan", None, [["devices", "scan", "--json"]]),
     ("POST", "/devices/web", {"device": "usb:2e8a:000a", "confirm": True}, [["devices", "add", "web", "usb:2e8a:000a"]]),
     ("POST", "/devices/web/remove", {"device": "2"}, [["devices", "remove", "web", "2"]]),
     ("POST", "/limits/web", {"memory": "4g", "cpus": "2"}, [["limits", "web", "--show", "--json"],
@@ -249,13 +313,27 @@ ACTIONS = [
     ("POST", "/limits/web", {"pids": "none", "confirm": True}, [["limits", "web", "--pids=none"]]),
     ("GET", "/limits/web", None, [["limits", "web", "--show", "--json"]]),
     ("GET", "/presets", None, [["presets", "list", "--json"]]),
+    # each agent's cloud models with their effort levels (the start form's Model and Effort choices)
+    ("GET", "/models", None, [["models", "--json"]]),
     ("GET", "/preset-categories", None, [["presets", "categories", "--json"]]),
     ("GET", "/vpn", None, [["vpn", "list", "--json"]]),
     ("GET", "/team-choices", None, [["vpn", "list", "--json"]]),  # hotfix 0.1.96: a new team's members and VPNs
     ("POST", "/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD", "location": "se-sto"},
      [["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--location=se-sto"]]),
     ("POST", "/vpn/mv/check", {}, [["vpn", "check", "mv"]]),
+    ("POST", "/vpn/mv/set", {"settings": {"provider": "office", "exit-node": "none"}, "confirm": True},
+     [["vpn", "set", "--provider=office", "--exit-node=none", "--", "mv"]]),
     ("DELETE", "/vpn/mv", {"confirm": True}, [["vpn", "remove", "mv"]]),
+    ("GET", "/bridges", None, [["bridge", "list", "--hosts", "--json"]]),
+    ("GET", "/bridges/ct2:0123abcd", None, [["bridge", "show", "ct2:0123abcd", "--json"]]),
+    ("POST", "/bridges", {"a": "web", "b": "ct2:docs", "allow": ["message", "files:ro:src"], "dry_run": True},
+     [["bridge", "add", "web", "ct2:docs", "--allow=message,files:ro:src", "--ask=first", "--dry-run", "--json"]]),
+    ("POST", "/bridges", {"a": "ct2:web", "b": "ct3:docs", "allow": ["watch"], "both": True, "until": "2h",
+                          "observer_actions": ["alert", "pause"], "limits": {"rate": "30"}, "confirm": True},
+     [["bridge", "add", "ct2:web", "ct3:docs", "--allow=watch", "--both", "--until=2h", "--ask=first",
+       "--observer-actions=alert,pause", "--limit=rate=30", "--json"]]),
+    ("POST", "/bridges/0123abcd/revoke", {"confirm": True}, [["bridge", "revoke", "0123abcd"]]),
+    ("POST", "/bridges/ct2:0123abcd/resume", {"confirm": True}, [["bridge", "resume", "ct2:0123abcd"]]),
     ("GET", "/canaries", None, [["canaries", "log", "--json"]]),
     ("GET", "/canaries/web", None, [["canaries", "log", "web", "--json"]]),
     ("GET", "/safeguards", None, [["safeguards", "--json", "--tail", "500", "--all"]]),
@@ -276,6 +354,15 @@ ACTIONS = [
     ("POST", "/kits/mv/remove-plugin", {"plugin": "egm@sandbox-ai", "agent": "claude", "confirm": True},
      [["kits", "remove-plugin", "--agent=claude", "--", "mv", "egm@sandbox-ai"]]),
     ("DELETE", "/kits/mv", {"confirm": True}, [["kits", "delete", "--yes", "--", "mv"]]),
+    # what the agents there have of their own (kits host-list, host-show) and an import of the parts chosen
+    ("GET", "/agent-parts", None, [["kits", "host-list", "--json"]]),
+    ("GET", "/agent-parts/claude%3Askill%3Apdf", None, [["kits", "host-show", "--json", "--", "claude:skill:pdf"]]),
+    ("POST", "/agent-parts-import", {"parts": ["claude:skill:pdf"], "kit": "mv", "new": False, "agents": [],
+                                     "allow_secrets": False, "confirm": True},
+     [["kits", "host-import", "--kit=mv", "--", "claude:skill:pdf"]]),
+    # the System monitor page: what the runs use now, and the history of a span
+    ("GET", "/monitor", None, [["top", "--json", "--no-measure"]]),
+    ("GET", "/monitor/usage/24h", None, [["stats", "usage", "--since", "24h", "--json", "--series", "--by", "run"]]),
     # the marketplace browser of the Kits page
     ("GET", "/marketplaces", None, [["plugins", "marketplaces", "--json"]]),
     ("GET", "/plugins-status", None, [["plugins", "--status"]]),  # review 6: the app's "Plugin status" in the web
@@ -291,10 +378,95 @@ ACTIONS = [
      [["kits", "add-plugin", "--agent=claude", "--", "default", "egm@sandbox-ai"]]),
     # management: rename, history, gc, untaint, answers given before, secrets
     ("POST", "/starts/web/rename", {"new": "web-2"}, [["rename", "web", "web-2"]]),
+    # a session as one file (sandbox-ai board export), and such a file taken in: its plan, then confirmed
+    ("POST", "/starts/web/export", {}, [["board", "export", "--session=web", "-"]]),
+    ("POST", "/board-import", {"bundle": BUNDLE, "map": {"<folder:proj>": "/srv/p"}, "values": {"db-password": "dev"},
+                               "as": "copy"},
+     [["board", "import", "-", "--json", "--check", "--map=<folder:proj>=/srv/p", "--value=db-password=dev",
+       "--as=copy"]]),
+    ("POST", "/board-import", {"bundle": BUNDLE, "check": False, "replace": ["mcp:own"], "confirm": True},
+     [["board", "import", "-", "--json", "--yes", "--replace=mcp:own"]]),
     ("GET", "/starts/web/history", None, [["list", "--history", "web", "--json"]]),
+    # the workspace review (sandbox-ai workspace review): every project's, Keep, Restore (confirmed)
+    ("GET", "/workspace-review", None, [["workspace", "review", "--all", "--json"]]),
+    ("POST", "/workspace-review/keep", {"log_dir": "/srv/logs/app", "run": "claude-1a2b", "path": "/work/.vscode/x"},
+     [["workspace", "review", "claude-1a2b", "--log-dir=/srv/logs/app", "--keep=/work/.vscode/x", "--json"]]),
+    ("POST", "/workspace-review/restore", {"log_dir": "/srv/logs/app", "run": "claude-1a2b", "path": "/work/package.json",
+                                           "confirm": True},
+     [["workspace", "review", "claude-1a2b", "--log-dir=/srv/logs/app", "--restore=/work/package.json", "--yes",
+       "--json"]]),
+    # the MCP tool definitions pinned per project (sandbox-ai mcp tools): listed, shown, re-pinned, forgotten
+    ("GET", "/mcp-tools", None, [["mcp", "tools", "--all", "--json"]]),
+    ("POST", "/mcp-tools/show", {"project": "/srv/app", "server": "files"},
+     [["mcp", "tools", "files", "--json", "--project=/srv/app"]]),
+    ("POST", "/mcp-tools/repin", {"project": "/srv/app", "server": "files", "confirm": True},
+     [["mcp", "tools", "files", "--repin", "--json", "--project=/srv/app"]]),
+    ("POST", "/mcp-tools/forget", {"project": "/srv/app", "server": "files", "confirm": True},
+     [["mcp", "tools", "files", "--forget", "--json", "--project=/srv/app"]]),
+    # a start's workspace checkpoints (sandbox-ai checkpoint): listed, taken, compared, previewed, restored, deleted
+    ("GET", "/starts/web/checkpoints", None, [["checkpoint", "list", "web", "--json"]]),
+    ("POST", "/starts/web/checkpoints", {"label": "before the refactoring"},
+     [["checkpoint", "create", "web", "--json", "--label=before the refactoring"]]),
+    ("GET", "/checkpoints/20261117-120000-abcdef/diff", None,
+     [["checkpoint", "diff", "20261117-120000-abcdef", "--json"]]),
+    ("GET", "/checkpoints/20261117-120000-abcdef/restore", None,
+     [["checkpoint", "restore", "20261117-120000-abcdef", "--dry-run", "--json"]]),
+    ("POST", "/checkpoints/20261117-120000-abcdef/restore", {"paths": ["src/app.py"], "confirm": True},
+     [["checkpoint", "restore", "20261117-120000-abcdef", "--yes", "--json", "--path=src/app.py"]]),
+    ("POST", "/checkpoints/20261117-120000-abcdef/delete", {"confirm": True},
+     [["checkpoint", "delete", "20261117-120000-abcdef", "--yes"]]),
+    # a start's agent memory and session files (read only), its folder as one archive (confirmed: session-export)
+    ("GET", "/starts/web/memory/auto", None, [["session", "memory", "web", "--from=auto", "--json"]]),
+    ("GET", "/starts/web/memory/store/.claude%2FCLAUDE.md", None,
+     [["session", "memory", "web", "--from=store", "--json", "--file=.claude/CLAUDE.md"]]),
+    ("GET", "/starts/web/session-files", None, [["session", "files", "web", "--json"]]),
+    ("GET", "/starts/web/session-files/.claude%2Fprojects%2F-work%2Fs1.jsonl", None,
+     [["session", "files", "web", "--json", "--file=.claude/projects/-work/s1.jsonl"]]),
+    ("GET", "/starts/web/session-files/.claude%2Fprojects%2F-work%2Fs1.jsonl/full", None,
+     [["session", "files", "web", "--json", "--file=.claude/projects/-work/s1.jsonl", "--full"]]),
+    # a search in them (read only): the pattern, the text and the case as session files --search takes them
+    ("POST", "/starts/web/session-files-search", {"pattern": "*.jsonl", "text": "deploy", "case": True},
+     [["session", "files", "web", "--json", "--search=*.jsonl", "--text=deploy", "--case"]]),
+    ("POST", "/starts/web/session-files-search", {"pattern": ".claude/**/s?.jsonl"},
+     [["session", "files", "web", "--json", "--search=.claude/**/s?.jsonl"]]),
+    ("POST", "/starts/web/session-export", {"path": "/srv/out/web.tar.gz", "confirm": True},
+     [["session", "export", "web", "--json", "--", "/srv/out/web.tar.gz"]]),
+    # a file marked as a login or key: listed like the others, its text only after a question (show-secret-file); an
+    # export takes logins and keys in only when asked for and confirmed (session-export-secrets)
+    ("POST", "/starts/web/session-files/.claude%2Fprojects%2F-work%2Ftoken.jsonl/secret", {"confirm": True},
+     [["session", "files", "web", "--json", "--file=.claude/projects/-work/token.jsonl", "--show-secret"]]),
+    ("POST", "/starts/web/session-files/.claude%2Fprojects%2F-work%2Ftoken.jsonl/secret", {"confirm": True, "full": True},
+     [["session", "files", "web", "--json", "--file=.claude/projects/-work/token.jsonl", "--full", "--show-secret"]]),
+    ("POST", "/starts/web/memory/home/.claude%2Fprojects%2F-work%2Fmemory%2Fapi-token.md/secret", {"confirm": True},
+     [["session", "memory", "web", "--from=home", "--json", "--file=.claude/projects/-work/memory/api-token.md",
+       "--show-secret"]]),
+    ("POST", "/starts/web/session-export", {"path": "/srv/out/web.tar.gz", "include_secrets": True, "confirm": True},
+     [["session", "export", "web", "--json", "--include-secrets", "--yes", "--", "/srv/out/web.tar.gz"]]),
+    # the logins of the sessions (read only), and one imported as the central login (confirmed: login-import; only
+    # the login shown, by its fingerprint)
+    ("GET", "/session-logins", None, [["login", "--status", "--sessions", "--json"]]),
+    # an agent login for a sandbox that runs: shown first (check_only), then given with the fingerprint shown
+    ("POST", "/session-logins/give", {"run": "web", "agent": "codex", "check_only": True},
+     [["login", "give", "web", "codex", "--dry-run", "--json"]]),
+    ("POST", "/session-logins/give", {"run": "web", "from_session": "other", "fingerprint": "abcdef12",
+                                      "restart": True, "confirm": True},
+     [["login", "give", "web", "--from-session=other", "--yes", "--expect=abcdef12", "--restart", "--json"]]),
+    ("POST", "/session-logins/import", {"agent": "codex", "name": "web", "fingerprint": "abcdef12", "confirm": True},
+     [["login", "codex", "--from-session", "web", "--yes", "--expect=abcdef12", "--json"]]),
+    ("POST", "/session-logins/import", {"agent": "claude", "name": "web", "fingerprint": "0123abcd", "replace": True,
+                                        "confirm": True},
+     [["login", "claude", "--from-session", "web", "--yes", "--expect=0123abcd", "--replace", "--json"]]),
     ("GET", "/gc", None, [["gc", "--dry-run", "--json"]]),
     ("GET", "/gc/14", None, [["gc", "--dry-run", "--json", "--older-than=14"]]),
     ("POST", "/gc", {"older_than": 14, "confirm": True}, [["gc", "--json", "--older-than=14"]]),
+    # the storage check: its plan of the host and of one start (nothing applied), an item of it applied (asked)
+    ("GET", "/gc/check", None, [["gc", "--check", "--dry-run", "--json"]]),
+    ("GET", "/gc/check/web", None, [["gc", "--check", "--dry-run", "--json", "--home", "web"]]),
+    ("POST", "/gc/apply", {"argv": ["gc", "--only", "--compact-transcripts", "30", "--home", "web", "--yes"],
+                           "confirm": True},
+     [["gc", "--only", "--compact-transcripts", "30", "--home", "web", "--yes", "--json"]]),
+    ("POST", "/gc/apply", {"argv": ["gc", "--pack", "--home", "web", "--yes"], "confirm": True},
+     [["gc", "--pack", "--home", "web", "--yes", "--json"]]),
     ("POST", "/net/web/untaint", {"confirm": True}, [["net", "untaint", "web"]]),
     ("GET", "/approvals-history", None, [["approvals", "history"]]),
     ("GET", "/remembered", None, [["approvals", "remembered", "--json"]]),
@@ -303,6 +475,17 @@ ACTIONS = [
     ("GET", "/secrets", None, [["secrets", "list"]]),
     ("POST", "/secrets/GH_TOKEN", {"secret": "ghp-matrix-value", "confirm": True}, [["secrets", "set", "GH_TOKEN"]]),
     ("DELETE", "/secrets/GH_TOKEN", {"confirm": True}, [["secrets", "delete", "GH_TOKEN"]]),
+    # another name for a secret (carried through what names it); a secret kept on another host as well
+    ("POST", "/secrets/GH_TOKEN/rename", {"new": "GH_PUSH", "confirm": True},
+     [["secrets", "rename", "GH_TOKEN", "GH_PUSH"]]),
+    ("POST", "/secrets/GH_TOKEN/send", {"host": "ct2", "as": "GH_COPY", "replace": True, "confirm": True},
+     [["secrets", "send", "GH_TOKEN", "ct2", "--yes", "--as=GH_COPY", "--replace"]]),
+    # the primary password of the host's private files: what protects them, unlock, lock, a first password
+    ("GET", "/vault", None, [["secrets", "status", "--json"]]),
+    ("POST", "/vault/unlock", {"password": "matrix-primary-password", "for": "30m"},
+     [["secrets", "unlock", "--password-stdin", "--for", "30m"]]),
+    ("POST", "/vault/lock", {}, [["secrets", "lock"]]),
+    ("POST", "/vault/new", {"password": "matrix-primary-password"}, [["secrets", "password", "set", "--password-stdin"]]),
     # the parity actions (Projects, MCP servers, Logins, Images, Activity and the rest)
     ("GET", "/projects", None, [["wizard", "trust", "--list", "--json"]]),
     ("POST", "/projects/review", {"path": "/srv/project/.sandbox-ai.json"},
@@ -323,6 +506,13 @@ ACTIONS = [
     ("POST", "/git-logins/remove", {"url": "https://github.com", "confirm": True},
      [["git-logins", "remove", "https://github.com"]]),
     ("POST", "/git-logins/check", {}, [["git-logins", "check"]]),
+    # a login edited in place (git-logins edit, publish-logins edit), asked first
+    ("POST", "/git-logins/edit", {"url": "https://github.com", "new_url": "https://git.example.org", "user": "alice",
+                                  "secret": "GH_TOKEN", "confirm": True},
+     [["git-logins", "edit", "--url=https://git.example.org", "--user=alice", "--secret=GH_TOKEN", "--",
+       "https://github.com"]]),
+    ("POST", "/publish-logins/pypi/edit", {"secret": "PYPI2", "url": "default", "confirm": True},
+     [["publish-logins", "edit", "--secret=PYPI2", "--url=default", "pypi"]]),
     ("GET", "/publish-logins", None, [["publish-logins", "list", "--json"]]),
     ("GET", "/publish-logins/kinds", None, [["publish-logins", "kinds"]]),
     ("GET", "/login-status", None, [["login", "--status"]]),
@@ -331,6 +521,54 @@ ACTIONS = [
      [["publish-logins", "add", "--secret=PYPI", "pypi"]]),
     ("POST", "/publish-logins/check", {}, [["publish-logins", "check"]]),
     ("POST", "/publish-logins/pypi/remove", {"confirm": True}, [["publish-logins", "remove", "pypi"]]),
+    # phone notifications (sandbox-ai notify): channels by secret names; add and remove asked first
+    ("GET", "/notify", None, [["notify", "list", "--json"]]),
+    ("POST", "/notify", {"name": "phone", "kind": "ntfy", "url": "https://ntfy.sh", "topic": "alerts-4f9c2a7b1d",
+                         "token_secret": "NTFY", "events": ["questions", "alarms", "run-failed"], "when": "always",
+                         "detail": "minimal", "quiet": "22:00-07:00", "rate": 120, "confirm": True},
+     [["notify", "add", "--ntfy=https://ntfy.sh/alerts-4f9c2a7b1d", "--token-secret=NTFY",
+       "--events=questions,alarms,run-failed", "--when=always", "--detail=minimal", "--rate=120",
+       "--quiet=22:00-07:00", "--", "phone"]]),
+    ("POST", "/notify", {"name": "tg", "kind": "telegram", "bot_token_secret": "TG_BOT", "chat": "-1001", "confirm": True},
+     [["notify", "add", "--telegram", "--bot-token-secret=TG_BOT", "--chat=-1001", "--events=questions,alarms",
+       "--when=away", "--detail=normal", "--rate=60", "--", "tg"]]),
+    ("POST", "/notify", {"name": "wa", "kind": "whatsapp", "phone_id": "106540352242922", "token_secret": "WA",
+                         "to": "+4917612345678", "template": "sandbox_alert", "language": "de", "confirm": True},
+     [["notify", "add", "--whatsapp", "--phone-id=106540352242922", "--recipient=+4917612345678",
+       "--template=sandbox_alert", "--language=de", "--token-secret=WA", "--events=questions,alarms", "--when=away",
+       "--detail=normal", "--rate=60", "--", "wa"]]),
+    ("POST", "/notify", {"name": "hook", "kind": "webhook", "url_secret": "HOOK_URL", "confirm": True},
+     [["notify", "add", "--webhook-secret=HOOK_URL", "--events=questions,alarms", "--when=away", "--detail=normal",
+       "--rate=60", "--", "hook"]]),
+    ("POST", "/notify/phone/remove", {"confirm": True}, [["notify", "remove", "phone"]]),
+    ("POST", "/notify/phone/test", {}, [["notify", "test", "phone"]]),
+    ("POST", "/notify-link", {"url": "https://web.example.org:8443"},
+     [["notify", "link", "https://web.example.org:8443"]]),
+    ("POST", "/notify-link", {"url": None}, [["notify", "link", "--none"]]),
+    # scheduled runs (sandbox-ai schedule): add, remove and the timer asked first
+    ("GET", "/schedules", None, [["schedule", "list", "--json"]]),
+    ("GET", "/schedules/nightly", None, [["schedule", "show", "nightly", "--json"]]),
+    ("GET", "/schedules/nightly/history", None, [["schedule", "history", "nightly", "--json"]]),
+    ("GET", "/schedules/nightly/report", None, [["schedule", "report", "nightly"]]),
+    ("GET", "/schedules/nightly/report/20261117-030000-abcd", None,
+     [["schedule", "report", "nightly", "20261117-030000-abcd"]]),
+    ("POST", "/schedules", {"name": "nightly", "cron": "0 3 * * 1-5", "agent": "codex", "options": ["--offline"],
+                            "agent_args": ["exec", "review"], "ask": "allow", "limit": "30m", "workdir": "/srv/app",
+                            "commit": "nightly", "keep_starts": 2, "notify": False, "replace": True, "confirm": True},
+     [["schedule", "add", "--cron=0 3 * * 1-5", "--workdir=/srv/app", "--commit=nightly", "--ask=allow", "--limit=30m",
+       "--missed=once", "--keep-starts=2", "--no-notify", "--replace", "nightly", "--", "codex", "--offline", "--",
+       "exec", "review"]]),
+    ("POST", "/schedules/nightly/run", {}, [["schedule", "run-now", "nightly"]]),
+    ("POST", "/schedules/nightly/pause", {}, [["schedule", "pause", "nightly"]]),
+    ("POST", "/schedules/nightly/resume", {}, [["schedule", "resume", "nightly"]]),
+    ("POST", "/schedules/nightly/remove", {"keep_history": True, "confirm": True},
+     [["schedule", "remove", "nightly", "--keep-history"]]),
+    ("POST", "/schedules-timer", {"on": False, "confirm": True}, [["schedule", "disable"]]),
+    # the update mode (sandbox-ai update mode): shown, and changed asked first
+    ("GET", "/update-mode", None, [["update", "mode", "--json"]]),
+    ("POST", "/update-mode", {"mode": "auto", "at": "02:00-04:00", "confirm": True},
+     [["update", "mode", "auto", "--at=02:00-04:00", "--json"]]),
+    ("POST", "/update-mode", {"mode": "off", "confirm": True}, [["update", "mode", "off", "--json"]]),
     ("GET", "/identities", None, [["identities", "list", "--json"]]),
     ("GET", "/identities/work", None, [["identities", "show", "--json", "work"]]),
     ("POST", "/identities", {"identity": "work", "email": "a@example.org"},
@@ -438,11 +676,20 @@ def test_every_action_in_every_login_state_on_every_host(web, state, host, metho
         assert web.processes.args() == [(host, command) for command in commands]
         if host == "ct1":
             assert {entry["target"] for entry in web.processes.log} == {REMOTE["ssh"]}
-        if path.startswith("/secrets/") and method == "POST":
+        if path.startswith("/secrets/") and method == "POST" and "secret" in body:
             # a secret's value: on standard input only, as the command reads it; never in argv, a response or the log
             assert [entry["input"] for entry in web.processes.log] == [body["secret"] + "\n"]
             assert all(body["secret"] not in arg for entry in web.processes.log for arg in entry["args"])
             web.extra_secrets.append(body["secret"])
+        elif path in ("/vault/unlock", "/vault/new"):
+            # the primary password: the same - one line on standard input, in no argument, no response, no log
+            assert [entry["input"] for entry in web.processes.log] == [body["password"] + "\n"]
+            assert all(body["password"] not in arg for entry in web.processes.log for arg in entry["args"])
+            assert body["password"] not in data.decode() if isinstance(data, bytes) else body["password"] not in data
+            web.extra_secrets.append(body["password"])
+        elif path == "/board-import":
+            # the bundle: on standard input, as the command reads it (never an argument)
+            assert [json.loads(entry["input"]) for entry in web.processes.log] == [body["bundle"]]
         else:
             assert all(entry["input"] is None for entry in web.processes.log), "nothing on standard input"
     events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()] \
@@ -609,14 +856,14 @@ def test_the_pages_in_every_login_state(web, state):
     web.assert_nothing_leaked()
 
 
-# -- the terminal WebSocket: attach, or a new start of each agent --
+# -- the terminal WebSocket: attach, a shell in a start, or a new start of each agent --
 
-TERMINALS = [("attach", None)] + [("start", agent) for agent in AGENTS]
+TERMINALS = [("attach", None), ("shell", None)] + [("start", agent) for agent in AGENTS]
 
 
 def terminal_query(web, kind, agent, host, csrf):
     query = {"host": host, "csrf": csrf, "cols": "120", "rows": "40", "kind": kind}
-    if kind == "attach":
+    if kind in ("attach", "shell"):
         query["name"] = "web"
     else:  # what the page's New start sends: the options one per line, as a JSON list
         query.update(agent=agent, name=f"{agent}-1", workspace="/srv/project",
@@ -641,15 +888,15 @@ def test_the_terminal_in_every_login_state_on_every_host(web, state, host, kind,
     assert session["user"] == "admin" and session["terminals"] == 0
     found_host, found_target, args = sandbox_args(argv)
     assert found_host == host and (argv[1] == "-tt" if host == "ct1" else True), "a terminal: a tty over SSH"
-    if kind == "attach":
-        assert args == ["attach", "web"]
+    if kind in ("attach", "shell"):
+        assert args == [kind, "web"]
     else:
         given = ["--workspaces-as-given"] if host == "local" else []  # a host's older sandbox-ai would not know it
         assert args == [agent, "--name", f"{agent}-1", "--workspace", "/srv/project", *given, "--preset",
                         "development", "--allow-pypi", "--mode", "high"]
     events = [json.loads(line) for line in (w.state_dir() / "audit.jsonl").read_text().splitlines()]
     assert [(e["event"], e["host"], e["kind"], e["name"]) for e in events if e["event"] == "terminal"] == [
-        ("terminal", host, kind, "web" if kind == "attach" else f"{agent}-1")]
+        ("terminal", host, kind, "web" if kind in ("attach", "shell") else f"{agent}-1")]
     web.assert_nothing_leaked()
 
 
@@ -664,6 +911,7 @@ def test_a_terminal_query_that_is_not_one_is_refused_before_anything_runs(web, h
     base = {"host": host, "csrf": web.csrf, "kind": "start", "agent": agent}
     base["workspace"] = "/srv/app"
     for change in ({"agent": "bash"}, {"name": "--all"}, {"workspace": "relative/path"}, {"workspace": ""},
+                   {"workspace": "sshfs://h:0/x"}, {"workspace": "sshfs://-o/x"},
                    {"options": json.dumps({"--mode": "high"})}, {"options": json.dumps([1])}, {"options": "[not json"},
                    {"host": "nowhere"}, {"host": "Bad;id"}, {"kind": "shell"}, {"kind": "attach", "name": "-x"}):
         with pytest.raises(w.Refused) as refused:
@@ -957,11 +1205,16 @@ def test_every_call_of_the_page_is_in_the_matrix():
         prefix = "/api/hosts/X" if path.startswith("hostPath(") else ""
         path = re.sub(r", [A-Za-z_.]+\)$", ")", path)[len("hostPath("):-1] if prefix else path
         calls.add((method, prefix + re.sub(r"\$\{[^}]*\}", "X", path.strip("\"`"))))
-    covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2|GH_TOKEN|14|work|development|files)(?=/|$)", "/X", p))
+    covered = {(m, "/api/hosts/X" + re.sub(r"/(web|gpu|mv|1700000000-1-2|GH_TOKEN|14|work|development|files|claude%3Askill%3Apdf|24h|phone|nightly|20261117-120000-abcdef|pypi)(?=/|$)", "/X", p))
                for m, p, _, _ in ACTIONS}
     covered |= {(m, re.sub(r"/ct1$", "/X", p)) for m, p, _ in SESSION_CALLS} | {("POST", "/api/login")}
     covered |= {("GET", "/api/approvals")}  # test_the_questions_of_every_host_in_every_login_state
+    # test_web.py: test_every_state_of_the_questions_of_every_host_and_an_answer_without_confirmation
+    covered |= {("GET", "/api/approvals/all")}
+    covered |= {("GET", "/api/starts")}  # the starts of every host (the Bridges page's sessions), tested below
     covered |= {("POST", "/api/hosts/X/starts/X/X")}  # ${action}: pause, resume, stop, delete above
+    covered |= {("GET", "/api/hosts/X/bridges/X"),  # a bridge's ID or HOST:ID above
+                ("POST", "/api/hosts/X/bridges/X/X")}  # and ${action}: revoke, resume above
     covered |= {("POST", "/api/hosts/X/kits/X/X"),  # ${action}: add-skill, new-skill, add-plugin above
                 ("POST", "/api/hosts/X/kits/X/remove-X")}  # remove-${kind}: remove-skill, remove-plugin above
     # Tested on their own in test_web.py: a host's update runs through the updater (not one command), and an MCP
@@ -969,6 +1222,17 @@ def test_every_call_of_the_page_is_in_the_matrix():
     covered |= {("POST", "/api/hosts/X/update"), ("POST", "/api/hosts/X/mcp/X/attach")}
     # test_a_host_install_in_every_login_state (run by this machine's sandbox-ai, about the host)
     covered |= {("POST", "/api/hosts/X/install"), ("GET", "/api/hosts/X/install")}
+    # tests/test_web_mcp_copy.py: MCP servers of another host copied here (run by this machine's sandbox-ai, which
+    # reaches both hosts; its check and the copy asked first)
+    covered |= {("POST", "/api/hosts/X/mcp-copy")}
+    # a schedule's ${path}: run, pause, resume above; a run's report (report/RUN) above
+    covered |= {("POST", "/api/hosts/X/schedules/X/X"), ("GET", "/api/hosts/X/schedules/X/report/X")}
+    # a start's memory and session files: ${source} (auto, home, store), a listed file's name, /full above
+    covered |= {("GET", "/api/hosts/X/starts/X/memory/X"), ("GET", "/api/hosts/X/starts/X/memory/X/X"),
+                ("GET", "/api/hosts/X/starts/X/session-files/X"),
+                ("GET", "/api/hosts/X/starts/X/session-files/X/full"),
+                ("POST", "/api/hosts/X/starts/X/session-files/X/secret"),
+                ("POST", "/api/hosts/X/starts/X/memory/X/X/secret")}
     assert calls and calls <= covered, sorted(calls - covered)
     assert "new WebSocket(`wss://${location.host}/api/terminal?" in script
 
@@ -1039,3 +1303,22 @@ def test_over_https_each_login_state_once(server):
     assert headers["Content-Security-Policy"].startswith("default-src 'self'") and headers["X-Frame-Options"] == "DENY"
     audit = (w.state_dir() / "audit.jsonl").read_text()
     assert PASSWORD not in audit and code not in audit and cookie.partition("=")[2] not in audit and csrf not in audit
+
+
+@pytest.mark.parametrize("host", ["local", "ct1"])
+def test_a_wildcard_below_a_shared_service_is_asked_about_by_itself(web, host):
+    """User 2026-11-20: net allow of *.blob.core.windows.net (anyone can rent a name there) needs its own confirmation,
+    which names the risk and the shared suffix: the net-allow confirmation alone is not it, and nothing runs."""
+    headers = web.headers("full")
+    body = {"op": "allow", "allow_host": ["*.blob.core.windows.net"], "allow_tcp": [], "host_ports": [], "dns": False,
+            "confirm": True}
+    status, _, data = web.request("POST", f"/api/hosts/{host}/net/web", body, headers)
+    answer = json.loads(data)
+    assert status == 400 and answer["confirm"] == "shared-wildcard" and answer["code"] == "shared-wildcard"
+    assert answer["params"] == {"wildcards": "*.blob.core.windows.net", "suffix": "blob.core.windows.net"}
+    assert "could open any server anyone rents below blob.core.windows.net" in answer["error"]
+    for value in ("yes", 1, None):  # only true is a yes
+        refused = web.request("POST", f"/api/hosts/{host}/net/web", {**body, "confirm_shared_wildcard": value},
+                              headers)
+        assert refused[0] == 400
+    assert web.processes.log == []

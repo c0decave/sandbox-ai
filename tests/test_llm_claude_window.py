@@ -87,7 +87,7 @@ def test_regression_claude_code_is_told_the_real_window(studio, capsys):
     studio(65536)
     env = llm.agent_environment(start())
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536"
-    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16384"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"   # round 6: a window up to 64k answers in at most 8192
     assert env["ANTHROPIC_MODEL"] == MODEL and "1m tokens" not in capsys.readouterr().err
 
 
@@ -112,8 +112,10 @@ def test_regression_claude_code_compacts_within_the_models_window(studio):
 
 def test_the_output_limit_follows_the_window_and_the_max_tokens_ceiling(studio):
     studio(262144)
-    env = llm.agent_environment(start())
+    env = llm.agent_environment(start(no_llm_profile=True))
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "262144" and env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32768"
+    # With its model profile (0.1.98) Qwen3-Coder-Next is told the research's 131072 of the 262144 loaded.
+    assert llm.agent_environment(start())["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "131072"
     run("set", NAME, "--model", MODEL, "--param", "max_tokens=8192")
     assert llm.agent_environment(start())["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"
     # num_ctx (the start's) is what the agent is told, as for the other agents.
@@ -181,7 +183,7 @@ def test_e2e_a_claude_start_with_lm_studio_passes_the_window(tmp_path):
         assert "may not accept the model name" not in done.stderr and "does not know the model" not in done.stderr
         given = json.loads((tmp_path / "kept/session/config.json").read_text())["env"]
         assert given["ANTHROPIC_MODEL"] == MODEL and given["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{port}"
-        assert given["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536" and given["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16384"
+        assert given["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "65536" and given["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192"
         assert given["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "65536"
         assert given["ENABLE_TOOL_SEARCH"] == "false"  # the MCP servers' tools offered as they are (no ToolSearch)
     finally:
@@ -276,3 +278,33 @@ def test_the_relay_serves_claude_code_a_multi_turn_tool_call(tmp_path):
         relay.close()
     finally:
         server.shutdown()
+
+
+def test_regression_small_window_leaves_room_before_compaction(studio):
+    """Local-model research round 5 (c11_compact, phase A): Claude Code compacts at its window less the reserved
+    answer (CLAUDE_CODE_MAX_OUTPUT_TOKENS, at most 20k) less ~13k. With the profile's max_tokens 16384 sandbox-ai told
+    it half the window as the answer size: on 49152 it compacted at ~17-20k prompt tokens, on 32768 it ended the run
+    with "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact". The
+    answer limit is at most a quarter of the window, whatever max_tokens allows."""
+    studio(262144)
+    for window, output in ((32768, 8192), (49152, 8192), (65536, 8192), (131072, 16384)):   # round 6: <= 64k 8192
+        env = llm.agent_environment(start(llm_param=[f"num_ctx={window}", "max_tokens=16384"]))
+        assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(window)
+        assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(output), window
+        # room for the conversation before Claude Code compacts: at least half the window less its 13k buffer
+        assert window - min(int(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]), 20000) - 13000 >= window // 2 - 13000
+
+
+def test_regression_a_64k_window_keeps_room_after_a_compaction(studio):
+    """Local-model research round 6 (D13, c11_compact at 64k): Claude Code's own prompt is 24-28k tokens, so with an
+    answer limit of 16384 it compacted at ~35k and the context refilled within 3 turns, 3 times in a row ("Autocompact
+    is thrashing" - a fixed breaker, no setting). Neither a read cap (CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS 8000/4000)
+    nor CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=70 helped (0.33-0.58); an answer limit of 8192 with the PROGRESS.md line passed
+    4 of 4 (Ornith-35B 3, Flash-Next 1). Windows up to 64k get at most 8192; larger ones keep a quarter (max_tokens)."""
+    studio(262144)
+    for window, output in ((32768, 8192), (49152, 8192), (65536, 8192), (98304, 16384), (131072, 16384)):
+        env = llm.agent_environment(start(llm_param=[f"num_ctx={window}", "max_tokens=16384"]))
+        assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(output), window
+    # a smaller max_tokens stays the ceiling
+    env = llm.agent_environment(start(llm_param=["num_ctx=65536", "max_tokens=4096"]))
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"

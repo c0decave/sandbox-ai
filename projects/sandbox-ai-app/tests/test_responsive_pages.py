@@ -58,13 +58,18 @@ def held_back():
 
 
 class Stopwatch:
-    """Seconds since it was made, less the time other processes held this one back (held_back)."""
+    """Seconds since it was made, less the time other processes held this one back (held_back). cpu(): the seconds
+    of them the GUI thread itself computed - what a slow click is made of (a loaded machine also slows the CPU time
+    itself: two busy loops beside it on its CPU doubled the gallery's 0.35 s, which no run queue shows)."""
 
     def __init__(self):
-        self.began, self.held = time.monotonic(), held_back()
+        self.began, self.held, self.cpu_began = time.monotonic(), held_back(), time.thread_time()
 
     def __call__(self):
         return max(0.0, time.monotonic() - self.began - max(0.0, held_back() - self.held))
+
+    def cpu(self):
+        return time.thread_time() - self.cpu_began
 
 
 def children():
@@ -239,7 +244,8 @@ def test_every_button_of_every_page_leaves_slow_work_to_the_background(qapp, swe
             took = watch()
             clicked += 1
             if took > MAX_CLICK:
-                slow_clicks.append(f"{key}: {text!r} {took:.2f} s")
+                slow_clicks.append(f"{key}: {text!r} {took:.2f} s ({watch.cpu():.2f} s of it the GUI thread's own "
+                                   "computing)")
             run_for(qapp, 0.02)
             for top in QtWidgets.QApplication.topLevelWidgets():  # a dialog shown without exec: closed again
                 if top not in stray and top is not window and top.isVisible() and isinstance(top, QtWidgets.QDialog):

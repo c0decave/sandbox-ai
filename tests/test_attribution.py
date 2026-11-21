@@ -409,7 +409,7 @@ class StopLoop(Exception):
 
 def test_a_refused_lookup_names_the_process(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "LOG_DIR", tmp_path)
-    packet = b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04evil\x07example\x00\x00\x01\x00\x01"
+    packet = b"\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04evil\x07example\x03org\x00\x00\x01\x00\x01"
     sent = []
 
     class Sock:
@@ -436,7 +436,7 @@ def test_a_refused_lookup_names_the_process(tmp_path, monkeypatch):
     with pytest.raises(StopLoop):
         rt.dns_logger(set(), broker=Broker(), who=who)
     record = json.loads((tmp_path / "egress-denied.jsonl").read_text())
-    assert record["host"] == "evil.example" and record["process"]["comm"] == "curl" and record["sandbox"] == SANDBOX
+    assert record["host"] == "evil.example.org" and record["process"]["comm"] == "curl" and record["sandbox"] == SANDBOX
     assert sent == [("10.0.2.100", 53000)] and who.calls == [("udp", "10.0.2.100", 53000)]
     # Looked up, then answered: once the refusal is out the client closes its socket and nothing names it.
     assert looked_up == [[("udp", "10.0.2.100", 53000)]]

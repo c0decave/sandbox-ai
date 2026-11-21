@@ -1,6 +1,8 @@
-# Claude Code, Codex and OpenCode in one image: an agent's start with --with AGENT (sandbox-ai build team).
-# uv ships as a static binary in its official image; COPY --from takes only it.
-ARG UV_VERSION=latest
+# Claude Code, Codex and OpenCode in one image: an agent's start with --with AGENT (sandbox-ai build team); the other
+# agents are layers on it (sandbox-ai build team --with hermes,qwen: team_image.py).
+# uv ships as a static binary in its official image; COPY --from takes only it. Pinned like the reviewed agents' images
+# (Containerfile.hermes and the others): their layers on this image install their CPython with it.
+ARG UV_VERSION=0.13.5
 # Floating tag: the current Active LTS line with its newest patch release.
 # Pin with --build-arg NODE_IMAGE=docker.io/library/node:<version>-bookworm-slim.
 ARG NODE_IMAGE=docker.io/library/node:lts-bookworm-slim

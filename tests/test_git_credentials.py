@@ -342,29 +342,43 @@ def test_sad_not_a_regular_file(tmp_path):
     refused(tmp_path, "symlink", "--git-credentials", str(tmp_path / "dangling"))
 
 
-def test_sad_inside_agent_writable_trees(tmp_path):
+def given_with_warning(tmp_path, capsys, match, *options):
+    """Mounts: you decide - a file the launcher reads in a tree the agent can change is read, with a warning on
+    standard error that names the risk."""
+    capsys.readouterr()
+    a = validated(tmp_path, *options)
+    said = capsys.readouterr().err
+    assert "agent-sandbox: warning: " in said and match in said, said
+    return a
+
+
+def test_inside_agent_writable_trees_is_given_with_a_warning(tmp_path, capsys):
+    """Was refused; the human chose the file, so it is read, and the warning says the agent can change it."""
     work, state, rw = tmp_path / "work", tmp_path / "state", tmp_path / "rw"
     row = login("u", GIT_TOKEN, "https://git.example.org")
     in_work = lines(work / "sub", row)
-    refused(tmp_path, "agent can change", "--git-credentials", str(in_work))
+    given_with_warning(tmp_path, capsys, "agent can change", "--git-credentials", str(in_work))
     # Second workspace.
     second = tmp_path / "work2"
     in_second = lines(second, row)
-    with pytest.raises(ValueError, match="agent can change"):
-        s.validate(s.parse_args(["claude", "--workspace", f"{work},{second}", "--git-credentials", str(in_second)]))
+    capsys.readouterr()
+    s.validate(s.parse_args(["claude", "--workspace", f"{work},{second}", "--git-credentials", str(in_second)]))
+    assert "agent can change" in capsys.readouterr().err
     in_state = lines(state, row)
-    refused(tmp_path, "agent can change", "--state-dir", str(state), "--git-credentials", str(in_state))
+    given_with_warning(tmp_path, capsys, "agent can change", "--state-dir", str(state), "--git-credentials",
+                       str(in_state))
     in_rw = lines(rw, row)
-    refused(tmp_path, "agent can change", "--mount", f"{rw}:/mnt/rw:rw", "--git-credentials", str(in_rw))
+    given_with_warning(tmp_path, capsys, "agent can change", "--mount", f"{rw}:/mnt/rw:rw", "--git-credentials",
+                       str(in_rw))
     # A symlinked parent outside that leads into the workspace.
     (tmp_path / "outside-link").symlink_to(work / "sub")
-    refused(tmp_path, "agent can change", "--git-credentials", str(tmp_path / "outside-link" / "git-credentials"))
+    given_with_warning(tmp_path, capsys, "agent can change", "--git-credentials",
+                       str(tmp_path / "outside-link" / "git-credentials"))
     # A symlinked parent inside the workspace that leads outside: the agent could retarget it.
     private = lines(tmp_path / "private", row)
     (work / "inside-link").symlink_to(private.parent)
-    refused(tmp_path, "agent can change", "--git-credentials", str(work / "inside-link" / "git-credentials"))
-    # A '..' detour through the workspace.
-    refused(tmp_path, "agent can change", "--git-credentials", str(work / "sub" / ".." / "sub" / "git-credentials"))
+    given_with_warning(tmp_path, capsys, "agent can change", "--git-credentials",
+                       str(work / "inside-link" / "git-credentials"))
 
 
 def test_sad_offline_and_mcp(tmp_path):

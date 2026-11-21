@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import threading
@@ -29,7 +30,7 @@ k = load("kits_for_tests", "sandbox/kits.py")
 plugins = load("plugins_for_tests", "sandbox/plugins.py")
 doctor = load("doctor_for_kits_tests", "sandbox/doctor.py")
 wizard = load("wizard_for_kits_tests", "sandbox/wizard.py")
-AGENTS = ("claude", "codex", "opencode", "hermes")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes")
 
 
 @pytest.fixture(autouse=True)
@@ -311,11 +312,13 @@ def test_stage_never_copies_through_a_folder_swapped_for_a_symlink(tmp_path, mon
         assert (tmp_path / "staging/skills/skill/sub/zz_id_ed25519").read_text() == "decoy\n"
 
 
-def test_kit_inside_workspace_is_refused(tmp_path):
-    """A kit the agent can write would let it change what other sandboxes run."""
+def test_kit_inside_workspace_is_refused(tmp_path, monkeypatch):
+    """A kit the agent can write lets it change what other sandboxes run: you decide - given, with that warning."""
     make(tmp_path / "work/kit/claude", {"skills/a/SKILL.md": "x"})
-    with pytest.raises(ValueError, match="agent can change"):
-        args(tmp_path, "claude", "--kit-dir", str(tmp_path / "work/kit"))
+    said = []
+    monkeypatch.setattr(s, "warner", lambda warn=None: warn or said.append)
+    args(tmp_path, "claude", "--kit-dir", str(tmp_path / "work/kit"))
+    assert any("--kit-dir" in text and "agent can change" in text for text in said), said
 
 
 def agent_wrote_a_link(home, how, workspace=None):
@@ -352,7 +355,8 @@ def test_review6_kit_link_re_pointed_by_an_agent_is_refused(tmp_path, isolated, 
                       str(isolated / "kit")])
     plan = k.scan("claude", k.sources(a))
     (tmp_path / "staging").mkdir()
-    expected = "agent can change" if how == "same workspace" else "is a symlink inside .*proj .*planted.*kits add-skill"
+    # (In this run's own workspace too: the link lies in a folder this sandbox can write - never followed.)
+    expected = "is a symlink inside .*proj .*planted.*kits add-skill"
     with pytest.raises(ValueError, match=f"on the way to .*kit/claude/skills/foo.*{expected}"):
         k.stage("claude", plan, tmp_path / "staging", s.kit_check(a))
     assert not any(b"HOST-PRIVATE-KEY" in path.read_bytes() for path in (tmp_path / "staging").rglob("*")
@@ -586,12 +590,15 @@ def test_declarations(tmp_path):
                        ({"marketplaces": {"../x": {"source": {"source": "github", "repo": "a/b"}}}}, "invalid")]:
         with pytest.raises(ValueError, match=error):
             k.declarations("claude", [declare(tmp_path, "bad", bad)])
-    # OpenCode: npm names only; Codex: noted as unsupported.
+    # OpenCode: npm names only; Codex and OpenCode 2: Claude's format (their plugins come from the same store);
+    # the other agents: noted as unsupported.
     oc = declare(tmp_path, "oc", {"plugins": ["opencode-x", "@scope/pkg@1.2.3"], "marketplaces": {}})
     assert k.declarations("opencode", [oc])[1] == ["opencode-x", "@scope/pkg@1.2.3"]
     with pytest.raises(ValueError, match="npm package"):
         k.declarations("opencode", [declare(tmp_path, "ocbad", {"plugins": ["rm -rf /"]})])
-    assert "not supported for Codex" in k.declarations("codex", [kit])[2][0]
+    assert k.declarations("codex", [kit])[1] == k.declarations("claude", [kit])[1]
+    assert k.declarations("opencode2", [kit])[1] == k.declarations("claude", [kit])[1]
+    assert "not supported for Qwen Code" in k.declarations("qwen", [kit])[2][0]
     (tmp_path / "huge.json").write_text(" " * (k.DECLARATION_LIMIT + 2) + "{}")
     with pytest.raises(ValueError, match="JSON object"):
         k.declarations("claude", [("huge", tmp_path / "huge.json")])
@@ -681,14 +688,16 @@ def test_plugins_sync_reaches_github_only_for_a_github_plugin_of_the_own_marketp
 # --- the built-in kit egm ----------------------------------------------------------------------------
 
 def test_builtin_kit_egm_is_claude_only_and_a_kit_of_the_users_replaces_it(tmp_path):
-    assert k.kit_names(k.BUILTIN_KITS) == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"] and k.builtin_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
-    assert k.builtin_kits("codex") == k.builtin_kits("opencode") == ["design-system", "ffuf", "hallmark", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
+    assert k.kit_names(k.BUILTIN_KITS) == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "superpowers-plugin", "tdd"] and k.builtin_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "superpowers-plugin", "tdd"]
+    assert k.builtin_kits("opencode") == ["design-system", "ffuf", "hallmark", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
+    # superpowers-plugin: upstream's plugin, for the agents that take plugins from sandbox-ai's store.
+    assert k.builtin_kits("codex") == k.builtin_kits("opencode2") == ["design-system", "ffuf", "hallmark", "hyperframes", "playwright-skill", "security-audit", "superpowers", "superpowers-plugin", "tdd"]
     document = json.loads((k.BUILTIN_KITS / "egm/claude/marketplaces.json").read_text())
     assert document["plugins"] == ["egm@sandbox-ai"]
     # Only marketplaces.json: a CLAUDE.md here would clash with the default kit's memory template.
     assert sorted(p.name for p in (k.BUILTIN_KITS / "egm/claude").iterdir()) == ["marketplaces.json"]
     assert k.kit_path("egm", "claude") == k.BUILTIN_KITS / "egm/claude"
-    assert k.available_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"] and k.available_kits("claude", builtin=False) == []
+    assert k.available_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "superpowers-plugin", "tdd"] and k.available_kits("claude", builtin=False) == []
     assert k.sources(args(tmp_path, "claude", "--kit", "egm"))[-1] == ("kit egm", k.BUILTIN_KITS / "egm/claude")
     for agent in ("codex", "opencode"):
         with pytest.raises(ValueError, match=f"built-in kit egm is not available for {agent} \\(only for claude\\)"):
@@ -696,7 +705,7 @@ def test_builtin_kit_egm_is_claude_only_and_a_kit_of_the_users_replaces_it(tmp_p
     # The user's own kit egm (for that agent) wins.
     make(data() / "kits/egm/claude", {"skills/mine/SKILL.md": "x"})
     assert k.kit_path("egm", "claude") == data() / "kits/egm/claude" and "egm" not in k.builtin_kits("claude")
-    assert k.available_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "tdd"]
+    assert k.available_kits("claude") == ["design-system", "egm", "ffuf", "hallmark", "hallmark-hook", "hyperframes", "playwright-skill", "security-audit", "superpowers", "superpowers-plugin", "tdd"]
 
 
 def test_builtin_kit_egm_plan_and_install_hint(tmp_path):
@@ -725,14 +734,14 @@ def test_plugins_sync_installs_the_builtin_kit_only_on_request(tmp_path, monkeyp
     assert "--allow-github" in install and "--kit" not in install
     with pytest.raises(ValueError, match="no built-in kit of that name for claude \\(built-in: design-system, egm, "
                                          "ffuf, hallmark, hallmark-hook, hyperframes, playwright-skill, security-audit, "
-                                         "superpowers, tdd\\)"):
+                                         "superpowers, superpowers-plugin, tdd\\)"):
         plugins.sync(out=lambda line: None, runner=FakeClaude(), builtin=["nope"])
     lines = []
     plugins.status(lines.append)
     assert any("built-in kit egm (--kit egm): egm@sandbox-ai" in line and "->" not in line for line in lines)
     # The command line: --kit is sandbox-ai plugins' own, not handed to the store sandbox.
     seen = []
-    monkeypatch.setattr(plugins, "sync", lambda options, update, builtin=(), marketplaces_only=False:
+    monkeypatch.setattr(plugins, "sync", lambda options, update, builtin=(), marketplaces_only=False, agent="claude":
                         seen.append((options, builtin, marketplaces_only)) or 0)
     assert plugins.cli(["claude", "--kit", "egm", "--backend", "bwrap"]) == 0
     assert plugins.cli(["claude", "--marketplaces-only"]) == 0
@@ -798,14 +807,17 @@ def test_plugins_update_and_passthrough(tmp_path, monkeypatch):
     monkeypatch.setattr(plugins.subprocess, "run", lambda command: seen.append(command)
                         or subprocess.CompletedProcess(command, 0))
     assert plugins.cli(["claude", "--", "list"]) == 0 and seen[0][-2:] == ["plugin", "list"]
-    assert plugins.cli(["codex"]) == 1
+    assert plugins.cli(["opencode"]) == 1, "OpenCode installs its npm plugins itself"
+    assert plugins.cli(["codex", "--", "list"]) == 0 and seen[-1][-2:] == ["plugin", "list"], "the same store"
 
 
 def test_plugins_status(capsys):
     lines = []
     assert plugins.status(lines.append) == 0
     text = "\n".join(lines)
-    assert "plugins: none" in text and "opencode  npm plugins" in text and "codex     plugins: not supported" in text
+    assert "plugins: none" in text and "opencode  npm plugins" in text
+    assert "codex     plugins from the kits (the same store): none" in text
+    assert "opencode2 plugins from the kits (the same store): none" in text
     k.ensure_default_home("claude")
     lines.clear()
     plugins.status(lines.append)
@@ -873,14 +885,14 @@ def test_wizard_new_configuration_offers_kits_only_when_there_are_some():
     p = Prompter([])
     assert wizard.ask_new_kits(p, "claude") == [] and p.questions == []
     assert ("Built-in kits for claude: design-system, egm, ffuf, hallmark, hallmark-hook, hyperframes, playwright-skill, "
-            "security-audit, superpowers, tdd; choose them later with: sandbox-ai wizard edit, part k") in p.lines[1]
+            "security-audit, superpowers, superpowers-plugin, tdd; choose them later with: sandbox-ai wizard edit, part k") in p.lines[1]
     make(data() / "kits/review/claude", {"skills/a/SKILL.md": "x"})
     make(data() / "kits/python/codex", {"skills/a/SKILL.md": "x"})
     p = Prompter(["nope, review", "review, egm"])
     assert wizard.ask_new_kits(p, "claude") == ["--kit", "review", "--kit", "egm"]
     assert ("available for claude: design-system (built-in), egm (built-in), ffuf (built-in), hallmark (built-in), "
             "hallmark-hook (built-in), hyperframes (built-in), playwright-skill (built-in), review, security-audit "
-            "(built-in), superpowers (built-in), tdd (built-in))") in p.questions[0]
+            "(built-in), superpowers (built-in), superpowers-plugin (built-in), tdd (built-in))") in p.questions[0]
     assert any("No kit 'nope'" in l for l in p.lines)
 
 
@@ -1048,9 +1060,9 @@ def test_review_memory_swap_during_the_walk_is_harmless(tmp_path, monkeypatch):
     assert b"SECRET" not in b"".join(files.values())
 
 
-def test_review_template_and_declarations_are_checked_like_kit_files(tmp_path):
-    """A memory template or marketplaces.json that links into a workspace is refused, so an agent
-    there cannot feed a host file into new projects or choose the plugins of every sandbox."""
+def test_review_template_and_declarations_are_checked_like_kit_files(tmp_path, monkeypatch):
+    """A memory template or marketplaces.json that links into a workspace lets an agent there feed a file into new
+    projects or choose the plugins of every sandbox. Your link, your choice: given, with that warning."""
     work = tmp_path / "work"
     work.mkdir()
     (work / "CLAUDE.md").write_text("planted")
@@ -1059,14 +1071,16 @@ def test_review_template_and_declarations_are_checked_like_kit_files(tmp_path):
     a = args(tmp_path, "claude")
     home = tmp_path / "home"
     home.mkdir()
-    with pytest.raises(ValueError, match="agent can change"):
-        s.prepare_kits(a, home, tmp_path / "staging")
-    assert not k.memory_store(work, "claude").exists()
+    said = []
+    monkeypatch.setattr(s, "warner", lambda warn=None: warn or said.append)
+    s.prepare_kits(a, home, tmp_path / "staging")
+    assert any("CLAUDE.md" in text and "agent can change" in text for text in said), said
     (data() / "home/claude/CLAUDE.md").unlink()
     (work / "marketplaces.json").write_text("{}")
     (data() / "home/claude/marketplaces.json").symlink_to(work / "marketplaces.json")
-    with pytest.raises(ValueError, match="agent can change"):
-        s.prepare_kits(a, home, tmp_path / "staging2")
+    del said[:]
+    s.prepare_kits(a, home, tmp_path / "staging2")
+    assert any("marketplaces.json" in text and "agent can change" in text for text in said), said
 
 
 def test_review_store_limits_hold_for_the_merged_result(tmp_path, monkeypatch):
@@ -1173,12 +1187,16 @@ def test_review_plugin_store_with_a_planted_symlink_is_ignored(tmp_path):
     assert s.claude_plugins(home, {}, ["x@y"], []) == []
 
 
-def test_review_agent_trees_inside_a_store_are_refused(tmp_path):
+def test_review_agent_trees_inside_a_store_are_refused(tmp_path, monkeypatch):
+    """A workspace inside a store lets the agent change what every sandbox gets: you decide - given, said."""
+    said = []
+    monkeypatch.setattr(s, "warner", lambda warn=None: warn or said.append)
     for path in (k.plugin_store("claude") / ".claude/plugins/cache/x", data() / "home/claude/skills",
                  Path(os.environ["HOME"]) / ".local/state/sandbox-ai/memory/p"):
         path.mkdir(parents=True, exist_ok=True)
-        with pytest.raises(ValueError, match="lies inside|lies in "):
-            s.validate(s.parse_args(["claude", "--workspace", str(path), "--no-auth"]))
+        del said[:]
+        s.validate(s.parse_args(["claude", "--workspace", str(path), "--no-auth"]))
+        assert any(re.search("lies inside|lies in ", text) for text in said), (path, said)
     # The plugin store's own sandbox (--no-plugins, store as HOME) is fine.
     s.validate(s.parse_args(["claude", "--workspace", str(tmp_path / "w"), "--no-auth", "--no-plugins",
                              "--no-default-kit", "--no-memory", "--state-dir", str(k.plugin_store("claude"))]))

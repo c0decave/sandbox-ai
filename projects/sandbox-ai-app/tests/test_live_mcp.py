@@ -189,8 +189,8 @@ def test_the_real_command_line_takes_each_argv(env, args):
 
 
 def test_every_agent_the_launcher_takes_as_a_helper_is_offered_and_recognised(sai):
-    """`sandbox-ai mcp attach --helper AGENT` and the launcher's --helper take every agent (hermes, dsh, qwen and goose
-    too): the app offers each one and names a helper's server (helper-AGENT-HASH) as that agent's, never as a server
+    """`sandbox-ai mcp attach --helper AGENT` and the launcher's --helper take every agent (hermes, dsh, qwen, goose and
+    openhands too): the app offers each one and names a helper's server (helper-AGENT-HASH) as that agent's, never as a server
     of its own (its detach goes by --helper)."""
     import importlib.util
     root = Path(backend.__file__).resolve().parents[3] / "sandbox"

@@ -203,18 +203,14 @@ def too_large_reason(details):
     return rt.too_large_refusal(details["too_large"]) if details.get("too_large") else "answered"
 
 
-def test_an_unanswered_question_refuses_only_its_own_call(tmp_path):
-    """Nobody answered the question about one call: that call is refused at once for a while (cooling) - another
-    call of the same tool with other arguments is asked on its own (before, it was refused by the other's silence;
-    the refusal is bound to the call as the question is)."""
-    broker = rt.ApprovalBroker(tmp_path / "a", rt.RuntimeNetwork({}, None, lambda *_: None), timeout=0.3, poll=0.02,
-                               pause=60)
+def test_an_unanswered_question_stays_bound_to_its_own_call(tmp_path):
+    """Nobody answered the question about one call: that call fails, its question stays open for that exact call (its
+    next try waits for it again) - another call of the same tool with other arguments is asked on its own (before,
+    it was refused by the other's silence; the question is bound to the call)."""
+    broker = rt.ApprovalBroker(tmp_path / "a", rt.RuntimeNetwork({}, None, lambda *_: None), timeout=0.3, poll=0.02)
     base = {"agent": "claude", "tool": "Bash", "rule": "r", "ruleset": "rules.json", "arguments": "{}"}
     first = broker.ask("tool", {**base, "arguments_full": '{"command": "rm -rf /"}', "call_digest": "a" * 32})
-    assert first["decision"] == "deny" and "no answer" in first["reason"]
-    again = broker.ask("tool", {**base, "arguments_full": '{"command": "rm -rf /"}', "call_digest": "a" * 32})
-    assert again["decision"] == "deny" and "refused without asking until" in again["reason"]
-    assert len(list((tmp_path / "a").glob("*.json"))) == 1
+    assert first["decision"] == "deny" and first["reason"] == rt.NOT_ANSWERED
     results = {}
     thread = threading.Thread(target=lambda: results.update(other=broker.ask(
         "tool", {**base, "arguments_full": '{"command": "ls"}', "call_digest": "b" * 32})), daemon=True)
@@ -225,14 +221,14 @@ def test_an_unanswered_question_refuses_only_its_own_call(tmp_path):
     thread.join(10)
     assert results["other"]["decision"] == "allow"
     listed = broker.decided_list()
-    assert [e["scope"] for e in listed] == ["pause"] and listed[0]["question"] != other["id"]
-    # Allowed for the run by its question (sandbox-ai approvals allow ID): the pause is gone, the tool allowed.
-    paused = listed[0]["question"]
-    broker.control({"action": "allow", "question": paused})
-    assert not broker.cooling
+    timed_out = [e for e in listed if e["scope"] == "timeout"]
+    assert len(timed_out) == 1 and timed_out[0]["question"] == first["question"]
+    # Allowed for the run by its question (sandbox-ai approvals allow ID --scope run on the decided question): the
+    # tool is allowed, the timed-out question answered by it.
+    broker.control({"action": "allow", "question": first["question"]})
+    assert not broker.late
     assert broker.ask("tool", {**base, "arguments_full": "{}", "call_digest": "c" * 32})["decision"] == "allow"
-    # Ask again (forget) takes back the decision; a paused call's pause is forgotten by its own question.
-    assert broker.control({"action": "forget", "question": paused})["forgot"] is True
+    assert broker.control({"action": "forget", "question": first["question"]})["forgot"] is True
 
 
 def test_newlines_and_escapes_in_a_tool_question_cannot_forge_lines(tmp_path, monkeypatch):
@@ -253,8 +249,8 @@ def test_newlines_and_escapes_in_a_tool_question_cannot_forge_lines(tmp_path, mo
     (run / "approvals").mkdir(parents=True)
     (run / "approvals" / f"{item['id']}.json").write_text(json.dumps(item))
     runs = {"r1": {"directory": str(run), "run": "r1", "workspace": str(tmp_path)}}
-    monkeypatch.setattr(ap, "questions", lambda runs_=None, answered=False, real=ap.questions:
-                        real(runs, answered=answered))
+    monkeypatch.setattr(ap, "questions", lambda runs_=None, answered=False, real=ap.questions, **kw:
+                        real(runs, answered=answered, **kw))
     monkeypatch.setattr(ap, "policy_scope", lambda: "always")
     lines = []
     assert ap.main(["show", item["id"]], out=lines.append) == 0
@@ -340,8 +336,8 @@ def test_details_list_and_show_for_a_tool_question(tmp_path, monkeypatch):
             "arguments": rt.McpGateway.arguments(arguments)[:300], "arguments_full": rt.full_arguments(arguments)}
     (run / "approvals" / f"{item['id']}.json").write_text(json.dumps(item))
     runs = {"r1": {"directory": str(run), "run": "r1", "workspace": str(tmp_path)}}
-    monkeypatch.setattr(ap, "questions", lambda runs_=None, answered=False, real=ap.questions:
-                        real(runs, answered=answered))
+    monkeypatch.setattr(ap, "questions", lambda runs_=None, answered=False, real=ap.questions, **kw:
+                        real(runs, answered=answered, **kw))
     monkeypatch.setattr(ap, "policy_scope", lambda: "always")
     lines = []
     assert ap.main(["list", "--json"], out=lines.append) == 0

@@ -21,10 +21,12 @@ from .files import printable, printable_text
 from .host_choice import on_host
 from .i18n import tr
 from . import llm_loaded as LL
+from . import model_profile as MP
+from . import model_profile_view as MPV
 from . import wizard_llm as WL
 from .model_combo import searchable
 from .widgets import (
-    ask_first, background, fill, outcome, plain_label, row_key, safe_tooltip, set_enabled, table,
+    ask_first, background, explanation, fill, outcome, plain_label, row_key, safe_tooltip, set_enabled, table,
 )
 
 
@@ -36,15 +38,18 @@ def failure(status, out, err):
 class LoadDialog(QDialog):
     """Load…: a model of MODELS (wizard_llm.parse_models) and the context it is loaded with (empty: num_ctx of its
     parameters, DEFAULTS(model), else the server's own), for Ollama the seconds it stays when idle. OK only for valid
-    values; ON_SAVE(argv) loads and calls finish() or failed()."""
+    values; ON_SAVE(argv) loads and calls finish() or failed(). With SAI (this machine's sandbox-ai) each model shows
+    its traffic light (model_profiles.support: icon, words as tooltip and accessible text) and the chosen one its
+    detail panel."""
 
-    def __init__(self, name, kind, models, defaults, host_label="", parent=None):
+    def __init__(self, name, kind, models, defaults, host_label="", parent=None, sai=None):
         super().__init__(parent)
         self.name, self.kind, self.defaults, self.saved, self.on_save = name, kind, defaults, False, None
+        self.sai = sai
         self.setWindowTitle(tr("Load a model on {name}", name=printable(name)))
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("The model is loaded explicitly: it stays until it is unloaded, and LM "
-                                        "Studio's Auto-Evict leaves it alone."), role="secondary"))
+        layout.addWidget(explanation(tr("The model is loaded explicitly: it stays until it is unloaded, and LM "
+                                        "Studio's Auto-Evict leaves it alone.")))
         if host_label:
             layout.addWidget(plain_label(tr("on {host}", host=host_label), role="secondary"))
         form = QFormLayout()
@@ -55,10 +60,11 @@ class LoadDialog(QDialog):
         for entry in models:
             label = entry["name"] + (f"  ({tr('loaded')})" if entry.get("loaded") else "")
             self.model.addItem(printable(label), entry["name"])
+        MPV.mark_combo(self.model, sai, self.model.itemData)  # each model's light: how far the research supports it
         self.model.setCurrentIndex(-1)
         self.model.setEditText("")
         self.model.currentIndexChanged.connect(lambda *_: self.model_chosen())
-        self.model.editTextChanged.connect(lambda *_: self.validate())
+        self.model.editTextChanged.connect(lambda *_: self.model_chosen())
         form.addRow(tr("Model"), self.model)
         self.context = QLineEdit()
         self.context.setAccessibleName(tr("Context"))
@@ -78,6 +84,10 @@ class LoadDialog(QDialog):
         else:
             self.ttl.hide()
         layout.addLayout(form)
+        self.support_panel = MPV.SupportPanel()
+        self.support_area = MPV.scrolled(self.support_panel, 180)
+        self.support_area.setVisible(False)
+        layout.addWidget(self.support_area)
         self.message = plain_label(role="secondary", selectable=True, log="llm")
         self.message.setVisible(False)
         layout.addWidget(self.message)
@@ -100,6 +110,9 @@ class LoadDialog(QDialog):
         model = self.chosen()
         default = self.defaults(model) if model else None
         self.context.setPlaceholderText(str(default) if default else tr("the server's own"))
+        found = MP.support_of(self.sai, model) if model and self.sai is not None else None
+        self.support_panel.set(found)
+        self.support_area.setVisible(found is not None)
         self.validate()
 
     def problems(self):
@@ -158,19 +171,21 @@ class LoadDialog(QDialog):
 
 class LoadedDialog(QDialog):
     """Models on the server…: what server NAME (of KIND) has loaded, read with RUN(*argv, timeout=...) - the page's
-    `sandbox-ai [hosts run HOST --] ...` - in the background, and Load…, Unload…, Keep loaded, Refresh."""
+    `sandbox-ai [hosts run HOST --] ...` - in the background, and Load…, Unload…, Keep loaded, Refresh. SAI (this
+    machine's sandbox-ai) gives Load…'s models their traffic light."""
 
-    def __init__(self, run, name, kind, host_label="", host="local", parent=None):
+    def __init__(self, run, name, kind, host_label="", host="local", parent=None, sai=None):
         super().__init__(parent)
         self.run, self.name, self.kind, self.host_label, self.host = run, name, kind, host_label, host
+        self.sai = sai
         self.entry, self.models, self.view, self.asked, self.load_dialog = None, [], {}, 0, None
         self.setWindowTitle(tr("Models on the server {name}", name=printable(name)))
         self.resize(900, 420)
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr(
+        layout.addWidget(explanation(tr(
             "What {name} has loaded now, as its API reports it, and the running sandboxes that use each model. A JIT "
             "model (LM Studio) may be unloaded when another sandbox's model is loaded: Keep loaded loads it "
-            "explicitly.", name=printable(name)), role="secondary"))
+            "explicitly.", name=printable(name))))
         if host_label:
             layout.addWidget(plain_label(tr("on {host}", host=host_label), role="secondary"))
         self.table = table([tr(title) for title in LL.COLUMNS], stretch=0, compact=range(2, len(LL.COLUMNS)))
@@ -315,7 +330,7 @@ class LoadedDialog(QDialog):
 
     def load(self):
         dialog = LoadDialog(self.name, self.kind, self.models, lambda model: LL.default_context(self.view, model),
-                            self.host_label, self)
+                            self.host_label, self, sai=self.sai)
         self.load_dialog = dialog
         dialog.on_save = lambda argv: self.do_load(argv, dialog)
         try:

@@ -8,7 +8,8 @@ CPU: the CPUs used over the interval (cgroup cpu.stat), as a share of --cpus (or
 limit), and how often --cpus held the sandbox back (throttled periods). Memory: used and the limit, and what the
 files in its /tmp and HOME take (they count as memory). Processes: processes and threads against --pids. The top
 processes by CPU and resident memory come from /proc. Where this host cannot read the sandbox's cgroup (a remote
-engine, macOS) the launcher's last record (the session directory's resources.json) is shown instead.
+engine, macOS) the launcher's last record (the session directory's resources.json) is shown instead, else the
+system monitor's last look (sandbox-ai top: on macOS from podman stats).
 
 Change the limits while it runs: sandbox-ai limits RUN --memory SIZE --cpus N --pids N (a strict security mode
 keeps its caps; --json names them under "caps").
@@ -139,7 +140,10 @@ def second(record, before, proc=PROC, clock=time.monotonic, top=TOP, host_cpus=N
     host_cpus = host_cpus or os.cpu_count() or 1
     result = {"run": record.get("run"), "name": record.get("name"), "agent": record.get("agent"),
               "backend": record.get("backend"), "workspace": record.get("workspace"), "caps": caps(record),
-              "source": None, "cpu": None, "memory": None, "pids": None, "top": [], "warnings": []}
+              "source": None, "cpu": None, "memory": None, "pids": None, "top": [], "warnings": [],
+              "orphaned": record.get("orphaned") is True}
+    if result["orphaned"]:
+        result["orphaned_why"] = l.printable(str(record.get("orphaned_why") or ""))
     cgroup = before.get("cgroup")
     if cgroup is not None:
         now = clock()
@@ -185,6 +189,29 @@ def second(record, before, proc=PROC, clock=time.monotonic, top=TOP, host_cpus=N
                 if isinstance(shared.get(key), dict):
                     result[key] = {name: value for name, value in shared[key].items()
                                    if isinstance(value, (int, float)) and not isinstance(value, bool)}
+    if result["source"] is None:  # the system monitor's collector (monitor.py), e.g. through podman stats on macOS
+        live = None
+        try:
+            live = module("monitor").live_record(record.get("run")) if record.get("run") else None
+        except Exception:  # noqa: BLE001 - nothing more to show then
+            live = None
+        sample = (live or {}).get("sample") or {}
+        if sample:
+            result["source"], result["monitor_source"] = "monitor", live.get("source")
+            result["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(live["updated"]))
+            if sample.get("mem") is not None:
+                limit = sample.get("mem_lim") or None
+                result["memory"] = {"used_bytes": sample["mem"], "limit_bytes": limit,
+                                    "percent": round(100 * sample["mem"] / limit, 1) if limit else None,
+                                    "tmpfs_bytes": sample.get("tmpfs") or 0, "oom_kills": None}
+            if sample.get("cpu") is not None:
+                result["cpu"] = {"used_cpus": sample["cpu"], "limit_cpus": sample.get("cpu_lim") or None,
+                                 "host_cpus": host_cpus, "percent": sample.get("cpu_pct"),
+                                 "throttled_percent": sample.get("thr")}
+            if sample.get("pids") is not None:
+                pids_limit = sample.get("pids_lim") or None
+                result["pids"] = {"current": sample["pids"], "limit": pids_limit,
+                                  "percent": round(100 * sample["pids"] / pids_limit, 1) if pids_limit else None}
     memory, cpu, pids = result["memory"] or {}, result["cpu"] or {}, result["pids"] or {}
     if (memory.get("percent") or 0) >= 100 * l.MEMORY_WARN:
         result["warnings"].append("memory")
@@ -215,6 +242,8 @@ def lines(entry):
     title = p(entry.get("name") or entry.get("run") or "?")
     if entry.get("name") and entry.get("run") and entry["name"] != entry["run"]:
         title += f" ({p(entry['run'])})"
+    if entry.get("orphaned"):
+        title += f" (orphaned: {p(entry.get('orphaned_why') or '')})"
     out.append(title)
     if entry["source"] is None:
         out.append("  no usage known: this host cannot read the sandbox's cgroup and the launcher has not recorded "
@@ -222,6 +251,9 @@ def lines(entry):
         return out
     if entry["source"] == "watch":
         out.append(f"  (the launcher's last record, {p(str(entry.get('updated') or '?'))})")
+    if entry["source"] == "monitor":
+        out.append(f"  (the system monitor's last look ({p(str(entry.get('monitor_source') or '?'))}), "
+                   f"{p(str(entry.get('updated') or '?'))})")
     cpu, memory, pids = entry["cpu"] or {}, entry["memory"] or {}, entry["pids"] or {}
     if cpu:
         of = f"of {cpu['limit_cpus']:g} CPUs" if cpu.get("limit_cpus") else \
@@ -272,10 +304,17 @@ def main(argv, out=print, sleep=time.sleep):
     net = module("net")
     try:
         runs = net.running()
-        if args.all:
-            records = [record for record in runs.values() if record.get("kind", "agent") == "agent"]
+        if args.all:  # an orphaned run (its supervisor on the host gone, its pod running on) too, marked
+            records = [record for record in [*runs.values(), *net.orphaned_runs().values()]
+                       if record.get("kind", "agent") == "agent"]
         else:
-            records = [net.choose(runs, args.run, command="usage")]
+            try:
+                records = [net.choose(runs, args.run, command="usage")]
+            except net.NotRunning as exc:
+                orphan = net.orphan_record(exc.entry)
+                if orphan is None or not orphan.get("directory"):  # (its run.json says where its processes are)
+                    raise
+                records = [orphan]
     except ValueError as exc:
         print(f"sandbox-ai usage: {launcher().printable(exc)}", file=sys.stderr)
         return 1

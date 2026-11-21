@@ -28,7 +28,7 @@ DATA = (
     ("credentials", "publish.list", [["npm", "registry.npmjs.org", "NPM_PUBLISH_TOKEN_FOR_ORGANISATION", "missing secret"]]),
     ("credentials", "vpn.profiles", [["home-wireguard-fritzbox", "wireguard", "Example Company IT"]]),
     ("approvals", "open", [["claude-abc123-very-long-sandbox-name", "connection", URL, T, "proxy", "this machine"]]),
-    ("approvals", "history", [[T, "claude-abc123", URL, "allowed", "once", "asked by the human in the dialog"]]),
+    # (the History table is hidden since the approvals rework: its answers are the one table's tabs)
     ("approvals", "always", [[LONG, "pypi.org", "host"]]),
     ("connections", "table", [[T, "allowed", "CONNECT", "200", f"{URL}?page={i}", 1234567 + i] for i in range(300)]),
     ("kits", "table", [["python-dev-full", "kit", "claude, codex", "skills: 4 · plugins: 2 · packages: apt python3-dev",

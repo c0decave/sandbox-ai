@@ -317,7 +317,9 @@ def test_the_run_record_names_the_vpn_container():
     text = (ROOT / "sandbox" / "agent_sandbox.py").read_text()
     assert '"vpn_container": load_vpn_module().container_name(a.vpn_pod)' in text
     approvals = (ROOT / "sandbox" / "approvals.py").read_text()
-    assert "resolved = (resolver or net().vpn_resolver(record) or resolve)(host)" in approvals
+    # an answer resolves through the run's VPN when it has one (approvals.answer: the VPN's resolver before this host's)
+    assert "vpn_resolver = None if resolver else net().vpn_resolver(record)" in approvals
+    assert "resolved = (resolver or vpn_resolver or resolve)(host)" in approvals
 
 
 # --- sandbox-ai llm through the endpoint's VPN ------------------------------------------------------------------------
@@ -383,7 +385,7 @@ def test_llm_check_through_the_vpn(llm, monkeypatch):
         path = fields["url"].split("example", 1)[1]
         body = {"/v1/models": {"data": [{"id": "qwen"}]}}.get(path)
         return {"status": 200 if body else 400, "body": base64.b64encode(json.dumps(body or {}).encode()).decode()}
-    monkeypatch.setattr(llm, "remember_models", lambda name, names, contexts=None: None)
+    monkeypatch.setattr(llm, "remember_models", lambda name, names, contexts=None, vision=None: None)
     monkeypatch.setattr(llm.socket, "create_connection", lambda *a, **k: pytest.fail("connected from the host"))
     lines = []
     tunnel = FakeTunnel(answer)

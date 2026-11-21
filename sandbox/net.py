@@ -7,6 +7,7 @@
                        [--allow-PRESET]                  (--allow-domain D: --allow-host D --allow-host '*.D')
                        [--dns] [--nameserver IP]           real DNS lookups (as --dns at the start)
                        [--git-token-env|--git-token-file|--git-token-secret URL=REF]   a Git login
+                       [--git-token-in-sandbox]            that login where the run's proxy cannot log in
                        [--allow-host-port PORT]            the host's 127.0.0.1:PORT, through a relay
                        [--api-key HOST=NAME[=SECRET]]      an API key the proxy puts in (runs from 0.1.92)
                        [--public-only]                     with --allow-host alone: only each name's public
@@ -49,6 +50,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
@@ -168,11 +170,23 @@ def alive(pid, start=None):
         return False
     except (PermissionError, ValueError, TypeError, OverflowError):  # (a number beyond a PID: OverflowError)
         return True
+    if zombie(pid):
+        return False  # ended, only not reaped yet (the terminal of 0.1.93 that started it never did): signal 0 passes
     if isinstance(start, int) and not isinstance(start, bool):
         now = process_start(int(pid))
         if now is not None and now != start:
             return False
     return True
+
+
+def zombie(pid):
+    """PID has ended and waits to be reaped (state Z in PROC/PID/stat); False where that cannot be read (macOS)."""
+    try:
+        text = (PROC / str(int(pid)) / "stat").read_text(errors="replace")
+    except (OSError, ValueError):
+        return False
+    fields = text.rpartition(")")[2].split()  # (the command's name may hold spaces and parentheses)
+    return bool(fields) and fields[0] == "Z"
 
 
 def ours(path):
@@ -253,7 +267,7 @@ def running(orphans=None):
 def forget_ended(directory, record):
     """The run in DIRECTORY (RECORD: its run.json) ended without its launcher's cleanup (the launcher was killed):
     its end goes into its name's history and its start's exit.json (once), its pod goes if Podman still lists it
-    with nothing running, then its directory and its browser directory. One command at a time (a lock on the
+    with nothing running (on a Mac Cairn's relay volume too), then its directory and the folders beside it. One command at a time (a lock on the
     directory): the app lists the runs often, several commands at once, and each that found the run recorded its end
     before one of them removed the directory (two ends of one run in its history); one that finds the lock held, or
     the directory gone once it holds it, leaves the cleanup to the other."""
@@ -276,6 +290,8 @@ def forget_ended(directory, record):
             launcher().load_starts_module().run_event(directory, "exit")
         with contextlib.suppress(Exception):
             liveness().remove_ended_pod(record)
+        with contextlib.suppress(Exception):
+            liveness().remove_ended_volumes(record)  # (macOS: Cairn's relay, a volume in podman machine's VM)
         liveness().discard(directory)
     finally:
         os.close(fd)
@@ -335,10 +351,17 @@ def who(record, run=None):
     return f"{printable(run)} ({printable(str(name))})" if name and name != run else printable(run)
 
 
+def shown_login(entry):
+    """A Git login given during the run as it is listed: {url, user} - and "in_sandbox": True for one whose token is
+    in the sandbox's session directory (readable by the agent); never the token."""
+    return {"url": entry["url"], "user": entry.get("user"),
+            **({"in_sandbox": True} if entry.get("where") == "sandbox" else {})}
+
+
 def given_credentials(record):
-    """{"git": [{url, user}], "api_keys": [{name, host, port, placeholder, secret}]} the run was given during the run
+    """{"git": [{url, user[, in_sandbox]}], "api_keys": [{name, host, port, placeholder, secret}]} the run was given during the run
     (`net allow --git-token-*`/`--api-key`, `git-logins give`, `secrets give`): names, never a token or a key."""
-    return {"git": [{"url": entry["url"], "user": entry.get("user")} for entry in git_logins(record)],
+    return {"git": [shown_login(entry) for entry in git_logins(record)],
             "api_keys": [{"name": entry["name"], "host": entry.get("host"), "port": entry.get("port"),
                           "placeholder": entry.get("placeholder"), "secret": entry.get("secret")}
                          for entry in added_api_keys(record)]}
@@ -358,8 +381,11 @@ def list_given(run, kind, out=print, as_json=False, prog="net"):
         t, name = textout(), who(record, run)
         if kind == "git":
             t.section(f"{name}: Git logins given during the run", out,
-                      note="sandbox-ai git-logins give / revoke; the tokens stay in the run's session directory")
-            t.table(["SERVER", "USER"], [[printable(e["url"]), printable(str(e.get("user") or ""))] for e in found],
+                      note="sandbox-ai git-logins give / revoke; its proxy logs in on the wire, no token is in the "
+                           "sandbox (TOKEN \"in the sandbox\": given so, the agent can read it)")
+            t.table(["SERVER", "USER", "TOKEN"], [[printable(e["url"]), printable(str(e.get("user") or "")),
+                                                    "in the sandbox" if e.get("in_sandbox") else "with the proxy"]
+                                                   for e in found],
                     out, empty=f"none (give one: sandbox-ai git-logins give {printable(str(record.get('run')))} URL "
                                "--secret NAME)")
         else:
@@ -386,6 +412,85 @@ def labels(runs):
     for name in named.values():
         counts[name] = counts.get(name, 0) + 1
     return {run: name if counts[name] == 1 or name == run else f"{name} (run {run})" for run, name in named.items()}
+
+
+def added_hosts(record):
+    """How many names the run was given since its start: allowed with `net allow` or by an answered question (its
+    names.json), and the wildcards added (wildcards.json); files of its run directory only, the run is not asked."""
+    names = remembered(record)
+    try:
+        added = json.loads(wildcards_file(record).read_text())
+    except (OSError, ValueError, RecursionError):
+        added = []
+    return len(names) + len([w for w in added if isinstance(w, str)] if isinstance(added, list) else [])
+
+
+APPROVAL_ID = re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}")  # approvals.ID: a question's file name
+
+
+def waiting_questions(record):
+    """How many of the run's questions wait for an answer (its approvals directory: QUESTION.json without .answer
+    or .done beside it, and not one nobody waits for any more: timed out, still answerable - its .state)."""
+    try:
+        files = list((Path(record["directory"]) / "approvals").glob("*.json"))
+    except (OSError, KeyError, TypeError):
+        return 0
+    return len([path for path in files if APPROVAL_ID.fullmatch(path.stem) and not path.with_suffix(".done").exists()
+                and not path.with_suffix(".answer").exists() and not timed_out(path)])
+
+
+def timed_out(path):
+    """True when nobody waits for the open question PATH any more (its .state says "timeout"; approvals.question_state)."""
+    try:
+        return '"timeout"' in path.with_suffix(".state").read_text()[:4096]
+    except OSError:
+        return False
+
+
+LIST_HEADERS = ["NAME", "AGENT", "MODE", "PROFILE", "VPN", "APPROVALS", "ADDED", "STARTED"]
+
+
+def list_row(record, shown, colour, cut_column=False, wide=False):
+    """One row of `net list` for a running sandbox (RECORD: its run.json; SHOWN: its name as `sandbox-ai list` shows
+    it): what it may reach, in short."""
+    t = textout()
+    mode = record.get("mode") if isinstance(record.get("mode"), dict) else {}
+    profiles = record.get("profiles")  # (runs of sandbox-ai 0.1.98 on)
+    profile = (", ".join(printable(str(p)) for p in profiles) or "provider") if isinstance(profiles, list) else "-"
+    if record.get("offline"):
+        profile = "offline"
+    vpn = record.get("vpn_profile")
+    vpn = (printable(vpn) + (" (tor)" if record.get("vpn_type") == "tor" else "")) if isinstance(vpn, str) else "-"
+    ask, waiting = record.get("ask"), waiting_questions(record)
+    approvals = "no proxy" if record.get("proxy") is False else \
+        {"on": "on", "off": "off", "allow": "allow all"}.get(ask, "-" if ask is None else printable(str(ask)))
+    if waiting:
+        approvals += f", {waiting} waiting"
+    added = added_hosts(record)
+    cut = record.get("cut")
+    return [printable(str(shown)), printable(str(record.get("agent") or ("mcp" if record.get("kind") == "mcp" else "-"))),
+            printable(str(mode.get("name") or "-")), profile, vpn,
+            t.style(approvals, "bad" if ask == "allow" else "warn", colour) if ask == "allow" or waiting else approvals,
+            f"{added} host{'s' if added != 1 else ''}" if added else "-",
+            *([t.style(cut, "bad", colour) if cut else "-"] if cut_column else []),
+            t.ago(record.get("started")),
+            *([printable(str(record.get("run") or "-")), printable(t.home_short(record.get("workspace") or "-"))]
+              if wide else [])]
+
+
+def list_table(runs, out=print, wide=False, colour=None):
+    """`sandbox-ai net list`: the running sandboxes, the newest first, one line each with what it may reach - its
+    mode, profiles, VPN, approvals and the questions waiting, the hosts added since its start, CUT while a kill switch
+    holds somewhere (`net show RUN` has the details); WIDE: its run id and workspace too. Colour on a terminal only."""
+    t = textout()
+    colour = t.colour_enabled() if colour is None else colour
+    cut = any(r.get("cut") for r in runs.values())  # the column only while a kill switch holds somewhere
+    names = labels(runs)
+    ordered = sorted(runs.items(), key=lambda item: (-(t.utc_seconds(item[1].get("started")) or 0), str(item[0])))
+    headers = LIST_HEADERS[:7] + (["CUT"] if cut else []) + LIST_HEADERS[7:] + (["RUN", "WORKSPACE"] if wide else [])
+    t.table(headers, [list_row({"run": run, **record}, names[run], colour, cut, wide) for run, record in ordered],
+            out, indent=0, colour=colour,
+            empty="No sandbox is running. Start one with: sandbox-ai claude (or another agent: sandbox-ai --help)")
 
 
 def running_names(runs):
@@ -435,6 +540,31 @@ STOPPED_HINTS = {
 }
 
 
+# Commands that would widen what a run may reach, see or do. On an orphaned run (its supervisor on the host is gone,
+# its pod runs on) they are refused - fail closed: nothing would supervise what they give, and nobody be asked.
+WIDENING = frozenset(("net allow", "net untaint", "net cut off", "workspace add", "approvals allow",
+                      "git-logins give", "secrets give", "devices add", "limits", "canaries resume",
+                      "rules reload"))
+
+
+def orphaned_text(entry, command=None):
+    """What a COMMAND for a running sandbox says of the orphaned start ENTRY (starts.entries): why it runs without its
+    supervisor - its end as recorded (starts.orphaned_why: when, why, whether its network was cut) - and what to do
+    (stop, then resume); a command that widens access (WIDENING) is refused as such."""
+    what = printable(str(entry.get("name") or "NAME"))
+    why = entry.get("orphaned_why") if isinstance(entry.get("orphaned_why"), str) else None
+    if not why:
+        try:
+            why = starts_module().orphaned_why(entry)
+        except Exception:  # noqa: BLE001 - the general reason: what to do is said all the same
+            why = liveness().orphan_text(entry.get("name") or "NAME")
+    why = printable(why)
+    if command in WIDENING:
+        return (f"{what} is orphaned: nothing supervises it, so {command} is refused (fail closed: nothing would hold "
+                f"what it gives); {why}")
+    return f"{what} is orphaned: {printable(command or 'this command')} needs its supervisor, which is gone; {why}"
+
+
 def not_running(name, runs, command=None):
     """The NotRunning for NAME, which names none of the running RUNS: what it is (a stopped kept start, an MCP server
     that does not run, a start whose HOME was discarded, nothing), what COMMAND ("workspace add", "net allow", ...:
@@ -465,6 +595,8 @@ def not_running(name, runs, command=None):
         if state == "stopped":
             hint = STOPPED_HINTS.get(command, "start it again first: sandbox-ai resume {name}")
             return NotRunning(f"{what} is stopped: " + hint.format(name=what), entry)
+        if state == "orphaned":
+            return NotRunning(orphaned_text(entry, command), entry)
         return NotRunning(f"{what} does not run now ({printable(str(state))}; see sandbox-ai list)", entry)
     if isinstance(last, dict) and last.get("event") == "rename" and isinstance(last.get("to"), str):
         return NotRunning(f"{shown} was renamed: it is {printable(last['to'])} now; {running_names(runs)} (see "
@@ -891,10 +1023,197 @@ def cut_runs(runs, record, mode, out=print, alone=False, every=False, as_json=Fa
                 f"{now}: only what every cut keeps stays reachable")
         else:
             out(f"{shown}: kill switch {mode}{why}: {CUT_TEXT[mode]}")
-    if mode != "off" and len(failed) < len(targets):
+    if mode != "off" and len(failed) < len(targets) and not (isinstance(record, dict) and record.get("orphaned")):
         undo = "--all-runs" if every else printable(str(names.get(record.get("run"), record.get("run"))))
         out(f"undo: sandbox-ai net cut {undo} off")
     return 1 if failed else 0
+
+
+# --- the kill switch for an orphaned run: its supervisor on the host is gone, its pod runs on --------------------------
+
+ORPHAN_STOP_WAIT = 10  # seconds an orphaned run's pod has to end when the kill switch cannot reach its sandbox
+
+
+def orphan_record(entry):
+    """The orphaned start ENTRY (starts.entries) as the record the kill switch, net show and usage act on: its
+    run.json with "directory" while its run directory is there (the sandbox's own supervisor still listens on its
+    control socket), else what its start's directory knows (run, pod, Podman); "orphaned": True, "orphaned_why",
+    "orphan" ({name, id, session}). None for any other entry (an MCP server's sandbox is not one)."""
+    if not isinstance(entry, dict) or entry.get("state") != "orphaned" or entry.get("kind") == "mcp":
+        return None
+    run = entry.get("run") if isinstance(entry.get("run"), str) else None
+    record = None
+    if isinstance(entry.get("run_dir"), str) and entry["run_dir"]:
+        try:
+            found = json.loads((Path(entry["run_dir"]) / "run.json").read_text())
+        except (OSError, ValueError, RecursionError):
+            found = None
+        if isinstance(found, dict) and found.get("run", run) == run:
+            record = {**found, "directory": entry["run_dir"]}
+    session = bool(entry.get("directory"))  # a start of its own (a session, a task): its directory outlives the run
+    if record is None:
+        data = {}
+        if session:
+            with contextlib.suppress(Exception):  # an unreadable start: only its pod's name (agent-RUN) is guessed
+                data = sessions_module().load(entry["id"])
+        record = {"run": run, "name": entry.get("name"), "backend": data.get("backend") or entry.get("backend"),
+                  "pod": data.get("pod"), "podman_url": data.get("podman_url"), "directory": None}
+    record.setdefault("run", run)
+    why = entry.get("orphaned_why") if isinstance(entry.get("orphaned_why"), str) else None
+    if not why:
+        try:
+            why = starts_module().orphaned_why(entry)
+        except Exception:  # noqa: BLE001 - the general reason
+            why = liveness().orphan_text(entry.get("name") or "NAME")
+    return {**record, "orphaned": True, "orphaned_why": why,
+            "orphan": {"name": entry.get("name") or run, "id": entry.get("id") or run, "session": session}}
+
+
+def orphaned_runs():
+    """{run: orphan_record} of the runs whose launcher is gone while their pod runs on and whose run directory is
+    kept (running's ORPHANS; no MCP server's): what only reads (approvals list, usage) shows them, marked."""
+    found = {}
+    running(found)
+    result = {}
+    for run, record in found.items():
+        if not isinstance(run, str) or record.get("kind") == "mcp" or run.startswith("mcp-"):
+            continue
+        start = record.get("start") if isinstance(record.get("start"), str) else None
+        directory = None
+        if start:
+            with contextlib.suppress(Exception):  # (no such start: the run's own record says why)
+                directory = str(sessions_module().session_dir(start))
+        made = orphan_record({"name": label(run, record), "id": start or run, "run": run, "state": "orphaned",
+                              "run_dir": record["directory"], "directory": directory})
+        if made is not None:
+            result[run] = made
+    return result
+
+
+def orphan_targets():
+    """orphan_record of every orphaned start sandbox-ai list knows (net cut --all-runs: the emergency stop reaches them
+    too); [] when they cannot be listed (said in launcher.log)."""
+    try:
+        found = starts_module().entries(prune=False)
+    except Exception as exc:  # noqa: BLE001 - the running runs are cut all the same
+        LOG.warning("net", "kill switch: the orphaned starts could not be listed", exc)
+        return []
+    return [record for record in map(orphan_record, found) if record is not None]
+
+
+def cut_orphan(record, mode, wait=ORPHAN_STOP_WAIT):
+    """The kill switch MODE for the orphaned run RECORD (orphan_record), on its own behalf: asked of the supervisor in
+    its sandbox through its control socket as for any run, and kept when it confirms; when it does not (no run
+    directory, no socket, no answer, a run without a kill switch, paused or starting), its pod is stopped instead -
+    fail closed - recorded in launcher.log and in its start's history. {"cut", "cuts", "stopped", "why", "pod"}.
+    ValueError when neither is confirmed, and for "off" (nothing would hold the network it gives back)."""
+    orphan = record.get("orphan") or {}
+    name, run = str(orphan.get("name") or record.get("run")), record.get("run")
+    if mode == "off":
+        raise ValueError(orphaned_text({"name": name, "orphaned_why": record.get("orphaned_why")}, "net cut off"))
+    if record.get("directory") and not (Path(record["directory"]) / "control.sock").exists():
+        why = "the sandbox does not answer: its control socket is gone"
+    elif record.get("directory"):
+        try:
+            answer = cut_one(record, mode, [run])
+            LOG.warning("net", f"kill switch {mode} for the orphaned {name} (run {run}): confirmed by the supervisor in "
+                               f"its sandbox; it holds now: {cut_label(answer.get('cut')) or 'none'}")
+            return {"cut": cut_label(answer.get("cut")), "cuts": answer.get("cuts") or {}, "stopped": False}
+        except (Pending, ValueError, OSError) as exc:
+            why = getattr(exc, "strerror", None) or str(exc)
+    else:
+        why = "its run directory is gone, and its control socket with it"
+    pod = liveness().pod_of(record)
+    if pod is None:
+        raise ValueError(f"the kill switch could not reach it ({why}), and it names no pod to stop")
+    url = record.get("podman_url") if isinstance(record.get("podman_url"), str) else None
+    LOG.warning("net", f"kill switch {mode} for the orphaned {name} (run {run}): not confirmed ({why}); stopping its "
+                       f"pod {pod}")
+    stopped, said = liveness().stop_pod(pod, url, wait)
+    if not stopped:
+        LOG.error("net", f"kill switch {mode} for the orphaned {name} (run {run}): NOT cut ({why}) and its pod {pod} "
+                         f"could not be stopped ({said or 'it still runs'})")
+        raise ValueError(f"the kill switch could not reach it ({why}) and its pod {pod} could not be stopped "
+                         f"({printable(said) or 'it still runs'}): end it now: podman pod rm --force {pod}")
+    starts = starts_module()
+    with contextlib.suppress(Exception):  # (its history: what list --history says; never fails the stop)
+        starts.record(name, "stop", orphan.get("id") or run, run, by="kill switch", why=f"net cut {mode}: {why}"[:300])
+    if record.get("directory"):
+        with contextlib.suppress(Exception):
+            running()  # it has ended: its end is recorded and its run directory goes (forget_ended)
+    elif orphan.get("session"):
+        with contextlib.suppress(Exception):
+            starts.write_exit(orphan["id"], run, None)
+            starts.record(name, "exit", orphan["id"], run, status=None)
+    LOG.warning("net", f"kill switch {mode} for the orphaned {name} (run {run}): its pod {pod} was stopped")
+    return {"cut": None, "cuts": {}, "stopped": True, "why": why, "pod": pod}
+
+
+def cut_orphans(records, mode):
+    """cut_orphan for each of RECORDS at once (an emergency waits for none of them one after the other): [its result
+    as net cut --json says it ({"run", "name", "for", "ok", "pending", "cut", "cuts", "error", "orphaned",
+    "stopped"}), with "said": its line]."""
+    results = [None] * len(records)
+
+    def entry(record):
+        name = str((record.get("orphan") or {}).get("name") or record.get("run"))
+        return {"run": record.get("run"), "name": name, "for": None, "ok": False, "pending": False, "orphaned": True,
+                "stopped": False, "cut": None, "cuts": {}, "error": None}
+
+    def one(index, record):
+        found = entry(record)
+        shown = printable(found["name"])
+        try:
+            done = cut_orphan(record, mode)
+        except (ValueError, OSError) as exc:
+            error = getattr(exc, "strerror", None) or str(exc)
+            results[index] = {**found, "error": error,
+                              "said": f"{shown}: NOT {'lifted' if mode == 'off' else 'cut'}: {printable(error)}"}
+            return
+        if done["stopped"]:
+            resume = f" Continue it: sandbox-ai resume {shown}" if (record.get("orphan") or {}).get("session") else ""
+            results[index] = {**found, "ok": True, "stopped": True,
+                              "said": f"{shown}: the kill switch could not reach it ({printable(done['why'])}), so its "
+                                      f"pod {printable(done['pod'])} was stopped: nothing of it runs now.{resume}"}
+            return
+        now = done["cut"]
+        holds = f"; with the other cuts there it holds {now}" if now and now != mode else ""
+        results[index] = {**found, "ok": True, "cut": now, "cuts": done["cuts"],
+                          "said": f"{shown}: kill switch {mode}{holds}: {CUT_TEXT[mode]}. It is orphaned: "
+                                  f"{printable(str(record.get('orphaned_why') or ''))}"}
+    threads = [threading.Thread(target=one, args=(index, record), daemon=True) for index, record in enumerate(records)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(CUT_SECONDS + ORPHAN_STOP_WAIT + 4 * liveness().PODMAN_TIMEOUT + 30)
+    return [result if result is not None else
+            {**entry(record), "error": "no answer in time",
+             "said": f"{printable(entry(record)['name'])}: NOT cut: no answer in time"}
+            for result, record in zip(results, records)]
+
+
+def cut_with_orphans(runs, record, mode, orphans, out=print, alone=False, every=False, as_json=False):
+    """The kill switch MODE for RUNS (cut_runs: with EVERY each one, else RECORD's related runs unless ALONE - RECORD
+    being an orphan, which is not among RUNS) and for ORPHANS (orphan_record; or a function that gives them: looked
+    for once RUNS are cut, an emergency waits for nothing): one report, as cut_runs gives it."""
+    said, status = [], 0
+    others = bool(runs) if every else bool(not alone and record is not None and related_runs(runs, record))
+    if others:
+        status = cut_runs(runs, record, mode, said.append if as_json else out, alone=alone, every=every,
+                          as_json=as_json)
+    orphans = orphans() if callable(orphans) else orphans
+    results = cut_orphans(orphans, mode) if orphans else []
+    if as_json:
+        report = json.loads("\n".join(said)) if said else {"mode": mode, "runs": []}
+        report["runs"] = list(report.get("runs") or []) + [
+            {key: value for key, value in result.items() if key != "said"} for result in results]
+        out(json.dumps(report, indent=2))
+    else:
+        for result in results:
+            out(result["said"])
+        if not others and not results:
+            out("no sandbox is running")
+    return 1 if status or any(not result["ok"] for result in results) else 0
 
 
 def resolve(hosts):
@@ -968,11 +1287,19 @@ def request_for(args, op, resolver=resolve):
     for value in getattr(args, "allow_domain", None) or []:
         l.domain_of(value)  # as the start refuses it, naming --allow-domain (expand_domains left it out)
     wildcards = sorted({h for h in args.allow_host if h.startswith("*.")})
+    confirmed = set(getattr(args, "shared_confirmed", None) or ())
+    shared = []
     for wildcard in wildcards:
         try:
-            l.RUNTIME.wildcard_suffix(wildcard)
+            # A revoke only narrows: no confirmation. An allow below a shared service: only what the human confirmed.
+            l.RUNTIME.wildcard_suffix(wildcard, shared_ok=op != "allow" or wildcard in confirmed)
+        except l.RUNTIME.SharedWildcardError as exc:
+            raise ValueError(f"--allow-host {wildcard}: {exc} (on a terminal net allow asks; --yes answers yes for "
+                             "scripts)") from None
         except ValueError as exc:
             raise ValueError(f"--allow-host {wildcard}: {exc}") from None
+        if op == "allow" and l.RUNTIME.shared_wildcard(wildcard):
+            shared.append(wildcard)
     hosts = list(dict.fromkeys([h for h in args.allow_host if not h.startswith("*.")]
                                + [h for preset in args.presets for h in l.PRESETS[preset]]))
     for host in hosts:
@@ -1006,12 +1333,72 @@ def request_for(args, op, resolver=resolve):
         request["dns"] = servers
     if wildcards:
         request["wildcards"] = wildcards  # not for the network change: control op "wildcards" (see change_wildcards)
+    if shared:
+        request["shared_wildcards"] = shared  # their risk confirmed (the control op's "shared")
     return request, names, hosts
 
 
 def wildcards_file(record):
     """The wildcards added during the run (run directory, outside the sandbox): approvals.watch reads them."""
     return Path(record["directory"]) / "wildcards.json"
+
+
+def shared_file(record):
+    """The wildcards below a shared service whose risk you confirmed with `sandbox-ai net allow` (run directory,
+    outside the sandbox; written from your command, not from the supervisor's answer): net show --keep keeps only
+    those."""
+    return Path(record["directory"]) / "shared-wildcards.json"
+
+
+def confirmed_shared(record):
+    """Every wildcard below a shared service whose risk you confirmed for the run: at the start (run.json
+    shared_wildcards) and with `sandbox-ai net allow` since."""
+    found = [w for w in (record.get("shared_wildcards") or {}) if isinstance(w, str)]
+    try:
+        added = json.loads(shared_file(record).read_text())
+    except (OSError, ValueError, RecursionError, KeyError):
+        added = []
+    found += [w for w in added if isinstance(w, str)] if isinstance(added, list) else []
+    return sorted(set(found))
+
+
+def shared_of(wildcards):
+    """{"*.DOMAIN": the shared suffix} of those of WILDCARDS below a shared service (marked as a risk)."""
+    found = {}
+    for wildcard in wildcards:
+        with contextlib.suppress(ValueError):
+            shared = launcher().RUNTIME.shared_wildcard(wildcard)
+            if shared:
+                found[wildcard] = shared
+    return found
+
+
+def confirm_shared(args, ask=None):
+    """The wildcards below a shared service of an allow (--allow-host '*.DOMAIN') not confirmed by
+    --allow-shared-wildcard: confirmed by --yes, or by your yes to "allow anyway? [y/N]" on a terminal (ASK: the
+    question, for tests). What stays unconfirmed is refused by request_for, naming --allow-shared-wildcard."""
+    for wildcard in dict.fromkeys(h for h in args.allow_host if h.startswith("*.")):
+        if wildcard in args.shared_confirmed:
+            continue
+        try:
+            risk = launcher().RUNTIME.shared_wildcard_risk(wildcard)
+        except ValueError:
+            risk = None
+        if not risk:
+            continue
+        if getattr(args, "yes", False):
+            args.shared_confirmed.add(wildcard)
+            continue
+        question = ask
+        if question is None and sys.stdin.isatty() and sys.stderr.isatty():
+            def question(text):
+                print(f"sandbox-ai net: {launcher().printable(text)}", file=sys.stderr)
+                try:
+                    return input("sandbox-ai net: allow anyway? [y/N] ").strip().lower() in ("y", "yes")
+                except EOFError:
+                    return False
+        if question is not None and question(f"--allow-host {wildcard}: {risk}"):
+            args.shared_confirmed.add(wildcard)
 
 
 def run_wildcards(record):
@@ -1025,10 +1412,11 @@ def run_wildcards(record):
     return sorted(set(found))
 
 
-def change_wildcards(record, op, wildcards, apply=True):
+def change_wildcards(record, op, wildcards, apply=True, shared=()):
     """Add (allow) or take back (revoke) WILDCARDS during the run: the supervisor's DNS stub holds the lookups below
-    them, the launcher answers those on the host. Only for a run that asks questions. APPLY False only checks
-    (before anything of the command changes)."""
+    them, the launcher answers those on the host. Only for a run that asks questions. SHARED: those below a shared
+    service whose risk you confirmed (refused where the administrator's policy forbids them, as the supervisor
+    refuses them in a strict mode). APPLY False only checks (before anything of the command changes)."""
     l = launcher()
     started = set(record.get("allow_wildcards") or [])
     if op == "allow":
@@ -1053,6 +1441,10 @@ def change_wildcards(record, op, wildcards, apply=True):
         if outside:
             raise ValueError(f"{', '.join(outside)} is not among the hosts the administrator's policy allows "
                              "(allow_hosts)")
+        if shared and (policy.get("forbid_shared_wildcards") is True or
+                       "--allow-shared-wildcard" in (policy.get("forbid") or [])):
+            raise ValueError(f"{', '.join(shared)}: a wildcard below a shared service, which the administrator's "
+                             "policy forbids (forbid_shared_wildcards); give the hosts by name instead")
     else:
         fixed = sorted(set(wildcards) & started)
         if fixed:
@@ -1065,8 +1457,12 @@ def change_wildcards(record, op, wildcards, apply=True):
     # The supervisor's answer and the file written from it, as one step under the run's lock: two commands at once
     # (allow and revoke) must not write their answers in the other order, nor share a temporary file.
     with hosts_lock(record):
-        answer = ask(record["directory"], {"op": "wildcards", "add" if op == "allow" else "remove": wildcards})
+        answer = ask(record["directory"], {"op": "wildcards", "add" if op == "allow" else "remove": wildcards,
+                                           **({"shared": list(shared)} if shared else {})})
         now = sorted(f"*.{suffix}" for suffix in answer.get("wildcards", []))
+        if shared:  # your confirmation, recorded from your command (not from the supervisor's answer)
+            confirmed = sorted(set(confirmed_shared({"directory": record["directory"]})) | set(shared))
+            write_json_atomic(shared_file(record), confirmed)
         target = wildcards_file(record)
         fd, temporary = tempfile.mkstemp(prefix=".wildcards.", suffix=".tmp", dir=target.parent)
         try:
@@ -1078,6 +1474,19 @@ def change_wildcards(record, op, wildcards, apply=True):
                 os.unlink(temporary)
             raise
     return now
+
+
+def write_json_atomic(target, value):
+    """VALUE as JSON into TARGET, replaced in one step (a temporary file of its own beside it)."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(json.dumps(value))
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
 
 
 # Longer than a firewall change may take in the sandbox (runtime.NFT_SECONDS, 30 s): a change the supervisor
@@ -1154,6 +1563,10 @@ def ask_socket(directory, request, timeout, fds=()):
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
             client.connect(f"/proc/self/fd/{fd}/control.sock")
+        except FileNotFoundError:
+            # (registered, its supervisor not listening yet - a start still coming up - or gone since)
+            raise ValueError(f"the sandbox does not answer yet: its control socket {path} is not there - it is still "
+                             "starting (try again once it is up) or has ended (sandbox-ai list)") from None
         except OSError as exc:
             raise ValueError(f"the sandbox does not answer on {path}: {exc.strerror or exc}") from None
         finally:
@@ -1180,8 +1593,12 @@ def ask_socket(directory, request, timeout, fds=()):
 GIT_KINDS = ("env", "file", "secret")
 
 
-def git_logins(record):
-    """[{"url", "user", "token"}] of the Git logins added during the run (the session directory's file)."""
+GIT_LOGINS_FILE = "git-logins.json"  # in the run's directory: the Git logins its proxy was given during the run
+
+
+def sandbox_git_logins(record):
+    """[{"url", "user", "token"}] of the Git logins given into the sandbox during the run (the session directory's
+    file, which the sandbox's Git helper reads - and its agent can)."""
     try:
         data = json.loads((Path(record["session_dir"]) / launcher().RUNTIME_GIT_TOKENS).read_text())
     except (OSError, ValueError, KeyError, TypeError, RecursionError):
@@ -1191,10 +1608,96 @@ def git_logins(record):
         if isinstance(logins, list) else []
 
 
+def proxy_git_file(record):
+    """The run's list of the Git logins its proxy was given during the run, on the host (its run directory: yours,
+    hidden from the agent, as api-keys.json): what `revoke` and a later `give` start from. The proxy gets the logins
+    from the supervisor."""
+    directory = record.get("directory")
+    return Path(directory) / GIT_LOGINS_FILE if isinstance(directory, str) and directory else None
+
+
+def proxy_git_logins(record):
+    """[{"url", "user", "host", "port", "loopback", "token"}] of the Git logins the run's proxy was given during
+    the run."""
+    path = proxy_git_file(record)
+    try:
+        data = json.loads(path.read_text()) if path else {}
+    except (OSError, ValueError, RecursionError):
+        return []
+    logins = data.get("logins") if isinstance(data, dict) else None
+    return [entry for entry in logins if isinstance(entry, dict) and isinstance(entry.get("url"), str)] \
+        if isinstance(logins, list) else []
+
+
+def git_logins(record):
+    """[{"url", "user", "token", "where"}] of every Git login given during the run: "where" is "proxy" (the run's
+    connection proxy logs in on the wire: no token in the sandbox) or "sandbox" (the session directory's file for
+    the sandbox's Git helper, which the agent can read: only where the proxy cannot log in)."""
+    return [{**entry, "where": "proxy"} for entry in proxy_git_logins(record)] + \
+        [{**entry, "where": "sandbox"} for entry in sandbox_git_logins(record)]
+
+
+def proxy_login_refusal(record, credential):
+    """Why the run's connection proxy cannot log in to CREDENTIAL's server with a login given now (None: it can):
+    the run has no proxy, was started by a sandbox-ai whose supervisor hands no login to it, or does not open that
+    server's requests (--no-inspect)."""
+    l = launcher()
+    if not record.get("proxy"):
+        return "it runs without the connection proxy (--no-proxy)"
+    if not record.get("proxy_git_logins") or proxy_git_file(record) is None:
+        return "it was started by an older sandbox-ai, whose proxy takes no login during the run"
+    if not credential["loopback"] and any(l.host_matches_any(credential["host"], value)
+                                          for value in record.get("no_inspect") or []):
+        return f"it was started with --no-inspect {credential['host']}: its proxy does not open that server's requests"
+    return None
+
+
+@contextlib.contextmanager
+def git_logins_lock(record):
+    """The run's lock for the Git logins its proxy was given (read, give and keep as one step)."""
+    fd = os.open(Path(record["directory"]) / "git-logins.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def write_proxy_git_logins(record, entries, options=()):
+    """Give the run's proxy ENTRIES (the whole list of the logins given during the run) through its supervisor
+    (control op "git-logins": the proxy runs as a user of its own, which reads them in its run directory - no token
+    enters the sandbox), then keep the list here: 0600, written whole and renamed into place. Both go when the run
+    ends. OPTIONS: the --git-token-* options of this command (the supervisor holds them to the policy too)."""
+    path = proxy_git_file(record)
+    if path is None or not ours(path.parent):
+        raise ValueError("the run's directory is gone or not yours")
+    try:
+        ask(record["directory"], {"op": "git-logins", "options": sorted(options), "git_logins": [
+            {key: entry[key] for key in ("host", "port", "user", "loopback", "token")} for entry in entries]})
+    except ValueError as exc:
+        if "op" in str(exc) and "allow" in str(exc):  # a supervisor that knows no "git-logins"
+            raise ValueError(f"{launcher().printable(record.get('run', '?'))} takes no Git login for its proxy during "
+                             "the run: it was started by an older sandbox-ai; start it again, or give the login "
+                             "into the sandbox (--git-token-in-sandbox: the agent can read the token)") from None
+        raise
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"version": 1, "logins": entries}, stream)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+
+
 def write_git_logins(record, logins):
-    """Replace the run's Git logins with LOGINS: a file of yours (0600), written whole and renamed into place, so
-    the sandbox's helper never reads half of it. The session directory goes when the run ends, and the logins
-    with it."""
+    """Replace the Git logins given INTO THE SANDBOX with LOGINS: a file of yours (0600) in the run's session
+    directory, written whole and renamed into place, so the sandbox's helper never reads half of it. The agent can
+    read it: only for a run whose proxy cannot log in, and only when the human said so (--git-token-in-sandbox). The
+    session directory goes when the run ends, and the logins with it."""
     directory = Path(record["session_dir"])
     if not ours(directory):
         raise ValueError(f"the run's session directory {directory} is gone or not yours")
@@ -1209,6 +1712,27 @@ def write_git_logins(record, logins):
         with contextlib.suppress(OSError):
             temporary.unlink()
         raise
+
+
+def register_sandbox_logins(record, asker=None):
+    """The Git logins given INTO the sandbox (its agent can read their tokens) registered with the run's secret
+    guard: the whole list, through the supervisor (control op "secret-values"), so that the proxy reports - or, where
+    the run says so, holds - such a token on its way to another host than its own. True if the run took them; False
+    for a run without the connection proxy or of a sandbox-ai older than the secret guard (nothing looks there).
+    No token is printed or kept anywhere else for it."""
+    guard = launcher().load_secret_guard_module()
+    values = []
+    for entry in sandbox_git_logins(record):
+        host = (urllib.parse.urlsplit(entry["url"]).hostname or "").lower()
+        value = guard.value_entry(f"git-login:{host}", f"the Git login for {host} (given into the sandbox)",
+                                  entry.get("token"), guard.server_hosts(host)) if host else None
+        if value is not None:
+            values.append(value)
+    try:
+        (asker or ask)(record["directory"], {"op": "secret-values", "values": guard.added_entries(values)})
+    except (ValueError, KeyError):
+        return False
+    return True
 
 
 def api_keys_file(record):
@@ -1319,6 +1843,40 @@ def git_requests(args):
     return found
 
 
+def named_token_files(values):
+    """The --git-token-file values (URL=FILE) with FILE as the file it names from here: a relative path is this
+    command's, and what is said ("start with: ...") and kept (--keep, the project file) is read by a start in
+    another directory. A path with ~ stays (the start expands it)."""
+    found = []
+    for value in values or []:
+        url, sep, file = str(value).partition("=")
+        if sep and file and not file.startswith("~") and not os.path.isabs(file):
+            file = os.path.abspath(file)
+        found.append(f"{url}{sep}{file}")
+    return found
+
+
+def run_trees(record):
+    """The host folders the agent of the run RECORD can write, as its start recorded them (run.json
+    "workspace_checks": its workspaces, rw mounts and HOME) and as they were added since (workspace add)."""
+    checks = record.get("workspace_checks") if isinstance(record.get("workspace_checks"), dict) else {}
+    found = [entry.get("host") for entry in checks.get("workspaces") or [] if isinstance(entry, dict)]
+    found += list(checks.get("trees") or [])
+    with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+        found += [entry.get("host") for entry in load_workspaces_module().added_workspaces(record)]
+    return [Path(tree) for tree in dict.fromkeys(found) if isinstance(tree, str) and os.path.isabs(tree)]
+
+
+def check_token_file(record, path):
+    """A --git-token-file given during the run, held as a start holds it (the launcher's check_host_source): on a
+    way through a link in a folder a sandbox could write it is refused (an agent may have planted the link, and the
+    file it leads to would be read and written into the sandbox's git-tokens.json); inside a folder the agent can
+    change it is given, with the start's warning."""
+    l = launcher()
+    trees = list(dict.fromkeys([*run_trees(record), *l.exposed_before()]))
+    l.check_host_source(None, path, "--git-token-file", trees)
+
+
 def git_network(args, logins):
     """Open what each login's server needs, as at the start: github.com its preset, another HTTPS server its name
     (TCP/443; another port needs --allow-tcp). A server on the host's loopback is reached only if the run forwards
@@ -1419,10 +1977,11 @@ def tainted_text(state):
         (f" (and {more} later source{'s' if more != 1 else ''})" if more > 0 else "")
 
 
-def show(result, out=print, names=None, run=None, as_json=False, logins=(), wildcards=(), api_keys=(), title=None):
+def show(result, out=print, names=None, run=None, as_json=False, logins=(), wildcards=(), api_keys=(), title=None,
+         hints=True):
     """What was allowed during the run, grouped by kind; HTTPS addresses under the names they were allowed
     for (from `net allow --allow-host`, presets and approved lookups; never looked up anew: a name the
-    agent chose may carry data)."""
+    agent chose may carry data). HINTS: how to lift the cut, untaint and take back (not for an orphaned run: refused)."""
     printable = launcher().printable
     names = names or {}
     by_address = {}
@@ -1435,14 +1994,16 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
     dns = sorted({bare(n) for n in result.get("dns", [])}, key=address_sort)
     relayed = sorted({int(p) for p in result.get("host_ports", []) if isinstance(p, int)})
     taint = result.get("taint") if isinstance(result.get("taint"), dict) else None
-    git = [{"url": entry["url"], "user": entry.get("user")} for entry in logins]  # never the token
+    git = [shown_login(entry) for entry in logins]  # never the token
     keys = [{"name": e.get("name"), "host": e.get("host"), "port": e.get("port"), "placeholder": e.get("placeholder"),
              "secret": e.get("secret")} for e in api_keys]  # never the key
     cut = cut_label(result.get("cut"))
+    risky = shared_of(wildcards)  # below a shared service: anyone can rent a name there (marked as a risk)
     if as_json:
         out(json.dumps({"run": run, "cut": cut, "all_ports": nets, "dns": dns,
                         **({"taint": taint} if taint is not None else {}),
                         "host_wildcards": list(wildcards),
+                        **({"shared_wildcards": risky} if risky else {}),
                         "git": git, "api_keys": keys, "host_ports": relayed,
                         "https": [{"address": a, "names": sorted(by_address.get(a, []))} for a in https],
                         "tcp": [{"address": a, "port": p, "names": sorted(by_address.get(a, []))} for a, p in tcp]},
@@ -1451,20 +2012,23 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
     t = textout()
     if cut:
         out(t.style(f"  kill switch: {cut}: {'; '.join(CUT_TEXT[part] for part in cut.split('+'))}", "warn"))
-        out(t.style(f"  lift it: sandbox-ai net cut {printable(run) if run else '[RUN]'} off", "muted"))
+        if hints:
+            out(t.style(f"  lift it: sandbox-ai net cut {printable(run) if run else '[RUN]'} off", "muted"))
         out("")
     if taint is not None:
         printable = launcher().printable
         line = printable(tainted_text(taint))
         out(t.style(f"  untrusted content: {line}", "warn" if taint.get("tainted") else "muted"))
-        if taint.get("tainted"):
+        if taint.get("tainted") and hints:
             out(t.style(f"  take it back: sandbox-ai net untaint {printable(run) if run else '[RUN]'}", "muted"))
         out("")
     total = len(nets) + len(https) + len(tcp) + len(dns) + len(relayed)
     if git:
-        t.section("Git logins added during this run", out, note="the tokens stay in the run's session directory")
-        t.table(["SERVER", "USER"], [[printable(entry["url"]), printable(str(entry.get("user") or ""))] for entry in git],
-                out)
+        t.section("Git logins added during this run", out,
+                  note="its proxy logs in on the wire; a token \"in the sandbox\" is readable by the agent")
+        t.table(["SERVER", "USER", "TOKEN"], [[printable(entry["url"]), printable(str(entry.get("user") or "")),
+                                                "in the sandbox" if entry.get("in_sandbox") else "with the proxy"]
+                                               for entry in git], out)
         out("")
     if keys:
         t.section("API keys given during this run", out,
@@ -1475,7 +2039,12 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
         out("")
     if wildcards:
         t.section("Host wildcards", out, note="every name below them is opened as it is looked up")
-        t.table(["WILDCARD"], [[printable(w)] for w in wildcards], out)
+        if risky:  # the risk you confirmed, said again wherever the run's wildcards are shown
+            t.table(["WILDCARD", "RISK"], [[printable(w), f"below the shared service {printable(risky[w])}: any "
+                                            "server anyone rents there" if w in risky else "-"] for w in wildcards],
+                    out)
+        else:
+            t.table(["WILDCARD"], [[printable(w)] for w in wildcards], out)
         out("")
     t.section(f"{title or (printable(run) if run else 'this sandbox')}: allowed during this run", out,
               note=f"{total} destination{'s' if total != 1 else ''}, added with `sandbox-ai net allow` or approvals")
@@ -1514,8 +2083,43 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
         t.table(["NETWORK", "NAME"],
                 [[n, ", ".join(sorted(printable(h) for h in by_address.get(n, []))) or "-"] for n in nets], out)
     out("")
-    out(t.style(f"  take back: sandbox-ai net revoke {printable(run) if run else '[RUN]'} --allow-host NAME | "
-                "--allow-domain DOMAIN | --allow-tcp IP:PORT | --allow IP_OR_CIDR | --dns", "muted"))
+    if hints:
+        out(t.style(f"  take back: sandbox-ai net revoke {printable(run) if run else '[RUN]'} --allow-host NAME | "
+                    "--allow-domain DOMAIN | --allow-tcp IP:PORT | --allow IP_OR_CIDR | --dns", "muted"))
+
+
+def show_orphan(record, out=print, as_json=False):
+    """`net show NAME` for the orphaned run RECORD (orphan_record), marked as such: what its sandbox's supervisor
+    answers on its control socket, else what its run directory recorded (the names allowed and their addresses, the
+    kill switch, logins and keys given), said as such. ValueError when its run directory is gone (nothing is left)."""
+    name = str((record.get("orphan") or {}).get("name") or record.get("run"))
+    why = str(record.get("orphaned_why") or "")
+    if not record.get("directory"):
+        raise ValueError(f"{printable(name)} is orphaned and its run directory is gone: nothing of what was allowed "
+                         f"during its run is left to show; {printable(why)}")
+    names = remembered(record)
+    try:
+        result, answered, silent = ask(record["directory"], {"op": "show"}, timeout=CUT_SECONDS), True, None
+    except ValueError as exc:
+        result, answered, silent = {"cut": cut_state(record["directory"]), "https": sorted(
+            {address for entry in names.values() if isinstance(entry, dict)
+             for address in entry.get("addresses", []) if isinstance(address, str)})}, False, str(exc)
+    given = {"names": names, "run": record.get("run"), "logins": git_logins(record),
+             "wildcards": run_wildcards(record), "api_keys": added_api_keys(record), "title": who(record),
+             "hints": False}
+    if as_json:
+        shown = []
+        show(result, shown.append, as_json=True, **given)
+        out(json.dumps({**json.loads("\n".join(shown)), "orphaned": True, "orphaned_why": why, "answered": answered},
+                       indent=2))
+        return 0
+    t = textout()
+    out(t.style(f"{printable(name)} is orphaned: ", "bad") + printable(why))
+    if not answered:
+        out(t.style(f"its supervisor did not answer ({printable(silent)}): what its run directory recorded", "warn"))
+    out("")
+    show(result, out, **given)
+    return 0
 
 
 def process_state(pid):
@@ -1778,16 +2382,34 @@ def seconds(value):
     return number
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def parser(lean=False):
     """LEAN: allow and revoke without their options, which ask the launcher (its presets, nameservers and short
     options): for a command line that argparse never hands to them (`net list`, which the app asks every few
     seconds, loads no launcher)."""
     p = argparse.ArgumentParser(prog="sandbox-ai net", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
+                                formatter_class=help_style, allow_abbrev=False,
                                 epilog="\n".join(__doc__.split("\n\n")[1:3]))
     commands = p.add_subparsers(dest="command", required=True)
-    listing = commands.add_parser("list", help="running sandboxes")
+    listing = commands.add_parser("list", help="running sandboxes and what each may reach, in short",
+                                  description="The running sandboxes and what each may reach, one line each: its "
+                                              "security mode, network profiles, VPN, approvals (questions waiting), "
+                                              "the hosts added while it runs (sandbox-ai net allow, approvals) and "
+                                              "the kill switch's cut, newest first (--wide: its run id and "
+                                              "workspace too). The details of one: sandbox-ai net show RUN.")
     listing.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts")
+    listing.add_argument("-w", "--wide", "--no-trunc", dest="wide", action="store_true",
+                         help="also each run's id and workspace (whole)")
     shown = commands.add_parser("show", help="what was allowed during the run")
     shown.add_argument("run", nargs="?")
     shown.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts")
@@ -1798,11 +2420,13 @@ def parser(lean=False):
                             "logins). Refused when the administrator's policy caps approvals below always")
     shown.add_argument("--keep-all", action="store_true",
                        help="--keep, and also the names and addresses approvals opened once or for the run")
-    untainted = commands.add_parser("untaint", help="take back the run's taint: the rules for tainted runs no longer "
-                                                    "hold, until untrusted content enters it again")
+    untainted = commands.add_parser("untaint", help="take back the run's taint",
+                                               description="Take back the run's taint: the rules for tainted runs "
+                                                           "no longer hold, until untrusted content enters it "
+                                                           "again.")
     untainted.add_argument("run", nargs="?")
     cutting = commands.add_parser(
-        "cut", help="the kill switch: cut a running sandbox's network (and its MCP servers', helpers' and team's)",
+        "cut", help="the kill switch: cut a running sandbox's network",
         description="The kill switch: cut a running sandbox's network down at once. MODE: remote (the internet is "
                     "cut; only the local network and the host's ports it may reach stay), local (the local network "
                     "and the host's ports are cut; only the internet it may reach stays), api (only its model API "
@@ -1831,32 +2455,43 @@ def parser(lean=False):
         if lean:
             continue
         command.add_argument("run", nargs="?")
-        command.add_argument("-A", "--allow-host", action="append", default=[], metavar="HOST", type=str.lower,
-                             help="pin HOST in the sandbox's /etc/hosts and allow TCP/443 to it")
-        command.add_argument("-ad", "--allow-domain", action="append", default=[], metavar="DOMAIN", type=str.lower,
+        lists = launcher().ListOption  # several items in one value: "a.example, b.example" (LIST_OPTIONS)
+        each = launcher().LIST_HELP
+        command.add_argument("-A", "--allow-host", action=lists, default=[], metavar="HOST", type=str.lower,
+                             help=f"pin HOST in the sandbox's /etc/hosts and allow TCP/443 to it; {each}")
+        command.add_argument("-ad", "--allow-domain", action=lists, default=[], metavar="DOMAIN", type=str.lower,
                              help="DOMAIN and every name below it: --allow-host DOMAIN --allow-host '*.DOMAIN' in one, "
-                                  "with the same checks (no public suffix or hosting service)")
-        command.add_argument("-t", "--allow-tcp", action="append", default=[], metavar="IP:PORT")
-        command.add_argument("-a", "--allow", action="append", default=[], metavar="IP_OR_CIDR",
-                             help="every protocol and port")
+                                  f"with the same checks (no public suffix or hosting service); {each}")
+        command.add_argument("-t", "--allow-tcp", action=lists, default=[], metavar="IP:PORT",
+                             help=f"allow TCP to IP:PORT ([IPv6]:PORT); {each}")
+        command.add_argument("-a", "--allow", action=lists, default=[], metavar="IP_OR_CIDR",
+                             help=f"every protocol and port; {each}")
         command.add_argument("-R", "--dns", action="store_true",
                              help="real DNS: the sandbox's DNS stub forwards every name to "
                                   f"{' and '.join(launcher().DEFAULT_NAMESERVERS)} (each lookup logged); addresses "
                                   "stay closed unless allowed as well")
-        command.add_argument("-ns", "--nameserver", action="append", default=[], metavar="IP",
-                             help="this resolver instead of the defaults (implies --dns); repeatable")
-        command.add_argument("-P", "--allow-host-port", action="append", default=[], type=port_number, metavar="PORT",
+        command.add_argument("-ns", "--nameserver", action=lists, default=[], metavar="IP",
+                             help=f"this resolver instead of the defaults (implies --dns); {each}")
+        command.add_argument("-P", "--allow-host-port", action=lists, default=[], item_type=port_number, metavar="PORT",
                              help="the host's 127.0.0.1:PORT (a local Git server, an LLM server), through a relay "
-                                  "that only you start (runs started with sandbox-ai 0.1.37 or newer)")
+                                  f"that only you start (runs started with sandbox-ai 0.1.37 or newer); {each}")
         for kind, ref, where in (("env", "NAME", "your variable NAME"), ("file", "FILE", "FILE (yours, mode 0600)"),
                                  ("secret", "SECRET", "the secret SECRET of sandbox-ai secrets")):
             short = launcher().SHORT_OPTIONS.get(f"--git-token-{kind}")
             command.add_argument(*([short] if short else []), f"--git-token-{kind}", action="append", default=[],
                                  metavar=f"URL={ref}",
                                  help=f"a Git login for http(s)://[USER@]HOST[:PORT], the token from {where}; the "
-                                      "sandbox's Git uses it at once (runs started with sandbox-ai 0.1.37 or newer, "
-                                      "without --token-proxy)" if name == "allow" else
+                                      "run's connection proxy logs in with it on the wire at once, for clone, fetch "
+                                      "and push (no token enters the sandbox; it wins over a login the run was "
+                                      "started with for that server)" if name == "allow" else
                                       f"take back the Git login for URL (the {ref} part is not read)")
+        if name == "allow":
+            command.add_argument("--git-token-in-sandbox", action="store_true",
+                                 help="a Git login the run's connection proxy cannot use (a run without the proxy, "
+                                      "--no-inspect for that server, a run started by an older sandbox-ai) "
+                                      "is put into the sandbox's session directory for its Git helper "
+                                      "instead: the agent can read the token there. Without this such a login is "
+                                      "refused")
         command.add_argument("-ky", "--api-key", action="append", default=[], metavar="HOST=NAME[=SECRET]",
                              help="an API key for HTTPS requests to HOST, from the secret SECRET (default NAME) of "
                                   "sandbox-ai secrets: as at a start, the connection proxy puts it in on the wire "
@@ -1872,6 +2507,17 @@ def parser(lean=False):
                                  help="also keep it for the next starts: the options go into the project's "
                                       ".sandbox-ai.json (only while that file is exactly what you trusted; the new "
                                       "file is trusted at once). Logins are kept as references, never as tokens")
+            command.add_argument("-sw", "--allow-shared-wildcard", action=lists, default=[], metavar="'*.DOMAIN'",
+                                 type=str.lower,
+                                 help="a host wildcard below a shared service where anyone can rent a name "
+                                      "(*.blob.core.windows.net): the agent could open any server anyone rents there "
+                                      "and send data there; giving it here is your confirmation of that risk "
+                                      "(--allow-host '*.DOMAIN' asks on a terminal, else it is refused). Refused in "
+                                      "the modes high and paranoid and where the administrator's policy forbids it; "
+                                      f"*.com and a country's suffix (*.co.uk) always; {each}")
+            command.add_argument("-ys", "--yes", action="store_true",
+                                 help="answer the risk question of a wildcard below a shared service given with "
+                                      "--allow-host with yes, for scripts (as --allow-shared-wildcard)")
             command.add_argument("--public-only", action="store_true",
                                  help="--allow-host only: open just the public addresses of each name (one the agent "
                                       "chose may point at this host, your network or a VPN), as an answered lookup "
@@ -1883,8 +2529,10 @@ def parser(lean=False):
 def kept_options(args, ports):
     """The options of an allow command, as tokens for a project file (logins as their references). An
     --allow-domain is kept as given, not as the two --allow-host it stands for."""
+    confirmed = getattr(args, "shared_confirmed", None) or ()
     tokens = [token for host in args.allow_host if host not in getattr(args, "domain_hosts", ())
-              for token in ("--allow-host", host)]
+              for token in ("--allow-shared-wildcard" if host in confirmed and shared_of([host]) else "--allow-host",
+                            host)]
     tokens += [token for domain in dict.fromkeys(launcher().domain_of(value)
                                                  for value in getattr(args, "allow_domain", None) or [])
                for token in ("--allow-domain", domain)]
@@ -1894,7 +2542,7 @@ def kept_options(args, ports):
     tokens += [token for value in args.nameserver for token in ("--nameserver", value)] or (["--dns"] if args.dns else [])
     tokens += [token for port in ports for token in ("--allow-host-port", str(port))]
     tokens += [token for kind in GIT_KINDS for value in getattr(args, f"git_token_{kind}", None) or []
-               for token in (f"--git-token-{kind}", value)]
+               for token in (f"--git-token-{kind}", value)]  # (a token file: absolute by now, named_token_files)
     tokens += [token for value in getattr(args, "api_key", None) or [] for token in ("--api-key", value)]
     return tokens
 
@@ -1996,9 +2644,18 @@ def running_options(record, result, everything=False):
             notes.append(f"{l.printable(str(host))[:100]}: not kept (not a host name)")
         elif not any(str(host).endswith(w[1:]) for w in every):  # below a wildcard: the wildcard is kept, not each
             (tokens if everything or host in kept_hosts else left).extend(["--allow-host", host])
+    confirmed = set(confirmed_shared(record))
     for wildcard in wildcards:
-        l.RUNTIME.wildcard_suffix(wildcard)
-        tokens += ["--allow-host", wildcard]
+        try:
+            l.RUNTIME.wildcard_suffix(wildcard)
+            tokens += ["--allow-host", wildcard]
+        except l.RUNTIME.SharedWildcardError:
+            # Below a shared service: kept only where you confirmed its risk (your command's record, not the
+            # supervisor's word), and kept so - as that confirmation.
+            if wildcard not in confirmed:
+                notes.append(f"{l.printable(wildcard)}: not kept (below a shared service; you did not confirm it)")
+                continue
+            tokens += ["--allow-shared-wildcard", wildcard]
     for value in sorted({bare(n) for n in result.get("https", [])} - named, key=address_sort):
         if "/" not in value:  # a single address allowed by an approval: its port, not a whole network
             target = tcp_text(address(value), 443)
@@ -2047,6 +2704,13 @@ def running_options(record, result, everything=False):
     if git_logins(record):
         notes.append("Git logins added during the run are not kept (tokens never go into a project file): start with "
                      "--git-token-env / --git-token-secret, or add one with sandbox-ai git-logins")
+    keys = [entry for entry in added_api_keys(record) if isinstance(entry.get("host"), str)]
+    if keys:
+        # (Their hosts are kept above, --allow-host: said, or the next start reaches them without its keys.)
+        notes.append("API keys given during the run are not kept: start with " + " ".join(
+            f"--api-key {entry['host']}={entry['name']}" + (f"={entry['secret']}" if isinstance(
+                entry.get("secret"), str) and entry["secret"] != entry["name"] else "") for entry in keys)
+            + ", or give them with --keep (sandbox-ai secrets give RUN NAME --api-key HOST --keep)")
     if left:
         notes.append("left out (opened by an approval answered once or for the run, or with no record that you "
                      f"allowed it; --keep-all keeps them too): {' '.join(left)}")
@@ -2075,6 +2739,39 @@ def keep_allowed():
     if widest != "always":
         raise ValueError(f"--keep: the administrator's policy approves at most for {widest}, so what was "
                          "allowed during the run is not kept for later starts (nothing was written)")
+
+
+def own_port(record, ports):
+    """As at the start (dsh_web_port, a service's ports): a port of PORTS that the sandbox of RECORD listens on
+    itself - DSH's web UI (its session browser reaches it there), a --service - is never relayed from the host: the
+    relay's redirect would take the sandbox's 127.0.0.1:PORT, and the browser and the agent would reach the host's
+    port instead. ValueError naming what listens there."""
+    name = launcher().printable(record.get("run", "?"))
+    for port in sorted(ports):
+        if record.get("dsh_web_port") == port:
+            raise ValueError(f"--allow-host-port {port}: DeepSeek Harness' web UI listens there in {name} (the "
+                             "sandbox's own loopback port; a relay would take it from DSH); another port reaches "
+                             "the host's")
+        for service in record.get("services") or []:
+            if isinstance(service, dict) and port in (service.get("ports") or []):
+                raise ValueError(f"--allow-host-port {port}: the service {launcher().printable(service.get('name'))} "
+                                 f"listens there in {name} (the sandbox's own port); another port reaches the host's")
+
+
+def new_project_file_note(record):
+    """" (a new project file, for AGENT: ...)" when keep_in_project is about to make the project file of the run
+    RECORD (there is none yet): a project file is for one agent - another one's start there is refused with "is for
+    AGENT" until it is started with --no-config. "" when the file is there (or the run names no workspace)."""
+    workspace = record.get("workspace")
+    if not workspace:
+        return ""
+    try:
+        if launcher().config_key(Path(workspace) / launcher().CONFIG_NAME).exists():
+            return ""
+    except (OSError, ValueError):
+        return ""
+    agent = launcher().printable(str(record.get("agent")))
+    return f" (a new project file, for {agent}: another agent starts in this project with --no-config)"
 
 
 def keep_in_project(record, tokens, write=True, workspaces=(), preview=None, change=None):
@@ -2159,7 +2856,7 @@ def keep_in_project(record, tokens, write=True, workspaces=(), preview=None, cha
 
 def telemetry_refusal(record, args):
     """ValueError for `net allow` ARGS that would open the telemetry of a run's agent whose telemetry is never
-    switchable (Hermes, Qwen Code, DSH, Goose) where the run has no connection proxy to refuse it: one of its telemetry
+    switchable (Hermes, Qwen Code, DSH, Goose, OpenHands, nanobot, Letta Code) where the run has no connection proxy to refuse it: one of its telemetry
     hosts (also through a wildcard) or a public network (as the start refuses them: the agent's check_telemetry,
     the launcher's check_telemetry_unproxied). With the proxy its rules refuse those hosts whatever is opened."""
     agent = record.get("agent")
@@ -2234,6 +2931,10 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
     args = parser(lean=argv[:1] in (["list"], ["show"], ["untaint"], ["stop"], ["cut"])).parse_args(argv)
     # --allow-domain D is --allow-host D '*.D' from here on, as at the start (the launcher's expand_domains).
     args.domain_hosts = launcher().expand_domains(args) if getattr(args, "allow_domain", None) else []
+    # --allow-shared-wildcard '*.D' is --allow-host '*.D', its risk confirmed (the launcher's expand_shared_wildcards).
+    args.shared_confirmed = set()
+    if hasattr(args, "allow_host"):
+        launcher().expand_shared_wildcards(args)
     try:
         runs = running()
         if args.command == "list":
@@ -2244,13 +2945,7 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                                  "session": r.get("session"), "kind": r.get("kind"), "cut": r.get("cut"),
                                  "killswitch": bool(r.get("net_cut"))} for name, r in runs.items()], indent=2))
                 return 0
-            cut = any(r.get("cut") for r in runs.values())  # the column only while a kill switch holds somewhere
-            textout().table(["RUN", "NAME", "AGENT", "SINCE", "WORKSPACE", *(["CUT"] if cut else [])],
-                            [[printable(name), printable(str(label(name, r) if label(name, r) != name else
-                                                             r.get("session") or "-")),
-                              printable(r.get("agent", "")), printable(r.get("started", "")),
-                              printable(r.get("workspace", "")), *([r.get("cut") or "-"] if cut else [])]
-                             for name, r in runs.items()], out, indent=0, empty="no sandbox is running")
+            list_table(runs, out, wide=args.wide)
             return 0
         if args.command == "cut":
             if len(args.words) > (1 if args.all_runs else 2):
@@ -2260,11 +2955,26 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                 raise ValueError(f"no kill switch mode {printable(mode)}: remote, local, api, all or off" +
                                  (f" (sandbox-ai net cut [RUN] MODE: the mode comes last, e.g. net cut "
                                   f"{printable(mode)} api)" if len(args.words) == 1 and not args.all_runs else ""))
-            if args.all_runs:
-                return cut_runs(runs, None, mode, out, every=True, as_json=args.json)
-            record = choose(runs, args.words[0] if len(args.words) == 2 else None, command="net cut")
+            if args.all_runs:  # (the app's emergency stop): the orphaned runs too, once the running ones are cut
+                return cut_with_orphans(runs, None, mode, orphan_targets, out, every=True, as_json=args.json)
+            try:
+                record = choose(runs, args.words[0] if len(args.words) == 2 else None, command="net cut")
+            except NotRunning as exc:
+                orphan = orphan_record(exc.entry)  # its supervisor gone, its sandbox runs on: reached all the same
+                if orphan is None:
+                    raise
+                if mode == "off":
+                    raise ValueError(orphaned_text(exc.entry, "net cut off")) from None
+                return cut_with_orphans(runs, orphan, mode, [orphan], out, alone=args.only, as_json=args.json)
             return cut_runs(runs, record, mode, out, alone=args.only, as_json=args.json)
-        record = choose(runs, args.run, command=command or f"net {args.command}")
+        try:
+            record = choose(runs, args.run, command=command or f"net {args.command}")
+        except NotRunning as exc:
+            orphan = orphan_record(exc.entry) if args.command == "show" and not (
+                getattr(args, "keep", False) or getattr(args, "keep_all", False)) else None
+            if orphan is None:
+                raise
+            return show_orphan(orphan, out, as_json=args.json)  # what it may reach: read where it is kept
         if args.command == "stop":
             if sys.stderr.isatty() and not os.environ.get("SANDBOX_AI_NO_DEPRECATION"):
                 print(f"note: sandbox-ai net stop is the older form; sandbox-ai stop "
@@ -2293,10 +3003,11 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                         index += len(pairs[-1])
                     for pair in pairs:
                         said(f"  {launcher().printable(' '.join(pair))}")
+                made = new_project_file_note(record)
                 path, added = keep_in_project(record, tokens, workspaces=workspaces, preview=preview)
                 shown_added = " ".join(added)
                 said(f"{record.get('run', args.run)}: " + (f"kept in {launcher().printable(path)} (trusted): "
-                                                            f"{launcher().printable(shown_added)}" if added else
+                                                            f"{launcher().printable(shown_added)}{made}" if added else
                                                             f"{launcher().printable(path)} already has it all"))
             return 0
         if args.command == "untaint":
@@ -2305,6 +3016,8 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             out(f"{launcher().printable(record.get('run', args.run))}: " + (
                 f"taint taken back ({tainted_text(was)})" if was.get("tainted") else "was not tainted"))
             return 0
+        if getattr(args, "git_token_file", None):
+            args.git_token_file = named_token_files(args.git_token_file)
         logins = git_requests(args)
         notes = []
         if logins:
@@ -2312,11 +3025,30 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             forbidden = [o for o in options if o in (launcher().load_policy().get("forbid") or [])]
             if forbidden:
                 raise ValueError(f"{' '.join(forbidden)} is forbidden by the administrator's policy")
-            if not record.get("runtime_git_tokens"):
-                raise ValueError(f"{launcher().printable(record.get('run', args.run))} takes no Git login during the run: "
-                                 "it was started with --token-proxy or by a sandbox-ai older than 0.1.37; start it "
-                                 "again with the --git-token-* option")
             if args.command == "allow":
+                # Where each login goes: to the run's connection proxy (no token in the sandbox) wherever it can log
+                # in; into the sandbox's session directory (for its Git helper: the agent can read the token) only
+                # where it cannot, and only when the human says so.
+                shown_run = launcher().printable(record.get("run", args.run))
+                for kind, credential in logins:
+                    why = proxy_login_refusal(record, credential)
+                    credential["where"] = "proxy" if why is None else "sandbox"
+                    if why is None:
+                        continue
+                    if not record.get("runtime_git_tokens"):
+                        raise ValueError(f"{shown_run} takes no Git login during the run: {why}, and it was started "
+                                         "with --token-proxy or by a sandbox-ai older than 0.1.37 (no Git helper "
+                                         "for one in the sandbox); start it again with the --git-token-* option")
+                    if not getattr(args, "git_token_in_sandbox", False):
+                        raise ValueError(
+                            f"{who(record, args.run)} cannot be given the Git login for {printable(credential['url'])} "
+                            f"through its connection proxy: {why}. It can only be put into the sandbox's session "
+                            "directory for its Git helper, where the agent can read the token: to give it so, add "
+                            "--in-sandbox (sandbox-ai git-logins give ... --in-sandbox; net allow: "
+                            "--git-token-in-sandbox); or start it again with the login")
+                for kind, credential in logins:
+                    if kind == "file":
+                        check_token_file(record, credential["file"])
                 notes = git_network(args, logins)
         keys = api_key_requests(args, record) if args.api_key else []
         if keys and args.command == "allow":
@@ -2335,9 +3067,12 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             raise ValueError("--public-only goes with --allow-host NAME alone (names, no wildcard and no other "
                              "option)")
         chosen = resolve_with(through) if through else resolver
+        if args.command == "allow":
+            confirm_shared(args)  # --allow-host '*.D' below a shared service: --yes, or asked on a terminal
         request, names, hosts = request_for(args, args.command, public_resolver(chosen, notes) if public_only
                                             else chosen)
         wildcards = request.pop("wildcards", [])
+        shared = request.pop("shared_wildcards", [])
         ports = request.get("host_ports", [])
         network = request["nets"] or request["https"] or request["tcp"] or request.get("dns") or hosts or ports
         if not (network or logins or wildcards or keys):
@@ -2346,10 +3081,11 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
         if ports and args.command == "allow":
             if "--allow-host-port" in (launcher().load_policy().get("forbid") or []):
                 raise ValueError("--allow-host-port is forbidden by the administrator's policy")
-            web = launcher().web_service_port()
-            if web in ports:  # as at the start: the web interface controls every sandbox
-                raise ValueError(f"--allow-host-port {web}: the web interface (sandbox-ai web) listens there; no "
+            web = sorted(set(ports) & set(launcher().web_service_ports()))
+            if web:  # as at the start: the web interface controls every sandbox
+                raise ValueError(f"--allow-host-port {web[0]}: the web interface (sandbox-ai web) listens there; no "
                                  "sandbox may reach it")
+            own_port(record, ports)
             if not record.get("host_relay"):
                 raise ValueError(f"{launcher().printable(record.get('run', args.run))} cannot relay host ports: it was "
                                  "started by a sandbox-ai older than 0.1.37; start it again with --allow-host-port")
@@ -2362,13 +3098,19 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             inside_subnet(record, request)
             # The run's security mode (run.json): what it refuses at the start stays closed during the run. The
             # supervisor checks it as well.
-            own_hosts = [h for h in args.allow_host if h not in args.domain_hosts]
-            wanted = (["--allow"] if args.allow else []) + (["--allow-host"] if own_hosts else []) + \
+            own_hosts = [h for h in args.allow_host if h not in args.domain_hosts and h not in shared]
+            wanted = (["--allow-shared-wildcard"] if shared else []) + \
+                (["--allow"] if args.allow else []) + (["--allow-host"] if own_hosts else []) + \
                 (["--allow-domain"] if args.allow_domain else []) + \
                 (["--allow-tcp"] if args.allow_tcp else []) + [f"--allow-{p}" for p in dict.fromkeys(args.presets)] + \
                 (["--dns"] if request.get("dns") else []) + (["--allow-host-port"] if ports else []) + \
                 (["--api-key"] if keys else [])
             refused = launcher().MODES.runtime_refusal(record.get("mode"), wanted, record.get("run", args.run))
+            run_mode = record.get("mode") if isinstance(record.get("mode"), dict) else {}
+            if not refused and shared and "--allow-shared-wildcard" not in (run_mode.get("refuses") or []):
+                # A run whose mode record predates --allow-shared-wildcard: what it stands for, --allow-host, decides.
+                refused = launcher().MODES.runtime_refusal(record.get("mode"), ["--allow-host"],
+                                                           record.get("run", args.run))
             if not refused and args.domain_hosts:
                 # A run whose mode record predates --allow-domain: what it stands for, --allow-host, decides.
                 refused = launcher().MODES.runtime_refusal(record.get("mode"), ["--allow-host"],
@@ -2376,7 +3118,7 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             if refused:
                 raise ValueError(refused)
         if wildcards:
-            change_wildcards(record, args.command, wildcards, apply=False)
+            change_wildcards(record, args.command, wildcards, apply=False, shared=shared)
         if args.command == "revoke" and hosts:
             # The addresses these names had when they were allowed, minus those another name allowed during
             # the run still needs (a CDN serves many names from one address).
@@ -2409,15 +3151,40 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
         restore = []
         try:
             if logins:
-                before = git_logins(record)
-                file = Path(record["session_dir"]) / launcher().RUNTIME_GIT_TOKENS
-                existed = file.exists()
+                # A login given for a server replaces the one given for it before, wherever that one was (the
+                # proxy's, the sandbox's); a revoke takes it from both.
+                giving = args.command == "allow"
                 urls = {credential["url"] for _, credential in logins}
-                kept = [entry for entry in before if entry["url"] not in urls]
-                write_git_logins(record, kept if args.command == "revoke" else kept + [
-                    {"url": credential["url"], "user": credential["user"], "token": tokens[credential["url"]]}
-                    for _, credential in logins])
-                restore.append(lambda: write_git_logins(record, before) if existed else file.unlink())
+                inside = [credential for _, credential in logins if giving and credential.get("where") == "sandbox"]
+                through = [credential for _, credential in logins if giving and credential.get("where") == "proxy"]
+                before = sandbox_git_logins(record)
+                if inside or any(entry["url"] in urls for entry in before):
+                    file = Path(record["session_dir"]) / launcher().RUNTIME_GIT_TOKENS
+                    existed = file.exists()
+                    write_git_logins(record, [entry for entry in before if entry["url"] not in urls] + [
+                        {"url": credential["url"], "user": credential["user"], "token": tokens[credential["url"]]}
+                        for credential in inside])
+                    restore.append(lambda: write_git_logins(record, before) if existed else file.unlink())
+                    # The agent can read these tokens: the run's secret guard knows them from now on (and no longer
+                    # those taken back); put back with the logins when the command fails.
+                    register_sandbox_logins(record)
+                    restore.append(lambda: register_sandbox_logins(record))
+                if proxy_git_file(record) is not None and (through or any(
+                        entry["url"] in urls for entry in proxy_git_logins(record))):
+                    with git_logins_lock(record):  # read, give and keep as one step: two at once lose no login
+                        proxy_before = proxy_git_logins(record)
+
+                        def give_back_logins(previous=proxy_before):
+                            with git_logins_lock(record):
+                                write_proxy_git_logins(record, previous)
+                        # Before the write: the supervisor may have the logins already when the run's own list
+                        # cannot be kept (a full disk) - given back as they were then, never left unlisted.
+                        restore.append(give_back_logins)
+                        write_proxy_git_logins(
+                            record, [entry for entry in proxy_before if entry["url"] not in urls] + [
+                                {**{key: credential[key] for key in ("url", "user", "host", "port", "loopback")},
+                                 "token": tokens[credential["url"]]} for credential in through],
+                            options={f"--git-token-{kind}" for kind, _ in logins})
             if keys:
                 names_given = {key_name for _, key_name, _ in keys}
                 if args.command == "allow":
@@ -2460,14 +3227,21 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             note_given(record, args.command, hosts,
                        launcher().tcp_targets(argparse.Namespace(allow_tcp=args.allow_tcp)))
         if wildcards:
-            now = change_wildcards(record, args.command, wildcards)
+            now = change_wildcards(record, args.command, wildcards, shared=shared)
             out(f"{name}: host wildcards: {', '.join(now) or 'none'}" + (
                 "; the names opened below them stay open for the run (revoke them by name)"
                 if args.command == "revoke" else "; each name below them is opened as it is looked up"))
         for _, credential in logins:
-            out(f"{name}: Git login for {printable(credential['url'])} (user {printable(credential['user'])}): its "
-                "Git logs in with it until the run ends" if args.command == "allow" else
-                f"{name}: Git login for {printable(credential['url'])} taken back")
+            if args.command != "allow":
+                out(f"{name}: Git login for {printable(credential['url'])} taken back")
+            elif credential.get("where") == "proxy":
+                out(f"{name}: Git login for {printable(credential['url'])} (user {printable(credential['user'])}): its "
+                    "connection proxy logs in with it on the wire until the run ends (clone, fetch, push; it wins over "
+                    "a login the run was started with for that server); the token does not enter the sandbox")
+            else:
+                out(f"{name}: Git login for {printable(credential['url'])} (user {printable(credential['user'])}): its "
+                    "Git logs in with it until the run ends - IN THE SANDBOX: the token is in its session directory, "
+                    "where the agent can read it (its connection proxy cannot log in there)")
         for host, key_name, _ in keys:
             if args.command == "allow":
                 out(f"{name}: API key {key_name} for {host}: in the sandbox, "
@@ -2481,7 +3255,8 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
         for note in notes:
             out(f"note: {launcher().printable(note)}")
         if args.command == "allow":
-            options = (" ".join(f"--allow-host {h}" for h in args.allow_host if h not in args.domain_hosts)
+            options = (" ".join(f"--allow-shared-wildcard {h}" if h in shared else f"--allow-host {h}"
+                                for h in args.allow_host if h not in args.domain_hosts)
                        + "".join(f" --allow-domain {d}" for d in dict.fromkeys(launcher().domain_of(v)
                                                                                 for v in args.allow_domain))
                        + "".join(f" --allow-{p}" for p in args.presets)
@@ -2502,9 +3277,10 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
                 out(f"{name}: allowed always for this project, its public addresses at every start: "
                     f"{', '.join(hosts)} (sandbox-ai approvals remembered; approvals forget)")
             elif getattr(args, "keep", False):
+                made = new_project_file_note(record)
                 path, added = keep_in_project(record, kept_options(args, ports))
                 if added:
-                    out(f"{name}: kept in {launcher().printable(path)} (trusted): {' '.join(added)}")
+                    out(f"{name}: kept in {launcher().printable(path)} (trusted): {' '.join(added)}{made}")
                 else:
                     out(f"{name}: {launcher().printable(path)} already has it")
             elif public_only:

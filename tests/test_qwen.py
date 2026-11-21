@@ -53,7 +53,8 @@ def ns(agent="qwen", *enable, **more):
 
 def test_every_feature_names_its_hosts_and_says_what_it_does():
     for name, spec in qwen.FEATURES.items():
-        assert qwen.FEATURE_SYNTAX.fullmatch(name) and spec["help"] and spec["hosts"]
+        # (a feature that only trusts something of the workspace or HOME opens no host: qwen.TRUSTS)
+        assert qwen.FEATURE_SYNTAX.fullmatch(name) and spec["help"] and (spec["hosts"] or name in qwen.TRUSTS)
         assert all(re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", host) for host in spec["hosts"]), name
     # No feature for its own sandbox or its telemetry: neither is ever switchable.
     assert not {"sandbox", "telemetry", "usage-statistics"} & set(qwen.FEATURES)
@@ -96,10 +97,10 @@ def test_check_refuses_what_qwen_cannot_do_here():
     qwen.check(ns("claude"))  # nothing to say about another agent
     with pytest.raises(ValueError, match="is for Qwen Code"):
         qwen.check(ns("claude", "updates"))
-    with pytest.raises(ValueError, match="not in the team image"):
-        qwen.check(ns("qwen"), companions=["claude"])
-    with pytest.raises(ValueError, match="not enforced for Qwen Code"):
-        qwen.check(ns("qwen"), hooks_active=True)
+    qwen.check(ns("qwen"), companions=["claude"])  # --with: a layer of the team image since 0.1.98
+    qwen.check(ns("qwen"), hooks_active=True)  # rules for its own tools: its hooks (system settings)
+    with pytest.raises(ValueError, match="loads no hook at all"):
+        qwen.check(ns("qwen", agent_args=["--safe-mode"]), hooks_active=True)
     with pytest.raises(ValueError, match="needs the network"):
         qwen.check(ns("qwen", "updates", offline=True))
 
@@ -199,7 +200,7 @@ def test_files_environment_and_plan():
     plan = qwen.plan(ns("qwen", "updates"))
     assert plan["version"] == qwen.VERSION and plan["experimental"] and plan["telemetry"]["switchable"] is False
     assert plan["enabled"] == [{"feature": "updates", "hosts": ["registry.npmjs.org"]}]
-    assert plan["off"] == ["model-catalog", "extensions"]
+    assert plan["off"] == ["model-catalog", "extensions", "extension-hooks"]
 
 
 def test_login_document():
@@ -518,3 +519,34 @@ def test_the_proxy_never_cuts_a_model_stream_qwen_still_waits_for():
     assert runtime.IDLE_TIMEOUT * 1000 >= llm.qwen_generation(llm.LOCAL_WAIT)["timeout"]
     assert runtime.relay.__defaults__[0] == runtime.IDLE_TIMEOUT
     assert llm.LOOP_DEFAULTS["watchdog_minutes"] == 0 and llm.LOOP_DEFAULTS["watchdog_requests"] == 0
+
+
+def test_extensions_hooks_cannot_run_after_the_rule_check():
+    """Backlog A: Qwen Code 0.26.4 runs an event's hooks project, user, system (sandbox-ai's rule hook), then the
+    extensions' (HookRegistry.getSourcePriority), and the last updatedInput wins (HookAggregator): an extension's hook
+    could rewrite a call after the check. While rules hold, Qwen Code starts with --extensions none (no extension
+    loads, nor its hooks) unless the human trusts them: --qwen-enable extension-hooks, or an --extensions of their
+    own in its arguments."""
+    assert qwen.extension_args(ns("qwen"), hooks_active=True) == ["--extensions", "none"]
+    assert qwen.extension_args(ns("qwen"), hooks_active=False) == [], "no rules: nothing to keep first"
+    assert qwen.extension_args(ns("qwen", "extension-hooks"), hooks_active=True) == [], "the human's trust"
+    for own in (["--extensions", "mine"], ["-e", "mine"], ["--extensions=mine"]):
+        assert qwen.extension_args(ns("qwen", agent_args=own), hooks_active=True) == [], own
+    assert qwen.extension_args(ns("qwen", agent_args=["--", "-e x"]), hooks_active=True) == \
+        ["--extensions", "none"], "after -- it is the prompt's text"
+    assert qwen.extension_args(ns("claude"), hooks_active=True) == []
+    assert "extension-hooks" in qwen.FEATURES and qwen.FEATURES["extension-hooks"]["hosts"] == []
+    assert "after sandbox-ai's rule check" in qwen.FEATURES["extension-hooks"]["help"]
+
+
+def test_the_start_passes_extensions_none_while_rules_hold(tmp_path, monkeypatch):
+    a = s.parse_args(["qwen", "--no-tmux", "--workspace", str(tmp_path)])
+    monkeypatch.setattr(s, "hooks_active", lambda a: True)
+    assert s.agent_command(a, "qwen")[-2:] == ["--extensions", "none"] or \
+        "--extensions" in s.agent_command(a, "qwen")
+    command = s.agent_command(a, "qwen")
+    assert command[command.index("--extensions") + 1] == "none"
+    trusted = s.parse_args(["qwen", "--qwen-enable", "extension-hooks", "--no-tmux", "--workspace", str(tmp_path)])
+    assert "--extensions" not in s.agent_command(trusted, "qwen")
+    monkeypatch.setattr(s, "hooks_active", lambda a: False)
+    assert "--extensions" not in s.agent_command(a, "qwen")

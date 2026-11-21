@@ -374,7 +374,7 @@ def test_the_managed_directories_are_mounted_read_only(with_rules, tmp_path):
         s.validate(a)
         source = tmp_path / s.PurePosixPath(target).name
         _, run = s.pod_commands(a, "pod", tmp_path, tmp_path / "home")
-        assert f"type=bind,src={source},dst={target},ro,nodev" in run
+        assert f"type=bind,src={source},dst={target},ro,nodev,nosuid" in run
         a.backend = "bwrap"
         cmd = s.bwrap_command(a, tmp_path, tmp_path / "home")
         index = cmd.index(target)

@@ -59,7 +59,8 @@ def test_sandbox_ais_presets_are_grouped_by_its_categories_in_their_order(env):
     by_key = {key: [c.preset.name for c in cards] for _, _, cards, key in gallery.sections}
     for name, category in (("coding-memory", "development"), ("research-memory", "research"),
                            ("pentest-lab", "security"), ("paranoid", "privacy"), ("forensics", "forensics"),
-                           ("software-analysis", "forensics"), ("mobile-android", "hardware"), ("ollama", "llm"),
+                           ("software-analysis", "forensics"), ("mobile-android", "hardware"),
+                           ("android-debugging", "security"), ("axross-mcp-server", "development"), ("ollama", "llm"),
                            ("docs-writer", "writing"), ("sand-chess", "fun"), ("chaos-monkey", "testing")):
         assert name in by_key[f"{PR.SAI_CATEGORY}:{category}"], (name, category)
     every = {name for names in by_key.values() for name in names}
@@ -170,7 +171,8 @@ def test_the_showcases_are_demos_in_both_languages_and_keep_what_they_show_on_th
         argv[name] = B.to_argv(sai, board)
     stack = argv["showcase-full-stack"]
     assert stack.count("--service") == 2 and any(v.startswith("db:image=postgres,port=5432") for v in stack)
-    assert any(v.startswith("web:image=web,port=8080") for v in stack)
+    # (2026-11-19: sandbox-ai's own template by default - built by the start's preparation when it is not built)
+    assert any(v.startswith("web:image=showcase-web,port=8080") for v in stack)
     assert {"--allow-pypi", "--allow-npm", "--allow-github"} <= set(stack)
     vpn = argv["showcase-vpn"]
     assert vpn[vpn.index("--vpn") + 1] == "home" and "--dns" in vpn and "api.ipify.org" in vpn

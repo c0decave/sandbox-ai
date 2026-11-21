@@ -30,8 +30,8 @@ from .host_choice import on_host
 from .i18n import tr
 from .short_notices import short_notice
 from .widgets import (
-    MONO, AsyncCommand, Task, ask_first, button, confirm, fill, inform, plain_label, safe_tooltip, select_keys,
-    selected_keys, show_text, table, warn, shown_as_text,
+    MONO, AsyncCommand, Task, ask_first, button, confirm, explanation, fill, inform, plain_label, safe_tooltip,
+    select_keys, selected_keys, show_text, table, warn,
 )
 
 KINDS = ("apt", "npm", "pip")
@@ -390,6 +390,21 @@ class PackageList(QWidget):
             self.changed.emit()
 
 
+def keep_draft(dialog, key, names):
+    """What was typed in DIALOG's fields NAMES and not sent (Cancel, a refusal) filled in again when it opens for the
+    same KEY (drafts.py); KEY, for drafts.drop once sandbox-ai took it. A box that replaces an image, lets a build
+    reach the network or vouches for an agent-written file is never among NAMES: chosen anew each time."""
+    from . import drafts
+    dialog.draft = drafts.Draft(dialog, key, {name: getattr(dialog, name) for name in names})
+    return key
+
+
+def drop_draft(key, status):
+    if key is not None and status == 0:
+        from . import drafts
+        drafts.drop(key)
+
+
 class FileTargetDialog(QDialog):
     """Where a file goes in the image, and its mode."""
 
@@ -503,7 +518,8 @@ class NewVariantDialog(QDialog):
                 item = self.base.model().item(index)
                 if item is not None:
                     item.setEnabled(False)
-                self.base.setItemData(index, entry["base_problem"], Qt.ItemDataRole.ToolTipRole)
+                # (the reason names the image's own os-release, which whoever built the image chose)
+                self.base.setItemData(index, safe_tooltip(entry["base_problem"]), Qt.ItemDataRole.ToolTipRole)
             else:
                 self.base.addItem(tr("{name} (your image, UNCHECKED)", name=entry["name"]), entry["name"])
                 self.base.setItemData(index, unchecked_text(), Qt.ItemDataRole.ToolTipRole)
@@ -647,10 +663,11 @@ class BuildImageDialog(QDialog):
     its build runs on this computer) is built only after "I reviewed it" is ticked; that box is shown only then (on
     this machine: WRITABLE(path, what) - sandbox-ai's images.check_location - says so; another host's build says it)."""
 
-    def __init__(self, parent, taken=(), local=True, writable=None):
+    def __init__(self, parent, taken=(), local=True, writable=None, host=LOCAL):
         super().__init__(parent)
         self.setWindowTitle(tr("Add an image from a Containerfile"))
         self.taken, self.local, self.writable = set(taken), local, writable
+        self.host = LOCAL if local else host  # whose files: Choose… lists that host's folders (remote_chooser)
         layout = QFormLayout(self)
         self.name = QLineEdit()
         self.name.setPlaceholderText(tr("e.g. tools"))
@@ -661,7 +678,7 @@ class BuildImageDialog(QDialog):
         file_row, context_row = QHBoxLayout(), QHBoxLayout()
         file_row.addWidget(self.file, 1)
         context_row.addWidget(self.context, 1)
-        if local:
+        if local or host != LOCAL:  # (another host's, unnamed: typed)
             file_row.addWidget(button(tr("Choose…"), tr("Choose the Containerfile"), self.choose_file))
             context_row.addWidget(button(tr("Choose…"), tr("Choose the build context"), self.choose_context))
         self.replace = QCheckBox(tr("Replace an image of this name (build it anew)"))
@@ -697,14 +714,15 @@ class BuildImageDialog(QDialog):
         self.check()
 
     def choose_file(self):
-        from .state import choose_file
-        path = choose_file(self, tr("Containerfile"), key="containerfile")
+        from . import remote_chooser as RC
+        path = RC.choose_file(self, self.host, tr("Containerfile"), key="containerfile", start=self.file.text().strip())
         if path:
             self.file.setText(path)
 
     def choose_context(self):
-        from .state import choose_folder
-        path = choose_folder(self, tr("Build context"), key="containerfile-context")
+        from . import remote_chooser as RC
+        path = RC.choose_folder(self, self.host, tr("Build context"), key="containerfile-context",
+                                start=self.context.text().strip() or self.file.text().strip().rpartition("/")[0])
         if path:
             self.context.setText(path)
 
@@ -843,6 +861,8 @@ class ImagesPage(QWidget):
                                                 self.delete_button, self.more_button, None, self.refresh_button])
         images_layout.addWidget(widgets.flow(self.refresh_button, self.build_button, self.more_builds,
                                              self.new_button, self.delete_button, self.more_button))  # (wraps)
+        widgets.set_enabled(self.delete_button, False, tr(
+            "Select a variant first: an agent's own image is not deleted here."))  # (until a variant is selected)
         self.status = plain_label(selectable=True, log="images")
         images_layout.addWidget(self.status)
         splitter.addWidget(images)
@@ -864,11 +884,10 @@ class ImagesPage(QWidget):
         packages = QWidget()
         packages_layout = QVBoxLayout(packages)
         # What each tab is for, one line at its top (user: what are they for?).
-        self.tab_notes = [plain_label(tr("What the selected image has installed: its Debian, npm and Python packages "
-                                         "with their versions, read from the built image."), role="secondary"),
-                          plain_label(tr("What sandbox-ai adds to the selected image when it builds it: your packages, "
-                                         "files and Containerfile lines, a layer on top (Save, then Build)."),
-                                      role="secondary")]
+        self.tab_notes = [explanation(tr("What the selected image has installed: its Debian, npm and Python packages "
+                                         "with their versions, read from the built image.")),
+                          explanation(tr("What sandbox-ai adds to the selected image when it builds it: your packages, "
+                                         "files and Containerfile lines, a layer on top (Save, then Build)."))]
         packages_layout.addWidget(self.tab_notes[0])
         self.filter = QLineEdit()
         self.filter.setPlaceholderText(tr("filter (name or version)"))
@@ -1097,7 +1116,9 @@ class ImagesPage(QWidget):
         several = len(chosen) > 1
         widgets.set_enabled(self.build_button, entry is not None and not several,
                             tr("Acts on one row: {count} are selected.", count=len(chosen)) if several else None)
-        self.delete_button.setEnabled(any(e["variant"] for e in chosen) if several else bool(entry and entry["variant"]))
+        variant = any(e["variant"] for e in chosen) if several else bool(entry and entry["variant"])
+        widgets.set_enabled(self.delete_button, variant, None if variant else tr(
+            "Select a variant first: an agent's own image is not deleted here."))
 
     def show_shown_for(self):
         """The header above the tabs: which image the packages and the extension below are of (hidden on Your
@@ -1276,11 +1297,9 @@ class ImagesPage(QWidget):
             return
         editing = (self.host(), self.target)
         if self.host() != LOCAL:
-            # A file of that host: its path there, typed (this machine's file dialog cannot see it).
-            from PySide6.QtWidgets import QInputDialog
-            source, ok = QInputDialog.getText(self, tr("File to copy into the image"), shown_as_text(tr(
-                "The file's absolute path on {host}:", host=self.hosts.label())))
-            source = source.strip() if ok else ""
+            # A file of that host: chosen from its folders (remote_chooser), its path there.
+            from . import remote_chooser as RC
+            source = RC.choose_file(self, self.host(), tr("File to copy into the image"), "image-file", sai=self.sai)
             if source and (not source.startswith("/") or ":" in source or not source.isprintable()):
                 warn(self, tr("Images"), tr("Not an absolute path without ':': {path}", path=printable(source)))
                 return
@@ -1438,11 +1457,10 @@ class ImagesPage(QWidget):
     def build_user_images(self):
         box = QWidget()
         layout = QVBoxLayout(box)
-        layout.addWidget(plain_label(tr("Images from a registry (Docker Hub, quay.io, ghcr.io …) or your own "
+        layout.addWidget(explanation(tr("Images from a registry (Docker Hub, quay.io, ghcr.io …) or your own "
                                         "Containerfile: for services beside the agent (Service on the board, "
                                         "--service) and as the base of a variant. Each is pinned when it is added "
-                                        "and never pulled at a start; nobody reviewed them (UNCHECKED)."),
-                                     role="secondary"))
+                                        "and never pulled at a start; nobody reviewed them (UNCHECKED).")))
         self.user_table = table([tr("Name"), tr("Review"), tr("From"), tr("Pinned as"), tr("ID"), tr("User"),
                                  tr("Ports"), tr("System"), tr("Used by")], stretch=3, compact=(1, 4, 5, 6))
         self.user_table.setAccessibleName(tr("Your images"))
@@ -1549,21 +1567,23 @@ class ImagesPage(QWidget):
         host = self.host()
         dialog = PullDialog(self, [e["name"] for e in self.user_entries])
         dialog.reference.setText(reference or "")
+        draft = keep_draft(dialog, ("image-pull", host, reference or ""), ("reference", "name"))
         if widgets.exec_dropped(dialog):
             name = dialog.chosen_name()
             self.task.run(self.run_argv(*dialog.argv(), host=host),
-                          lambda status, out, err: self.user_image_added(status, out, err, name, host),
+                          lambda status, out, err: self.user_image_added(status, out, err, name, host, draft=draft),
                           tr("Pulling {name} (once; it is pinned by its digest)…", name=name), self.pull_button,
                           timeout=3600)
 
     def build_user_image(self):
         host = self.host()
         dialog = BuildImageDialog(self, [e["name"] for e in self.user_entries], local=host == LOCAL,
-                                  writable=self.location_check() if host == LOCAL else None)
+                                  writable=self.location_check() if host == LOCAL else None, host=host)
+        draft = keep_draft(dialog, ("image-build", host), ("name", "file", "context"))
         if widgets.exec_dropped(dialog):
             name, argv = dialog.name.text().strip(), dialog.argv()
             self.task.run(self.run_argv(*argv, host=host),
-                          lambda status, out, err: self.user_image_added(status, out, err, name, host, argv),
+                          lambda status, out, err: self.user_image_added(status, out, err, name, host, argv, draft),
                           tr("Building {name} (every FROM pulled once and pinned)…", name=name),
                           self.build_image_button, timeout=7200)
 
@@ -1576,7 +1596,8 @@ class ImagesPage(QWidget):
             applog.swallowed("images_page", "ImagesPage.location_check: a sandbox-ai that does not load: its bu…", _exc)
             return None
 
-    def user_image_added(self, status, out, err, name, host=None, argv=()):
+    def user_image_added(self, status, out, err, name, host=None, argv=(), draft=None):
+        drop_draft(draft, status)  # added: what was typed is done with (refused: kept)
         if status == -2 or (host is not None and host != self.host()):
             return
         if status != 0:
@@ -1622,18 +1643,20 @@ class ImagesPage(QWidget):
         entry, host = self.entry(), self.host()
         dialog = NewVariantDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0],
                                   getattr(module, "taggable", module.valid_name), getattr(self, "user_entries", []))
+        draft = keep_draft(dialog, ("image-variant", host), ("name", "agent", "copy", "base"))
         if widgets.exec_dropped(dialog):
             self.create_variant(dialog.name.text().strip(), dialog.agent.currentData(), not dialog.copy.isChecked(),
-                                host=host, base=dialog.base_name() or None)
+                                host=host, base=dialog.base_name() or None, draft=draft)
 
-    def create_variant(self, name, agent, empty=False, host=None, base=None):
+    def create_variant(self, name, agent, empty=False, host=None, base=None, draft=None):
         host = self.host() if host is None else host
         argv = self.run_argv("images", "new", name, "--from", agent, *(["--empty"] if empty else []),
                              *(["--base", base] if base else []), "--json", host=host)
-        self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name, host),
+        self.task.run(argv, lambda status, out, err: self.variant_done(status, out, err, name, host, draft),
                       tr("Creating the variant {name}…", name=name), self.new_button)
 
-    def variant_done(self, status, out, err, name, host=None):
+    def variant_done(self, status, out, err, name, host=None, draft=None):
+        drop_draft(draft, status)
         if status == -2 or (host is not None and host != self.host()):
             return
         if status != 0:
@@ -1652,9 +1675,8 @@ class ImagesPage(QWidget):
             self.delete_variants([e for e in chosen if e["variant"]], keep_image)
             return
         entry = self.entry()
-        if not entry or not entry["variant"]:
-            if keep_image:
-                warn(self, tr("Images"), tr("Select a variant first."))
+        if not entry or not entry["variant"]:  # (the Delete key on an agent's own image, or nothing selected)
+            warn(self, tr("Images"), tr("Select a variant first."))
             return
         text = tr("Delete the variant {name}? Its image {image} stays; projects that start it with --image-variant "
                   "stop working.", name=entry["target"], image=entry["image"]) if keep_image else \
@@ -1722,6 +1744,7 @@ class ImagesPage(QWidget):
     def new_from_recipe(self):
         entry, host = self.entry(), self.host()
         dialog = RecipeDialog(self, self.sai.agents, entry["agent"] if entry else self.sai.agents[0])
+        draft = keep_draft(dialog, ("image-recipe", host), ("recipe", "agent", "name"))
         if not widgets.exec_dropped(dialog):
             return
         name = dialog.name.text().strip()
@@ -1733,10 +1756,11 @@ class ImagesPage(QWidget):
         recipe, agent = dialog.recipe.currentData(), dialog.agent.currentData()
         argv = self.run_argv("images", "recipe", recipe, "--from", agent, *([f"--as={name}"] if name else []),
                              host=host)
-        self.task.run(argv, lambda status, out, err: self.recipe_done(status, out, err, recipe),
+        self.task.run(argv, lambda status, out, err: self.recipe_done(status, out, err, recipe, draft),
                       tr("Creating the variant {name}…", name=name or recipe), self.more_button)
 
-    def recipe_done(self, status, out, err, recipe):
+    def recipe_done(self, status, out, err, recipe, draft=None):
+        drop_draft(draft, status)
         if status == -2:
             return
         if status != 0:

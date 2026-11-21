@@ -90,17 +90,35 @@ def read(name, default):
 version, kind = read("version", "0.1.30"), read("kind", "user")
 where = {{"user": home + "/.local/share/sandbox-ai/versions/" + version,
          "system": "/opt/sai/lib/sandbox-ai/versions/" + version, "checkout": "/srv/sandbox-ai",
-         "pip": "/usr/lib/python3/site-packages"}}.get(kind)
+         "pip": "/usr/lib/python3/site-packages",
+         "package": home + "/.cache/sandbox-ai/appimage/" + version + "-0123456789abcdef"}}.get(kind)
 if args == ["--version"]:
     print("sandbox-ai " + version)
 elif args == ["version", "--verbose"]:
     print("sandbox-ai " + version)
     if kind != "old":
         print("installed in: " + where)
-        print("updates: not through install.sh (pip install -U sandbox-ai)" if kind == "pip" else
+        if kind == "package":
+            print("package: appimage")
+        print("updates: not through install.sh (pip install -U sandbox-ai-app)" if kind == "pip" else
               "updates: must be signed by one of these keys (sandbox-ai update)")
+        if read("self_update", ""):  # (a package or a pip installation that replaces itself says so)
+            print("self-update: " + read("self_update", ""))
+        print("update mode: " + read("update_mode", "notify"))
+elif args[:2] == ["update", "mode"]:
+    if kind == "old":  # (before 0.1.117: install.sh got the words)
+        print("Usage: install.sh [options]", file=sys.stderr)
+        sys.exit(2)
+    if args[2] in ("download", "auto") and kind != "user":
+        print("sandbox-ai update mode: update mode " + args[2] + " ... notify works", file=sys.stderr)
+        sys.exit(2)
+    open(os.path.join(home, "update_mode"), "w").write(args[2])
+    open(os.path.join(home, "update.log"), "a").write(json.dumps({{"args": args, "root": False}}) + "\\n")
+    window = args[args.index("--at") + 1] if "--at" in args else "03:00-05:00"
+    print(json.dumps({{"mode": args[2], "window": window, "kind": kind, "manual": None, "installed": version,
+                      "timer": {{"installed": args[2] != "off"}}}}))
 elif args == ["update", "--check"]:
-    if kind in ("checkout", "pip"):
+    if kind in ("checkout", "pip") and read("self_update", "") != "yes":
         print("sandbox-ai update: this copy was not installed by install.sh", file=sys.stderr)
         sys.exit(1)
     print("installed: " + (version if kind == "user" or os.environ.get("FAKE_ROOT") else "none") + " (somewhere)")
@@ -217,6 +235,20 @@ def test_ssh_never_prompts_and_learns_the_host_key_once(remote):
     assert h.known_hosts_file().parent.is_dir()
     tty = h.argv("ct1", ["attach", "web"], tty=True)
     assert tty[1] == "-tt", "an attach gets a terminal"
+
+
+def test_a_terminal_shows_no_connection_closed_line_of_ssh(remote):
+    """User report 2026-11-19: the app's tab Preparing the start (an MCP server added on a host) showed ssh's own
+    "Connection to 192.168.88.150 closed." under the command's output. Every ssh with a terminal (-tt: the app's and
+    the web's terminal tabs, hosts update in a terminal) runs with LogLevel=ERROR - its errors still said; one without
+    a terminal (-T) prints no such line and keeps ssh's default."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    tty = h.argv("ct1", ["mcp", "add", "binwalk"], tty=True)
+    options = tty[:tty.index("--")]
+    assert tty[1] == "-tt" and options[options.index("LogLevel=ERROR") - 1] == "-o"
+    assert "BatchMode=yes" in options, "still never prompting"
+    plain = h.argv("ct1", ["list"])
+    assert plain[1] == "-T" and "LogLevel=ERROR" not in plain
 
 
 def test_test_says_what_is_wrong(remote):
@@ -446,13 +478,39 @@ def test_sudo_that_wants_a_password_is_named_and_asked_in_a_terminal(remote, mon
 
 
 def test_what_is_not_updated_over_ssh(remote):
-    for kind, words in (("checkout", "git pull"), ("pip", "pip install -U sandbox-ai")):
+    for kind, words in (("checkout", "git pull"), ("pip", "pip install -U sandbox-ai-app")):
         setup(remote, kind=kind)
         result = h.update("ct1")
         assert words in result["error"] and "install.sh" in result["error"] and not result["changed"]
     assert updates(remote) == []
     setup(remote, kind="old")  # a version before version --verbose: its own update, as it would run it
     assert h.update("ct1")["after"] == "0.1.66" and updates(remote)[-1]["args"] == ["update"]
+
+
+@pytest.mark.parametrize("kind", ["pip", "package"])
+def test_a_host_whose_package_or_pip_installation_replaces_itself_is_updated_by_its_own_update(remote, kind):
+    """`self-update: yes` in its version --verbose: its `sandbox-ai update` takes the release's file for it, signed -
+    so hosts update runs it, as for install.sh's installations (with nothing of install.sh's in the words)."""
+    setup(remote, kind=kind)
+    (remote["home"] / "self_update").write_text("yes")
+    info = h.installation(f"sandbox-ai 0.1.30\ninstalled in: /x\n" + ("package: appimage\n" if kind == "package" else
+                          "updates: not through install.sh (a pip installation)\n") + "self-update: yes\n")
+    assert info["kind"] == kind and info["self_update"] is True and h.not_updatable("ct1", info) is None
+    assert h.update_args(info, "0.1.70") == ["update", "--version", "0.1.70"]
+    status = h.host_status("ct1")
+    assert status["available"] == "0.1.66" and status["update"] is True and status["error"] is None
+    result = h.update("ct1")
+    assert result["error"] is None and result["after"] == "0.1.66" and result["changed"], result
+    assert updates(remote)[-1]["args"] == ["update"]
+    # This machine's copy is install.sh's kind of installation: never put over a package there.
+    refused = h.update("ct1", from_here=True)
+    assert "which --from-here does not replace" in refused["error"] and "sandbox-ai hosts install ct1" in \
+        refused["error"]
+    # One that cannot (an older release, a folder its user cannot write): said, with the way.
+    (remote["home"] / "self_update").write_text("no")
+    (remote["home"] / "version").write_text("0.1.30")
+    result = h.update("ct1")
+    assert "does not replace itself" in result["error"] and not result["changed"]
 
 
 def test_update_all_and_the_summary(remote):
@@ -570,11 +628,14 @@ def test_control_folder_without_xdg_runtime_dir(monkeypatch):
             assert oct(info.st_mode & 0o777) == "0o700" and info.st_uid == os.getuid()
         assert len(os.fsencode(other)) + 17 < 104
         top.chmod(0o755)
-        assert h.control_path(entry, platform="linux") is None, "a folder in a shared TMPDIR others can read"
+        fallback = h.temp_root()  # (backlog A: the user's own cache folder instead, never the folder others can read)
+        assert fallback.name == "run" and not str(fallback).startswith(str(scratch / "tmp"))
+        assert h.control_path(entry, platform="linux").parent == fallback / "ssh", "a folder others can read"
         shutil.rmtree(top)
         (scratch / "elsewhere").mkdir(mode=0o700)
         top.symlink_to(scratch / "elsewhere")
-        assert h.control_path(entry, platform="linux") is None, "never through a symbolic link"
+        assert h.control_path(entry, platform="linux").parent == fallback / "ssh", "never through a symbolic link"
+        assert not list((scratch / "elsewhere").iterdir())
         top.unlink()
         deep = scratch / ("t" * 70)
         deep.mkdir()
@@ -1032,6 +1093,33 @@ def test_an_update_with_no_release_points_to_from_here(remote, monkeypatch):
     assert "sandbox-ai hosts update ct1 --from-here" in result["error"]
 
 
+def test_an_old_installers_refusal_of_the_new_layout_points_to_from_here_in_one_readable_line(remote, monkeypatch):
+    """Live (coding-101, 2026-11-16): a host with a sandbox-ai before 0.1.92 ran its own `sandbox-ai update`, whose
+    install.sh downloaded the newest release and refused it - "not a sandbox-ai tree: claude-sandbox missing" (the old
+    single commands are gone since 0.1.92, and the old installer requires them in every tree). The error says why and
+    the way that works (this machine's copy); the installer's lines are joined readably - they were one line with
+    "\\x0a" between them."""
+    h.save({"ct1": h.check("ct1", {"ssh": "user@ct1"})})
+    real = h.run
+    said = ("install.sh: the release 0.1.94 is signed by SHA256:abc, but no release key is trusted yet: checked "
+            "against SHA256SUMS only\ninstall.sh: downloaded sandbox-ai 0.1.94 from https://github.com/c0decave/"
+            "sandbox-ai (SHA-256 verified, signature not checked)\ninstall.sh: not a sandbox-ai tree: claude-sandbox "
+            "missing\n")
+
+    def run(name, args, **kw):
+        if args[:1] == ["update"]:
+            return 1, "", said
+        return real(name, args, **kw)
+    monkeypatch.setattr(h, "run", run)
+    (remote["home"] / "kind").write_text("user")
+    (remote["home"] / "version").write_text("0.1.80")
+    result = h.update("ct1")
+    assert "sandbox-ai hosts update ct1 --from-here" in result["error"] and "0.1.80 on ct1 is older than 0.1.92" in \
+        result["error"], result
+    assert "\\x0a" not in result["error"] and "\n" not in result["error"]
+    assert "signature not checked); install.sh: not a sandbox-ai tree" in result["error"]
+
+
 def test_a_from_here_update_whose_sudo_wants_a_password_asks_in_the_terminal_from_here(remote, monkeypatch):
     """In a terminal, the second try of `hosts update --from-here` is this machine's copy again (sudo asking there),
     never the release update."""
@@ -1079,3 +1167,73 @@ def test_a_from_here_update_of_the_same_version_says_it_reinstalled():
             "fixed": []}
     assert h.update_lines({**base, "from_here": True})[0] == "ct1: reinstalled from this machine's copy (0.1.78)"
     assert h.update_lines(base)[0] == "ct1: 0.1.78, up to date"
+
+
+def test_a_sandbox_ai_uid_folder_another_user_made_first_is_never_used(tmp_path, monkeypatch):
+    """Backlog A (security review 1, finding 9): without XDG_RUNTIME_DIR the sockets go to $TMPDIR/sandbox-ai-UID,
+    which another user could make first (a squat): refused, never used, but then nothing worked. Now a folder that is
+    not this user's own private one - a link, open to others, another's - is passed over for the user's own
+    $XDG_CACHE_HOME/sandbox-ai/run, which nobody else can make; secret_store and remotefs use the same rule."""
+    import stat as stat_module
+    secret_store = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+        "secret_store_for_hosts_tests", ROOT / "sandbox" / "secret_store.py"))
+    secret_store.__spec__.loader.exec_module(secret_store)
+    remotefs = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+        "remotefs_for_hosts_tests", ROOT / "sandbox" / "remotefs.py"))
+    remotefs.__spec__.loader.exec_module(remotefs)
+    short = Path(tempfile.mkdtemp(prefix="sq-", dir="/tmp"))
+    try:
+        monkeypatch.setenv("TMPDIR", str(short))
+        monkeypatch.setenv("XDG_CACHE_HOME", str(short / "cache"))
+        monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+        own = short / f"sandbox-ai-{os.getuid()}"
+        fallback = short / "cache" / "sandbox-ai" / "run"
+        for module in (h, secret_store, remotefs):
+            assert module.temp_root() == own and stat_module.S_IMODE(own.stat().st_mode) == 0o700, module
+        assert h.control_folders("linux")[0][0] == own
+        own.rmdir()
+        elsewhere = short / "theirs"
+        elsewhere.mkdir()
+        own.symlink_to(elsewhere)  # a link (another user's folder behind it)
+        for module in (h, secret_store, remotefs):
+            assert module.temp_root() == fallback, module
+        assert stat_module.S_IMODE(fallback.stat().st_mode) == 0o700 and not list(elsewhere.iterdir())
+        path = h.control_path({"ssh": "me@host1", "port": 22}, "linux")
+        assert path is not None and str(path).startswith(str(fallback / "ssh"))
+        assert str(secret_store.agent_socket("ab" * 16, make=True)).startswith(str(fallback / "secrets"))
+        assert str(remotefs.control_path({"target": "me@host1"})).startswith(str(fallback / "sshfs"))
+        own.unlink()
+        own.mkdir(mode=0o700)
+        own.chmod(0o777)  # open to others (as another user's mkdir with a wide umask would leave it)
+        assert h.temp_root() == fallback and not list(own.iterdir())
+        own.rmdir()
+        assert secret_store.temp_root(make=False) == own and not own.exists(), "a question makes nothing"
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_a_hosts_own_update_mode_is_set_over_ssh_and_listed(remote):
+    """sandbox-ai hosts update NAME --mode MODE: `sandbox-ai update mode MODE --json` there (its timer as the SSH user);
+    hosts list shows each host's mode (read from its version --verbose)."""
+    setup(remote)
+    assert h.host_status("ct1")["update_mode"] == "notify"
+    lines = []
+    assert h.cli(["update", "ct1", "--mode", "auto", "--at", "02:00-04:00"], lines.append) == 0
+    assert lines == ["ct1: update mode auto, window 02:00-04:00, timer made"]
+    assert updates(remote)[-1]["args"] == ["update", "mode", "auto", "--at", "02:00-04:00", "--json"]
+    assert h.host_status("ct1")["update_mode"] == "auto"
+    assert h.status_text(h.host_status("ct1")) == "0.1.30, update: 0.1.66; updates: auto"
+    lines = []
+    assert h.cli(["update", "ct1", "--mode", "off", "--json"], lines.append) == 0
+    assert json.loads(lines[0])[0]["mode"] == "off"
+    with pytest.raises(ValueError, match="window of --mode auto"):
+        h.cli(["update", "ct1", "--at", "02:00"], print)
+    with pytest.raises(ValueError, match="--version, --from-here and --sudo are for an update now"):
+        h.cli(["update", "ct1", "--mode", "notify", "--version", "0.1.70"], print)
+    # A copy that cannot update itself: refused there, with the reason; an old sandbox-ai: update it first.
+    setup(remote, kind="checkout")
+    lines = []
+    assert h.cli(["update", "ct1", "--mode", "auto"], lines.append) == 1 and "notify works" in lines[0]
+    setup(remote, kind="old")
+    result = h.update_mode("ct1", "notify")
+    assert "no update mode yet" in result["error"] and "sandbox-ai hosts update ct1" in result["error"]

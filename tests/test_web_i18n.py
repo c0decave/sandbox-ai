@@ -207,7 +207,11 @@ NOT_WORDS = {
     "PreToolUse", "Bash|Write", "hub:binwalk", "egm", "x-access-token", "work", "Ann Example",
     "GH_WORK",
     # examples of the start form, the teams, the kits' marketplaces and the images (names, a Containerfile line)
+    # examples of the schedules' form (a schedule, a branch, a remote, an agent's one-shot form)
+    "nightly", "nightly-result", "origin", 'exec "review"',
     "my-plugins", "review", "ffmpeg jq", "RUN apt-get update && apt-get install -y --no-install-recommends tree", "data",
+    # the session files' search: an example of its patterns
+    "*.jsonl, **/rollout-*",
     # the launcher's own words a start's terminal is read for (never shown by the page)
     "agent-sandbox: /work is ",
 }
@@ -333,7 +337,7 @@ class Node {
   querySelectorAll(sel) { const cls = sel.replace(/^\./, ""); return this.all().filter(n => n !== this && (n.className || "").split(" ").includes(cls)); }
 }
 const body = new Node("body"), app = new Node("div"); app.setAttribute("id", "app"); body.append(app);
-const document = { body, title: "", createElement: t => new Node(t), createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
+const document = { body, title: "", createElement: t => new Node(t), createElementNS: (ns, t) => new Node(t), createTextNode: t => { const n = new Node("#text"); n.text = t; return n; },
   getElementById: id => body.all().find(n => n.id === id) || null, querySelector: () => null,
   querySelectorAll: sel => (sel === "[data-i18n]" ? body.all().filter(n => n.attributes["data-i18n"]) : []),
   documentElement: { lang: "en", style: { setProperty() {} } } };
@@ -407,9 +411,10 @@ def test_the_page_in_german_and_back_to_english(tmp_path):
     assert result["toast"] == "!Warnung: Fertig<b>x</b>×", "the level in German, the text as it is"
     assert result["filled"] == "<img src=x> auf {host}", "values are put in as text, once"
     approvals = result["approvals"]
-    for text in ("Freigaben", "Host", "Frage", "Verbleibende Zeit", "Erlauben", "Für diesen Lauf ablehnen", "Immer sperren…",
-                 "nur dieses Mal", "für den Rest dieses Laufs", "immer (für das Projekt gemerkt)"):
-        assert text in approvals, (text, approvals)
+    for text in ("Freigaben", "Host", "Frage", "Zustand", "Einmal erlauben", "Immer erlauben",
+                 "Immer, auch für Folgesitzungen", "Für diesen Lauf ablehnen", "Einmal ablehnen", "Immer sperren",
+                 "Offen (1)", "Zeit abgelaufen (0)", "Abgelehnt (0)", "Alle (1)"):
+        assert text in approvals, (text, " | ".join(x for x in approvals if len(x) < 60))
     assert result["closed"] == "die Verbindung wurde abgelehnt oder ging verloren (Code 1006): gone", \
         "the service's reason stays as it came"
     assert result["choices"] == [["en", "English", False, "en"], ["de", "Deutsch", True, "de"]], "each in its own language"

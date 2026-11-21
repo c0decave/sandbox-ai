@@ -42,6 +42,24 @@ def test_parts_refuse_dotdot_absolute_and_nul():
             files.parts(bad)
 
 
+def test_logins_and_keys_are_listed_like_every_other_file(tmp_path):
+    """User 2026-11-19 ("does the file manager hide files such as git-credentials? Always visible by default"): the
+    Files page lists every entry of a folder, logins and keys too - nothing is left out by its name."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    names = (".git-credentials", ".netrc", ".npmrc", ".pypirc", ".env", "api-token.txt", "id_ed25519.key")
+    for name in names:
+        (home / name).write_text("x")
+    (home / ".ssh" / "id_ed25519").write_text("x")
+    (home / ".claude").mkdir()
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    root = files.Root(home)
+    assert set(names) | {".ssh", ".claude"} == {entry.name for entry in root.list()}
+    assert [entry.name for entry in root.list(".ssh")] == ["id_ed25519"]
+    assert [entry.name for entry in root.list(".claude")] == [".credentials.json"]
+    assert root.read(".git-credentials") is not None
+
+
 def test_listing_shows_links_without_following(tree):
     root, *_ = tree
     entries = {e.name: e for e in root.list()}

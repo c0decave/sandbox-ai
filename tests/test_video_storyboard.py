@@ -41,7 +41,8 @@ def helptext(helper_env):
                               env=helper_env, timeout=60)
         if done.returncode != 0 and len(words) == 1:
             # a command whose --help needs an installation (update): its line in sandbox-ai --help
-            lines = [line for line in run().splitlines() if line.strip().startswith(f"sandbox-ai {words[0]}")]
+            lines = [line for line in run().splitlines()
+                     if words[0] in re.split(r"\s{2,}", line.strip())[0].split(", ")]
             assert lines, f"sandbox-ai {words[0]} --help: {done.stderr}"
             return "\n".join(lines)
         assert done.returncode == 0, f"sandbox-ai {' '.join(words)} --help: {done.stderr}"

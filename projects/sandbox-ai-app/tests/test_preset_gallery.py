@@ -27,6 +27,9 @@ def env(qapp, tmp_path, monkeypatch):
         monkeypatch.setenv(name, str(tmp_path / sub))
     (tmp_path / "runtime").mkdir()
     (tmp_path / "project").mkdir()
+    # The project inside HOME, as a user's projects are: the score does not depend on where the machine keeps its
+    # temporary files (under /root a folder outside HOME is "a system directory": score 92 there, 100 under /tmp).
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     monkeypatch.setattr(widgets, "SHOWN", [])
     sai = backend.SandboxAI()
@@ -191,11 +194,13 @@ def test_the_wizard_offers_the_same_library(env):
 def test_the_categories_and_the_description_are_on_the_left(gallery, qapp):
     """Feedback 2026-11-11: the categories above the description, both on the left; a click on a category shows its
     section of the cards without scrolling down to it."""
-    split = gallery.categories.parentWidget().parentWidget()
-    assert isinstance(split, QtWidgets.QSplitter)
+    details = gallery.categories.parentWidget()
+    split = gallery.findChild(QtWidgets.QSplitter)
+    # (the details in a scroll area of their own: they scroll when the dialog is lower than they need)
     assert split.widget(0).isAncestorOf(gallery.categories) and split.widget(0).isAncestorOf(gallery.description)
+    assert isinstance(split.widget(0), QtWidgets.QScrollArea) and split.widget(0).widget() is details
     assert split.widget(1) is gallery.scroll
-    side = split.widget(0).layout()
+    side = details.layout()
     order = [side.itemAt(i).widget() for i in range(side.count()) if side.itemAt(i).widget() is not None]
     assert order.index(gallery.categories) < order.index(gallery.description)
     assert gallery.categories.count() == len(gallery.sections) >= 2

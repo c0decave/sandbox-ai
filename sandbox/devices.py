@@ -4,6 +4,7 @@
   sandbox-ai devices list [RUN] [--json]        the run's devices: identity, rule, state
   sandbox-ai devices add [RUN] DEVICE           hand a host device to the running sandbox (as --device)
   sandbox-ai devices remove [RUN] DEVICE|ID     take it away again
+  sandbox-ai devices scan [--json]              this machine's devices a sandbox could be given (read-only)
   sandbox-ai limits [RUN] [--memory SIZE] [--cpus N] [--pids N]   change the running sandbox's limits
   sandbox-ai limits [RUN] --show [--json]       the limits it runs with now (nothing changed, no root needed)
 
@@ -561,6 +562,194 @@ def plan(value, launcher=None, option="--device"):
         raise ValueError(f"{option} {shown(value)}: no device node of it can be passed"
                          + (f" ({'; '.join(notes)})" if notes else " (it has none)"))
     return entries, notes, device
+
+
+# --- what this machine has: devices scan (the Board's device picker, "Add device" of a running sandbox) ----------
+
+SCAN_LIMIT = 256  # entries of one kind
+SCAN_KINDS = ("usb", "serial", "video", "render", "kvm", "sound", "gpu", "input")
+SCAN_TITLES = {"usb": "USB devices", "serial": "Serial ports", "video": "Cameras and video", "render": "Render nodes",
+               "kvm": "Virtual machines", "sound": "Sound", "gpu": "GPU (--gpu)", "input": "Input devices"}
+SERIAL_NODES = re.compile(r"tty(USB|ACM|AMA)[0-9]{1,4}")
+GPU_VENDORS = {"0x8086": "Intel", "0x1002": "AMD", "0x10de": "NVIDIA", "0x1af4": "virtio", "0x15ad": "VMware",
+               "0x1234": "QEMU", "0x5143": "Qualcomm", "0x13b5": "ARM"}
+
+
+def usb_name(facts):
+    """What a USB device is called: its manufacturer (unless the product says it) and product, as it reports them."""
+    product, maker = facts.get("product") or "", facts.get("manufacturer") or ""
+    if maker and maker.lower() not in product.lower():
+        product = f"{maker} {product}".strip()
+    return product or "USB device"
+
+
+def scan_entry(kind, value, label, nodes=(), option="--device", **more):
+    return {"kind": kind, "value": value, "label": shown(label, 300), "nodes": list(nodes), "option": option,
+            "usb": more.get("usb"), "product": more.get("product"), "manufacturer": more.get("manufacturer"),
+            "links": list(more.get("links") or []), "refused": more.get("refused"), "note": more.get("note")}
+
+
+def scan(sys_root=None, launcher=None, udev_root=None):
+    """{"devices": [entry], "notes": [...]} of the devices of this machine a sandbox could be given (`devices scan`):
+    each entry {"kind" (SCAN_KINDS), "value" (what --device or --gpu takes), "option", "label" (readable: "FTDI
+    FT232R USB UART (usb:0403:6001) - /dev/ttyUSB0"), "nodes", "usb", "product", "manufacturer", "links" (udev's
+    /dev/serial/by-id/...), "refused" (the launcher's reason, or None: not to be offered), "note" (its warning)}.
+    Read-only, no root: sysfs, udev's database and the names in /dev. LAUNCHER: agent_sandbox (its /dev and its
+    checks)."""
+    launcher = launcher or module("agent_sandbox")
+    sys_root = Path(sys_root or SYS)
+    dev_root = Path(launcher.DEV)
+    found, notes = [], []
+
+    def name(path):
+        return dev_names([str(path)], dev_root)[0]
+
+    def below(path):
+        return Path(name(path)).relative_to("/dev").as_posix()
+
+    def refusal(path):
+        for pattern, reason in launcher.DEVICE_REFUSED:
+            if re.fullmatch(pattern, below(path)):
+                return reason
+        try:
+            launcher.parse_device(str(path))
+        except ValueError as exc:
+            return shown(str(exc).replace(str(dev_root), "/dev"), 500)
+        return None
+
+    def warning(path):
+        return next((reason for pattern, reason in getattr(launcher, "DEVICE_WARN", [])
+                     if re.fullmatch(pattern, below(path))), None)
+
+    def listed(directory, pattern):
+        try:
+            return sorted(entry for entry in os.listdir(dev_root / directory) if re.fullmatch(pattern, entry))[
+                :SCAN_LIMIT]
+        except OSError:
+            return []
+
+    def owner(path):
+        """(sysfs directory, USB facts or None) of the node PATH."""
+        numbers = node_numbers(str(path))
+        directory = sysfs_device(numbers, sys_root) if numbers else None
+        usb = usb_ancestor(directory, sys_root) if directory else None
+        return directory, (usb_facts(usb) if usb else None)
+
+    def tail(facts):
+        return f" (usb:{facts['usb']})" if facts and facts.get("usb") else ""
+
+    # USB devices by identity (their nodes found as --device usb:... finds them); hubs are no device to hand over.
+    devices = []
+    for directory in usb_devices(sys_root):
+        facts = usb_facts(directory)
+        if facts["usb"] is None or attribute(directory, "bDeviceClass") == "09" or facts["usb"].startswith("1d6b:"):
+            continue
+        devices.append(facts)
+    for facts in devices[:SCAN_LIMIT]:
+        same = [f for f in devices if f["usb"] == facts["usb"]]
+        value = f"usb:{facts['usb']}"
+        if len(same) > 1 and facts.get("serial") and [f.get("serial") for f in same].count(facts["serial"]) == 1:
+            value += f":{facts['serial']}"
+        refused, nodes = None, []
+        try:
+            entries, _notes, _device = plan(value, launcher)
+            nodes = [name(entry["path"]) for entry in entries]
+        except ValueError as exc:
+            refused = shown(str(exc).removeprefix(f"--device {shown(value)}: "), 500)
+        shown_nodes = [n for n in nodes if not n.startswith("/dev/bus/usb/")] or nodes
+        label = f"{usb_name(facts)} ({value})" + (f" - {', '.join(shown_nodes)}" if shown_nodes else "")
+        found.append(scan_entry("usb", value, label, nodes, usb=facts["usb"], product=facts.get("product"),
+                                manufacturer=facts.get("manufacturer"), refused=refused))
+    if (dev_root / "bus" / "usb").is_dir():
+        found.append(scan_entry("usb", "/dev/bus/usb", "All USB devices, also those plugged in later - /dev/bus/usb",
+                                ["/dev/bus/usb"], note=warning(dev_root / "bus" / "usb")))
+    # Serial ports, cameras, input devices: the node, what it belongs to.
+    for node in listed(".", SERIAL_NODES.pattern):
+        path = dev_root / node
+        _directory, facts = owner(path)
+        numbers = node_numbers(str(path))
+        links = dev_names(udev_links(numbers, udev_root, dev_root), dev_root) if numbers else []
+        what = f"{usb_name(facts)} serial port" if facts else "Serial port"
+        found.append(scan_entry("serial", name(path), f"{what}{tail(facts)} - {name(path)}", [name(path)],
+                                usb=facts and facts.get("usb"), product=facts and facts.get("product"),
+                                links=links, refused=refusal(path), note=warning(path)))
+    for node in listed(".", r"video[0-9]{1,4}"):
+        path = dev_root / node
+        directory, facts = owner(path)
+        what = (attribute(directory, "name") if directory else None) or (usb_name(facts) if facts else "Video device")
+        found.append(scan_entry("video", name(path), f"{shown(what, 100)}{tail(facts)} - {name(path)}", [name(path)],
+                                usb=facts and facts.get("usb"), product=facts and facts.get("product"),
+                                refused=refusal(path), note=warning(path)))
+    # Render nodes (the GPU's compute and video engines without the screen), /dev/kvm.
+    for node in listed("dri", r"renderD[0-9]{1,4}"):
+        path = dev_root / "dri" / node
+        directory, _facts = owner(path)
+        pci = directory.parent.parent if directory else None
+        maker = GPU_VENDORS.get(attribute(pci, "vendor") or "") if pci else None
+        try:
+            driver = os.path.basename(os.readlink(pci / "driver")) if pci else None
+        except OSError:
+            driver = None
+        what = " ".join(filter(None, [maker and f"{maker} graphics", driver and f"({shown(driver, 40)})"]))
+        found.append(scan_entry("render", name(path), f"{what or 'GPU'} render node - {name(path)}", [name(path)],
+                                refused=refusal(path), note=warning(path)))
+    if (dev_root / "kvm").exists():
+        found.append(scan_entry("kvm", "/dev/kvm", "KVM (virtual machines) - /dev/kvm", ["/dev/kvm"],
+                                refused=refusal(dev_root / "kvm"), note=warning(dev_root / "kvm")))
+    # Sound: the whole /dev/snd, as the launcher passes it.
+    if (dev_root / "snd").is_dir():
+        try:
+            cards = sorted(filter(None, (attribute(card, "id") for card in (sys_root / "class" / "sound").glob(
+                "card[0-9]*"))))[:16]
+        except OSError:
+            cards = []
+        label = "Sound" + (f" ({', '.join(shown(c, 40) for c in cards)})" if cards else "") + " - /dev/snd"
+        found.append(scan_entry("sound", "/dev/snd", label, ["/dev/snd"], note=warning(dev_root / "snd")))
+    # The GPU kinds of --gpu this machine has.
+    nvidia = listed(".", launcher.NVIDIA_NODES)
+    if any(re.fullmatch(r"nvidia[0-9]+", n) for n in nvidia):
+        note = None
+        try:
+            if not launcher.nvidia_cdi_available():
+                note = ("with Podman, once: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml (the NVIDIA "
+                        "Container Toolkit); Bubblewrap takes /dev/nvidia* as they are")
+        except OSError:
+            pass
+        nodes = [f"/dev/{n}" for n in nvidia]
+        found.append(scan_entry("gpu", "nvidia", f"NVIDIA GPU (--gpu nvidia) - {', '.join(nodes)}", nodes, "--gpu",
+                                note=note))
+    if (dev_root / "dri").is_dir():
+        found.append(scan_entry("gpu", "dri", "Intel/AMD graphics, render nodes (--gpu dri) - /dev/dri", ["/dev/dri"],
+                                "--gpu"))
+        if (dev_root / "kfd").exists():
+            found.append(scan_entry("gpu", "rocm", "AMD ROCm (--gpu rocm) - /dev/dri, /dev/kfd",
+                                    ["/dev/dri", "/dev/kfd"], "--gpu"))
+    for node in listed("input", r"event[0-9]{1,4}"):
+        path = dev_root / "input" / node
+        directory, facts = owner(path)
+        what = (attribute(directory.parent, "name") if directory else None) or \
+            (usb_name(facts) if facts else "Input device")
+        found.append(scan_entry("input", name(path), f"{shown(what, 100)}{tail(facts)} - {name(path)}", [name(path)],
+                                usb=facts and facts.get("usb"), refused=refusal(path) or "an input device"))
+    found.sort(key=lambda entry: SCAN_KINDS.index(entry["kind"]))
+    return {"devices": found, "notes": notes}
+
+
+def scan_lines(found):
+    """`devices scan` as text: the devices grouped by kind, the value to give first."""
+    lines = []
+    for kind in SCAN_KINDS:
+        entries = [entry for entry in found["devices"] if entry["kind"] == kind]
+        if not entries:
+            continue
+        lines.append(SCAN_TITLES[kind])
+        width = max(len(entry["value"]) for entry in entries)
+        for entry in entries:
+            extra = f"  (refused: {entry['refused']})" if entry["refused"] else \
+                f"  ({entry['note']})" if entry["note"] else ""
+            lines.append(f"  {entry['value'].ljust(width)}  {entry['label']}{extra}")
+    lines += found["notes"]
+    return lines or ["no devices found that a sandbox could be given"]
 
 
 def judge(rules, entries):
@@ -1455,7 +1644,18 @@ def limits_line(limits):
 # --- command line -------------------------------------------------------------------------------------------
 
 
-def main(argv, out=print, prog="devices"):
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
+def main(argv, out=print, prog="devices", launcher=None):
     net = module("net")
     if prog == "limits":
         parser = argparse.ArgumentParser(prog="sandbox-ai limits", description="Change a running sandbox's limits.")
@@ -1467,14 +1667,17 @@ def main(argv, out=print, prog="devices"):
         parser.add_argument("--json", action="store_true", help="with --show: as JSON")
     else:
         parser = argparse.ArgumentParser(prog="sandbox-ai devices", description=__doc__.split("\n\n")[0],
-                                         formatter_class=argparse.RawDescriptionHelpFormatter,
+                                         formatter_class=help_style,
                                          epilog="\n\n".join(__doc__.split("\n\n")[1:3]))
         commands = parser.add_subparsers(dest="command", required=True)
-        lister = commands.add_parser("list")
+        lister = commands.add_parser("list", help="the run's devices: identity, rule, state")
         lister.add_argument("run", nargs="?")
         lister.add_argument("--json", action="store_true", help="as JSON")
-        for name in ("add", "remove"):
-            command = commands.add_parser(name)
+        scanner = commands.add_parser("scan", help="the devices of this machine a sandbox could be given (read-only)")
+        scanner.add_argument("--json", action="store_true", help="as JSON")
+        for name, text in (("add", "hand a host device to the running sandbox (as --device)"),
+                           ("remove", "take a device away again")):
+            command = commands.add_parser(name, help=text)
             command.add_argument("args", nargs="+", metavar="[RUN] DEVICE")
     args = parser.parse_args(argv)
     if prog == "limits" and args.show and (args.memory or args.cpus or args.pids):
@@ -1489,6 +1692,10 @@ def main(argv, out=print, prog="devices"):
                 out(json.dumps(limits) if args.json else limits_line(limits))
                 return 0
             set_limits(record, args.memory, args.cpus, args.pids, out=out)
+            return 0
+        if args.command == "scan":
+            found = scan(launcher=launcher)
+            out(json.dumps(found, indent=2) if args.json else "\n".join(scan_lines(found)))
             return 0
         if args.command == "list":
             runs = net.running()

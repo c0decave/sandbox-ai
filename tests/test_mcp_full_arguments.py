@@ -194,8 +194,8 @@ def running(tmp_path, monkeypatch):
     for item in (long, short):
         (run / "approvals" / f"{item['id']}.json").write_text(json.dumps(item))
     runs = {"r1": {"directory": str(run), "run": "r1", "workspace": str(tmp_path)}}
-    monkeypatch.setattr(approvals, "questions", lambda runs_=None, answered=False, real=approvals.questions:
-                        real(runs, answered=answered))
+    monkeypatch.setattr(approvals, "questions", lambda runs_=None, answered=False, real=approvals.questions, **kw:
+                        real(runs, answered=answered, **kw))
     monkeypatch.setattr(approvals, "policy_scope", lambda: "always")
     return long, short
 

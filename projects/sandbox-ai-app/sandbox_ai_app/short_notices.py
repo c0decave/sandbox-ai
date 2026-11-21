@@ -15,7 +15,10 @@ Every notice is also written to the app's log (INFO, component "notice": app.log
 status bar of the main window - also with the setting short_notices off ("Show short notices (toasts)"), which
 shows none at all.
 
-What needs reading (an error, a warning with a decision, a question) stays a dialog (widgets.inform, warn, confirm).
+What needs reading (an error, a warning with a decision, a question) stays a dialog (widgets.inform, warn, confirm) -
+but for an error the user asked to see in passing (an answer on the Approvals page that sandbox-ai refused: "no box
+with OK"): short_notice(..., error=True), framed in the theme's error colour, at least ERROR_MS and longer for a
+longer text (ERROR_LONGEST_MS at most), logged at ERROR; its page keeps the text in its note line to read again.
 """
 from __future__ import annotations
 
@@ -40,6 +43,9 @@ TEXT_LIMIT = 600  # characters shown (the log gets all of it)
 WIDTH = 520  # at most, in pixels (less in a narrow window)
 MARGIN = 16  # from the window's edges and between notices
 STATUS_MS = 8000  # the status bar keeps it that long
+ERROR_MS = 1500  # an error notice stays at least that long (the user: "about a second"; a little more to read it)
+ERROR_PER_CHAR_MS = 45  # and that much longer per character of its text
+ERROR_LONGEST_MS = 9000
 
 _enabled = [True]
 SHOWN = []  # tests: (title, text) of every notice shown
@@ -54,8 +60,11 @@ def enabled():
     return _enabled[0]
 
 
-def lifetime(text):
-    """How long (ms) TEXT stays before it fades: VISIBLE_MS, a little longer for a longer text, LONGEST_MS at most."""
+def lifetime(text, error=False):
+    """How long (ms) TEXT stays before it fades: VISIBLE_MS, a little longer for a longer text, LONGEST_MS at most; an
+    ERROR at least ERROR_MS, longer by its length (ERROR_LONGEST_MS at most), so a long one can be read."""
+    if error:
+        return min(ERROR_LONGEST_MS, max(ERROR_MS, VISIBLE_MS + len(str(text)) * ERROR_PER_CHAR_MS))
     return min(LONGEST_MS, VISIBLE_MS + max(0, len(str(text)) - FREE_CHARS) * PER_CHAR_MS)
 
 
@@ -99,12 +108,12 @@ def _status(window, title, text):
         pass
 
 
-def short_notice(parent, title_text, text, details=None, modal=None, warning=False):
+def short_notice(parent, title_text, text, details=None, modal=None, warning=False, error=False):
     """Say TEXT (TITLE_TEXT: what it is about) briefly in PARENT's window; it goes by itself. Takes what inform()
-    takes (MODAL means nothing here: a notice never waits). Returns the Notice shown, or None (setting off, or no
-    window)."""
+    takes (MODAL means nothing here: a notice never waits). ERROR: what failed, in the error colour, a little longer
+    (lifetime). Returns the Notice shown, or None (setting off, or no window)."""
     title_text, text = str(title_text or ""), printable_text(str(text or "")).strip()
-    applog.log("WARNING" if warning else "INFO", "notice",
+    applog.log("ERROR" if error else "WARNING" if warning else "INFO", "notice",
                (f"{title_text}: {text}" if title_text else text)  # (its lines kept: a list of what was removed)
                + (f"\n{printable_text(details)}" if details else ""))
     window = target_window(parent)
@@ -112,7 +121,7 @@ def short_notice(parent, title_text, text, details=None, modal=None, warning=Fal
     if not text or not enabled() or window is None:
         return None
     SHOWN.append((title_text, text))
-    return Stack.of(window).add(title_text, text)
+    return Stack.of(window).add(title_text, text, error=error)
 
 
 class NoticeLabel(NoticeText):
@@ -153,7 +162,7 @@ class NoticeLabel(NoticeText):
 class Notice(QFrame):
     """One notice inside WINDOW: the text, the theme's colours, a fade at its end; never focused when it appears."""
 
-    def __init__(self, window, title, text, stack):
+    def __init__(self, window, title, text, stack, error=False):
         super().__init__(window)
         self.setObjectName("short_notice")
         self.stack, self.title, self.text = stack, title, text
@@ -169,7 +178,9 @@ class Notice(QFrame):
         if title:
             self.setToolTip(safe_tooltip(title))  # (a title may name a start or a path)
         colors = theme.data()["colors"]
-        self.background, self.border = QColor(colors["base"]), QColor(colors["accent"])
+        self.error = bool(error)
+        self.background = QColor(colors["base"])
+        self.border = QColor(theme.color("bad") if error else colors["accent"])
         self.label.setStyleSheet(f"QTextEdit {{ color: {colors['text']}; background: transparent; border: none;"
                                  " padding: 0; margin: 0; }")
         self.opacity = QGraphicsOpacityEffect(self)
@@ -187,7 +198,7 @@ class Notice(QFrame):
         self.dismiss_timer = QTimer(self)
         self.dismiss_timer.setSingleShot(True)
         self.dismiss_timer.timeout.connect(self.dismiss)
-        self.ms = lifetime(text)
+        self.ms = lifetime(text, error=self.error)
         self.gone, self.menu_open, self.previous_focus = False, False, None
         QApplication.instance().focusChanged.connect(self.focus_moved)
 
@@ -311,10 +322,10 @@ class Stack(QObject):
         found = window.findChild(Stack, "short_notices", Qt.FindChildOption.FindDirectChildrenOnly)
         return found if found is not None else cls(window)
 
-    def add(self, title, text):
+    def add(self, title, text, error=False):
         while len(self.notices) >= MAX_SHOWN:
             self.notices[0].dismiss()
-        notice = Notice(self.window, title, text, self)
+        notice = Notice(self.window, title, text, self, error=error)
         self.notices.append(notice)
         self.layout()
         notice.start()

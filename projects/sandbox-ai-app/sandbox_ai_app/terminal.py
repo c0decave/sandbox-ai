@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -228,6 +229,27 @@ def login_of(argv):
     return terminal_text.login_agent(argv)
 
 
+def start_of_argv(argv):
+    """The agent a terminal of ARGV starts (`sandbox-ai AGENT ...` here, or on a host over SSH), else None."""
+    argv = [str(arg) for arg in argv]
+    if argv and os.path.basename(argv[0]) == "ssh":
+        words = remote_words(argv[-1])
+        return terminal_text.start_agent(words) if words else None
+    return terminal_text.start_agent(argv)
+
+
+DEVICE_CODE_WAIT_MS = 1500  # after a device page's link came: how long its one-time code may take to follow
+# What sandbox-ai says in the sandbox when the device sign-in it ran before Codex ended (agent_sandbox.py
+# DEVICE_LOGIN_PRELUDE): the window with the code closes then.
+SIGNED_IN, NOT_SIGNED_IN = "agent-sandbox: signed in", "agent-sandbox: no login was made"
+# What the launcher says on the host, before the sandbox runs, when the start's agent has no login (agent_sandbox.py
+# check_login): only after this line is a device sign-in in a start's tab taken for the start's own. Everything a
+# sandbox prints later is the agent's to choose - a one-time code it showed beside the provider's real page would be
+# someone else's sign-in (device codes are a common phishing target) - so nothing of a start that has a login, and
+# nothing after the beginning of its output (terminal_text.START_WATCH_BYTES), opens a browser by itself.
+NO_LOGIN_SAID = re.compile(r"agent-sandbox: [^\n]{0,80} has (?:no|an expired) (?:codex|hermes|qwen) login")
+
+
 class TerminalView(QWidget):
     """One terminal: the web view and the command's pseudo-terminal, the bar it asks its questions in (a paste, a
     program's OSC 52, a sign-in link), and, for `sandbox-ai login AGENT`, what watches the login for its sign-in
@@ -266,10 +288,22 @@ class TerminalView(QWidget):
         # A login: its output is read for the sign-in link (and a device code), its end closes the login browser.
         self.login_agent = login_of(self.argv)
         self.watch, self.offered, self.code_shown = None, None, False
+        # A start (sandbox-ai AGENT ...): the beginning of its output is kept (its launcher's last words, when it
+        # refuses: start_tail) and, for an agent whose sign-in is a device sign-in, read for one (Codex in a sandbox
+        # without a login runs its device sign-in first).
+        self.started_agent = None if self.login_agent else start_of_argv(self.argv)
+        self.tail, self.device_url, self.device_done, self.device_timer = None, None, False, None
+        self.ended_status = None  # the command's exit status once it ended (its output may still be on its way here)
         if self.login_agent:
             self.watch = terminal_text.LoginWatch()
             self.bridge.output.connect(self.login_output)
             self.exited.connect(self.login_exited)
+        elif self.started_agent:
+            self.tail = terminal_text.OutputTail()
+            if self.started_agent in terminal_text.DEVICE_AGENTS:
+                self.watch = terminal_text.LoginWatch(rows=True)  # (the agent's own screen, in tmux)
+            self.bridge.output.connect(self.start_output)
+            self.exited.connect(self.start_exited)
         # Chromium's page process may end on its own (out of memory, a crash in it): the app goes on, the tab says
         # so, and the log window and app.log keep why (it was silent before: an empty tab).
         self.page.renderProcessTerminated.connect(self.page_ended)
@@ -439,7 +473,12 @@ class TerminalView(QWidget):
         for url in self.watch.feed(data):
             if self.offered is None and terminal_text.host_in(terminal_text.host_of(url), self.hosts_for(url)[1]):
                 self.offered = url
+                if self.device_page(url):
+                    continue  # (a device sign-in: its page in the system browser, its code in a window)
                 self.offer_signin(url, auto=True)
+        if self.device_url:
+            self.device_progress()
+            return
         if self.offered and self.watch.code and not self.code_shown:
             self.code_shown = True
             from . import login_browser
@@ -466,12 +505,139 @@ class TerminalView(QWidget):
             self.open_login(url)
 
     def login_exited(self, status):
-        from . import login_browser
+        from . import device_window, login_browser
+        self.ended_status = status
         window = login_browser.window_for(self)
         if window is not None:
             window.login_ended(status)
+        shown = device_window.window_for(self)
+        if shown is not None:
+            shown.login_ended(status)
         if status == 0 and self.offered:
             self.bar.dismiss()
+
+    # -- a device sign-in: its page in the system browser, its one-time code in a window --
+
+    def device_page(self, url):
+        """True when URL is a device sign-in's page that is handled as one (the setting device_signin "system", the
+        default): the page is opened in the system browser and the code shown in a window once the code came - or
+        after DEVICE_CODE_WAIT_MS without one. With "app" the login browser takes it, as every sign-in link."""
+        if terminal_text.flow_of(url).kind != "device" or backend_setting("device_signin") != "system":
+            return False
+        self.device_url = url
+        if self.device_timer is None:
+            self.device_timer = QTimer(self)  # (the tab's own: it goes with the tab)
+            self.device_timer.setSingleShot(True)
+            self.device_timer.timeout.connect(self.device_signin)
+        self.device_timer.start(DEVICE_CODE_WAIT_MS)
+        return True
+
+    def start_signin_expected(self, url):
+        """Whether a device page's link in this start's tab belongs to the start itself: the launcher said on the
+        host, before that link, that the start's agent has no login (NO_LOGIN_SAID)."""
+        text = self.watch.text if self.watch is not None else ""
+        said = NO_LOGIN_SAID.search(text)
+        at = text.find(url)
+        return said is not None and (at < 0 or said.start() < at)
+
+    def device_progress(self):
+        """More output of a tab that shows a device sign-in: the window comes once the code is there, gets a code
+        that came later, and goes when sandbox-ai's sign-in before a start said its end."""
+        from . import device_window
+        if self.watch.code and not self.device_done:
+            self.device_signin()
+        elif self.watch.code:
+            shown = device_window.window_for(self)
+            if shown is not None and shown.code is None:
+                shown.show_code(self.watch.code)
+        if self.started_agent and self.device_done:
+            text = self.watch.text
+            if SIGNED_IN in text or NOT_SIGNED_IN in text:
+                shown = device_window.window_for(self)
+                if shown is not None:
+                    shown.login_ended(0 if SIGNED_IN in text else 1)
+                if SIGNED_IN in text:
+                    self.bar.dismiss()
+                self.device_url = None  # (over: the tab is the agent's from here on)
+
+    def device_signin(self):
+        """The device sign-in this tab shows (device_url, the watch's code), once: its page opens in the system
+        browser - not for a run behind Tor or a VPN, whose page would be reached with this computer's own address -
+        and a window shows the one-time code (Copy, Open again); the line above the terminal says the same. The
+        terminal may be another host's: the browser is this computer's."""
+        from . import device_window
+        from .terminal_tools import system_browser
+        url = self.device_url
+        if not url or self.device_done:
+            return
+        self.device_done = self.code_shown = True
+        code = self.watch.code if self.watch else None
+        agent = self.login_agent or self.started_agent
+        privacy = self.privacy()
+        refused = ""
+        if privacy is not None:
+            kind, profile = privacy
+            refused = tr("This sandbox runs through Tor: its sign-in page is not opened on this computer, which would "
+                         "reach it with your own address. Copy the link and open it in Tor Browser.") \
+                if kind == "tor" else \
+                tr("This sandbox runs behind the VPN or Tor profile {name}: its sign-in page is not opened on this "
+                   "computer, which would reach it past the VPN. Copy the link and open it in a browser behind it.",
+                   name=profile)
+        opened = False if refused else bool(system_browser(url))
+        where = self.start_host if self.start_host not in (None, LOCAL) else (
+            tr("another host") if self.argv and os.path.basename(str(self.argv[0])) == "ssh" else None)
+        window = self.window()
+        shown = device_window.show(self, url, code, agent, where, opened, refused,
+                                   parent=window if window is not self else None)
+        if self.ended_status is not None:
+            # The command ended before its output was shown here (a tab whose page was not ready yet keeps what was
+            # printed until it is): the window says the end it would have been told.
+            shown.login_ended(self.ended_status)
+        text = (tr("The sign-in page opened in your browser: {url}", url=terminal_text.shown_url(url, 120)) if opened
+                else tr("Sign-in link: {url}", url=terminal_text.shown_url(url, 160)))
+        # (the code itself is in the window, not in this line: a bar's text goes to the log)
+        text += " " + (tr("Its one-time code is shown in a window of its own.") if code else
+                       tr("Its one-time code is in the terminal."))
+        choices = [(tr("Copy the code"), lambda: self.helper.copy_text(code))] if code else []
+        if not refused:
+            choices += [(tr("Open again"), lambda: system_browser(url)),
+                        (tr("Open in the app's browser"), lambda: self.open_login(url))]
+        choices.append((tr("Copy link"), lambda: self.helper.copy_text(url)))
+        self.bar.ask(text, choices, level="info")
+
+    # -- a start: the beginning of its output --
+
+    def start_output(self, encoded):
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return
+        self.tail.feed(data)
+        if self.watch is not None:
+            for url in self.watch.feed(data):
+                if self.offered is None and terminal_text.host_in(terminal_text.host_of(url),
+                                                                  self.hosts_for(url)[1]) and \
+                        self.start_signin_expected(url) and self.device_page(url):
+                    self.offered = url
+            if self.device_url:
+                self.device_progress()
+        if self.tail.done and (not self.device_url or self.tail.seen > 8 * self.tail.limit):
+            # Its beginning is read: an agent that runs is left alone (no slot per chunk of its output). A sign-in
+            # still shown is followed a while longer (its end closes the window), never for good.
+            self.device_url = None
+            with contextlib.suppress(RuntimeError, TypeError):
+                self.bridge.output.disconnect(self.start_output)
+
+    def start_tail(self):
+        """The end of what this tab's start printed (plain text; "" for a tab that runs no start)."""
+        return self.tail.text() if self.tail is not None else ""
+
+    def start_exited(self, status):
+        from . import device_window
+        self.ended_status = status
+        shown = device_window.window_for(self)
+        if shown is not None:
+            shown.login_ended(status)
 
     # -- the context menu --
 
@@ -667,7 +833,7 @@ def attach_key(argv):
     return None
 
 
-AGENT_NAMES = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENT_NAMES = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 
 
 def remote_words(command):
@@ -831,6 +997,10 @@ class TerminalsPage(QWidget):
         self.browsers = browser_tabs.BrowserTabs(self)
         # The window's Sandboxes & sessions (set by the window): a tab's start, its Stop, Rename and Focus.
         self.sessions_page, self.focus_start = None, None
+        self.files_request = None  # the window: the Files page on a start's folder (MainWindow.show_files_for)
+        self.shell_request = None  # the window: a shell in a start's sandbox (SandboxesPage.open_shell)
+        self.workspace_request = None  # the window: a folder for a running start (MainWindow.add_folder_to)
+        self.run_menu_request = None  # the window: the "While it runs" submenu of a start (MainWindow.run_menu_for)
         self.store, self.reopening = None, False  # the app's state (MainWindow), and while reopen() opens tabs
         self.entries, self.problem, self.reading, self.shown_rows, self.ticks = [], "", None, None, 0
         self.starts = self.make_starts() if sai is not None else None
@@ -887,6 +1057,9 @@ class TerminalsPage(QWidget):
         self.refresh_button.setToolTip(tr("Read again now (it is read every few seconds anyway)"))
         self.refresh_button.clicked.connect(lambda _=False: self.refresh_starts())
         top.addWidget(self.host)
+        from .host_choice import follow_note
+        self.follow_note = follow_note()  # whose starts, when the window's pages follow the Sandboxes page's host
+        top.addWidget(self.follow_note)
         top.addWidget(self.summary, 1)
         top.addWidget(self.refresh_button)
         box_layout.addLayout(top)
@@ -989,7 +1162,9 @@ class TerminalsPage(QWidget):
 
     def starts_read(self, host, result, error):
         self.reading = None
-        if host != self.chosen_host():
+        if host != self.chosen_host():  # another host was chosen meanwhile: its starts now (a hidden page: when shown)
+            if on_screen(self):
+                self.refresh_starts()
             return
         if error is not None or not isinstance(result, list):
             self.problem = printable_text(str(error) if error is not None else tr("not a list"))[:300]
@@ -1808,10 +1983,46 @@ class TerminalsPage(QWidget):
                 (tr("Restart"), restart_why is None, restart_why, lambda: self.restart(view)),
                 (tr("Stop session"), stop_why is None, stop_why, lambda: self.stop_session(view)),
                 (tr("Focus in Sandboxes & sessions"), focus_why is None, focus_why, lambda: self.focus(view)),
+                self.files_entry(instance),
+                self.shell_entry(instance),
+                self.workspace_entry(instance),
+                self.run_menu(instance),
                 None,
                 (tr("Close tab"), True, None, lambda: self.close_tab(self.index_of(view))),
                 (tr("Stop session and close tab"), stop_why is None, stop_why, lambda: self.stop_and_close(view)),
                 (tr("Close other tabs"), self.tabs.count() > 1, None, lambda: self.close_others(view))]
+
+    def files_entry(self, instance):
+        """The tab menu's "File manager": the Files page on the session's folder (its workspace; on a host, over SSH)."""
+        record = instance.record if instance is not None and isinstance(instance.record, dict) else {}
+        folder = record.get("workspace") or (instance.project if instance is not None else "")
+        why = None if folder and getattr(self, "files_request", None) is not None else \
+            tr("Not a session the app knows (yet), or no folder of it: see Sandboxes & sessions")
+        return (tr("File manager"), why is None, why, lambda: self.files_request(instance))
+
+    def shell_entry(self, instance):
+        """The tab menu's "Open shell" (user 2026-11-19): a shell in the session's sandbox under the agent's rules
+        (`sandbox-ai shell NAME`; on a host over SSH) in a tab of its own - the Sandboxes page's Shell; while it runs."""
+        running = instance is not None and instance.state == "running"
+        why = None if running and getattr(self, "shell_request", None) is not None else \
+            tr("Only while the session runs (a session the app knows: see Sandboxes & sessions)")
+        return (tr("Open shell"), why is None, why, lambda: self.shell_request(instance))
+
+    def run_menu(self, instance):
+        """The tab menu's "While it runs" submenu (user 2026-11-19): the Sandboxes page's actions for a running start -
+        Allow…, Revoke…, Allowed during the run, the connection log, devices, workspaces, MCP servers, skills and
+        plugins, limits, rules, the browser - for this tab's session (the window builds it: run_menu_request), or
+        None (no window, a start the app does not know)."""
+        request = getattr(self, "run_menu_request", None)
+        return request(self, instance) if request is not None and instance is not None else None
+
+    def workspace_entry(self, instance):
+        """The tab menu's "Add folder…" (user 2026-11-19): a folder of this machine, of the session's host or of another
+        machine (sshfs) mounted into the running session - the Sandboxes page's Add workspace… for it."""
+        running = instance is not None and instance.state == "running"
+        why = None if running and getattr(self, "workspace_request", None) is not None else \
+            tr("Only while the session runs (a session the app knows: see Sandboxes & sessions)")
+        return (tr("Add folder…"), why is None, why, lambda: self.workspace_request(instance))
 
     def tab_menu(self, position):
         bar = self.tabs.tabBar()

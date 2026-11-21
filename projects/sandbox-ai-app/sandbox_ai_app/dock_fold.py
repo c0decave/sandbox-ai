@@ -4,13 +4,22 @@ Its own title bar keeps what Qt's has - the title (drag it to move the panel to 
 it; a double click undocks it or docks it again), the float button and the close button - and adds a fold button:
 folded, a panel docked at the left or the right is a slim strip with its title turned, one at the top or the bottom
 its title bar alone (and one that shares its column or row with another panel folds the other way, leaving the
-other panel its room). A floating panel is never folded (undocking a folded one unfolds it)."""
+other panel its room). A floating panel is never folded (undocking a folded one unfolds it).
+
+Undocked by its float button or a double click on its title, a panel is a window centred over the app's window and
+sized to what it shows (FloatPlacement) - unless the user moved or resized it while it floated before (in this app
+session): then it comes back where they had it. A panel dragged out stays where it was dropped, unless that leaves it
+partly off the screen."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
+import time
+import weakref
+
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
-    QBoxLayout, QDockWidget, QLabel, QSizePolicy, QStyle, QToolButton, QWidget,
+    QAbstractButton, QApplication, QBoxLayout, QDockWidget, QLabel, QScrollArea, QSizePolicy, QStyle, QToolButton,
+    QWidget,
 )
 
 from .i18n import tr
@@ -70,7 +79,7 @@ class DockTitleBar(QWidget):
         self.label.elides = True  # (tests/test_layout.py: a narrow panel cuts its title on purpose)
         self.turned = TurnedTitle(dock.windowTitle())
         self.fold_button = self.button(fold.toggle)
-        self.float_button = self.button(lambda: dock.setFloating(not dock.isFloating()))
+        self.float_button = self.button(lambda: float_out(dock) if not dock.isFloating() else dock.setFloating(False))
         self.close_button = self.button(dock.close)
         self.close_button.setToolTip(tr("Close the panel (View > Panels brings it back)"))
         self.close_button.setAccessibleName(self.close_button.toolTip())
@@ -283,3 +292,166 @@ class DockFold(QObject):
                 dock.setMaximumSize(UNLIMITED, UNLIMITED)
         finally:
             self.applying = False
+
+
+# -- a panel floated out of the window --
+
+MIN_FLOAT = QSize(320, 240)  # a floating panel at least this big (when the screen has the room)
+SCREEN_SHARE = 0.9  # ... and at most this share of the screen's available area
+
+
+def float_geometry(wanted, minimum, over, available, maximum=None, least=MIN_FLOAT):
+    """Where a panel floated out goes: WANTED's size (its content's), at least MINIMUM and LEAST (MIN_FLOAT), at most
+    SCREEN_SHARE of AVAILABLE (the screen's available area) and MAXIMUM (the panel's own), centred over OVER (the
+    app's window; None: where WANTED is, a QRect then) and kept inside AVAILABLE."""
+    cap = QSize(int(available.width() * SCREEN_SHARE), int(available.height() * SCREEN_SHARE))
+    if maximum is not None:
+        cap = cap.boundedTo(maximum)
+    size = wanted.size() if isinstance(wanted, QRect) else wanted
+    width = min(max(size.width(), minimum.width(), least.width()), cap.width())
+    height = min(max(size.height(), minimum.height(), least.height()), cap.height())
+    placed = QRect(0, 0, width, height)
+    placed.moveCenter(over.center() if over is not None else wanted.center())
+    placed.moveLeft(max(available.left(), min(placed.left(), available.left() + available.width() - width)))
+    placed.moveTop(max(available.top(), min(placed.top(), available.top() + available.height() - height)))
+    return placed
+
+
+def content_size(dock):
+    """The size DOCK needs to show its content whole: its size hint, and what its scrolled areas (the properties'
+    rows) would hide beyond theirs."""
+    hint = dock.sizeHint().expandedTo(dock.minimumSizeHint())
+    content = dock.widget()
+    more_width = more_height = 0
+    if content is not None:
+        for scroll in content.findChildren(QScrollArea):
+            inner = scroll.widget()
+            outer = scroll.parentWidget()
+            while outer is not None and outer is not content and not isinstance(outer, QScrollArea):
+                outer = outer.parentWidget()
+            if inner is None or isinstance(outer, QScrollArea) or not scroll.widgetResizable() \
+                    or scroll.isHidden():
+                continue  # (only the outermost scrolled areas shown: a nested one scrolls inside its own)
+            need = inner.sizeHint().expandedTo(inner.minimumSizeHint())
+            frame = 2 * scroll.frameWidth()
+            have = scroll.sizeHint()
+            bar = scroll.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+            more_width = max(more_width, need.width() + frame + bar - have.width())
+            more_height = max(more_height, need.height() + frame - have.height())
+    return QSize(hint.width() + max(0, more_width), hint.height() + max(0, more_height))
+
+
+def float_out(dock):
+    """Undock DOCK as by its float button: centred and sized to its content (FloatPlacement)."""
+    placement = getattr(dock, "placement", None)
+    if placement is not None:
+        placement.ask_centre()
+    dock.setFloating(True)
+
+
+class FloatPlacement(QObject):
+    """Where DOCK goes when it floats out of WINDOW (the app's main window). Its float button (dock_fold's or Qt's
+    own) or a double click on its title: centred over WINDOW on its screen, sized to its content (float_geometry,
+    content_size). A drag: where it was dropped, unless partly off the screen - then centred, its size kept (settled,
+    once no mouse button is held: MainWindow.settle_floating); a panel restored floating (or floated by the app) is
+    only moved inside the screen. Once the user moved or resized it while it floated, a later undocking keeps theirs
+    (Qt brings it back where it was)."""
+
+    QUIET = 0.5  # seconds after the app placed it in which a move is the window manager's, not the user's
+
+    def __init__(self, dock, window):
+        super().__init__(dock)
+        # (the window by a weak reference and no lambda holding the dock: a connection is held in C++, where Python's
+        # collector cannot see a cycle - a closed window would stay alive with its backend; test_performance)
+        self.dock, self.window_ref = dock, weakref.ref(window) if window is not None else (lambda: None)
+        self.centre, self.placing, self.dragged, self.user_placed = False, False, False, False
+        self.floating = dock.isFloating()  # (as topLevelChanged said: Qt moves it before it says so)
+        self.placed, self.quiet_until = None, 0.0
+        dock.installEventFilter(self)
+        dock.topLevelChanged.connect(self.floated)
+        own = dock.findChild(QAbstractButton, "qt_dockwidget_floatbutton")  # Qt's own title bar's float button
+        if own is not None:
+            own.pressed.connect(self.own_float_pressed)
+
+    @property
+    def window(self):
+        return self.window_ref()
+
+    def own_float_pressed(self):
+        """Qt's own float button: a press while docked is the user's "undock" (centred)."""
+        if not self.dock.isFloating():
+            self.ask_centre()
+
+    def ask_centre(self):
+        """The next undocking (now) is the user's "undock": centred and fitted."""
+        self.centre = True
+        QTimer.singleShot(0, self, self.forget_centre)  # (undocked meanwhile, or not at all)
+
+    def forget_centre(self):
+        self.centre = False
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        kind = event.type()
+        if watched is self.dock:
+            if kind == QEvent.Type.MouseButtonDblClick and not self.dock.isFloating():
+                self.ask_centre()  # (Qt undocks it on the title's double click, right after this)
+            elif kind in (QEvent.Type.Move, QEvent.Type.Resize) and self.floating and self.dock.isFloating() \
+                    and not self.placing \
+                    and time.monotonic() >= self.quiet_until and self.dock.geometry() != self.placed:
+                self.user_placed = True
+        return False
+
+    def floated(self, floating):
+        self.floating = bool(floating)
+        if not floating:
+            self.placing = False
+            return
+        self.placing = True
+        centre, self.centre = self.centre, False
+        self.dragged = not centre and QApplication.mouseButtons() != Qt.MouseButton.NoButton
+        if centre:
+            QTimer.singleShot(0, self, self.place)  # (once it is a window and unfolded: dock_fold's floated)
+
+    def place(self, force=False, keep_size=False, centre=True):
+        """Centred over the window and sized to its content - unless the user placed it before. FORCE: also then (it
+        is partly off the screen); KEEP_SIZE: its own size kept (at most SCREEN_SHARE of the screen); CENTRE False:
+        moved only as far as it takes to be inside the screen."""
+        dock = self.dock
+        try:
+            if not dock.isFloating():
+                return
+            if force or not self.user_placed:
+                screen = (self.window.screen() if self.window is not None and centre else None) or dock.screen()
+                available = screen.availableGeometry()
+                frame, inner = dock.frameGeometry(), dock.geometry()
+                # (the window manager's frame around it, when it has one: kept inside the screen too)
+                available = available.adjusted(inner.left() - frame.left(), inner.top() - frame.top(),
+                                               inner.right() - frame.right(), inner.bottom() - frame.bottom())
+                over = (self.window.frameGeometry() if self.window is not None else available) if centre else None
+                wanted = inner if keep_size else content_size(dock)
+                placed = float_geometry(wanted, QSize(0, 0) if keep_size else dock.minimumSizeHint(), over,
+                                        available, dock.maximumSize(), least=QSize(0, 0) if keep_size else MIN_FLOAT)
+                if placed != dock.geometry():
+                    dock.setGeometry(placed)
+            self.placed = dock.geometry()
+        finally:
+            self.placing = False
+            self.quiet_until = time.monotonic() + self.QUIET
+
+    def settled(self):
+        """No mouse button is held any more (a drag ended, or none ran). A panel partly off the screen is brought
+        back with its size: a drag's centred, one restored or floated by the app moved only that far. A drop on the
+        screen stays (and counts as the user's place)."""
+        dock = self.dock
+        if not dock.isFloating():
+            return
+        dragged, self.dragged = self.dragged, False
+        screen = dock.screen()
+        if screen is not None and not screen.availableGeometry().contains(dock.frameGeometry()):
+            self.place(force=True, keep_size=True, centre=dragged)
+            return
+        if dragged:
+            self.user_placed = True
+        self.placing = False
+        self.placed = dock.geometry()
+        self.quiet_until = time.monotonic() + self.QUIET

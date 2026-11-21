@@ -212,7 +212,7 @@ def test_the_relay_changes_are_listed_and_the_note_does_not_hide_what_is_new():
         note["note"]
     # The digests are the agent's: the next request (the note not in it) continues this one.
     original = history(3)
-    digests = rt.llm_digests(sent, "chat", done["note"])
+    digests = rt.llm_digests(sent, "chat", done["notes"])
     assert digests == [rt.llm_digest("")] + [rt.llm_digest(m) for m in original["messages"]]
     assert "[sandbox-ai loop guard]" in sent["messages"][-1]["content"]  # put back after the digests
     # The block step changes no tool_choice and no tools (a server would render the prompt anew): the note only.
@@ -336,10 +336,12 @@ def test_the_file_is_rotated_and_old_parts_go(tmp_path):
     os.close(write_fd)
     thread.join(5)
     names = sorted(p.name for p in tmp_path.iterdir())
-    assert names == [path.name, path.name + ".1", path.name + ".2"]
+    # the older parts compressed while the run goes on (review 2: they stayed uncompressed until gc after the run)
+    assert names == [path.name, path.name + ".1.gz", path.name + ".2.gz"]
     assert all(p.stat().st_size <= 1000 for p in tmp_path.iterdir())
-    numbers = [json.loads(line)["n"] for name in (path.name + ".2", path.name + ".1", path.name)
-               for line in (tmp_path / name).read_text().splitlines()]
+    numbers = [json.loads(line)["n"] for name in (path.name + ".2.gz", path.name + ".1.gz", path.name)
+               for line in (gzip.decompress((tmp_path / name).read_bytes()).decode() if name.endswith(".gz")
+                            else (tmp_path / name).read_text()).splitlines()]
     assert numbers == sorted(numbers) and numbers[-1] == 99 and 0 not in numbers and writer.lost == 1
     assert writer.write(b"x\n") is True  # after the pipe ended, writing still works
     blocked = rt.LlmTrafficFile(-1, tmp_path / "missing" / "f.jsonl")

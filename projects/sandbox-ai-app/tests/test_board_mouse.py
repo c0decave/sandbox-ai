@@ -5,6 +5,7 @@ the inspector is a panel that moves, undocks, folds to a strip and unfolds (or c
 the score and the findings are shown only on request."""
 import gc
 import os
+import time
 
 import pytest
 
@@ -136,7 +137,8 @@ def test_a_right_click_on_the_canvas_opens_its_menu_and_moves_nothing(page, qapp
     assert len(page.menus) == 1
     menu = page.menus[0]
     assert texts(menu) == ["Add a part here", "Paste", "Select all", "Fit the board", "Zoom 100 %", "Arrange",
-                           "Save as preset…", "Discard the changes not applied", "Undo", "Redo", "What is this?"]
+                           "Save as preset…", "Export…", "Import…", "Discard the changes not applied", "Undo", "Redo",
+                           "What is this?"]
     assert not action(menu, "Undo").isEnabled()
     parts = action(menu, "Add a part here").menu()
     limits = next(a for a in parts.actions() if a.text() == "Limits")
@@ -169,8 +171,9 @@ def test_a_right_click_on_a_node_selects_it_and_offers_its_actions(page, qapp):
     qapp.processEvents()
     assert limits.isSelected() and not agent.isSelected(), "the node right-clicked is the selection"
     menu = page.menus[-1]
-    assert [t for t in texts(menu) if t != "Wizard…"] == ["Properties", "What is this?", "Cut", "Copy",
-                                                                       "Paste", "Remove"]
+    # (Disconnect from: what the limits part is connected with - the agent; Connect with: nothing left)
+    assert [t for t in texts(menu) if t != "Wizard…"] == ["Properties", "What is this?", "Disconnect from", "Cut",
+                                                           "Copy", "Paste", "Remove"]
     assert action(menu, "Remove").isEnabled() and action(menu, "Cut").isEnabled()
     assert page.undo.count() == undo
     action(menu, "Remove").trigger()
@@ -481,9 +484,17 @@ def test_a_double_click_on_a_part_unfolds_the_docked_inspector_and_esc_or_the_ca
 def test_a_double_click_on_a_part_brings_a_floating_inspector_back_where_it_was(window, qapp, wait, closed):
     board, dock, fold = board_window(window, qapp)
     dock.setFloating(True)
-    dock.move(dock.x() + 37, dock.y() + 23)
+    # Moved by the user to a place on the screen (one partly off it is brought back once no button is held: the
+    # settle 250 ms after floating - on a loaded machine before the double click below, the flaky [False] and
+    # [True] here: the 1400 px window docked it at x 1376 on offscreen's 800 px screen).
+    screen = dock.screen().availableGeometry()
+    dock.move(screen.left() + 37, screen.top() + 23)
     qapp.processEvents()
     where = dock.geometry()
+    assert screen.contains(dock.frameGeometry())
+    time.sleep(0.3)  # the settle is due
+    qapp.processEvents()
+    assert dock.geometry() == where, "a panel on the screen stays where the user put it"
     if closed:
         dock.close()
         qapp.processEvents()
@@ -502,6 +513,44 @@ def test_a_double_click_on_a_part_brings_a_floating_inspector_back_where_it_was(
     QTest.mouseClick(board.view.viewport(), LEFT, NONE, empty_point(board))
     qapp.processEvents()
     assert dock.isVisible() and dock.isFloating() and not fold.folded, "Esc and the canvas never close a window"
+
+
+def reopen_floating_closed_inspector(window, qapp):
+    board, dock, fold = board_window(window, qapp)
+    dock.setFloating(True)
+    qapp.processEvents()
+    dock.close()
+    qapp.processEvents()
+    window.activateWindow()
+    board.view.setFocus()
+    qapp.processEvents()
+    focused = QApplication.focusWidget()
+    double_click(board.view, board.items[board.board.first("agent").id])
+    return board, dock, focused
+
+
+def test_the_keyboard_stays_on_the_canvas_when_the_panel_is_activated_after_a_busy_moment(window, qapp, wait):
+    """A loaded machine (the flaky [True] case above, ~3 in 4 runs on two busy CPUs): the window system activates the
+    panel shown floating whenever its event arrives - after a busy GUI thread together with any fixed timer, and
+    one pass of the event loop runs the timers before the window system's events. The activation itself gives the
+    keyboard back."""
+    board, dock, focused = reopen_floating_closed_inspector(window, qapp)
+    time.sleep(0.2)  # the GUI thread busy (a loaded machine) before the window system's events are handled
+    qapp.processEvents()
+    assert dock.isVisible() and dock.isFloating()
+    assert wait(lambda: QApplication.focusWidget() is focused, 2), "the keyboard stays where it was"
+    assert not wait(lambda: QApplication.focusWidget() is not focused, 0.3), "and stays there"
+
+
+def test_a_click_into_the_reopened_panel_keeps_the_keyboard_there(window, qapp, wait):
+    """The human clicked into the panel shown: it is wanted there, the keyboard is not sent back to the canvas."""
+    board, dock, focused = reopen_floating_closed_inspector(window, qapp)
+    handle = dock.windowHandle()
+    QTest.mouseClick(handle, LEFT, NONE, QPoint(dock.width() // 2, dock.height() // 2))
+    time.sleep(0.2)
+    qapp.processEvents()
+    assert wait(lambda: QApplication.activeWindow() is dock, 2)
+    assert not wait(lambda: QApplication.focusWidget() is focused, 0.5), "the keyboard is not taken from the panel"
 
 
 def test_a_double_click_on_a_part_shows_a_closed_docked_inspector(window, qapp):

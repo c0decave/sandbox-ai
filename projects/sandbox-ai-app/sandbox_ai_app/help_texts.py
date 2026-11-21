@@ -48,6 +48,7 @@ def _tip(ident, title, what, does=None, cli="", section=""):
 PAGE_SECTIONS = {"launch": "page-launch", "board": "page-board", "sandboxes": "page-sandboxes",
                  "approvals": "page-approvals", "terminals": "page-terminals", "connections": "page-connections",
                  "activity": "page-activity", "traffic": "page-traffic", "statistics": "page-statistics",
+                 "monitor": "page-monitor",
                  "files": "page-files",
                  "kits": "page-kits", "mcp": "page-mcp", "llm": "page-llm", "images": "page-images",
                  "credentials": "page-credentials", "team": "page-team", "system": "page-system",
@@ -56,7 +57,7 @@ PAGE_CLI = {"launch": "sandbox-ai AGENT [options]", "board": ".sandbox-ai.json",
             "sandboxes": "sandbox-ai list",
             "approvals": "--ask", "terminals": "tmux", "connections": "sandbox-ai logs, --log-dir",
             "activity": "sandbox-ai activity", "traffic": "sandbox-ai llm traffic, --llm-traffic",
-            "statistics": "sandbox-ai activity", "files": "", "kits": "sandbox-ai kits, --kit",
+            "statistics": "sandbox-ai activity", "monitor": "sandbox-ai top, sandbox-ai stats usage", "files": "", "kits": "sandbox-ai kits, --kit",
             "mcp": "sandbox-ai mcp, --mcp", "llm": "sandbox-ai llm, --llm NAME", "images": "sandbox-ai build",
             "credentials": "sandbox-ai secrets", "team": "sandbox-ai team",
             "system": "sandbox-ai doctor", "hosts": "sandbox-ai hosts", "help": ""}
@@ -76,8 +77,8 @@ def _page_tips():
 KIND_SECTIONS = {"workspace": "workspaces-mounts", "mount": "workspaces-mounts", "home": "secrets", "kits": "kits",
                  "agent": "sandbox", "approvals": "approvals", "proxy": "proxy", "git": "secrets", "mcp": "mcp",
                  "llm": "llm", "service": "services", "network": "network", "vpn": "vpn-tor", "devices": "devices", "limits": "limits",
-                 "display": "display", "browser": "browser", "session": "sessions", "logs": "logs",
-                 "engine": "sandbox"}
+                 "display": "display", "browser": "browser", "cairn": "cairn", "session": "sessions", "logs": "logs",
+                 "engine": "sandbox", "bridge": "bridges", "team": "page-team"}
 KIND_DOES = {
     "workspace": ("Connected to the agent, its folder is mounted: the first at /work (the project file is written "
                   "there), further ones at /workspaces/NAME. Not connected, it does not count.",
@@ -146,10 +147,34 @@ KIND_DOES = {
                 "Ein Browser in einem eigenen Container neben dem Agenten, im Netz des Agenten; Browser (Sandboxen & "
                 "Sitzungen) zeigt ihn als Tab unter Terminals neben dem Terminal der Sitzung. Sein Image wird einmal "
                 "gebaut: sandbox-ai build browser."),
+    "cairn": ("Cairn's board in its own container beside the agent, on the agent's network, opened in the sandbox's "
+              "browser; the session's agents are its workers, reached through a relay that takes only Cairn's own "
+              "command lines. Its image is built once: sandbox-ai build cairn.",
+              "Cairns Brett in einem eigenen Container neben dem Agenten, im Netz des Agenten, geöffnet im Browser "
+              "der Sandbox; die Agenten der Sitzung sind seine Worker, erreicht über ein Relay, das nur Cairns eigene "
+              "Befehlszeilen annimmt. Sein Image wird einmal gebaut: sandbox-ai build cairn."),
     "session": ("tmux inside the sandbox or not; a session itself is started with Start and as session.",
                 "tmux in der Sandbox oder nicht; eine Sitzung selbst starten Sie mit Start und als Sitzung."),
     "logs": ("Where the connection and file logs go (outside the sandbox) and how much they keep.",
              "Wohin die Verbindungs- und Dateilogs gehen (außerhalb der Sandbox) und wie viel sie behalten."),
+    "bridge": ("Connected to the agent and given another session, a session bridge is made once the board's start "
+               "runs (here, not on another host): the launcher checks it and says its warnings, you confirm, then the "
+               "two sessions see each other as MCP servers bridge-PEER. It is not written into the project file.",
+               "Mit dem Agenten verbunden und mit einer anderen Sitzung versehen, wird eine Sitzungsbrücke angelegt, "
+               "sobald der Start des Boards läuft (hier, nicht auf einem anderen Host): Der Starter prüft sie und "
+               "nennt seine Warnungen, Sie bestätigen, dann sehen die beiden Sitzungen einander als MCP-Server "
+               "bridge-PEER. Sie wird nicht in die Projektdatei geschrieben."),
+    "team": ("Connected to the agent, the board's Start starts a team (sandbox-ai team start on the board's host): "
+             "a sandbox of this board's settings per member on its project folder, the lead first. Each member may "
+             "have a role (added to its first prompt) and its own model, LLM server and mode. team start checks the "
+             "team there first; the part shows the team's board, and Open on the Teams page leads to it. It is not "
+             "written into the project file.",
+             "Mit dem Agenten verbunden, startet Start des Boards ein Team (sandbox-ai team start auf dem Host des "
+             "Boards): pro Mitglied eine Sandbox mit den Einstellungen dieses Boards auf seinem Projektordner, die "
+             "Leitung zuerst. Jedes Mitglied kann eine Rolle haben (seinem ersten Prompt angefügt) und ein eigenes "
+             "Modell, einen eigenen LLM-Server und Modus. team start prüft das Team dort zuerst; der Teil zeigt das "
+             "Brett des Teams, und Auf der Seite Teams öffnen führt dorthin. Er wird nicht in die Projektdatei "
+             "geschrieben."),
     "engine": ("Podman or Bubblewrap, the image or variant, and the agent's executable.",
                "Podman oder Bubblewrap, das Image oder die Variante und die ausführbare Datei des Agenten."),
 }
@@ -161,6 +186,8 @@ def _kind_tips():
     for key, kind in B.KINDS.items():
         options = ", ".join(kind.options[:6]) + (", …" if len(kind.options) > 6 else "")
         cli = {"workspace": "--workspace, --workspace-ro", "mount": "--mount SRC:DEST[:ro|rw]", "mcp": "--mcp NAME", "service": "--service NAME[:KEY=VALUE,...]",
+               "bridge": "sandbox-ai bridge add A B --allow CAPS",
+               "team": "sandbox-ai team start NAME --agents A,B --role A=TEXT --member-model A=MODEL",
                "proxy": "--no-proxy, --allow-http, --no-inspect"}.get(key, options)
         found[f"kind.{key}"] = Tip(f"kind.{key}", both(kind.title), both(kind.help), Text(*KIND_DOES[key]), cli,
                                    KIND_SECTIONS[key])
@@ -185,10 +212,11 @@ AREA_TIPS = (
           "Wo es startet: dieser Rechner oder ein Host von sandbox-ai hosts (über SSH). Die Modellwahl, die "
           "Vorlagen und die Auswahllisten des Formulars (VPN-Profile, Kits, Identitäten, MCP-Server, "
           "Image-Varianten) folgen ihm."),
-         ("On another host paths are that host's and typed in; what its sandbox-ai does not know is greyed out, "
-          "and a start that needs it is refused with its names.",
-          "Auf einem anderen Host sind Pfade die dieses Hosts und werden eingetippt; was sein sandbox-ai nicht "
-          "kennt, ist ausgegraut, und ein Start, der es braucht, wird mit den Namen abgelehnt."),
+         ("On another host paths are that host's, chosen from its folders (listed over SSH) or typed in; what its "
+          "sandbox-ai does not know is greyed out, and a start that needs it is refused with its names.",
+          "Auf einem anderen Host sind Pfade die dieses Hosts, aus seinen Ordnern gewählt (über SSH aufgelistet) "
+          "oder eingetippt; was sein sandbox-ai nicht kennt, ist ausgegraut, und ein Start, der es braucht, wird "
+          "mit den Namen abgelehnt."),
          "sandbox-ai hosts run HOST -- AGENT", "hosts"),
     _tip("launch.model", ("Model", "Modell"),
          ("The agent's own provider (cloud), or a model server registered on the chosen host, as NAME or "
@@ -256,26 +284,48 @@ AREA_TIPS = (
          ("Drag a node to move it; drag from a node's right port onto another node to connect them; Delete removes "
           "the selection. Drag with the right or the middle mouse button to move the view; a right click opens a "
           "menu (on a part: Properties, Cut, Copy, Paste, Remove; also Ctrl+X, Ctrl+C, Ctrl+V). Drop folders here to add them as workspace or mount, a .sandbox-ai.json to open its "
-          "project, a preset file to import it. Every change is one step of Undo.",
+          "project, a preset file to import it. Every change is one step of Undo. With the keyboard alone: the arrow "
+          "keys choose the next part that way (the agent first), Enter opens its properties with the keyboard in "
+          "them (OK or Cancel bring it back here), Alt and an arrow key move the chosen parts by one step of the "
+          "grid, the menu key opens the part's menu (Connect with and Disconnect from do what a drag from its port "
+          "does), Ctrl+A chooses every part.",
           "Ziehen Sie einen Knoten, um ihn zu verschieben; ziehen Sie vom rechten Anschluss eines Knotens auf einen "
           "anderen, um sie zu verbinden; Entf entfernt die Auswahl. Ziehen Sie mit der rechten oder der mittleren "
           "Maustaste, um die Ansicht zu verschieben; ein Rechtsklick öffnet ein Menü (auf einem Teil: Eigenschaften, "
           "Ausschneiden, Kopieren, Einfügen, Entfernen; auch Strg+X, Strg+C, Strg+V). Legen Sie hier Ordner ab, um "
           "sie als Arbeitsordner oder Einbindung hinzuzufügen, eine .sandbox-ai.json, um ihr Projekt zu öffnen, eine "
-          "Vorlagen-Datei, um sie zu importieren. Jede Änderung ist ein Schritt von Rückgängig."),
+          "Vorlagen-Datei, um sie zu importieren. Jede Änderung ist ein Schritt von Rückgängig. Nur mit der Tastatur: "
+          "Die Pfeiltasten wählen das nächste Teil in dieser Richtung (zuerst den Agenten), Enter öffnet seine "
+          "Eigenschaften mit der Tastatur darin (OK oder Abbrechen bringen sie hierher zurück), Alt und eine "
+          "Pfeiltaste verschieben die gewählten Teile um einen Rasterschritt, die Menütaste öffnet das Menü des "
+          "Teils (Verbinden mit und Trennen von tun, was das Ziehen von seinem Anschluss tut), Strg+A wählt alle "
+          "Teile."),
          ".sandbox-ai.json", "page-board"),
     _tip("board.inspector", ("Inspector", "Inspektor"),
          ("The settings of the selected part, built from the launcher's own options with their help texts.",
           "Die Einstellungen des gewählten Teils, aufgebaut aus den Optionen des Launchers mit ihren Hilfetexten."),
          ("A change applies to the board at once and is one step of Undo; Wizard (bottom left) asks the "
-          "questions again. It is a panel: drag its title to another edge of the window, or out of it (or use the "
-          "undock button) to make it a window of its own; its arrow folds it to a strip at the edge. A click on a "
+          "questions again. Options that seldom need to be set are folded under More options (the agent's after "
+          "Agent without approval prompts, the network's Podman network and fixed addresses, the engine's Podman "
+          "address, executable and runtime, a bridge's limits): its line says how many of them are set, Enter or "
+          "Space opens it, it stays open or folded for that kind of part while the app runs, and a finding about "
+          "one of them opens it. It is a panel: drag its title to another edge of the window, or out of it (or use "
+          "the undock button or double-click its title: then it is a window centred over the app's, as big as what "
+          "it shows; once you moved or resized it, it comes back there) to make it a window of its own; its arrow "
+          "folds it to a strip at the edge. A click on a "
           "part unfolds it (or shows it again, closed or floating where it was); Esc or a click on the empty board "
           "fold it while it is docked. View > Panels shows or closes it; where it was is kept for the next start.",
           "Eine Änderung gilt sofort auf dem Board und ist ein Schritt von Rückgängig; Wizard (links unten) "
-          "stellt die Fragen erneut. Er ist ein Bereich: Ziehen Sie seinen Titel an einen anderen Rand "
-          "des Fensters oder aus ihm heraus (oder nutzen Sie die Schaltfläche zum Abdocken), um ihn zu einem eigenen "
-          "Fenster zu machen; sein Pfeil klappt ihn zu einem Streifen am Rand ein. Ein Klick auf ein Teil klappt ihn "
+          "stellt die Fragen erneut. Optionen, die selten gesetzt werden müssen, sind unter Weitere Optionen "
+          "eingeklappt (beim Agenten die nach Agent ohne Rückfragen, beim Netzwerk Podman-Netz und feste Adressen, "
+          "bei der Engine Podmans Adresse, Programm und Runtime, bei einer Brücke ihre Grenzen): Ihre Zeile sagt, "
+          "wie viele davon gesetzt sind, Eingabe oder Leertaste öffnet sie, sie bleibt für diese Art von Teil offen "
+          "oder eingeklappt, solange die App läuft, und ein Befund zu einer davon öffnet sie. Er ist ein Bereich: "
+          "Ziehen Sie seinen Titel an einen anderen Rand des Fensters oder aus ihm heraus (oder nutzen Sie die "
+          "Schaltfläche zum Abdocken oder doppelklicken Sie seinen Titel: dann ist er ein Fenster mittig über dem "
+          "der App, so groß wie sein Inhalt; haben Sie ihn verschoben oder seine Größe geändert, kommt er dorthin "
+          "zurück), um ihn zu einem eigenen Fenster zu machen; sein Pfeil klappt ihn zu einem Streifen am Rand ein. "
+          "Ein Klick auf ein Teil klappt ihn "
           "aus (oder zeigt ihn wieder, geschlossen oder schwebend, wo er war); Esc oder ein Klick auf das leere Board "
           "klappen ihn ein, solange er angedockt ist. Ansicht > Bereiche zeigt oder schließt ihn; wo er war, bleibt "
           "für den nächsten Start."),
@@ -379,9 +429,10 @@ AREA_TIPS = (
           "Listet auch die beendeten Starts: gestoppte MCP-Server und was sandbox-ai sonst noch aufbewahrt, auf "
           "diesem Rechner und jedem Host."),
          ("History… shows what happened to the selected start; Clean up… removes leftovers and kept starts "
-          "unused for longer than keep_days, after showing what it would remove.",
+          "unused for longer than keep_days (none set: 90 days), after showing what it would remove.",
           "Verlauf… zeigt, was mit dem gewählten Start geschah; Aufräumen… entfernt Reste und aufbewahrte Starts, "
-          "die länger als keep_days ungenutzt sind, nachdem es gezeigt hat, was es entfernen würde."),
+          "die länger als keep_days ungenutzt sind (keines gesetzt: 90 Tage), nachdem es gezeigt hat, was es "
+          "entfernen würde."),
          "sandbox-ai list --all, sandbox-ai gc", "page-sandboxes"),
     _tip("sandboxes.hosts", ("Host", "Host"),
          ("Whose starts are listed: all of them, this machine's or one host's of sandbox-ai hosts. Shown once "
@@ -389,22 +440,53 @@ AREA_TIPS = (
           "Wessen Starts aufgelistet sind: alle, die dieses Rechners oder die eines Hosts von sandbox-ai hosts. "
           "Zu sehen, sobald es Hosts gibt; Starts zeigen auf der Seite Hosts stellt es ein."),
          ("Each host is read on its own: one that hangs holds up no other, and its rows stay greyed with when it "
-          "answered last. Clean up… acts on the host chosen here.",
+          "answered last. Clean up… acts on the host chosen here. The pages with a host chooser of their own "
+          "(Credentials, Activity, Statistics, LLM traffic and the others) show the host chosen here when they are "
+          "shown next; one chosen on such a page holds until it is changed here again.",
           "Jeder Host wird für sich gelesen: Einer, der hängt, hält keinen anderen auf, und seine Zeilen bleiben "
-          "ausgegraut mit der Zeit seiner letzten Antwort. Aufräumen… wirkt auf den hier gewählten Host."),
+          "ausgegraut mit der Zeit seiner letzten Antwort. Aufräumen… wirkt auf den hier gewählten Host. Die Seiten "
+          "mit einer eigenen Host-Auswahl (Zugangsdaten, Aktivität, Statistik, LLM-Verkehr und die anderen) zeigen "
+          "den hier gewählten Host, wenn sie das nächste Mal zu sehen sind; ein auf einer solchen Seite gewählter "
+          "bleibt, bis er hier wieder geändert wird."),
          "sandbox-ai hosts run HOST -- list --json", "page-hosts"),
-    _tip("sandboxes.manage", ("Rename, History, Clean up", "Umbenennen, Verlauf, Aufräumen"),
+    _tip("sandboxes.storage", ("Optimize, Storage", "Optimieren, Speicher"),
+         ("Optimize… lists what could be freed on this machine or the host chosen above, each with how much, its "
+          "command and whether it is safe while starts run; tick and Apply selected. Storage… (a session's icon) is "
+          "the same for one start, with its HOME by kind and its growth.",
+          "Optimieren… listet, was auf diesem Rechner oder dem oben gewählten Host frei werden könnte, jeweils mit "
+          "Menge, Befehl und ob es sicher ist, während Starts laufen; ankreuzen und Ausgewählte übernehmen. "
+          "Speicher… (ein Symbol einer Sitzung) ist dasselbe für einen Start, mit seinem HOME nach Art und seinem "
+          "Wachstum."),
+         ("Nothing is removed before Apply selected asks; each item runs its own command (gc --only …), that and "
+          "nothing else. The Size column shows each start's size at the last check, its growth on hover.",
+          "Nichts wird entfernt, bevor Ausgewählte übernehmen fragt; jeder Eintrag führt seinen eigenen Befehl aus "
+          "(gc --only …), das und nichts sonst. Die Spalte Größe zeigt die Größe jedes Starts bei der letzten "
+          "Prüfung, sein Wachstum beim Zeigen."),
+         "sandbox-ai gc --check [--home NAME]", "storage-check"),
+    _tip("sandboxes.manage", ("Rename, History, Disk usage, Clean up",
+                              "Umbenennen, Verlauf, Speicherbelegung, Aufräumen"),
          ("Rename… gives the selected start another name: its run id stays, and so do its row and its tab. "
-          "History… shows its starts, ends, pauses and renames. Clean up… removes leftovers and kept starts unused "
-          "for longer than keep_days.",
+          "History… shows its starts, ends, pauses and renames. Disk usage… shows how much space what sandbox-ai "
+          "keeps takes, and what a clean-up would free. Clean up… removes leftovers and kept starts unused "
+          "for longer than keep_days (none set: 90 days, announced 14 days ahead; keep_days 0: never), MCP root "
+          "file systems no server uses, and compresses the logs of ended runs and of MCP servers.",
           "Umbenennen… gibt dem gewählten Start einen anderen Namen: Seine Lauf-ID bleibt, und mit ihr seine Zeile "
-          "und sein Tab. Verlauf… zeigt seine Starts, Enden, Pausen und Umbenennungen. Aufräumen… entfernt Reste "
-          "und aufbewahrte Starts, die länger als keep_days ungenutzt sind."),
+          "und sein Tab. Verlauf… zeigt seine Starts, Enden, Pausen und Umbenennungen. Speicherbelegung… zeigt, wie "
+          "viel Platz das belegt, was sandbox-ai aufbewahrt, und was ein Aufräumen freigäbe. Aufräumen… entfernt "
+          "Reste und aufbewahrte Starts, die länger als keep_days ungenutzt sind (keines gesetzt: 90 Tage, 14 Tage "
+          "vorher angekündigt; keep_days 0: nie), MCP-Wurzeldateisysteme, die kein Server nutzt, und komprimiert "
+          "die Logs beendeter Läufe und der MCP-Server."),
          ("Clean up shows what it would remove and asks; it removes exactly that, or nothing when the list "
-          "changed meanwhile. They wait while a command runs.",
+          "changed meanwhile. From Disk usage…, Clean up with the caches… also empties the download caches in the "
+          "kept HOMEs, and HOMEs in depth… shows what in each kept HOME is big, by kind. They wait while a command "
+          "runs.",
           "Aufräumen zeigt, was es entfernen würde, und fragt; es entfernt genau das, oder nichts, wenn sich die "
-          "Liste inzwischen geändert hat. Sie warten, solange ein Befehl läuft."),
-         "sandbox-ai rename OLD NEW, sandbox-ai list --history NAME, sandbox-ai gc --dry-run", "page-sandboxes"),
+          "Liste inzwischen geändert hat. Aus Speicherbelegung… leert Aufräumen mit den Caches… auch die "
+          "Download-Caches in den aufbewahrten HOMEs, und HOMEs im Detail… zeigt, was in jedem aufbewahrten HOME "
+          "groß ist, nach Art. Sie warten, solange ein Befehl läuft."),
+         "sandbox-ai rename OLD NEW, sandbox-ai list --history NAME, sandbox-ai gc --usage, sandbox-ai gc --usage "
+         "--detail, sandbox-ai gc --dry-run",
+         "page-sandboxes"),
     _tip("sandboxes.stop", ("Stop", "Stoppen"),
          ("Ends the selected sandbox after asking (several selected: each of them, after one question); its "
           "launcher cleans up. A session can be paused instead. Stop all… ends every start that runs here and on "
@@ -434,6 +516,19 @@ AREA_TIPS = (
          "sandbox-ai net allow | devices | limits | workspace add | mcp attach --live | mcp detach --live | "
          "rules reload",
          "page-sandboxes"),
+    _tip("sandboxes.bridges", ("Bridges", "Brücken"),
+         ("The session bridges between running sessions of this machine: who reaches whom with what, their state "
+          "and calls. Both sessions' State says \"bridged with PEER\".",
+          "Die Sitzungsbrücken zwischen laufenden Sitzungen dieses Rechners: wer wen womit erreicht, ihr Zustand und "
+          "ihre Aufrufe. Der Zustand beider Sitzungen sagt „verbunden mit PEER“."),
+         ("New bridge… asks what one session may do to the other (message, ask, files, watch), lets the launcher "
+          "check it and say its warnings - the egress direction above all - and makes it once you confirm. Show, "
+          "Revoke… and Resume… act on the bridge selected.",
+          "Neue Brücke… fragt, was eine Sitzung mit der anderen tun darf (message, ask, Dateien, watch), lässt den "
+          "Starter sie prüfen und seine Warnungen nennen - vor allem die Richtung, in der Daten hinausgehen - und "
+          "legt sie an, sobald Sie bestätigen. Zeigen, Zurücknehmen… und Fortsetzen… wirken auf die gewählte "
+          "Brücke."),
+         "sandbox-ai bridge add | list | show | revoke | resume", "bridges"),
     # Approvals
     _tip("approvals.open", ("Open questions", "Offene Fragen"),
          ("What running sandboxes ask, on this computer and on every host: a destination not allowed yet, a push "
@@ -452,16 +547,23 @@ AREA_TIPS = (
           "zeigen auf der Seite Hosts stellt es ein."),
          None, "sandbox-ai hosts run HOST -- approvals list", "page-approvals"),
     _tip("approvals.scope", ("For how long", "Für wie lange"),
-         ("How long an allow lasts: once, for this run, or always (kept for the project). The security mode and "
-          "the administrator decide what is offered.",
-          "Wie lange ein Erlauben gilt: einmal, für diesen Lauf oder immer (für das Projekt gemerkt). "
-          "Sicherheitsmodus und Administrator bestimmen, was angeboten wird."),
-         ("Allow (Ctrl+Return) uses the scope chosen here. Deny for this run (Ctrl+Shift+D) refuses it until the "
-          "run ends, Deny once only this time, Block always… (Ctrl+Shift+K, asked first) at every later start of "
-          "the project.",
-          "Erlauben (Strg+Eingabe) nutzt die hier gewählte Geltung. Für diesen Lauf ablehnen (Strg+Umschalt+D) "
-          "weist es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren… (Strg+Umschalt+K, "
-          "mit Rückfrage) bei jedem späteren Start des Projekts."),
+         ("One button per scope, each one click: Allow once (this time only), Always allow (every same request of "
+          "this run, this session) or Always, also for later sessions (remembered for the project: its later "
+          "starts and resumed sessions too). The security mode, the administrator and the kind of question decide "
+          "which are offered; one that is off says why.",
+          "Eine Schaltfläche je Geltung, jede mit einem Klick: Einmal erlauben (nur dieses Mal), Immer erlauben "
+          "(jede gleiche Anfrage dieses Laufs, dieser Sitzung) oder Immer, auch für Folgesitzungen (für das Projekt "
+          "gemerkt: auch bei seinen späteren Starts und fortgesetzten Sitzungen). Sicherheitsmodus, Administrator "
+          "und Art der Frage bestimmen, welche angeboten werden; eine abgeschaltete sagt, warum."),
+         ("Keys: Ctrl+Return allows once, Ctrl+Shift+Return always, Ctrl+Shift+A also for later sessions; Enter in "
+          "the list always (once where only that is possible). Deny for this run (Ctrl+Shift+D) refuses it until the "
+          "run ends, Deny once only this time, Block always (Ctrl+Shift+K) at every later start of the project. "
+          "Each acts at once; Undo takes it back for a few seconds.",
+          "Tasten: Strg+Eingabe erlaubt einmal, Strg+Umschalt+Eingabe immer, Strg+Umschalt+A auch für "
+          "Folgesitzungen; Eingabe in der Liste immer (einmal, wo nur das möglich ist). Für diesen Lauf ablehnen "
+          "(Strg+Umschalt+D) weist es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren "
+          "(Strg+Umschalt+K) bei jedem späteren Start des Projekts. Jedes wirkt sofort; Rückgängig nimmt es einige "
+          "Sekunden lang zurück."),
          "sandbox-ai approvals allow | deny ID --scope once|run|always", "approvals"),
     _tip("approvals.always", ("Allowed or blocked always", "Immer erlaubt oder blockiert"),
          ("Your standing answers per project, of this machine or of a host chosen beside Refresh.",
@@ -558,18 +660,73 @@ AREA_TIPS = (
           "Der Protokollordner, dessen Läufe gezählt werden: Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro "
           "Agent."),
          None, "--log-dir", "logs"),
+    # System monitor
+    _tip("monitor.tree", ("What runs, by project", "Was läuft, nach Projekt"),
+         ("Every running sandbox under its project - an MCP server or a helper under the start it serves - with "
+          "its CPUs (and their share of its limit), memory of its limit, disk IO, network, processes, its trend "
+          "of the last 15 minutes and its warnings.",
+          "Jede laufende Sandbox unter ihrem Projekt - ein MCP-Server oder Helfer unter dem Start, dem er dient - "
+          "mit ihren CPUs (und deren Anteil an ihrer Grenze), Speicher ihrer Grenze, Platten-IO, Netzwerk, "
+          "Prozessen, ihrem Verlauf der letzten 15 Minuten und ihren Warnungen."),
+         ("Sort by what you look for; select a run or a project for its history.",
+          "Sortieren Sie nach dem, was Sie suchen; wählen Sie einen Lauf oder ein Projekt für dessen Verlauf."),
+         "sandbox-ai top", "page-monitor"),
+    _tip("monitor.history", ("History", "Verlauf"),
+         ("CPUs and memory of the run or project selected (nothing selected: the host's CPU and free memory) over "
+          "the window chosen: from every sample for an hour, minutes for a week, hours for 30 days.",
+          "CPUs und Speicher des gewählten Laufs oder Projekts (nichts gewählt: CPU und freier Speicher des Hosts) "
+          "über den gewählten Zeitraum: aus jeder Messung für eine Stunde, Minuten für eine Woche, Stunden für "
+          "30 Tage."),
+         None, "sandbox-ai stats usage --since 24h", "page-monitor"),
+    _tip("monitor.gauges", ("Now of the limits", "Jetzt von den Grenzen"),
+         ("What the run chosen uses now of its limits - CPUs of --cpus, memory of --memory, processes of --pids - "
+          "(nothing chosen: the host's CPU busy, memory used and swap), in the warnings' colours: amber from 90 %, "
+          "red above 92 % of the memory limit (the sandbox is slowed down there) or with the CPU limit holding it "
+          "back half the time.",
+          "Was der gewählte Lauf jetzt von seinen Grenzen nutzt - CPUs von --cpus, Speicher von --memory, Prozesse "
+          "von --pids - (nichts gewählt: CPU belegt, Speicher belegt und Auslagerung des Hosts), in den Farben der "
+          "Warnungen: gelb ab 90 %, rot über 92 % der Speichergrenze (dort wird die Sandbox verlangsamt) oder wenn "
+          "die CPU-Grenze sie die Hälfte der Zeit bremst."),
+         None, "sandbox-ai top --json", "page-monitor"),
+    _tip("monitor.charts", ("Charts", "Diagramme"),
+         ("CPU, memory (with the 92 % slow-down and the limit), disk IO, network and processes of the run or "
+          "project chosen (nothing chosen: the host) over the window chosen, from 15 minutes to 30 days; All runs "
+          "stacks every run's CPUs and memory. From the history and every look since; a line breaks where samples "
+          "are missing.",
+          "CPU, Speicher (mit der Verlangsamung ab 92 % und der Grenze), Platten-IO, Netzwerk und Prozesse des "
+          "gewählten Laufs oder Projekts (nichts gewählt: des Hosts) über den gewählten Zeitraum, von 15 Minuten "
+          "bis 30 Tage; Alle Läufe stapelt CPUs und Speicher aller Läufe. Aus dem Verlauf und jedem Blick seither; "
+          "eine Linie bricht ab, wo Messungen fehlen."),
+         ("Point at a chart for the exact values at that time; choose the window under History.",
+          "Zeigen Sie auf ein Diagramm für die genauen Werte zu dieser Zeit; den Zeitraum wählen Sie unter Verlauf."),
+         "sandbox-ai stats usage --since 1h --json --series", "page-monitor"),
+    _tip("monitor.warnings", ("Warnings and what helps", "Warnungen und was hilft"),
+         ("Memory near the limit, an out-of-memory kill, the CPU limit holding a run back, a run waiting for its "
+          "disk, an idle run holding memory, processes near the limit, the host low on memory or swapping - each "
+          "with what helps.",
+          "Speicher nahe der Grenze, ein Abbruch wegen Speichermangels, die CPU-Grenze bremst einen Lauf, ein Lauf "
+          "wartet auf seine Platte, ein untätiger Lauf belegt Speicher, Prozesse nahe der Grenze, der Host hat "
+          "wenig freien Speicher oder lagert aus - jeweils mit dem, was hilft."),
+         ("Do what it suggests raises the limit (sandbox-ai limits) or stops the run, after asking.",
+          "Vorschlag ausführen hebt die Grenze an (sandbox-ai limits) oder stoppt den Lauf, nach einer Rückfrage."),
+         "sandbox-ai limits RUN --memory 12g", "page-monitor"),
     # Files
     _tip("files.roots", ("Whose files", "Wessen Dateien"),
-         ("The HOME and workspaces of a sandbox, or a project folder.",
-          "HOME und Arbeitsordner einer Sandbox oder ein Projektordner."),
-         ("Choose one to browse it without opening a shell in the sandbox.",
-          "Wählen Sie eines, um es zu durchsuchen, ohne eine Shell in der Sandbox zu öffnen."),
+         ("The HOME and workspaces of a sandbox, a project folder, this machine, or one of sandbox-ai's hosts.",
+          "HOME und Arbeitsordner einer Sandbox, ein Projektordner, dieser Rechner oder einer der Hosts von "
+          "sandbox-ai."),
+         ("Choose one to browse it without opening a shell in the sandbox; a host is connected over SSH and shown "
+          "from its HOME. The right pane has the same choice: copy between this machine and a host, or between two "
+          "hosts.",
+          "Wählen Sie eines, um es zu durchsuchen, ohne eine Shell in der Sandbox zu öffnen; ein Host wird über SSH "
+          "verbunden und ab seinem HOME gezeigt. Der rechte Bereich hat dieselbe Wahl: Kopieren zwischen diesem "
+          "Rechner und einem Host oder zwischen zwei Hosts."),
          "", "page-files"),
     _tip("files.table", ("Files", "Dateien"),
-         ("The left pane: the files of the chosen sandbox folder; the right pane: this machine. Links are shown "
-          "with where they point but never followed.",
-          "Der linke Bereich: die Dateien des gewählten Sandbox-Ordners; der rechte Bereich: dieser Rechner. Links "
-          "werden mit ihrem Ziel gezeigt, aber nie verfolgt."),
+         ("The left pane: the files of the chosen sandbox folder; the right pane: this machine - or, in either, a "
+          "host chosen above it. Links are shown with where they point but never followed.",
+          "Der linke Bereich: die Dateien des gewählten Sandbox-Ordners; der rechte Bereich: dieser Rechner - oder, "
+          "in beiden, ein darüber gewählter Host. Links werden mit ihrem Ziel gezeigt, aber nie verfolgt."),
          ("Copy (F5) or Move (F6) what is selected in one pane into the other pane's folder: no mount is needed. "
           "Tab switches panes. Drag items into the other pane or onto a folder (Shift: move); a double click opens "
           "a file in the editor (text or hex); a right click shows Copy, Cut, Paste, Rename, Properties and more.",
@@ -840,10 +997,34 @@ AREA_TIPS = (
          ("Applies at the next start; a folder a sandbox can write is refused.",
           "Gilt beim nächsten Start; ein Ordner, den eine Sandbox schreiben kann, wird abgelehnt."),
          "SANDBOX_AI_HOME", "releases-update"),
+    _tip("settings.updates", ("Updates", "Updates"),
+         ("How this sandbox-ai updates itself (sandbox-ai update mode): off, notify (the default: a check once a day, "
+          "a newer signed release announced), download (also downloaded and checked) or auto (also installed in its "
+          "window while nothing runs).",
+          "Wie sich dieses sandbox-ai selbst aktualisiert (sandbox-ai update mode): off, notify (die Voreinstellung: "
+          "einmal am Tag eine Prüfung, ein neueres signiertes Release wird gemeldet), download (auch geladen und "
+          "geprüft) oder auto (auch installiert, in seinem Zeitfenster, solange nichts läuft)."),
+         ("Check now, Install now… and Roll back… are asked first and name what runs; afterwards Restart the app "
+          "starts the new version - the app never restarts by itself.",
+          "Jetzt prüfen, Jetzt installieren… und Zurückrollen… fragen erst und nennen, was läuft; danach startet "
+          "App neu starten die neue Version - die App startet nie von selbst neu."),
+         "sandbox-ai update mode", "releases-update"),
     _tip("settings.new-projects", ("New projects", "Neue Projekte"),
          ("The agent, backend and preset a new board starts with, and the board's grid.",
           "Agent, Backend und Vorlage, mit denen ein neues Board beginnt, und das Raster des Boards."),
          None, "", "page-board"),
+    _tip("settings.notifications", ("Notifications", "Benachrichtigungen"),
+         ("Questions and alarms to your phone while you are away: ntfy, Telegram, WhatsApp or a webhook, per host. "
+          "Each channel has its events, when it sends (away or always), how much a message says, quiet hours and a "
+          "rate limit.",
+          "Fragen und Alarme aufs Telefon, wenn Sie nicht da sind: ntfy, Telegram, WhatsApp oder ein Webhook, je "
+          "Host. Jeder Kanal hat seine Ereignisse, wann er sendet (away oder always), wie viel eine Nachricht sagt, "
+          "Ruhezeiten und eine Höchstrate."),
+         ("Sent by the host, never from inside a sandbox; tokens only as the names of that host's secrets. WhatsApp "
+          "needs an approved message template to start a conversation.",
+          "Gesendet vom Host, nie aus einer Sandbox heraus; Tokens nur als Namen von Geheimnissen dieses Hosts. "
+          "WhatsApp braucht eine genehmigte Nachrichtenvorlage, um ein Gespräch zu beginnen."),
+         "sandbox-ai notify add|list|remove|test|link", "phone-notifications"),
     _tip("settings.privacy", ("Privacy", "Datenschutz"),
          ("sandbox-ai's own defaults for every start: the agents' telemetry and the privacy check of pushes.",
           "Die eigenen Standards von sandbox-ai für jeden Start: Telemetrie der Agenten und die "
@@ -851,6 +1032,18 @@ AREA_TIPS = (
          ("They apply to starts from the app and from the command line.",
           "Sie gelten für Starts aus der App und von der Befehlszeile."),
          "--telemetry, --privacy-check", "privacy-check"),
+    _tip("settings.storage", ("Storage", "Speicher"),
+         ("The storage check of this machine: how often the app runs it, when it says what could be freed, and its "
+          "automatic rules - each off unless set.",
+          "Die Speicher-Prüfung dieses Rechners: wie oft die App sie ausführt, wann sie sagt, was frei werden "
+          "könnte, und ihre automatischen Regeln - jede aus, solange nicht gesetzt."),
+         ("sandbox-ai's own defaults: the command line's gc --check and gc read them too. A rule never touches a "
+          "start that runs (compacting transcripts excepted: safe while it runs); each action is logged and said in "
+          "the next notice.",
+          "Die eigenen Standards von sandbox-ai: gc --check und gc auf der Befehlszeile lesen sie auch. Eine Regel "
+          "berührt nie einen laufenden Start (außer dem Komprimieren der Transkripte: sicher, während er läuft); jede "
+          "Aktion wird protokolliert und im nächsten Hinweis gesagt."),
+         "sandbox-ai gc --check, sandbox-ai defaults set storage_...", "storage-check"),
     _tip("settings.policy", ("Administrator policy", "Richtlinie des Administrators"),
          ("The policy file as it is, whether it stops every start, and what it forbids. Read-only.",
           "Die Richtliniendatei, wie sie ist, ob sie jeden Start stoppt und was sie verbietet. Nur lesbar."),
@@ -921,10 +1114,11 @@ PLACES = {
               ("arrange_button", "board.tools", "after")),
     "sandboxes": (("table", "sandboxes.table", "corner"), ("only_project", "sandboxes.only_project", "after"),
                   ("show_ended", "sandboxes.ended", "after"), ("host_filter", "sandboxes.hosts", "after"),
-                  ("clean_button", "sandboxes.manage", "after"),
-                  ("stop_button", "sandboxes.stop", "after"), ("devices_label", "sandboxes.live", "group")),
+                  ("clean_button", "sandboxes.manage", "after"), ("optimize_button", "sandboxes.storage", "after"),
+                  ("stop_button", "sandboxes.stop", "after"), ("run_label", "sandboxes.live", "after"),
+                  ("bridges_box", "sandboxes.bridges", "group")),
     "approvals": (("open", "approvals.open", "group"), ("host_filter", "approvals.hosts", "after"),
-                  ("scope", "approvals.scope", "after"),
+                  ("allow_run_button", "approvals.scope", "after"),
                   ("always", "approvals.always", "group")),
     "terminals": (("tabs", "terminals.tabs", "corner"),),
     "connections": (("directory", "connections.directory", "after"), ("filter", "connections.filter", "after"),
@@ -935,6 +1129,9 @@ PLACES = {
                 ("table", "traffic.table", "corner"), ("new_only", "traffic.new", "after"),
                 ("tabs", "traffic.detail", "corner")),
     "statistics": (("directory", "statistics.directory", "after"),),
+    "monitor": (("tree", "monitor.tree", "corner"), ("chart", "monitor.history", "corner"),
+                ("gauges_row", "monitor.gauges", "corner"), ("chart_tabs", "monitor.charts", "corner"),
+                ("warnings", "monitor.warnings", "corner")),
     "files": (("roots", "files.roots", "after"), ("table", "files.table", "corner"),
               ("replace", "files.replace", "after")),
     "kits": (("table", "kits.table", "group"), ("use_button", "kits.use", "after"),
@@ -954,8 +1151,9 @@ PLACES = {
               ("tabs", "hosts.tabs", "corner")),
     "help": (),  # the Help page places its own
 }
-SETTINGS_TABS = ("settings.appearance", "settings.window", "settings.polling", "settings.sandbox-ai",
-                 "settings.new-projects", "settings.privacy", "settings.policy")
+SETTINGS_TABS = ("settings.appearance", "settings.window", "settings.notifications", "settings.polling",
+                 "settings.sandbox-ai", "settings.updates",
+                 "settings.new-projects", "settings.privacy", "settings.storage", "settings.policy")
 
 
 def tip(ident):
@@ -976,8 +1174,9 @@ TERMS = _terms(
     # Approvals
     ("Question", "What the sandbox asks to do.", "Was die Sandbox tun möchte."),
     ("Asked", "When the sandbox asked.", "Wann die Sandbox gefragt hat."),
-    ("Refused in", "How long the sandbox still waits for your answer; then the request is refused.",
-     "Wie lange die Sandbox noch auf Ihre Antwort wartet; danach wird die Anfrage abgelehnt."),
+    ("Time left / answer", "Open: how long the request still waits for your answer. Else what was answered, or "
+     "why it was refused.", "Offen: wie lange die Anfrage noch auf Ihre Antwort wartet. Sonst, was geantwortet "
+     "wurde oder warum es abgelehnt wurde."),
     ("Answer", "What was answered: allowed or blocked.", "Was geantwortet wurde: erlaubt oder blockiert."),
     ("Scope", "How long an answer holds: once, for this run, or always for the project.",
      "Wie lange eine Antwort gilt: einmal, für diesen Lauf oder immer für das Projekt."),
@@ -1116,6 +1315,38 @@ SETTING_TIPS = _terms(
      "Beim ersten Start bietet die App eine Tour durch ihre Seiten an."),
     ("help_buttons", "Off hides every (?); these short explanations on hover, the Help page, the tours and F1 stay.",
      "Aus blendet jedes (?) aus; diese kurzen Erklärungen beim Zeigen, die Hilfe, die Touren und F1 bleiben."),
+    ("explanations", "On: the pages show their info texts and hints. Off (the default): hidden; warnings, errors and "
+     "status lines stay, the (?)s and tooltips explain.",
+     "An: die Seiten zeigen ihre Infotexte und Hinweise. Aus (die Voreinstellung): ausgeblendet; Warnungen, Fehler und "
+     "Statuszeilen bleiben, (?) und Tooltips erklären."),
+    ("button_texts", "On: the icon buttons of Sandboxes & sessions show their texts too. Off (default): icons "
+     "alone, the text on hover and in the right-click menu.",
+     "An: die Symbol-Schaltflächen von Sandboxen & Sitzungen zeigen auch ihre Texte. Aus (Standard): nur Symbole, "
+     "der Text beim Zeigen und im Kontextmenü."),
+    ("storage_check", "How often the app checks what sandbox-ai keeps here: weekly (the default), daily or off; "
+     "also at its start when due.",
+     "Wie oft die App prüft, was sandbox-ai hier aufbewahrt: wöchentlich (Standard), täglich oder aus; auch bei "
+     "ihrem Start, wenn fällig."),
+    ("storage_threshold_gb", "Above this many GB that could be freed, the check shows a notice that opens "
+     "Optimize….", "Über so vielen GB, die frei werden könnten, zeigt die Prüfung einen Hinweis, der Optimieren… "
+     "öffnet."),
+    ("storage_growth_gb", "A start that grew more than this many GB since the last check is named in its notice.",
+     "Ein Start, der seit der letzten Prüfung um mehr als so viele GB gewachsen ist, wird im Hinweis genannt."),
+    ("storage_caches_days", "Off (0) or days: the download caches of stopped kept starts unused that long are "
+     "emptied by the check and gc.", "Aus (0) oder Tage: Die Download-Caches gestoppter aufbewahrter Starts, so "
+     "lange ungenutzt, leeren die Prüfung und gc."),
+    ("storage_compact_days", "Off (0) or days: transcripts older than that are compacted in place (read as "
+     "before; never the newest).", "Aus (0) oder Tage: Ältere Transkripte werden an Ort und Stelle komprimiert "
+     "(gelesen wie zuvor; nie das neueste)."),
+    ("storage_pack_days", "Off (0) or days: stopped kept starts unused that long are packed (unpacked again "
+     "when resumed).", "Aus (0) oder Tage: Gestoppte aufbewahrte Starts, so lange ungenutzt, werden gepackt (beim "
+     "Fortsetzen wieder entpackt)."),
+    ("storage_logs_days", "Off (0) or days: log folders nothing was written into for that long are removed.",
+     "Aus (0) oder Tage: Protokollordner, in die so lange nichts geschrieben wurde, werden entfernt."),
+    ("hide_secrets", "On: the session file views leave logins and keys out and say how many. Off (the default): "
+     "listed, marked, opened only after asking.",
+     "An: die Sitzungsdatei-Ansichten lassen Logins und Schlüssel weg und sagen, wie viele. Aus (Standard): gezeigt, "
+     "markiert, erst nach Rückfrage geöffnet."),
     ("intro", "A short animation when the app starts; Esc skips it.",
      "Eine kurze Animation beim Start der App; Esc überspringt sie."),
     ("show_flags", "On: each option's field also shows its command-line option (--workspace, --allow-host…) and has "
@@ -1133,6 +1364,10 @@ SETTING_TIPS = _terms(
      "terminal) or in your usual browser.",
      "Der Anmelde-Link eines Agenten öffnet sich im Login-Browser der App (er fügt den Code ins Terminal ein) oder "
      "in Ihrem gewohnten Browser."),
+    ("device_signin", "A sign-in with a one-time code (Codex) opens its page in your usual browser and shows the code in a "
+     "small window - or in the app's login browser.",
+     "Eine Anmeldung mit Einmal-Code (Codex) öffnet ihre Seite in Ihrem gewohnten Browser und zeigt den Code in "
+     "einem kleinen Fenster - oder im Login-Browser der App."),
     ("copy_on_select", "On: text selected in a terminal tab is on the clipboard at once (on Linux it is always the "
      "primary selection).",
      "An: in einem Terminal-Tab markierter Text liegt sofort in der Zwischenablage (unter Linux immer in der primären "
@@ -1167,9 +1402,11 @@ SETTING_TIPS = _terms(
      "In den Farben der App an einer Ecke des Bildschirms oder als eigene Benachrichtigung des Desktops."),
     ("debug", "Logs every step with its time and result, to find a problem.",
      "Protokolliert jeden Schritt mit Zeit und Ergebnis, um einen Fehler zu finden."),
-    ("approvals_interval", "How often the app looks for new questions; a question without an answer is refused "
-     "after a while.", "Wie oft die App nach neuen Fragen sieht; eine Frage ohne Antwort wird nach einer Weile "
-     "abgelehnt."),
+    ("approvals_interval", "How often the app looks for new questions; a request waits only a while for its answer.",
+     "Wie oft die App nach neuen Fragen sieht; eine Anfrage wartet nur eine Weile auf ihre Antwort."),
+    ("ask_timeout", "How long a request waits for your answer (--ask-timeout wins). Then it fails; its question "
+     "stays open (Timed out).", "Wie lange eine Anfrage auf Ihre Antwort wartet (--ask-timeout geht vor). Dann "
+     "scheitert sie; ihre Rückfrage bleibt offen (Zeit abgelaufen)."),
     ("sandboxes_interval", "How often the list of running sandboxes is read again.",
      "Wie oft die Liste der laufenden Sandboxen neu gelesen wird."),
     ("connections_interval", "How often the connection log is read again.",

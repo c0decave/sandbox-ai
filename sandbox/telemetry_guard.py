@@ -1,5 +1,6 @@
-"""sandbox-ai's telemetry guard for the agents' own commands: Claude Code, Codex, OpenCode, Qwen Code, Goose and
-DeepSeek Harness (Hermes has its own, in its Python: hermes_guard.py).
+"""sandbox-ai's telemetry guard for the agents' own commands: Claude Code, Codex, OpenCode, Qwen Code, Goose,
+DeepSeek Harness, OpenCode 2, Pi and Letta Code, and for the Python of OpenHands and nanobot (Hermes has its own, in
+its Python: hermes_guard.py).
 
 The agents' telemetry is always off in sandbox-ai (the user's rule) - also from inside the sandbox. The launcher pins
 it for the agent it starts (variables, each agent's managed configuration, the proxy), but an agent could start a
@@ -9,10 +10,15 @@ opencode`, `ENABLE_BETA_TRACING_DETAILED=1 BETA_TRACING_ENDPOINT=... claude`, `d
 
 So every agent image sandbox-ai builds has its command guarded (Containerfile.*: `--install AGENT`):
 
-- Codex, Qwen Code and DSH are Node programs: their entry file (what `codex`, `qwen`, `dsh` run) imports
-  telemetry-guard.mjs first, so the guard runs in the agent's own process however the entry is started;
-- Claude Code, OpenCode and Goose are native programs: `/usr/local/bin/AGENT` is a shim that runs this file, which
-  checks and then becomes the program (exec) kept in REAL_DIR.
+- Codex, Qwen Code, DSH, Pi and Letta Code are Node programs: their entry file (what `codex`, `qwen`, `dsh`, `letta`
+  run; Pi's bundle behind the image's `pi` wrapper: ENTRIES) imports telemetry-guard.mjs first, so the guard runs in
+  the agent's own process however the entry is started;
+- Claude Code, OpenCode, Goose and OpenCode 2 are native programs: `/usr/local/bin/AGENT` (and its ALIASES: the
+  OpenCode 2 image's `opencode`) is a shim that runs this file, which checks and then becomes the program (exec) kept
+  in REAL_DIR;
+- OpenHands and nanobot are Python programs in a venv of their own: a .pth in its site-packages (SITE_PACKAGES, PTH)
+  runs python_guard at the start of every process of that Python - the agent, its servers, a script run with it - and
+  OpenHands' own `openhands` command (Debian's python3, which starts the Canvas) calls it first as well.
 
 Both forms decide alike (refused, pinned_environment; the JavaScript is generated from this file): an argument or a
 variable that would turn telemetry on - a pinned opt-out set to another value, a variable named for telemetry,
@@ -20,6 +26,9 @@ OpenTelemetry/OTLP, tracing or Datadog with a value of its own, the few that wou
 is refused with MESSAGE (exit status 2); otherwise every opt-out variable is set again and the agent runs. The
 launcher mounts its own copy of both files read-only over the image's (agent_sandbox.telemetry_guard_mounts), so a
 newer launcher's guard holds without a rebuild; the image's install is read-only.
+
+Codex's guard also turns a plain `codex login` into the device-code login (codex_login_args): the browser login's
+callback to the sandbox's 127.0.0.1:1455 is out of reach of a browser outside the sandbox.
 
 Standalone, standard library only: it runs in the sandbox under Debian's python3 (-I -S) before the agent.
 """
@@ -31,11 +40,24 @@ import sys
 
 MESSAGE = "sandbox-ai: {name} telemetry is always off in sandbox-ai and cannot be turned on"  # (possessive)
 NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "qwen": "Qwen Code", "goose": "Goose",
-         "dsh": "DeepSeek Harness"}
+         "dsh": "DeepSeek Harness", "opencode2": "OpenCode 2", "pi": "Pi", "letta": "Letta Code",
+         "openhands": "OpenHands", "nanobot": "nanobot"}
 AGENTS = tuple(NAMES)
 # How each command is guarded: "node" - its entry file imports GUARD_JS; "exec" - a shim runs this file, which then
-# becomes the program kept at REAL_DIR/AGENT.
-KINDS = {"claude": "exec", "codex": "node", "opencode": "exec", "qwen": "node", "goose": "exec", "dsh": "node"}
+# becomes the program kept at REAL_DIR/AGENT; "python" - a .pth in its venv's site-packages runs python_guard.
+KINDS = {"claude": "exec", "codex": "node", "opencode": "exec", "qwen": "node", "goose": "exec", "dsh": "node",
+         "opencode2": "exec", "pi": "node", "letta": "node", "openhands": "python", "nanobot": "python"}
+# Other names of an exec agent's program in its image, each a shim of the agent's as well (Containerfile.opencode2:
+# `opencode2` is a link to `opencode`, the binary) - unless that name is another agent's guarded command already (the
+# team image: `opencode` is OpenCode 1's, and OpenCode 2 is only `opencode2` there).
+ALIASES = {"opencode2": ("opencode",)}
+# A Node agent whose command is no link to its entry: the entry itself (Containerfile.pi: `pi` is sandbox-ai's sh
+# wrapper that loads its extension, then runs Pi's bundle).
+ENTRIES = {"pi": "/opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"}
+# A Python agent's venv (Containerfile.openhands, .nanobot: uv's CPython 3.12) and the .pth that loads the guard there.
+SITE_PACKAGES = {"openhands": "/opt/openhands/venv/lib/python3.12/site-packages",
+                 "nanobot": "/opt/nanobot/venv/lib/python3.12/site-packages"}
+PTH = "sandbox-ai-telemetry-off.pth"
 GUARD_DIR = "/usr/local/lib/sandbox-ai"
 GUARD_PY = GUARD_DIR + "/telemetry_guard.py"
 GUARD_JS = GUARD_DIR + "/telemetry-guard.mjs"
@@ -71,9 +93,33 @@ AGENT_PINS = {
     # The system settings stay the launcher's (QWEN_CODE_SYSTEM_SETTINGS_PATH names them; another path drops them).
     "qwen": {"QWEN_USAGE_STATISTICS_ENABLED": "false", "QWEN_TELEMETRY_ENABLED": "false",
              "GEMINI_TELEMETRY_ENABLED": "false", "QWEN_CODE_SYSTEM_SETTINGS_PATH": "/etc/qwen-code/settings.json"},
-    "goose": {"GOOSE_TELEMETRY_OFF": "1", "GOOSE_TELEMETRY_ENABLED": "false"},
+    # Goose 1.57.0 (goose.py: TELEMETRY_ENV) also has a Langfuse tracing layer (crates/goose/src/tracing/
+    # langfuse_layer.rs: it posts to LANGFUSE_URL/api/public/ingestion once LANGFUSE_PUBLIC_KEY and
+    # LANGFUSE_SECRET_KEY, or the LANGFUSE_INIT_PROJECT_ pair, are set - measured with the release binary): the keys
+    # are empty.
+    "goose": {"GOOSE_TELEMETRY_OFF": "1", "GOOSE_TELEMETRY_ENABLED": "false", "LANGFUSE_PUBLIC_KEY": "",
+              "LANGFUSE_SECRET_KEY": "", "LANGFUSE_INIT_PROJECT_PUBLIC_KEY": "",
+              "LANGFUSE_INIT_PROJECT_SECRET_KEY": ""},
     "dsh": {"DSH_TELEMETRY_DISABLED": "1", "DSH_TELEMETRY_OTLP_URL": "http://127.0.0.1:9/v1/logs"},
+    # OpenCode 2.2.5 (opencode2.py: TELEMETRY_ENV): Bun's crash reporter; its OpenTelemetry is TOOLS'.
+    "opencode2": {"BUN_ENABLE_CRASH_REPORTING": "0"},
+    # Pi 1.4.0 (pi.py: TELEMETRY_ENV): its install report and provider attribution (core/telemetry.js).
+    "pi": {"PI_TELEMETRY": "0"},
+    # Letta Code 0.34.36 (letta.py: TELEMETRY_ENV): its usage and error events, Scarf's install analytics.
+    "letta": {"LETTA_CODE_TELEM": "0", "SCARF_ANALYTICS": "false"},
+    # OpenHands (openhands.py: TELEMETRY_ENV): the Canvas' PostHog, the agent server's and the automation backend's
+    # exporters and consent, browser-use's PostHog, Laminar (with a key) and the SDK's OpenTelemetry endpoints.
+    "openhands": {"AGENT_CANVAS_DISABLE_TELEMETRY": "1", "VITE_DO_NOT_TRACK": "1", "OH_TELEMETRY_EXPORTER": "none",
+                  "OH_TELEMETRY_CONSENT": "denied", "OH_TELEMETRY_CONSENT_MODE": "override",
+                  "ANONYMIZED_TELEMETRY": "false", "BROWSER_USE_CLOUD_SYNC": "false", "LMNR_PROJECT_API_KEY": "",
+                  "OTEL_ENDPOINT": "", "OTEL_EXPORTER_OTLP_ENDPOINT": "", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": ""},
+    # nanobot 0.4.0 (nanobot.py: TELEMETRY_ENV): Langfuse's tracing, which starts with its keys - empty.
+    "nanobot": {"LANGFUSE_SECRET_KEY": "", "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_TRACING_ENABLED": "false"},
 }
+# Variables of an agent's own telemetry service that are not named for telemetry: they may hold only the pinned
+# value (or none) - Laminar's (OpenHands' tracing), Langfuse's (nanobot's: its host, keys, sampling; Goose's: its
+# keys and LANGFUSE_URL, _HOST, _BASE_URL).
+AGENT_NAMES = {"openhands": r"^LMNR_", "nanobot": r"^LANGFUSE_", "goose": r"^LANGFUSE_"}
 # Other agents' opt-outs a process may inherit (Hermes': hermes_guard.PINNED_ENV): taken as they are.
 OTHER_PINS = {"CUA_DRIVER_RS_TELEMETRY_ENABLED": "0"}
 # A variable named for telemetry, OpenTelemetry or OTLP, tracing or Datadog may hold only sandbox-ai's value (or
@@ -82,7 +128,7 @@ OTHER_PINS = {"CUA_DRIVER_RS_TELEMETRY_ENABLED": "0"}
 # OTEL_EXPORTER_OTLP_ENDPOINT, DSH's analytics read DSH_PRODUCT_ANALYTICS_OTLP_URL.
 TELEMETRY_NAME = re.compile(r"TELEMETRY|(?:^|_)OTEL(?:_|$)|OTLP|TRACING|DATADOG")
 # Variables that would take an agent's managed configuration (or its pins) away: refused with any value but none
-# (None) or those listed. Claude Code keeps the variables it was started with over every settings file, the managed
+# (None), with those listed, or ({"only": VALUES}) with any but VALUES (compared in lower case, untrimmed). Claude Code keeps the variables it was started with over every settings file, the managed
 # one included, when CLAUDE_CODE_ENVIRONMENT_KIND is byoc or its entry point a desktop app's (2.1.322: its host-spawn
 # keys); OpenCode reads its managed configuration from OPENCODE_TEST_MANAGED_CONFIG_DIR instead of /etc/opencode.
 REFUSED_ENV = {
@@ -90,6 +136,12 @@ REFUSED_ENV = {
                "CLAUDE_CODE_ENTRYPOINT": (("claude-desktop", "claude-desktop-3p", "local-agent"),
                                           "Claude Code's managed settings stay the last word")},
     "opencode": {"OPENCODE_TEST_MANAGED_CONFIG_DIR": (None, "OpenCode's configuration stays the one at /etc/opencode")},
+    "opencode2": {"OPENCODE_TEST_MANAGED_CONFIG_DIR": (None, "OpenCode 2's system configuration stays the image's")},
+    # Pi: PI_OFFLINE (no automatic network activity: the install report and /bug's upload too) is the launcher's
+    # unless --pi-enable leaves it out; it may stay on or unset, never be switched off. Pi 1.4.0 is offline only for
+    # 1, true or yes in any case, untrimmed (main.js isTruthyEnvFlag, package-manager.js and tools-manager.js
+    # isOfflineModeEnabled): "OFF", "on", "2" or " 1" switch it off as "0" does.
+    "pi": {"PI_OFFLINE": ({"only": ("1", "true", "yes")}, "Pi's offline mode stays on")},
 }
 # Named like telemetry, but no switch of it (Codex' own hand-over between its daemon's processes).
 EXEMPT_ENV = {"codex": ("CODEX_DAEMON_TELEMETRY_HANDOFF",)}
@@ -128,8 +180,10 @@ def accepted():
     return found
 
 
-def telemetry_name(name):
-    return bool(TELEMETRY_NAME.search(name.upper()))
+def telemetry_name(name, agent=None):
+    """Whether NAME is a telemetry variable (TELEMETRY_NAME), or one of AGENT's telemetry service (AGENT_NAMES)."""
+    return bool(TELEMETRY_NAME.search(name.upper())) or \
+        bool(agent in AGENT_NAMES and re.search(AGENT_NAMES[agent], name.upper()))
 
 
 def refusals(agent, environ):
@@ -138,7 +192,8 @@ def refusals(agent, environ):
     pins, known = pinned(agent), accepted()
     for name, (values, why) in REFUSED_ENV.get(agent, {}).items():
         value = environ.get(name, "")
-        if value.strip() and (values is None or value.strip() in values):
+        if value.strip() and (values is None or (value.lower() not in values["only"] if isinstance(values, dict)
+                                                 else value.strip() in values)):
             yield name, f"{name}={value}", why
     for name in sorted(environ):
         value = environ[name]
@@ -146,7 +201,7 @@ def refusals(agent, environ):
             continue
         if name in pins and value != pins[name]:
             yield name, f"{name}={value}", f"it stays {pins[name]}"
-        elif name not in pins and telemetry_name(name) and value != known.get(name):
+        elif name not in pins and telemetry_name(name, agent) and value != known.get(name):
             yield name, f"{name}={value}", ("it stays " + known[name]) if name in known else "telemetry is always off"
 
 
@@ -226,7 +281,7 @@ def refused(agent, args, environ):
 def pinned_environment(agent, environ):
     """ENVIRON for AGENT: every opt-out set (again), a telemetry variable left empty dropped."""
     env = {name: value for name, value in environ.items()
-           if value.strip() or not (telemetry_name(name) or name in REFUSED_ENV.get(agent, {}))}
+           if value.strip() or not (telemetry_name(name, agent) or name in REFUSED_ENV.get(agent, {}))}
     env.update(pinned(agent))
     return env
 
@@ -247,9 +302,114 @@ def dsh_args(args, patch=DSH_PATCH, exists=os.path.exists):
     return [args[0], "--patch", patch, *args[1:]]
 
 
+# Codex's login (0.169.0): a plain `codex login` starts a login server on the sandbox's 127.0.0.1:1455 and sends the
+# browser back there (redirect_uri=http://127.0.0.1:1455/auth/callback) - a browser outside the sandbox never reaches
+# it. In a sandbox it runs the device-code login instead (--device-auth: a code typed on auth.openai.com, no callback),
+# as `sandbox-ai login codex` does; one line on stderr says why. Left as they are: a login of its own kind
+# (CODEX_LOGIN_KEPT), `codex login status|help`, and any login while SANDBOX_AI_LOGIN_CALLBACK=1 (the browser login on
+# purpose: sandbox-ai relays its one callback when the human opens the link from the browser question, approvals).
+CODEX_LOGIN_KEPT = ("--device-auth", "--with-api-key", "--with-access-token", "--api-key", "-h", "--help")
+# Codex's top-level options that take a value (codex --help): the word after them is no subcommand.
+CODEX_VALUE_OPTIONS = ("-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env", "-i",
+                       "--image", "-m", "--model", "--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd",
+                       "--add-dir", "-a", "--ask-for-approval")
+LOGIN_CALLBACK_ENV = "SANDBOX_AI_LOGIN_CALLBACK"
+CODEX_LOGIN_NOTE = ("sandbox-ai: `codex login` runs the device-code login in a sandbox (--device-auth): a browser "
+                    "outside the sandbox cannot reach the login's callback on the sandbox's 127.0.0.1:1455 "
+                    "(SANDBOX_AI_LOGIN_CALLBACK=1 keeps the browser login; its callback is relayed when you open the "
+                    "link from sandbox-ai's question)\n")
+
+
+def codex_login_args(args, environ):
+    """Codex's ARGS with --device-auth added after a plain `login` (CODEX_LOGIN_NOTE says why), or None when they stay
+    as they are (no login, a login of its own kind, its status or help, LOGIN_CALLBACK_ENV=1 in ENVIRON)."""
+    if str(environ.get(LOGIN_CALLBACK_ENV, "")).strip() == "1":
+        return None
+    words = options(args)
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in CODEX_VALUE_OPTIONS:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        break
+    if index >= len(words) or words[index] != "login":
+        return None
+    rest = [str(arg) for arg in args][index + 1:]
+    if any(word in CODEX_LOGIN_KEPT or word.split("=", 1)[0] in CODEX_LOGIN_KEPT for word in options(rest)):
+        return None
+    positional = [word for word in options(rest) if not word.startswith("-")]
+    if positional[:1] and positional[0] in ("status", "help"):
+        return None
+    args = [str(arg) for arg in args]
+    return [*args[:index + 1], "--device-auth", *args[index + 1:]]
+
+
+# Goose's hooks (sandbox/goose.py: HOOKS_PLUGIN, HOOKS_LINK): sandbox-ai's plugin with the rules for Goose's own
+# tools and the approved kit hooks lies read-only in /etc/goose; Goose takes plugins only from its plugin folders.
+GOOSE_PLUGIN = "/etc/goose/sandbox-ai-hooks"
+GOOSE_PLUGIN_NAME = "sandbox-ai-hooks"
+
+
+def goose_hooks(environ, home=None, cwd=None):
+    """None if Goose about to start gets sandbox-ai's hooks plugin (or there is none this run), else why not. Links
+    the plugin into the user's plugin folder (~/.agents/plugins) when the link is missing; refuses what would leave it
+    out: GOOSE_PATH_ROOT (another plugin folder), something else under its name there or in the project's
+    .agents/plugins (the project's comes first and takes the name), the plugin disabled in a settings.json of Goose's
+    (the user's, the project's, its local one) or in the user's config.yaml."""
+    if not os.path.isfile(f"{GOOSE_PLUGIN}/hooks/hooks.json"):
+        return None
+    if (environ.get("GOOSE_PATH_ROOT") or "").strip():
+        return "GOOSE_PATH_ROOT moves Goose's plugin folder away from sandbox-ai's hooks"
+    home = home or environ.get("HOME") or "/root"
+    try:
+        cwd = cwd or os.getcwd()
+    except OSError:
+        cwd = "/"
+    link = os.path.join(home, ".agents", "plugins", GOOSE_PLUGIN_NAME)
+    try:
+        if not os.path.lexists(link):
+            os.makedirs(os.path.dirname(link), mode=0o755, exist_ok=True)
+            os.symlink(GOOSE_PLUGIN, link)
+        if os.path.realpath(link) != os.path.realpath(GOOSE_PLUGIN):
+            return f"{link} is not sandbox-ai's hooks plugin ({GOOSE_PLUGIN}); remove it"
+    except OSError as exc:
+        return f"sandbox-ai's hooks plugin could not be linked at {link} ({exc.strerror or exc})"
+    project = os.path.join(cwd, ".agents", "plugins", GOOSE_PLUGIN_NAME)
+    if os.path.lexists(project) and os.path.realpath(project) != os.path.realpath(GOOSE_PLUGIN):
+        return f"{project} takes the name of sandbox-ai's hooks plugin; remove it"
+    for settings in (os.path.join(home, ".config", "goose", "settings.json"),
+                     os.path.join(cwd, ".config", "goose", "settings.json"),
+                     os.path.join(cwd, ".config", "goose", "settings.local.json")):
+        try:
+            with open(settings, encoding="utf-8") as stream:
+                document = json.load(stream)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, RecursionError) as exc:
+            return f"{settings} cannot be read ({exc}); Goose would not start its plugins as sandbox-ai's hooks need"
+        disabled = document.get("disabled") if isinstance(document, dict) else None
+        if isinstance(disabled, list) and GOOSE_PLUGIN_NAME in disabled:
+            return f"{settings} disables {GOOSE_PLUGIN_NAME}; take it out of \"disabled\""
+    try:
+        with open(os.path.join(home, ".config", "goose", "config.yaml"), encoding="utf-8") as stream:
+            config = stream.read()
+    except OSError:
+        config = ""
+    for found in re.finditer(re.escape(link), config):
+        if re.match(r"[\"']?\s*:\s*(\{[^}]*\benabled\s*:\s*false|\n(?:[ \t]+\S[^\n]*\n)*?[ \t]+enabled\s*:\s*false)",
+                    config[found.end():]):
+            return f"~/.config/goose/config.yaml disables {link} (plugins: enabled: false); set it to true"
+    return None
+
+
 def run(agent, args, environ=None, execve=None, real_dir=REAL_DIR, stderr=None):
     """The guarded command of an exec agent: MESSAGE and 2 for what would turn its telemetry on, else become the
-    agent (REAL_DIR/AGENT) with every opt-out set."""
+    agent (REAL_DIR/AGENT) with every opt-out set. Goose: not without sandbox-ai's hooks plugin when the run has one
+    (goose_hooks)."""
     stderr = stderr or sys.stderr
     if agent not in NAMES:
         stderr.write(f"sandbox-ai: the telemetry guard knows no agent {agent!r}\n")
@@ -259,6 +419,11 @@ def run(agent, args, environ=None, execve=None, real_dir=REAL_DIR, stderr=None):
     if found is not None:
         stderr.write(f"{message(agent)} ({found[0]} is refused: {found[1]})\n")
         return 2
+    hooks = goose_hooks(environ) if agent == "goose" else None
+    if hooks:
+        stderr.write(f"sandbox-ai: Goose is not started: the rules for its own tools and the kits' approved hooks "
+                     f"hold through sandbox-ai's hooks plugin, and {hooks}\n")
+        return 2
     real = f"{real_dir}/{agent}"
     try:
         (execve or os.execve)(real, [agent, *args], pinned_environment(agent, environ))
@@ -266,6 +431,51 @@ def run(agent, args, environ=None, execve=None, real_dir=REAL_DIR, stderr=None):
         stderr.write(f"sandbox-ai: {NAMES[agent]} cannot be started ({real}: {exc.strerror or exc})\n")
         return 127
     return 0  # (only where EXECVE returns: the tests')
+
+
+def python_guard(agent, environ=None, stderr=None, exit=None):
+    """In every process of a Python agent's venv (its .pth: pth_line): MESSAGE and exit status 2 (EXIT, else
+    os._exit: a .pth cannot end the interpreter otherwise) for what would turn its telemetry on, else ENVIRON
+    (os.environ) pinned in place, which every process it starts inherits."""
+    environ = os.environ if environ is None else environ
+    found = refused(agent, [], environ)
+    if found is not None:
+        stream = stderr or sys.stderr
+        try:
+            stream.write(f"{message(agent)} ({found[0]} is refused: {found[1]})\n")
+            stream.flush()
+        finally:
+            (exit or os._exit)(2)
+        return
+    pinned_env = pinned_environment(agent, environ)
+    for name in [name for name in environ if name not in pinned_env]:
+        del environ[name]
+    environ.update(pinned_env)
+
+
+def pth_line(agent, guard_py=GUARD_PY):
+    """The .pth (PTH) in a Python agent's site-packages: GUARD_PY loaded by its path (nothing added to sys.path), its
+    python_guard run - at the start of every process of that Python."""
+    return (f"import importlib.util as _sai; _sai_spec = _sai.spec_from_file_location('sandbox_ai_telemetry_guard', "
+            f"{guard_py!r}); _sai_guard = _sai.module_from_spec(_sai_spec); _sai_spec.loader.exec_module(_sai_guard); "
+            f"_sai_guard.python_guard({agent!r})\n")
+
+
+def commonjs(entry):
+    """Whether the Node ENTRY is CommonJS for sure (.cjs, or "type": "commonjs" in the nearest package.json), where
+    the guard's import cannot go. Without a "type" Node takes a file with an import as an ES module; the image's
+    check of the command after --install proves it."""
+    entry = Path(entry)
+    if entry.suffix in (".mjs", ".cjs"):
+        return entry.suffix == ".cjs"
+    for folder in entry.parents:
+        package = folder / "package.json"
+        if package.is_file():
+            try:
+                return json.loads(package.read_text()).get("type") == "commonjs"
+            except (OSError, ValueError, AttributeError, RecursionError):
+                return False
+    return False
 
 
 def import_line(agent, guard_js=GUARD_JS):
@@ -280,16 +490,26 @@ def shim(agent, guard_py=GUARD_PY):
             f'exec {PYTHON} -IS {guard_py} {agent} "$@"\n')
 
 
-def install(agent, command_dir=COMMAND_DIR, guard_dir=GUARD_DIR):
-    """At the image's build (Containerfile.*): guard AGENT's command - a Node agent's entry file imports the guard, an
-    exec agent's command becomes the shim and the program moves to REAL_DIR. Writes the JavaScript beside this file.
-    Done once: a second call changes nothing."""
+def install(agent, command_dir=COMMAND_DIR, guard_dir=GUARD_DIR, entry=None, site_dir=None):
+    """At the image's build (Containerfile.*): guard AGENT's command - a Node agent's entry file (ENTRY: ENTRIES', else
+    what its command links to; not CommonJS) imports the guard, an exec agent's command and ALIASES become the shim and
+    the program moves to REAL_DIR, a Python agent's site-packages (SITE_DIR: SITE_PACKAGES') gets the .pth. Writes the
+    JavaScript beside this file. Done once: a second call changes nothing."""
     command, guard = Path(command_dir) / agent, Path(guard_dir)
     guard.mkdir(parents=True, exist_ok=True)
     (guard / Path(GUARD_JS).name).write_text(javascript())
+    if KINDS[agent] == "python":
+        site = Path(site_dir or SITE_PACKAGES[agent])
+        site.mkdir(parents=True, exist_ok=True)
+        pth = site / PTH
+        pth.write_text(pth_line(agent, str(guard / Path(GUARD_PY).name)))
+        return pth
     if KINDS[agent] == "node":
-        entry = command.resolve(strict=True)
+        entry = Path(entry or ENTRIES.get(agent) or command).resolve(strict=True)
         text = entry.read_text()
+        if commonjs(entry):
+            raise SystemExit(f"sandbox-ai: {entry} is not an ES module: {possessive(NAMES[agent])} telemetry guard "
+                             "cannot be imported there")
         line = import_line(agent, str(guard / Path(GUARD_JS).name))
         if line not in text:
             first, newline, rest = text.partition("\n")
@@ -297,25 +517,39 @@ def install(agent, command_dir=COMMAND_DIR, guard_dir=GUARD_DIR):
         return entry
     real = guard / "real" / agent
     real.parent.mkdir(parents=True, exist_ok=True)
+    names = [command, *(Path(command_dir) / alias for alias in ALIASES.get(agent, ()))]
     if not (real.exists() or real.is_symlink()):
-        if command.is_symlink():
-            real.symlink_to(command.resolve(strict=True))
-            command.unlink()
-        else:
-            os.replace(command, real)
-    if command.exists() or command.is_symlink():
-        command.unlink()
-    command.write_text(shim(agent, str(guard / Path(GUARD_PY).name)))
-    command.chmod(0o755)
+        program = command.resolve(strict=True)
+        if command.is_symlink() and program not in {name.resolve() for name in names[1:] if name.exists()}:
+            real.symlink_to(program)
+        else:  # the command is the program, or a link to one of its other names here: the program moves
+            os.replace(program, real)
+    for name in names:
+        if name != command and others_shim(name, agent, str(guard / Path(GUARD_PY).name)):
+            continue  # another agent's command (the team image: `opencode` is OpenCode 1's), left to it
+        if name.exists() or name.is_symlink():
+            name.unlink()
+        name.write_text(shim(agent, str(guard / Path(GUARD_PY).name)))
+        name.chmod(0o755)
     return real
+
+
+def others_shim(path, agent, guard_py=GUARD_PY):
+    """PATH is the guarded command of an agent other than AGENT (its shim): an alias of AGENT never takes it over."""
+    try:
+        text = Path(path).read_text() if Path(path).is_file() and not Path(path).is_symlink() else ""
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(text == shim(other, guard_py) for other in NAMES if other != agent)
 
 
 def spec(agent):
     """What the JavaScript guard needs of AGENT."""
     return {"name": NAMES[agent], "message": message(agent), "pinned": pinned(agent),
-            "refused": {name: [list(values) if values else None, why]
+            "refused": {name: [{"only": list(values["only"])} if isinstance(values, dict) else
+                               list(values) if values else None, why]
                         for name, (values, why) in REFUSED_ENV.get(agent, {}).items()},
-            "exempt": list(EXEMPT_ENV.get(agent, ()))}
+            "exempt": list(EXEMPT_ENV.get(agent, ())), "names": AGENT_NAMES.get(agent)}
 
 
 JAVASCRIPT = r"""// sandbox-ai's telemetry guard for a Node agent (generated by sandbox/telemetry_guard.py: do not edit).
@@ -328,18 +562,25 @@ const TELEMETRY_NAME = /TELEMETRY|(?:^|_)OTEL(?:_|$)|OTLP|TRACING|DATADOG/;
 const CODEX_TABLES = __CODEX_TABLES__;
 const CODEX_PINNED = __CODEX_PINNED__;
 const DSH_PATCH = __DSH_PATCH__;
+const CODEX_LOGIN_KEPT = __CODEX_LOGIN_KEPT__;
+const CODEX_VALUE_OPTIONS = __CODEX_VALUE_OPTIONS__;
+const LOGIN_CALLBACK_ENV = __LOGIN_CALLBACK_ENV__;
+const CODEX_LOGIN_NOTE = __CODEX_LOGIN_NOTE__;
 
 const agent = new URL(import.meta.url).searchParams.get("agent");
 const spec = Object.hasOwn(SPECS, agent) ? SPECS[agent] : null;
 
 const blank = (value) => String(value ?? "").trim() === "";
-const telemetryName = (name) => TELEMETRY_NAME.test(name.toUpperCase());
+const telemetryName = (name) =>
+  TELEMETRY_NAME.test(name.toUpperCase()) || (spec?.names ? new RegExp(spec.names).test(name.toUpperCase()) : false);
 const options = (args) => (args.includes("--") ? args.slice(0, args.indexOf("--")) : args);
 
 function refusedEnvironment(env) {
   for (const [name, [values, why]] of Object.entries(spec.refused)) {
     const value = env[name] ?? "";
-    if (!blank(value) && (values === null || values.includes(value.trim()))) return [`${name}=${value}`, why];
+    const hit = values === null || (Array.isArray(values) ? values.includes(value.trim())
+      : !values.only.includes(value.toLowerCase()));
+    if (!blank(value) && hit) return [`${name}=${value}`, why];
   }
   for (const name of Object.keys(env).sort()) {
     const value = env[name];
@@ -422,6 +663,24 @@ function dshArgs(args) {
   return [args[0], "--patch", DSH_PATCH, ...args.slice(1)];
 }
 
+function codexLoginArgs(args, env) {
+  if (String(env[LOGIN_CALLBACK_ENV] ?? "").trim() === "1") return null;
+  const words = options(args);
+  let index = 0;
+  while (index < words.length) {
+    const word = words[index];
+    if (CODEX_VALUE_OPTIONS.includes(word)) { index += 2; continue; }
+    if (word.startsWith("-")) { index += 1; continue; }
+    break;
+  }
+  if (index >= words.length || words[index] !== "login") return null;
+  const rest = options(args.slice(index + 1));
+  if (rest.some((word) => CODEX_LOGIN_KEPT.includes(word) || CODEX_LOGIN_KEPT.includes(word.split("=", 1)[0]))) return null;
+  const positional = rest.filter((word) => !word.startsWith("-"));
+  if (positional.length && ["status", "help"].includes(positional[0])) return null;
+  return [...args.slice(0, index + 1), "--device-auth", ...args.slice(index + 1)];
+}
+
 if (spec === null) {
   process.stderr.write(`sandbox-ai: the telemetry guard knows no agent ${JSON.stringify(agent)}\n`);
   process.exit(2);
@@ -437,6 +696,13 @@ for (const [name, value] of Object.entries(process.env)) {
 }
 Object.assign(process.env, spec.pinned);
 if (agent === "dsh") process.argv.splice(2, args.length, ...dshArgs(args));
+if (agent === "codex") {
+  const login = codexLoginArgs(args, process.env);
+  if (login !== null) {
+    process.stderr.write(CODEX_LOGIN_NOTE);
+    process.argv.splice(2, args.length, ...login);
+  }
+}
 """
 
 
@@ -445,7 +711,9 @@ def javascript():
     dsh_args (tests/test_telemetry_guard.py runs both on the same cases)."""
     values = {"__SPECS__": {agent: spec(agent) for agent in AGENTS if KINDS[agent] == "node"},
               "__ACCEPTED__": accepted(), "__CODEX_TABLES__": list(CODEX_TABLES), "__CODEX_PINNED__": CODEX_PINNED,
-              "__DSH_PATCH__": DSH_PATCH}
+              "__DSH_PATCH__": DSH_PATCH, "__CODEX_LOGIN_KEPT__": list(CODEX_LOGIN_KEPT),
+              "__CODEX_VALUE_OPTIONS__": list(CODEX_VALUE_OPTIONS), "__LOGIN_CALLBACK_ENV__": LOGIN_CALLBACK_ENV,
+              "__CODEX_LOGIN_NOTE__": CODEX_LOGIN_NOTE}
     text = JAVASCRIPT
     for placeholder, value in values.items():
         text = text.replace(placeholder, json.dumps(value, sort_keys=True))

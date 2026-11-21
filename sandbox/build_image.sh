@@ -2,36 +2,55 @@
 set -euo pipefail
 script_path=$(readlink -f -- "${BASH_SOURCE[0]}")
 script_dir=$(dirname -- "$script_path")
-usage='Usage: sandbox-ai build [-pu|--podman-url URL] [-p|--pin VERSION] [-u|--uv VERSION] [-n|--node IMAGE]
-                        [-e|--extension-only] codex|claude|opencode|hermes|dsh|qwen|goose|all|VARIANT
-                        [podman build options]
-       sandbox-ai build [-pu|--podman-url URL] [-u|--uv VERSION] [-n|--node IMAGE] team [podman build options]
-       sandbox-ai build [-pu|--podman-url URL] cairn [podman build options]
-       sandbox-ai build [-pu|--podman-url URL] [-e|--extension-only] --variant VARIANT [podman build options]
-       sandbox-ai build [-pu|--podman-url URL] vpn|tor [podman build options]
-       sandbox-ai build browser [podman build options]
+synopsis='Usage:  sandbox-ai build [OPTIONS] TARGET... [PODMAN BUILD OPTIONS]
+
+Targets: codex|claude|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi,
+         all, team, cairn, browser, vpn|tor, or one of your variants'
+usage='Usage:  sandbox-ai build [OPTIONS] TARGET... [PODMAN BUILD OPTIONS]
+
+Build the images of sandbox-ai: an agent'"'"'s, a variant of yours, or a part beside the
+agent. What follows the targets goes to podman build.
+
+Targets:
+  AGENT       codex|claude|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi
+  VARIANT     One of your variants (sandbox-ai images): its agent'"'"'s base, then the
+              variant; NAME@AGENT where several agents have one of that name
+  all         Every image: the twelve agents, team, cairn, browser, vpn|tor and your variants
+  team        Claude Code, Codex and OpenCode in one image (a start with --with AGENT);
+              team --with AGENT[,AGENT...]: that image with the other agents as layers
+  cairn       The container of --cairn
+  browser     The sandbox'"'"'s own browser (--browser)
+  vpn|tor     The container of --vpn: a WireGuard, OpenVPN, Mullvad or Tailscale
+              profile (vpn), or a Tor profile (tor)
+
+Options:
+  -pu, --podman-url URL    Build with the Podman service at URL (another machine)
+  -p,  --pin VERSION       Install exactly this agent version (one agent only); also
+                           --build-arg <AGENT>_VERSION=VERSION
+  -u,  --uv VERSION        Use this uv image tag instead of latest (agents, team)
+  -n,  --node IMAGE        Use this Node.js base image, e.g. a tag or an @sha256 digest
+                           (agents, team)
+  -e,  --extension-only    Build only the extension layers, on the base image there is
+       --variant VARIANT   A variant whose name is also a target (a variant called tor)
+  -h,  --help              Show this help
+  -V,  --version           Show the version of sandbox-ai
 
 Every build uses the newest releases unless you pin them: the newest npm release
 of the agent (looked up first, so the cached install layer is rebuilt), the
 newest uv image and the current Node.js LTS image (--pull=newer). No image is
-built if a lookup fails.
-
-  --pin VERSION    install exactly this agent version (one agent only); also
-                   --build-arg <AGENT>_VERSION=VERSION
-  --uv VERSION     use this uv image tag instead of latest
-  --node IMAGE     use this Node.js base image, e.g. a tag or an @sha256 digest
-
-The image is labelled with the installed agent version (sandbox-ai.agent-version).
+built if a lookup fails. Each image is labelled with the agent version in it
+(sandbox-ai.agent-version).
 
 hermes builds localhost/hermes-sandbox with Hermes Agent at the release sandbox-ai
 reviewed (Containerfile.hermes: its tag and commit, its Python dependencies
 hash-pinned in Containerfile.hermes.lock); --pin and HERMES_VERSION take no other
 release; "all" builds it too.
 
-"all" builds every image sandbox-ai has: the seven agents, team, cairn, browser,
+"all" builds every image sandbox-ai has: the twelve agents, team, cairn, browser,
 vpn, tor and each of your variants (sandbox-ai images), one build each, so one
-that fails stops none of the others; the end says what was built and what failed. Several targets in a
-row (sandbox-ai build claude codex team) are built the same way, one after the other.
+that fails stops none of the others; the end says what was built and what
+failed. Several targets in a row (sandbox-ai build claude codex team) are built
+the same way, one after the other.
 
 dsh builds localhost/dsh-sandbox with DeepSeek Harness, qwen localhost/qwen-sandbox
 with Qwen Code, each at the release sandbox-ai reviewed (docs/DSH_REVIEW.md,
@@ -44,6 +63,33 @@ goose builds localhost/goose-sandbox with Goose at the release sandbox-ai review
 in Containerfile.goose.lock; --pin and GOOSE_VERSION take no other release, and
 "all" builds it too.
 
+openhands builds localhost/openhands-sandbox with OpenHands (Agent Canvas and Agent
+Server) at the releases sandbox-ai reviewed (docs/OPENHANDS_REVIEW.md): the npm
+install hash-locked in Containerfile.openhands.lock (npm ci --ignore-scripts), the
+Python side in Containerfile.openhands-python.lock (uv pip --require-hashes);
+--pin and OPENHANDS_VERSION take no other release, and "all" builds it too.
+
+nanobot builds localhost/nanobot-sandbox with nanobot at the release sandbox-ai
+reviewed (docs/NANOBOT_REVIEW.md): its PyPI wheel and every dependency hash-pinned
+in Containerfile.nanobot.lock; --pin and NANOBOT_VERSION take no other release, and
+"all" builds it too.
+
+letta builds localhost/letta-sandbox with Letta Code at the release sandbox-ai
+reviewed (docs/LETTA_REVIEW.md): its npm install hash-locked in
+Containerfile.letta.lock (npm ci --ignore-scripts); --pin and LETTA_VERSION take no
+other release, and "all" builds it too.
+
+opencode2 builds localhost/opencode2-sandbox with OpenCode 2 (npm @opencode/cli) at
+the release sandbox-ai reviewed (docs/OPENCODE2_REVIEW.md): its platform package from
+npm'"'"'s registry, checked against the sha512 integrity in Containerfile.opencode2.lock;
+--pin and OPENCODE2_VERSION take no other release, and "all" builds it too. The
+opencode target stays OpenCode 1 (npm opencode-ai).
+
+pi builds localhost/pi-sandbox with Pi at the release sandbox-ai reviewed
+(docs/PI_REVIEW.md): its npm install hash-locked in Containerfile.pi.lock (npm ci
+--ignore-scripts); --pin and PI_VERSION take no other release, and "all" builds it
+too.
+
 Extensions (sandbox-ai images extend/new): the base image is tagged
 localhost/AGENT-sandbox:base; an agent with an extension gets it as a layer on
 top (localhost/AGENT-sandbox:latest), and building an agent also builds its
@@ -55,16 +101,25 @@ labelled with the hash of its extension. A variant on one of your images (images
 NAME --base IMAGE) gets the agent'"'"'s layers on that image instead (Debian 12; nothing
 but uv'"'"'s image is pulled), then its extension.
 
-  --extension-only  build only the extension layers, on the base image there is
-
 team builds localhost/team-sandbox:latest with Claude Code, Codex and OpenCode, the
 image of a start with --with AGENT (each agent at its newest release, or
---build-arg CLAUDE_VERSION=X.Y.Z and so on; no extensions).
+--build-arg CLAUDE_VERSION=X.Y.Z and so on; no extensions). team --with A,B (or
+--with A --with B, or --with all) builds localhost/team-A-B-sandbox:latest: that
+image with Hermes, DSH, Qwen Code, Goose, OpenHands, nanobot, Letta Code, OpenCode 2
+or Pi as layers on it (dsh, goose, hermes, letta, nanobot, opencode2, openhands, pi,
+qwen), each made from its own Containerfile at the release sandbox-ai reviewed (its
+lock, its checks, its telemetry guard; OpenCode 2 is opencode2 there, opencode stays
+OpenCode 1). The base is built first when it is not there; images whose layers
+begin alike share them, and every one shares the base: building team again builds
+the team images with layers that are there again, on the new base. A start with
+--with builds the one it needs when it is missing, or takes a built one that holds
+more agents.
 
-cairn builds localhost/cairn-sandbox:latest: the team image (build team first)
-with Cairn at the commit sandbox-ai reviewed (docs/CAIRN_REVIEW.md), unchanged,
-its Python dependencies hash-pinned in Containerfile.cairn.lock, for the preset
-cairn-pentest-board (claude --with codex --image localhost/cairn-sandbox:latest).
+cairn builds localhost/sandbox-ai-cairn:latest, the container of --cairn: Cairn
+at the commit sandbox-ai reviewed (docs/CAIRN_REVIEW.md), unchanged, its Python
+dependencies hash-pinned in Containerfile.cairn.lock, on a Debian base pinned by
+its digest (--build-arg DEBIAN_IMAGE=REPOSITORY@sha256:DIGEST for another one).
+No agent is in it: Cairn'"'"'s workers are the session'"'"'s agents.
 
 vpn builds localhost/sandbox-ai-vpn:latest, the container of --vpn with a
 WireGuard, OpenVPN, Mullvad or Tailscale profile (WireGuard, wireguard-go,
@@ -83,7 +138,20 @@ browser builds localhost/sandbox-ai-browser:latest, the sandbox'"'"'s own browse
 Debian base is pulled once and pinned by its digest (the image is labelled
 sandbox-ai.base=docker.io/library/debian@sha256:...); pin another one with
 --build-arg DEBIAN_IMAGE=REPOSITORY@sha256:DIGEST.'
-die_usage() { echo "$usage" >&2; exit 2; }
+# A help page: on a terminal coloured as every help of sandbox-ai (textout.help_page), else as it is. Colour as
+# textout.colour_enabled decides it: never with NO_COLOR (sandbox-ai --no-color sets it), always with FORCE_COLOR.
+show_help() {
+  if [[ -z "${NO_COLOR:-}" ]] && { [[ -n "${FORCE_COLOR:-}" ]] || [[ -t 1 && "${TERM:-}" != dumb ]]; }; then
+    "${SANDBOX_AI_PYTHON:-python3}" -I -c 'import importlib.util, sys
+spec = importlib.util.spec_from_file_location("textout", sys.argv[1])
+textout = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(textout)
+print(textout.help_page(sys.stdin.read().rstrip("\n"), True))' "$script_dir/textout.py" <<<"$1" && return 0
+  fi
+  printf '%s\n' "$1"
+}
+# A wrong call: the short synopsis, as docker does, and where the whole help is.
+die_usage() { printf '%s\n\nRun '"'"'sandbox-ai build --help'"'"' for more information.\n' "$synopsis" >&2; exit 2; }
 
 # launcher.log (sandbox/launchlog.py, which rotates it): what was asked to be built, how long it took, how it ended.
 # Never a secret: a NAME=VALUE whose NAME says token, secret, password or key is written as NAME=[secret].
@@ -110,14 +178,14 @@ while [[ $# -gt 0 ]]; do
     -V|--version)
       version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$script_dir/agent_sandbox.py")
       echo "sandbox-ai $version"; exit 0 ;;
-    -h|--help) echo "$usage"; exit 0 ;;
+    -h|--help) show_help "$usage"; exit 0 ;;
     -pu|--podman-url) [[ $# -ge 2 && -n "$2" ]] || die_usage; podman_cmd+=(--remote --url "$2"); podman_url=$2; shift 2 ;;
     -e|--extension-only) extension_only=1; shift ;;
     -p|--pin) [[ $# -ge 2 && -n "$2" ]] || die_usage; pin=$2; shift 2 ;;
     -u|--uv) [[ $# -ge 2 && -n "$2" ]] || die_usage; uv=$2; shift 2 ;;
     -n|--node) [[ $# -ge 2 && -n "$2" ]] || die_usage; node=$2; shift 2 ;;
-    codex|claude|opencode|hermes|dsh|qwen|goose) agents=("$1"); shift; break ;;
-    all) agents=(codex claude opencode hermes dsh qwen goose); shift; break ;;
+    codex|claude|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi) agents=("$1"); shift; break ;;
+    all) agents=(codex claude opencode opencode2 hermes dsh qwen goose openhands nanobot letta pi); shift; break ;;
     vpn) vpn=vpn; shift; break ;;
     tor) vpn=tor; shift; break ;;
     browser) vpn=browser; shift; break ;;
@@ -138,7 +206,7 @@ while [[ $# -gt 0 ]]; do
       # images.py's own refusal (no such variant, a damaged one) is said once, in this command's name
       plan=$("${images[@]}" build-plan "$1" 2>/dev/null) || {
         why=$("${images[@]}" build-plan "$1" 2>&1 >/dev/null | tail -n 1) || true
-        echo "sandbox-ai build: $1 is neither codex, claude, opencode, hermes, dsh, qwen, goose, all, team, cairn, vpn, tor, browser nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
+        echo "sandbox-ai build: $1 is neither codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, vpn, tor, browser nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
         exit 2; }
       agents=("${plan%% *}") variant=$1; read -r _ variant_kind _ <<<"$plan"; shift; break ;;
     *) die_usage ;;
@@ -271,19 +339,39 @@ package() {
   esac
 }
 
-# Hermes, DSH, Qwen Code, Goose: the reviewed release only (its lock file belongs to it), never the newest.
+# OpenCode 2, Hermes, DSH, Qwen Code, Goose, OpenHands, nanobot, Letta Code, Pi: the reviewed release only (its lock file belongs to it), never the newest.
 reviewed_version() {
   sed -n "s/^ARG ${1^^}_VERSION=//p" "$script_dir/Containerfile.$1"
 }
 reviewed_name() {
-  case "$1" in hermes) echo Hermes ;; dsh) echo "DeepSeek Harness" ;; qwen) echo "Qwen Code" ;; goose) echo Goose ;; esac
+  case "$1" in opencode2) echo "OpenCode 2" ;; hermes) echo Hermes ;; dsh) echo "DeepSeek Harness" ;; qwen) echo "Qwen Code" ;; goose) echo Goose ;;
+    openhands) echo OpenHands ;; nanobot) echo nanobot ;; letta) echo "Letta Code" ;; pi) echo Pi ;; esac
 }
 
 team_build() {
-  # Every agent at its newest release unless a --build-arg pins it; one image, no extensions.
-  local extra=(--pull=newer) labels=() agent given version
+  # The base (Containerfile.team): Claude Code, Codex and OpenCode, each at its newest release unless a --build-arg
+  # pins it; no extensions. --with A,B (repeatable, "all"): the image with those agents as layers on the base
+  # (team_image.py), the base built first when it is not there. The base built again: the team images with layers
+  # that are there are built again on it, so that they share it.
+  local extra=(--pull=newer) labels=() agent given version with=() rest=() layer_list="" name list status=0
   [[ -z "$pin$extension_only" ]] || {
     echo "sandbox-ai build: --pin and --extension-only apply to one agent's image, not team" >&2; exit 2; }
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --with) [[ $# -ge 2 && -n "$2" ]] || die_usage; with+=("$2"); shift 2 ;;
+      --with=*) [[ -n "${1#--with=}" ]] || die_usage; with+=("${1#--with=}"); shift ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  set -- ${rest[@]+"${rest[@]}"}
+  if [[ ${#with[@]} -gt 0 ]]; then
+    layer_list=$("$python" -I "$script_dir/team_image.py" layers "$(IFS=,; echo "${with[*]}")") || exit 2
+    if [[ -n "$layer_list" ]] && "${raw_podman[@]}" image exists localhost/team-sandbox:latest >/dev/null 2>&1; then
+      team_layers_build "$layer_list" "$@"
+      exit $?
+    fi
+    [[ -z "$layer_list" ]] || echo "sandbox-ai build: team: the base (localhost/team-sandbox:latest) is not there yet: building it first" >&2
+  fi
   for agent in claude codex opencode; do
     given=$(explicit_version "$agent" "$@")
     if [[ -n "$given" ]]; then
@@ -298,8 +386,47 @@ team_build() {
   done
   [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
   [[ -z "$node" ]] || extra+=(--build-arg "NODE_IMAGE=$node")
-  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/team-sandbox:latest --label sandbox-ai.role=team "${labels[@]}" \
-    --file "$script_dir/Containerfile.team" "${extra[@]}" "$@" "$script_dir"
+  "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/team-sandbox:latest --label sandbox-ai.role=team "${labels[@]}" \
+    --file "$script_dir/Containerfile.team" "${extra[@]}" "$@" "$script_dir" || exit $?
+  if [[ -n "$layer_list" ]]; then
+    team_layers_build "$layer_list" "$@"
+    exit $?
+  fi
+  # The team images with layers that are there: again, on the new base (else each kept the old one).
+  while read -r name; do
+    list=$("$python" -I "$script_dir/team_image.py" layers-of "$name" 2>/dev/null) || continue
+    [[ -n "$list" ]] || continue
+    echo "sandbox-ai build: team: ${name%:latest} again, on the new base" >&2
+    team_layers_build "$list" "$@" || status=1
+  done < <("${raw_podman[@]}" images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | sort -u)
+  exit $status
+}
+
+# The team image with the agents LIST (team_image.py's order) as layers on the base: each at the release sandbox-ai
+# reviewed, made from its own Containerfile (its lock, its checks, its telemetry guard).
+team_layers_build() {
+  local list=$1 image file agent version given labels=() status=0
+  shift
+  for agent in $list; do
+    given=$(explicit_version "$agent" "$@")
+    version=$(reviewed_version "$agent")
+    [[ -z "$given" || "${given#set:}" == "$version" || "${given#set:}" == "v$version" ]] || {
+      echo "sandbox-ai build: $(reviewed_name "$agent") is built at the release sandbox-ai reviewed, $version, not ${given#set:}" >&2
+      return 2; }
+    echo "sandbox-ai build: team: $agent -> $version (pinned)" >&2
+    labels+=(--label "sandbox-ai.$agent-version=$version")
+  done
+  # shellcheck disable=SC2086  # (LIST: agent names, one word each)
+  image=$("$python" -I "$script_dir/team_image.py" image $list) || return 2
+  file=$(mktemp "${TMPDIR:-/tmp}/sandbox-ai-team-Containerfile.XXXXXX") || return 1
+  # shellcheck disable=SC2086
+  "$python" -I "$script_dir/team_image.py" containerfile $list > "$file" || { rm -f "$file"; return 2; }
+  echo "sandbox-ai build: team: $image (claude codex opencode $list)" >&2
+  "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --pull=never --tag "$image" --label sandbox-ai.role=team \
+    --label "sandbox-ai.team-agents=claude,codex,opencode,${list// /,}" "${labels[@]}" --file "$file" "$@" \
+    "$script_dir" || status=$?
+  rm -f "$file"
+  return $status
 }
 
 latest_version() {
@@ -328,23 +455,32 @@ explicit_version() {
   echo "$found"
 }
 
-# Cairn on the team image: the commit sandbox-ai reviewed only (Containerfile.cairn: its commit, its lock); the team
-# image must be there (its agents are Cairn's workers), nothing else is pulled but uv's pinned image.
+# Cairn's own container (--cairn): the commit sandbox-ai reviewed only (Containerfile.cairn: its commit, its lock), on
+# a Debian base pinned by its digest (pulled once here; a --build-arg DEBIAN_IMAGE=... given is used as given); uv's
+# pinned image is pulled for the build stage. No agent image is needed: its workers are the session's agents.
 cairn_build() {
   [[ -z "$pin$extension_only$node" ]] || {
     echo "sandbox-ai build: --pin, --node and --extension-only apply to the agent images, not cairn" >&2; exit 2; }
-  "${raw_podman[@]}" image exists localhost/team-sandbox:latest >/dev/null 2>&1 || {
-    echo "sandbox-ai build: cairn is built on the team image: sandbox-ai build team first" >&2; exit 1; }
-  local commit arg extra=()
+  local commit arg extra=() given_base="" base digest
   commit=$(sed -n 's/^ARG CAIRN_COMMIT=//p' "$script_dir/Containerfile.cairn")
   for arg in "$@"; do
-    case "$arg" in *CAIRN_COMMIT=*|*TEAM_IMAGE=*)
-      echo "sandbox-ai build: Cairn is built at the commit sandbox-ai reviewed, $commit, on the team image" >&2; exit 2 ;;
+    case "$arg" in
+      *CAIRN_COMMIT=*)
+        echo "sandbox-ai build: Cairn is built at the commit sandbox-ai reviewed, $commit" >&2; exit 2 ;;
+      *DEBIAN_IMAGE=*) given_base=1 ;;
     esac
   done
   [[ -z "$uv" ]] || extra+=(--build-arg "UV_VERSION=$uv")
-  echo "sandbox-ai build: cairn -> $commit (on localhost/team-sandbox:latest)" >&2
-  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/cairn-sandbox:latest \
+  if [[ -z "$given_base" ]]; then
+    base=docker.io/library/debian:bookworm-slim
+    "${raw_podman[@]}" pull -q "$base" >/dev/null || { echo "sandbox-ai build: $base could not be pulled" >&2; exit 1; }
+    digest=$("${raw_podman[@]}" image inspect --format '{{.Digest}}' "$base") || digest=""
+    [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "sandbox-ai build: Podman names no digest for $base" >&2; exit 1; }
+    extra+=(--build-arg "DEBIAN_IMAGE=docker.io/library/debian@$digest")
+    echo "sandbox-ai build: Cairn's base: docker.io/library/debian@$digest ($base)" >&2
+  fi
+  echo "sandbox-ai build: cairn -> $commit (localhost/sandbox-ai-cairn:latest)" >&2
+  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/sandbox-ai-cairn:latest \
     --label sandbox-ai.role=cairn --label "sandbox-ai.cairn-commit=$commit" ${extra[@]+"${extra[@]}"} \
     --file "$script_dir/Containerfile.cairn" "$@" "$script_dir"
 }
@@ -376,7 +512,7 @@ for agent in "${agents[@]}"; do
   if [[ -n "$given_set" && ! "$given" =~ $semver ]]; then
     echo "sandbox-ai build: ${agent^^}_VERSION expects X.Y.Z: '$given'" >&2; exit 2
   fi
-  if [[ "$agent" == hermes || "$agent" == dsh || "$agent" == qwen || "$agent" == goose ]]; then
+  if [[ "$agent" == opencode2 || "$agent" == hermes || "$agent" == dsh || "$agent" == qwen || "$agent" == goose || "$agent" == openhands || "$agent" == nanobot || "$agent" == letta || "$agent" == pi ]]; then
     reviewed=$(reviewed_version "$agent")
     for wanted in "$pin" "$given"; do
       [[ -z "$wanted" || "${wanted#v}" == "$reviewed" ]] || {

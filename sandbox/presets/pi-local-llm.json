@@ -1,0 +1,38 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "pi-local-llm",
+  "title": "Pi with a local model",
+  "description": "Pi with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one) and nothing else: only the server's address is opened, with the model's real context window and the loop guard.",
+  "translations": {
+    "de": {
+      "title": "Pi mit einem lokalen Modell",
+      "description": "Pi mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler) und sonst nichts: nur die Adresse des Servers ist offen, mit dem echten Kontextfenster des Modells und dem Schleifenschutz."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "pi"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "loop_guard=on"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent pi asks it for the API Pi uses.",
+    "sandbox-ai's extension gives Pi the server as its provider sandbox-ai (OpenAI chat completions at the server's /v1 URL, the key a placeholder the connection proxy replaces, the model's context window as the start's num_ctx or the server says), and Pi starts with --model sandbox-ai/MODEL. LM Studio, Ollama, vLLM and llama.cpp all work.",
+    "The loop guard: its instructions in Pi's system prompt and its turn limit (the extension ends a run there), the relay's model parameters (sandbox-ai llm params) on the wire. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
+    "Pi is not live-tested yet (a start says so); its image first: sandbox-ai build pi."
+  ]
+}

@@ -216,6 +216,40 @@ def test_a_refusal_keeps_the_dialog_open_and_another_scope_is_saved_too(qapp, sa
     page.deleteLater()
 
 
+def test_the_servers_memory_is_set_and_forgotten_in_the_dialog(qapp, sai, monkeypatch):
+    """The server's memory for what fits it (llm set --memory GB: llm recommend, the Board's use case): shown as
+    llm show says it, changed with --memory N, emptied with --memory 0; unchanged: not sent."""
+    seen = []
+
+    def run(dialog):
+        seen.append(dialog.memory.value())
+        dialog.memory.setValue(128)
+        dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(LPV.ParamsDialog, "exec", run)
+    page = llm_page.LlmPage(sai)
+    page.show()
+    page.servers.selectRow(0)
+    page.parameters()
+    sets = [args for host, args in sai.asked if args[:2] == ("llm", "set")]
+    assert seen == [0.0] and sets == [("llm", "set", "lm", "--memory", "128")]
+    parsed(sai, list(sets[0]))
+    sai.answers[("local", ("llm", "show", "lm", "--json"))] = (0, json.dumps({**SERVER, "memory_gb": 64}), "")
+    sai.asked.clear()
+
+    def forget(dialog):
+        seen.append(dialog.memory.value())
+        dialog.memory.setValue(0)
+        dialog.accept()
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(LPV.ParamsDialog, "exec", forget)
+    page.parameters()
+    sets = [args for host, args in sai.asked if args[:2] == ("llm", "set")]
+    assert seen[-1] == 64.0 and sets == [("llm", "set", "lm", "--memory", "0")]
+    page.close()
+    page.deleteLater()
+
+
 def test_a_sandbox_ai_without_llm_params_disables_the_button(qapp, sai, monkeypatch):
     page = llm_page.LlmPage(sai)
     page.show()

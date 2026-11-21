@@ -69,20 +69,21 @@ def test_a_team_presets_texts_cannot_drive_the_terminal(host):
 # --- (2) --copy reads what no mount may show --------------------------------------------------------------------------
 
 def test_copy_from_sandbox_ais_own_secret_store_is_refused(host):
-    """`--copy ~/.local/share/sandbox-ai/secrets/NAME:...` put the raw secret into the sandbox HOME, while every mount
-    of sandbox-ai's own folders is refused (a secret reaches the agent only as a placeholder the proxy fills in)."""
+    """`--copy ~/.local/share/sandbox-ai/secrets/NAME:...` put the raw secret into the sandbox HOME without a word,
+    while every mount of sandbox-ai's own folders was refused (a secret reaches the agent only as a placeholder the
+    proxy fills in). Now both are your choice: copied, with the warning that names sandbox-ai's own folder."""
     secrets_of(host)
     result = host.run("claude", "--dry-run", "--copy", "~/.local/share/sandbox-ai/secrets/OPENAI_API_KEY:key")
-    assert result.returncode == 1
-    assert "sandbox-ai's own folder" in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "warning: --copy" in result.stderr and "sandbox-ai's own folder" in result.stderr, result.stderr
 
 
 def test_copy_from_a_kernel_file_system_is_refused(host):
     """`--copy /proc/self/environ:env` copied the launcher's own environment (the host's variables, tokens among
-    them) into the sandbox; a mount of /proc is refused as a file system of the kernel's own, the copy is too."""
+    them) into the sandbox without a word; now copied with the warning of a kernel file system, as a mount of it."""
     result = host.run("claude", "--dry-run", "--copy", "/proc/self/environ:env")
-    assert result.returncode == 1
-    assert "file system of the kernel's own" in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "warning: --copy" in result.stderr and "kernel" in result.stderr, result.stderr
 
 
 def test_copy_of_a_private_file_warns_as_a_mount_of_it_does(host):

@@ -131,3 +131,26 @@ def test_the_agents_own_tool_shows_its_arguments_whole_too(page, env):
     select(page, "1700000000-1-5")
     assert not box.isHidden() and not box.toggle.isChecked()
     assert "shortened" not in page.open.item(page.open.currentRow(), 2).text()
+
+
+def test_a_write_across_a_session_bridge_is_answered_here_with_its_diff(page, env):
+    """sandbox-ai bridge asks from the bridge's own folder (not a run's): its questions are on the page all the same,
+    a write with its diff in full before Allow."""
+    fake_run(env)  # (the page reads questions while something runs)
+    folder = env / "state" / "sandbox-ai" / "bridges" / "0badcafe" / "approvals"
+    folder.mkdir(parents=True)
+    # Only a living bridge's questions are listed (deep test round 1): its record active, its broker running.
+    (folder.parent / "bridge.json").write_text(json.dumps({"id": "0badcafe", "state": "active",
+                                                           "broker_pid": os.getpid()}))
+    diff = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-print('one')\n+print('two')\n"
+    (folder / "1700000000-7-1.json").write_text(json.dumps({
+        "id": "1700000000-7-1", "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": 300,
+        "kind": "bridge", "bridge": "0badcafe", "from": "alpha", "to": "beta", "tool": "write_file",
+        "arguments": "write src/app.py (13 bytes)", "arguments_full": diff, "write": True}))
+    page.poll()
+    question = select(page, "1700000000-7-1")[1]
+    assert question["kind"] == "bridge"
+    assert "alpha wants to write_file on beta" in page.open.item(page.open.currentRow(), 2).text()
+    assert "this one write only" in page.open.item(page.open.currentRow(), 2).text()
+    page.arguments.toggle.setChecked(True)
+    assert "+print('two')" in page.arguments.text.toPlainText()

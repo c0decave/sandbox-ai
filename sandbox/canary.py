@@ -1023,6 +1023,15 @@ class Plan:
             notify = self.approvals().desktop_notification
         with contextlib.suppress(Exception):
             notify(self.title(), text)
+        self.phone({"stop": "a canary went off: the sandbox was stopped", "block": "a canary went off: the request "
+                    "was refused"}.get(action, "a canary went off"), record.get("summary"))
+
+    def phone(self, what, detail=None):
+        """The alarm to the phone channels (sandbox-ai notify, sent from the host); never an error."""
+        with contextlib.suppress(Exception):
+            approvals = self.approvals()
+            approvals.phone("alarms", what, detail,
+                            run=approvals.run_name(approvals.run_record(self.control_dir / "approvals")) or self.run)
 
     def ask(self, record):
         if self.question is not None:
@@ -1051,6 +1060,8 @@ class Plan:
         def put():
             with contextlib.suppress(Exception):
                 asker(self.title(), text, ident)
+            self.phone("a canary went off: the sandbox is paused until you answer" if paused else
+                       "a canary went off: the sandbox could not be paused", record.get("summary"))
         threading.Thread(target=put, daemon=True).start()
 
     def check_question(self):
@@ -1409,14 +1420,27 @@ def model_requests(log_dir, run, hosts):
     needles = [h.encode() for h in hosts] + [b'"canary"']
     found, budget = [], CONNECTIONS_READ
     try:
-        paths = sorted(Path(log_dir).glob(f"connections-*-{run}.jsonl"))
+        # (NAME.gz: compressed by sandbox-ai gc once the run ended; NAME.N.gz: an older part the run rotated - the
+        # oldest first, the log itself last)
+        paths = list(reversed(module("logs").connection_logs(log_dir)))
+        paths = [path for path in paths if re.fullmatch(rf"connections-\d{{8}}-\d{{6}}-{re.escape(run)}\.jsonl"
+                                                        r"(?:\.\d{1,3})?(?:\.gz)?", path.name)]
     except OSError:
         return []
+    # The timeline's key of a record is its offset in the part it was read from - "OFFSET" in the first part the run
+    # wrote, "PART.OFFSET" in each after a rotation (activity.LogFile). The parts the run rotated are NAME.N.gz, the
+    # highest N the oldest; the log itself (or NAME.gz) is the last one.
+    def number(path):
+        match = re.fullmatch(r".+\.jsonl\.(\d{1,3})\.gz", path.name)
+        return int(match.group(1)) if match else 0
+    rotations = max((number(path) for path in paths), default=0)
     for path in paths:
         if path.is_symlink() or not path.is_file() or budget <= 0:
             continue
+        part = rotations - number(path)
         try:
-            with open(path, "rb") as stream:
+            with (module("jsonltail").open_compressed(path) if path.name.endswith(".gz") else open(path, "rb")) \
+                    as stream:
                 offset = 0
                 for line in stream:
                     start, offset = offset, offset + len(line)
@@ -1437,14 +1461,15 @@ def model_requests(log_dir, run, hosts):
                     seconds = activity.epoch(record.get("time"))
                     if seconds is None:
                         continue
-                    ident = hashlib.sha256(f"{run}\0proxy\0proxy:{start}".encode("utf-8", "replace")).hexdigest()[:16]
+                    key = f"proxy:{part}.{start}" if part else f"proxy:{start}"
+                    ident = hashlib.sha256(f"{run}\0proxy\0{key}".encode("utf-8", "replace")).hexdigest()[:16]
                     found.append({"time": record.get("time"), "epoch": seconds, "host": host,
                                   "event": record.get("event"), "method": record.get("method"),
                                   "url": record.get("url"), "status": record.get("status"),
                                   "model": host in hosts, "activity_id": ident,
                                   "canary": record["canary"] if isinstance(record.get("canary"), dict) else None,
                                   "log": path.name, "offset": start})
-        except OSError:
+        except (OSError, EOFError, zlib.error):  # (a damaged compressed log: what was read of it)
             continue
     return sorted(found, key=lambda r: r["epoch"])
 
@@ -1611,19 +1636,31 @@ def resume(run, out=print):
     return 0
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def main(argv, out=print):
     parser = argparse.ArgumentParser(prog="sandbox-ai canaries", description=__doc__.split("\n\n")[0],
-                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     formatter_class=help_style,
                                      epilog="\n\n".join(__doc__.split("\n\n")[1:4]))
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="runs with canaries, or one run's canaries and events")
     listing.add_argument("run", nargs="?")
     listing.add_argument("--tokens", action="store_true", help="show the tokens in full")
-    listing.add_argument("-j", "--json", action="store_true")
-    logging = commands.add_parser("log", help="every canary event with its process, the tool call, the prompt "
-                                              "and the model requests around it")
+    listing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    logging = commands.add_parser("log", help="every canary event with what happened around it",
+                                  description="Every canary event with its process, the tool call, the prompt and "
+                                              "the model requests around it.")
     logging.add_argument("run", nargs="?", help="a run id or the name of a start (default: every run)")
-    logging.add_argument("-j", "--json", action="store_true")
+    logging.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     resuming = commands.add_parser("resume", help="continue a sandbox a canary paused")
     resuming.add_argument("run")
     args = parser.parse_args(argv)

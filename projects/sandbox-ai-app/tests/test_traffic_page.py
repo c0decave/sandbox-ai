@@ -11,6 +11,7 @@ import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6 import QtCore, QtGui  # noqa: E402
+import shiboken6  # noqa: E402
 from sandbox_ai_app import backend, traffic_page, widgets  # noqa: E402
 from sandbox_ai_app.traffic_page import TrafficModel, chat_html, parameter_rows, traffic_runs  # noqa: E402
 
@@ -192,7 +193,7 @@ def test_the_page_lists_reads_a_request_and_follows(window, env, wait):
     assert chat is not None and chat.isVisible() and "welcome" in chat.browser.toPlainText()
     QtWidgets.QApplication.sendEvent(chat, QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Escape,
                                                            QtCore.Qt.KeyboardModifier.NoModifier))
-    assert wait(lambda: not chat.isVisible())
+    assert wait(lambda: not shiboken6.isValid(chat) or not chat.isVisible())  # (closed, it goes: test_leaks_perf_1)
     # A new request arrives while following.
     with open(path, "a") as stream:
         stream.write(json.dumps({**records()[0], "n": 5, "time": "2026-11-13T10:01:00.000Z"}) + "\n")
@@ -227,6 +228,20 @@ def test_search_and_export(window, env, wait, monkeypatch):
     (env / "link.md").symlink_to(env / "elsewhere.md")
     monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(env / "link.md")])
     assert page.export("md", False) is None and not (env / "elsewhere.md").exists()
+
+
+def test_a_run_compressed_by_gc_is_still_shown(window, env, wait):
+    """sandbox-ai gc compresses the logs of runs that ended (NAME.gz): listed and read as before."""
+    import gzip
+    logs, path = project(env)
+    packed = path.with_name(path.name + ".gz")
+    packed.write_bytes(gzip.compress(path.read_bytes()))
+    path.unlink()
+    assert [run for _, run, _ in traffic_runs([logs])] == ["opencode-1a2b"]
+    page = window.traffic
+    window.show_page("traffic")
+    assert wait(lambda: page.model.rowCount() == 4, timeout=30)
+    assert column(page, 0) == ["1", "2", "3", "4"]
 
 
 def test_nothing_recorded_yet(window, env, wait):

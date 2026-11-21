@@ -1196,7 +1196,7 @@ def test_the_wireguard_go_stage_is_pinned_and_optional():
 
 def test_main_knows_the_vpn_command():
     main = load("sandbox_main_vpn_test", "main.py")
-    assert main.PYTHON_COMMANDS["vpn"] == ("vpn.py",) and "sandbox-ai vpn add" in main.__doc__
+    assert main.PYTHON_COMMANDS["vpn"] == ("vpn.py",) and "\n  vpn " in main.help_text()
 
 
 # --- MCP servers and the policy file ---------------------------------------------------------------------------------
@@ -1260,8 +1260,10 @@ def test_mcp_wrapper_runs_the_bridge_behind_a_checked_tunnel(home, monkeypatch):
 def test_mcp_image_mounts_never_show_vpn_keys(home):
     wireguard_profile(home)
     mcp = load("sandbox_mcp_vpn_test", "mcp.py")
-    with pytest.raises(ValueError, match="where the VPN profiles keep their keys"):
-        mcp.check_image_mounts("x", {"image": "x", "mounts": [{"host": str(home / "config"), "target": "/cfg"}]})
+    said = []  # you decide what a server gets: given, and the warning says the keys are there
+    mcp.check_image_mounts("x", {"image": "x", "mounts": [{"host": str(home / "config"), "target": "/cfg"}]},
+                           warn=said.append)
+    assert any("where the VPN profiles keep their keys" in text for text in said), said
 
 
 def test_policy_file_require_vpn_values(tmp_path, monkeypatch):

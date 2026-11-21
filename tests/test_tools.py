@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+import re
 import subprocess
 import sys
 from unittest.mock import Mock
@@ -56,14 +57,16 @@ def test_dispatcher(scenario, tmp_path):
         # Review 6 L7: its help is shown all the same, with how this copy is updated.
         for flag in ("--help", "-h"):
             helped = sandbox_ai("update", flag)
-            assert helped.returncode == 0 and helped.stdout.startswith("Usage: sandbox-ai update"), helped.stderr
+            assert helped.returncode == 0 and helped.stdout.startswith("Usage:  sandbox-ai update"), helped.stderr
             assert "--check" in helped.stdout and "not installed by install.sh" in helped.stdout
     else:
         result = sandbox_ai("--help")
         assert result.returncode == 0
-        for command in ("session", "mcp", "wizard", "build", "doctor", "logs", "update"):
-            assert f"sandbox-ai {command}" in result.stdout
-        assert "hosts list|add|set|remove|test|update|install|run" in result.stdout  # review 6 N3
+        for command in ("session", "mcp", "wizard", "build", "doctor", "logs", "update", "hosts"):
+            assert re.search(rf"^  {command} {{2,}}[A-Z]", result.stdout, re.M), command
+        hosts = sandbox_ai("hosts", "--help")  # review 6 N3: every subcommand of hosts is shown
+        for command in ("list", "add", "set", "remove", "test", "update", "install", "run"):
+            assert re.search(rf"^  {command} {{2,}}[A-Z]", hosts.stdout, re.M), command
 
 
 def test_check_subids(scenario, tmp_path):

@@ -57,6 +57,11 @@ def pytest_configure(config):
         os.environ.setdefault("SANDBOX_AI_MCP_NO_IMAGE_CHECK", "1")
         # A start builds no missing image of its own (the tests that check it turn it on).
         os.environ.setdefault("SANDBOX_AI_NO_AUTO_BUILD", "1")
+        # Secrets kept in private files by the tests need no primary password (plain files, the choice a machine
+        # without anyone to ask makes; test_secrets_primary_password.py turns it off).
+        os.environ.setdefault("SANDBOX_AI_SECRETS_PLAIN", "1")
+        # A start compacts no logs in the background (test_statedirs.py turns it on).
+        os.environ.setdefault("SANDBOX_AI_AUTO_COMPACT", "0")
     config.addinivalue_line("markers", "agent_live: launches real sandboxes")
     config.addinivalue_line("markers", "agent_provider: makes a real authenticated model request")
     config.addinivalue_line("markers", "agent_network: downloads from the internet inside the sandbox")
@@ -121,6 +126,22 @@ def writable_tmp_path(request):
                     os.chmod(child, os.lstat(child).st_mode | 0o700)
                 except OSError:
                     pass
+
+
+@pytest.fixture(autouse=True)
+def no_fake_host_process_outlives_the_test():
+    """Nothing of a fake host (live_fakes.Host) a test made runs on after it: what is left (an MCP server's relay
+    outlives its start by design, a session's supervisor, ...) is ended by its exact PID and fails the test - it
+    stops what it started (`sandbox-ai mcp stop NAME`). 2026-11-20: four processes of every run of one test lived for
+    hours. Free for the tests that make no host (live_fakes not even imported)."""
+    fakes = sys.modules.get("live_fakes")
+    before = len(fakes.HOSTS) if fakes is not None else 0
+    yield
+    fakes = sys.modules.get("live_fakes")
+    problems = fakes.guard_since(before) if fakes is not None else []
+    if problems:
+        pytest.fail("the test left processes of its fake host running (ended now; stop what the test started, e.g. "
+                    "`sandbox-ai mcp stop NAME`):\n" + "\n".join(problems), pytrace=False)
 
 
 def pytest_sessionfinish(session, exitstatus):

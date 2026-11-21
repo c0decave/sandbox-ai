@@ -220,30 +220,81 @@ def test_a_packaged_sandbox_ai_is_updated_by_download(tmp_path, kind):
     env = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"), "HOME": str(tmp_path / "home")}
     update = subprocess.run([sys.executable, "-I", str(tree / "sandbox" / "main.py"), "update"], capture_output=True,
                             text=True, timeout=60, env=env)
-    assert update.returncode == 1 and "download the new one" in update.stderr
+    # Not started from its file (a bare tree with the marker): nothing to replace, said with the way - and neither
+    # install.sh nor the network is touched.
+    assert update.returncode == 1 and "this copy does not replace itself" in update.stderr
+    assert {"pyz": "was not started from the .pyz file", "appimage": "the AppImage",
+            "macos-app": "is not inside a sandbox-ai.app"}[kind] in update.stderr
     assert not (tmp_path / "data").exists() and not (tmp_path / "home").exists()
     verbose = subprocess.run([sys.executable, "-I", str(tree / "sandbox" / "main.py"), "version", "--verbose"],
                              capture_output=True, text=True, timeout=60, env=env).stdout
-    assert f"package: {kind}" in verbose
+    assert f"package: {kind}" in verbose and "self-update: no" in verbose
 
 
 def test_update_check_in_a_package_reports_the_newest_release(tmp_path):
-    """The app's update notice runs `sandbox-ai update --check`: in a package it names the package's version and
-    the newest release (install.sh --check with a private data folder: an install.sh installation is not read)."""
+    """The app's update notice runs `sandbox-ai update --check`: in a package it names the package's version and the
+    newest release of the source - asked by the package itself (package_update.py; its install.sh is never run, and
+    nothing of an install.sh installation is read) -, here a Gitea of one's own whose release is not signed."""
+    import http.server
+    import json
+    import threading
     tree = tmp_path / "tree"
     shutil.copytree(ROOT / "sandbox", tree / "sandbox", ignore=shutil.ignore_patterns("__pycache__"))
-    (tree / "install.sh").write_text('#!/usr/bin/env bash\necho "installed: 0.0.1 ($XDG_DATA_HOME)"\n'
-                                     'echo "available: 9.9.9 (https://example.org)"\necho "args: $*"\n')
+    (tree / "install.sh").write_text('#!/usr/bin/env bash\necho "installed: 0.0.0-never"; echo "install.sh ran" >&2\n')
     (tree / "PACKAGING").write_text("appimage\n")
-    result = subprocess.run([sys.executable, "-I", str(tree / "sandbox" / "main.py"), "update", "--check",
-                             "--source", "https://example.org/o/r"], capture_output=True, text=True, timeout=60)
+    asked = []
+
+    class Gitea(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            asked.append(self.path)
+            base = f"http://127.0.0.1:{self.server.server_address[1]}/o/r/releases/download/v9.9.9"
+            names = ("sandbox-ai-bundle-9.9.9.tar.gz", "SHA256SUMS")
+            body = json.dumps({"tag_name": "v9.9.9", "assets": [
+                {"name": name, "browser_download_url": f"{base}/{name}"} for name in names]}).encode() \
+                if self.path == "/api/v1/repos/o/r/releases/latest" else f"{'0' * 64}  {names[0]}\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gitea)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        source = f"http://127.0.0.1:{server.server_address[1]}/o/r"
+        env = {key: value for key, value in os.environ.items() if not key.lower().endswith("_proxy")}
+        env.update(HOME=str(tmp_path / "home"), XDG_STATE_HOME=str(tmp_path / "state"))
+        result = subprocess.run([sys.executable, "-I", str(tree / "sandbox" / "main.py"), "update", "--check",
+                                 "--source", source], capture_output=True, text=True, timeout=60, env=env)
+    finally:
+        server.shutdown()
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
     version = re.search(r'__version__ = "([^"]+)"', (ROOT / "sandbox/agent_sandbox.py").read_text())[1]
-    assert lines[0] == f"installed: {version} (the AppImage (sandbox-ai-ARCH.AppImage))"
-    assert "available: 9.9.9 (https://example.org)" in lines and "0.0.1" not in result.stdout
-    assert "args: --check --source https://example.org/o/r" in lines
-    assert lines[-1].startswith("update: this sandbox-ai runs from the AppImage")
+    assert lines[0] == f"installed: {version} (the AppImage)"
+    assert f"available: 9.9.9 ({source})" in lines and "0.0.0-never" not in result.stdout
+    assert "signature: none (the release has no SHA256SUMS.sig)" in lines
+    assert "           an update refuses this release" in lines
+    assert lines[-1].startswith("update: this copy was not started from the AppImage file")
+    assert "install.sh ran" not in result.stderr
+    assert asked[0] == "/api/v1/repos/o/r/releases/latest" and len(asked) == 2, asked
+    # What it found is kept as the last check (the app, update mode, the command line's hint).
+    state = json.loads((tmp_path / "state/sandbox-ai/update.json").read_text())
+    assert state["result"]["available"] == "9.9.9" and state["result"]["newer"] is False
+
+
+def test_the_package_check_of_a_release_runs_the_packages_own_update_without_the_network():
+    """release.yml runs scripts/e2e_package.sh for the .pyz, both AppImages and both macOS apps: its `update` is the
+    package's own (a package replaces itself) against a source that is nowhere - never the real GitHub, whose answer
+    (the release before, a rate limit) would decide whether a release's jobs are green."""
+    script = (ROOT / "scripts" / "e2e_package.sh").read_text()
+    assert "download the new one" not in script, "a package no longer points to a download"
+    assert "SANDBOX_AI_SOURCE=http://127.0.0.1:9/o/r no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 cli update" in script
+    assert 'grep -q "sandbox-ai update: cannot reach 127.0.0.1:9"' in script
+    wording = "is not writable for you; run the update as someone who may write it: sudo -H "
+    assert wording in script and wording in (ROOT / "sandbox" / "package_update.py").read_text()
+    assert 'raise UpdateError(f"cannot reach {parts.netloc}: ' in (ROOT / "sandbox" / "package_update.py").read_text()
 
 
 def test_make_dist_refuses_to_add_files_a_build_removes(tmp_path):

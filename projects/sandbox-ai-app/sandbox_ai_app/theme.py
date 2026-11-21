@@ -1,4 +1,4 @@
-"""The app's looks: the system's own, nine of the app's (light, dark, hacker, cyberpunk, amber, unicorn,
+"""The app's looks: the system's own, ten of the app's (light, dark, hacker, hacker (neon), cyberpunk, amber, unicorn,
 Windows 3.11, Mac, Fallout) and well-known editor themes in their upstream palettes (Solarized Dark and Light,
 Dracula, Nord, Gruvbox Dark, One Dark, Catppuccin Mocha and Latte, Tokyo Night). Each is a set of tokens -
 colours, font, corner radius, bevelled or flat controls, the board's canvas and the terminal's colours - from
@@ -77,6 +77,22 @@ THEMES_DATA = {
         "font": {"families": MONO, "size": 10}, "radius": 0, "bevel": False, "extra": "hacker",
         "terminal": {"background": "#000000", "foreground": "#33ff66", "cursor": "#33ff66",
                      "selectionBackground": "#0b5a22"},
+    },
+    # The hacker look again with more than phosphor green (user 2026-11-17): turquoise marks, yellow titles, orange
+    # warnings, light green text on dark green bands.
+    "hacker_neon": {
+        "label": N_("hacker (neon)"), "dark": True,
+        "colors": {"window": "#000000", "base": "#030806", "alternate": "#06100b", "text": "#8cff7a",
+                   "secondary": "#4fd26a", "placeholder": "#3dbb5a", "button": "#021008", "border": "#1fa37a",
+                   "highlight": "#2ee6d6", "highlight_text": "#000000", "accent": "#2ee6d6", "accent_text": "#000000",
+                   "danger": "#ff7a45", "tooltip": "#021008", "disabled": "#2a8a45", "nav": "#000000",
+                   "nav_text": "#8cff7a", "nav_selected": "#0b4a1f", "nav_selected_text": "#ffe14d",
+                   "title": "#ffe14d", "canvas": "#000000", "grid": "#16805a", "node": "#030c07",
+                   "node_header": "#0b4a1f"},
+        "status": {"ok": "#8cff7a", "warn": "#ff9f1c", "bad": "#ff5f56", "muted": "#4fd26a"},
+        "font": {"families": MONO, "size": 10}, "radius": 0, "bevel": False, "extra": "hacker",
+        "terminal": {"background": "#000000", "foreground": "#8cff7a", "cursor": "#ff9f1c",
+                     "selectionBackground": "#0b5a52"},
     },
     "cyberpunk": {
         "label": N_("cyberpunk"), "dark": True,
@@ -779,6 +795,8 @@ QMainWindow, QDialog {{ background: {c['window']}; }}
 QLabel[role="title"] {{ font-size: 17pt; font-weight: 700; padding: 2px 0 2px 0; color: {c['title']}; }}
 QLabel[role="section"] {{ font-size: 11pt; font-weight: 600; padding-top: 6px; color: {c['title']}; }}
 QLabel[role="secondary"] {{ color: {c['secondary']}; }}
+QFrame[role="chip"] {{ border: 1px solid {c['border']}; border-radius: {small}px; background: {c['alternate']}; }}
+QFrame[role="chip"]:focus {{ border: 2px solid {c['accent']}; }}
 QLabel[role="notice-warn"] {{ color: {s['warn']}; }}
 QLabel[role="notice-error"] {{ color: {s['bad']}; font-weight: 600; }}
 QLabel[role="notice-ok"] {{ color: {s['ok']}; }}
@@ -1061,7 +1079,12 @@ GLYPHS = {
                 ("line", (6, 8, 12, 8)), ("line", (12, 15, 18, 15))],
     "statistics": [("line", (5, 20, 5, 12)), ("line", (10, 20, 10, 6)), ("line", (15, 20, 15, 14)),
                    ("line", (20, 20, 20, 9))],
+    # The system monitor: a screen with a pulse on it.
+    "monitor": [("rect", (3, 4, 18, 13)), ("poly", [(6, 11), (9, 11), (11, 7.5), (13, 14), (15, 11), (18, 11)], False),
+                ("line", (9, 20.5, 15, 20.5))],
     "files": [("poly", [(3, 6), (9, 6), (11, 8), (21, 8), (21, 19), (3, 19)], True)],
+    # The file manager's search below a folder: a magnifying glass.
+    "search": [("circle", (10, 10, 6)), ("line", (14.5, 14.5, 20.5, 20.5))],
     "mcp": [("rect", (4, 4, 16, 6)), ("rect", (4, 14, 16, 6)), ("dot", (7, 7)), ("dot", (7, 17))],
     "llm": [("rect", (3, 4, 18, 12)), ("poly", [(8, 16), (8, 21), (13, 16)], True), ("line", (7, 8, 17, 8)),
             ("line", (7, 12, 14, 12))],
@@ -1097,6 +1120,10 @@ GLYPHS = {
     "refresh": [("poly", [(17.4, 16.5), (18.9, 13.1), (18.5, 9.4), (16.2, 6.4), (12.7, 5.0), (9.0, 5.7), (6.2, 8.1),
                           (5.0, 11.6), (5.8, 15.3), (8.4, 18.0), (12.0, 19.0)], False),
                 ("poly", [(9.5, 16.5), (12, 19), (9.5, 21.5)], False)],
+    # The remote folder chooser's bar (with home, up and refresh): list the path typed (Enter's ↵), a new folder.
+    "go": [("poly", [(19, 5), (19, 14), (6, 14)], False), ("poly", [(10, 10), (6, 14), (10, 18)], False)],
+    "folder-new": [("poly", [(3, 6), (9, 6), (11, 8), (21, 8), (21, 19), (3, 19)], True),
+                   ("line", (12, 10.5, 12, 16.5)), ("line", (9, 13.5, 15, 13.5))],
     "system": [("circle", (12, 12, 3.5)), ("circle", (12, 12, 8))],
     "hosts": [("rect", (3, 4, 7, 16)), ("rect", (14, 4, 7, 16)), ("dot", (6.5, 8)), ("dot", (17.5, 8)),
               ("line", (10, 14, 14, 14))],

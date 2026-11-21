@@ -478,6 +478,31 @@ def test_a_start_loads_its_model_explicitly_unless_evict_allow(lmstudio):
     assert any("Auto-Evict" in line for line in llm.evict_notes(llm.endpoint("studio")))
 
 
+def test_two_starts_at_once_load_their_model_once(tmp_path, monkeypatch):
+    """Analysis round 3 (chaos): two starts of the same model at once (the app's two windows, a double click, two
+    terminals) both found it not loaded and both loaded it - LM Studio's second load is a second instance (MODEL:2),
+    the model in memory twice. One load at a time per server: the second start finds the first one's instance."""
+    import threading
+    log = tmp_path / "requests.jsonl"
+    server, port = model_mock.start(models=("qwen3-8b",), lmstudio=True, log=str(log), log_bodies=True,
+                                    load_seconds=0.5)
+    try:
+        monkeypatch.delenv("SANDBOX_AI_LLM_NO_CONTEXT_FETCH", raising=False)
+        run("add", "studio", "--kind", "lmstudio", "--url", f"http://127.0.0.1:{port}", "--model", "qwen3-8b")
+        found = llm.endpoint("studio")
+        notes = []
+        threads = [threading.Thread(target=lambda: notes.append(llm.keep_loaded(found, "qwen3-8b"))) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        loads = [r for r in requests_of(log) if r["path"] == "/api/v1/models/load"]
+        assert len(loads) == 1, notes
+        assert sum(1 for note in notes if note and "loaded qwen3-8b" in note) == 1 and notes.count(None) == 2
+    finally:
+        server.shutdown()
+
+
 # --- end to end: the real proxy between a client and the mock model server ------------------------------------------
 
 pytestmark_e2e = pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
@@ -502,10 +527,15 @@ class Relay:
         self.port = self.listener.getsockname()[1]
         self.server.serve([self.listener])
 
-    def post(self, path, document):
+    def post(self, path, document, method="POST", encoding=None):
         body = json.dumps(document).encode()
+        if encoding == "gzip":
+            import gzip
+            body = gzip.compress(body)
         with socket.create_connection(("127.0.0.1", self.port), timeout=20) as sock:
-            sock.sendall(b"POST " + path.encode() + b" HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+            sock.sendall(method.encode() + b" " + path.encode() + b" HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                         b"Content-Type: application/json\r\n"
+                         + (b"Content-Encoding: %s\r\n" % encoding.encode() if encoding else b"")
                          + b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
             data = b""
             while chunk := sock.recv(65536):
@@ -611,6 +641,150 @@ def test_other_servers_traffic_is_never_changed(tmp_path):
         document = chat_history([same] * 6) | {"model": "qwen3-8b", "temperature": 0}
         relay.post("/v1/chat/completions", document)
         assert requests_of(log)[-1]["body"] == document
+        relay.close()
+    finally:
+        server.shutdown()
+
+
+# --- a model server that sends odd events (analysis round 3: chaos) ------------------------------------------------
+
+ODD_EVENTS = [
+    {"choices": True}, {"choices": 5}, {"choices": [{"index": 0, "delta": {"tool_calls": 7}}]},
+    {"choices": [{"index": {"a": 1}, "delta": {"tool_calls": [{"index": [], "function": {"arguments": "x"}}]}}]},
+    {"type": "content_block_start", "index": {"a": 1}, "content_block": {"type": "text"}},
+    {"type": "content_block_start", "index": "seven", "content_block": {"type": "text"}},
+    {"type": "content_block_stop", "index": []},
+    {"type": "content_block_delta", "index": {"a": 1}, "delta": {"partial_json": "{"}},
+    {"type": "response.function_call_arguments.delta", "item_id": {"a": 1}, "delta": "x"},
+    {"type": "response.output_item.added", "item": {"type": "function_call", "id": ["x"], "name": "n"}},
+    {"type": "response.completed", "response": {"output": [{"type": "message", "content": 5}]}},
+]
+
+
+@pytest.mark.parametrize("api", ["chat", "completions", "messages", "responses"])
+def test_odd_events_of_a_model_server_never_break_the_guard_or_the_record(api):
+    """An event of the wrong shape (a model server's bug, a hostile one) is skipped: the guard, its ending and the
+    answer's record go on with the events that follow - they read the stream beside the agent, never in its way."""
+    guard, answer = rt.LlmStreamGuard(api, 3), rt.LlmAnswer(api, 1 << 20)
+    for event in ODD_EVENTS:
+        assert guard.feed(sse(event)) is None
+        answer.feed(sse(event))
+    assert guard.ending("[note]").endswith(b"\n\n")  # the indexes it keeps for the ending are numbers only
+    good = {"chat": {"choices": [{"index": 0, "delta": {"content": "fine"}}]},
+            "completions": {"choices": [{"index": 0, "text": "fine"}]},
+            "messages": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "fine"}},
+            "responses": {"type": "response.output_text.delta", "item_id": "i", "delta": "fine"}}[api]
+    answer.feed(sse(good))
+    assert "fine" in answer.result().get("text", "")
+    for event in ODD_EVENTS:  # one document, not streamed: the same
+        whole = rt.LlmAnswer(api, 1 << 20)
+        whole.feed(json.dumps(event).encode())
+        assert isinstance(whole.result(), dict)
+        assert rt.llm_held_answer("chat" if api == "completions" else api, json.dumps(event).encode(), None, False,
+                                  "m", "stop") is None
+
+
+class OddModelServer:
+    """A model server whose streamed answer holds odd events between its good ones."""
+
+    def __init__(self, events):
+        import threading
+        self.events = events
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen()
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    data += conn.recv(65536)
+                head, _, body = data.partition(b"\r\n\r\n")
+                length = int([line.split(b":")[1] for line in head.split(b"\r\n")
+                              if line.lower().startswith(b"content-length:")][0])
+                while len(body) < length:
+                    body += conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                for event in self.events:
+                    conn.sendall(sse(event))
+                    time.sleep(0.03)  # (each event a read of its own at the relay)
+                conn.sendall(b"data: [DONE]\n\n")
+
+    def close(self):
+        self.listener.close()
+
+
+@pytestmark_e2e
+def test_odd_events_of_the_model_server_reach_the_agent_through_the_relay(tmp_path):
+    """End to end through the real proxy (the loop guard on): a stream with odd events between good ones reaches the
+    agent whole - before, the guard's TypeError ended the connection in the middle of the answer."""
+    good = [{"id": "c1", "model": "m", "choices": [{"index": 0, "delta": {"content": f"part {n} "}}]} for n in range(3)]
+    server = OddModelServer([good[0], *ODD_EVENTS, good[1], {"choices": [{"index": 0, "delta": {"tool_calls": 7}}]},
+                             good[2]])
+    try:
+        run("add", "box", "--kind", "llamacpp", "--url", f"http://127.0.0.1:{server.port}", "--model", "m")
+        relay = Relay(tmp_path, server.port, argparse.Namespace(llm="box", agent="opencode", llm_param=[]))
+        head, body = dechunk(relay.post("/v1/chat/completions", {"model": "m", "stream": True,
+                                                                "messages": [{"role": "user", "content": "go"}]}))
+        assert b" 200 " in head.split(b"\r\n", 1)[0]
+        assert b"part 0" in body and b"part 1" in body and b"part 2" in body and body.rstrip().endswith(b"[DONE]")
+        records = relay.records()
+        assert records and not any(r.get("event") == "error" for r in records)
+        relay.close()
+    finally:
+        server.close()
+
+
+@pytestmark_e2e
+def test_the_models_a_start_offers_hold_on_every_path_of_the_server(tmp_path):
+    """Analysis round 3 (hostile input): --llm-models MODEL,... ("the proxy refuses requests for the others") held
+    for the four model APIs only, and only for a model given as a string: the agent reached any other model of the
+    server through its native API (Ollama's /api/generate and /api/chat, LM Studio's /api/v1/chat and
+    /api/v1/models/load), with "model": ["other"], or with a body the relay could not read (gzip). Every request with
+    a body to the server is held to the list now: one naming another model, a model that is no name, or a body the
+    relay cannot read is refused; the models offered pass, on every path."""
+    log = tmp_path / "mock.jsonl"
+    server, port = model_mock.start(models=("qwen3-8b", "gemma-3-12b"), log=str(log), log_bodies=True)
+    try:
+        run("add", "box", "--kind", "llamacpp", "--url", f"http://127.0.0.1:{port}", "--model", "qwen3-8b")
+        relay = Relay(tmp_path, port, argparse.Namespace(llm="box", agent="opencode", llm_param=[],
+                                                         llm_models="qwen3-8b"))
+        for path, document, method, encoding in (
+                ("/api/generate", {"model": "gemma-3-12b", "prompt": "x"}, "POST", None),
+                ("/api/chat", {"model": "gemma-3-12b", "messages": []}, "POST", None),
+                ("/api/v1/chat", {"model": "gemma-3-12b", "input": "x"}, "POST", None),
+                ("/api/v1/models/load", {"model": "gemma-3-12b"}, "POST", None),
+                ("/api/delete", {"model": "gemma-3-12b"}, "DELETE", None),
+                ("/api/pull", {"name": "gemma-3-12b"}, "POST", None),
+                ("/v1/chat/completions", {"model": ["gemma-3-12b"], "messages": []}, "POST", None),
+                ("/v1/chat/completions", {"model": "gemma-3-12b", "messages": []}, "POST", "gzip")):
+            before = len(requests_of(log))
+            answer = relay.post(path, document, method, encoding)
+            assert b" 403 " in answer.split(b"\r\n", 1)[0], (path, document, answer[:200])
+            assert len(requests_of(log)) == before, f"{path} reached the server"
+        answer = relay.post("/v1/chat/completions", {"model": "qwen3-8b", "messages": [{"role": "user",
+                                                                                        "content": "hi"}]})
+        assert b" 200 " in answer.split(b"\r\n", 1)[0] and b"mock reply to: hi" in answer
+        answer = relay.post("/api/v1/models/load", {"model": "qwen3-8b"})
+        assert b" 403 " not in answer.split(b"\r\n", 1)[0]  # (the offered model: the server answers)
+        relay.close()
+        # An endpoint added below a path (a gateway's /gw): the server's paths beside it are held to the list too.
+        run("add", "box", "--kind", "llamacpp", "--url", f"http://127.0.0.1:{port}/gw", "--model", "qwen3-8b",
+            "--replace")
+        (tmp_path / "prefixed").mkdir()
+        relay = Relay(tmp_path / "prefixed", port, argparse.Namespace(llm="box", agent="opencode", llm_param=[],
+                                                                      llm_models="qwen3-8b"))
+        assert relay.server.config["llm"][0].get("prefix") == "/gw"
+        before = len(requests_of(log))
+        answer = relay.post("/api/generate", {"model": "gemma-3-12b", "prompt": "x"})
+        assert b" 403 " in answer.split(b"\r\n", 1)[0] and len(requests_of(log)) == before
         relay.close()
     finally:
         server.shutdown()

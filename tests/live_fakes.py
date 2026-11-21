@@ -2,7 +2,8 @@
 ./sandbox-ai entry point as a subprocess, with only Podman, tmux and npm faked on PATH.
 
   podman  a per-user image store (GraphRoot under $HOME, as rootless Podman keeps one per user; another user's is
-          another HOME), `image exists|inspect`, `images`, `build` (tags what it is told), `info --format
+          another HOME), `image exists|inspect` (with --format '{{.Id}} {{index .Labels "sandbox-ai.role"}}' the
+          ID and the role of sandbox-ai's own images), `images`, `build` (tags what it is told), `info --format
           {{.Store.GraphRoot}}`, the launcher's host lookup; `pod create` (and any other `run`) is where a start
           stops: its arguments are written to FAKE_PODMAN_STOP_AT and it fails with exit status 99 - the start got
           as far as making its pod. FAKE_PODMAN_POD_HOLD=FILE: `pod create` waits until FILE exists first (a session
@@ -12,16 +13,50 @@
           FAKE_PODMAN_RUN=STATUS[:SECONDS]: the start goes on instead - its pod is made (`pod exists|inspect|rm`
           know it), its sandbox (`run --pod`) runs SECONDS and ends with STATUS. FAKE_PODMAN_POD_CREATE_FAIL and
           FAKE_PODMAN_LOOKUP_FAIL=STATUS:MESSAGE: `pod create` or the host lookup says MESSAGE and fails with STATUS.
-          FAKE_PODMAN_KEEP=DIR (with FAKE_PODMAN_RUN): the sandbox's session directory is copied to DIR/session.
+          FAKE_PODMAN_KEEP=DIR (with FAKE_PODMAN_RUN): the sandbox's session directory is copied to DIR/session (the
+          proxy's private directory, /sandbox/proxy, to DIR/proxy).
+          FAKE_PODMAN_WIPE_WORK=1 (with FAKE_PODMAN_RUN): the sandbox deletes everything in /work (its bind source),
+          as an agent's rm -rf would. FAKE_PODMAN_WRITE_WORK={"RELATIVE": "TEXT"} (with FAKE_PODMAN_RUN): it writes
+          those files in /work, as an agent would.
+          FAKE_PODMAN_WRITE_HOME={"RELATIVE": "TEXT"} (with FAKE_PODMAN_RUN): it writes those files in its HOME (a
+          login made in the sandbox); FAKE_PODMAN_SAYS=FILE: it prints FILE's bytes (what its program says).
+          FAKE_PODMAN_POD_RM_FAIL=STATUS:MESSAGE (with FAKE_PODMAN_RUN): `pod rm` says MESSAGE and fails with STATUS
+          (a full disk), `pod kill` does nothing, and `pod ps --format json` lists every pod made as running (a
+          sandbox that outlives its launcher; FAKE_PODMAN_POD_GONE=1: none, it ended after all). FAKE_PODMAN_POD_LIVE=1:
+          `pod ps` so too, while `pod rm` works (a later command, the disk has room again).
+          FAKE_PODMAN_POD_PAUSE_FAIL=STATUS:MESSAGE: `pod pause` and `pod unpause` say MESSAGE and fail so.
           FAKE_TOR_SCHEDULE: the Tor container of a Tor profile runs the real vpn_runtime.py with a fake tor whose
           bootstrap goes as the schedule says (FAKE_TOR, below; FAKE_TOR_SPEED, FAKE_TOR_DIR). FAKE_VPN_DIR: a VPN
           container runs the real vpn_runtime.py with the kernel stood in for (FAKE_VPN, below): a start's lent
           tunnel and its MCP servers' borrowing VPN containers meet through a real Unix socket.
+          FAKE_PODMAN_STATS=FILE: `podman stats` prints a row for each pod made (its POD-agent container) from
+          FILE's JSON object, its counters grown at every call (CPUNano, NetInput, NetOutput, BlockInput, BlockOutput).
+          `pull REF` adds REF when it is in the JSON list FAKE_PODMAN_REGISTRY (else it fails); `save REF` writes a
+          small archive of it, `load` takes one in (FAKE_PODMAN_LOAD_DIGEST=lost: under another name, as Podman loses
+          a registry's digest); `image inspect --format {{.Size}}` says 50 MiB.
           `images search`'s package index (a run named sandbox-ai-package-index-*) prints the file
           FAKE_PODMAN_PACKAGE_INDEX; FAKE_PODMAN_PACKAGE_INDEX_STATUS=3: it fails as without network.
+          `volume ls` lists the names of GraphRoot/fake-volumes.json (a JSON list of names, or of {"Name", "Labels"};
+          `volume ls --format json`: rows of both), `volume rm NAME` removes one -
+          except one named in FAKE_PODMAN_VOLUME_IN_USE (comma-separated): "volume is being used", exit status 2.
+          FAKE_PODMAN_IMAGES=FILE: a JSON list of image rows as `podman images --format json` gives them (Id,
+          ParentId, Names, Labels, Size, Containers; "UniqueSize" for `system df -v`) answers `images` (--filter
+          dangling=true: those without a name nobody builds on), `system df [-v] --format json`, and `image rm REF`
+          (an id: the row goes; a name: the name goes, the row with its last one) - never one with Containers, nor one
+          named in FAKE_PODMAN_IMAGE_IN_USE (comma-separated): "image is in use by a container", exit status 2.
   tmux    never a real server: every call fails (and is logged).
   ssh     every host is unreachable (exit status 255, "No route to host"); `ssh -G` answers. Logged to FAKE_SSH_LOG.
   npm     `npm view PACKAGE version` answers 2.0.0 (the agents built at their newest release).
+  sshfs, fusermount3 (Host.add_sshfs(): not on PATH otherwise): real FUSE is not there. `sshfs TARGET:PATH POINT
+          -o ...` logs its arguments (and whether its standard input was a terminal) to FAKE_SSHFS_LOG, writes
+          POINT/REMOTE.txt (TARGET:PATH: the remote folder's content) and records POINT in FAKE_FUSE_MOUNTS (a JSON
+          list); FAKE_SSHFS_FAIL=STATUS:MESSAGE fails so instead. `fusermount3 -u [-z] POINT` logs too, takes
+          REMOTE.txt out again and POINT off the list ("not found in /etc/mtab", exit status 1, when it is not
+          there); FAKE_FUSERMOUNT_FAIL=STATUS:MESSAGE fails so (busy).
+  sudo, mount.nfs, mount.cifs (Host.add_sudo()): `sudo [-n] mount -t nfs|cifs ...` logs its arguments (and, for
+          cifs, the content of its credentials= file) to FAKE_SSHFS_LOG and mounts as the sshfs fake does (the mount
+          point: the first argument that is a folder); `sudo [-n] umount [-l] POINT` takes it out again.
+          FAKE_SUDO_FAIL=STATUS:MESSAGE fails so ("sudo: a password is required").
 
 These tests may run as uid 0 without capabilities (a sandbox), where the launcher refuses to start ("Run as an
 ordinary host user"): python3 on PATH then says euid 1000 (uidshim), and nothing else changes; as an ordinary user
@@ -74,6 +109,45 @@ def option(name):
     return next((args[i + 1] for i, a in enumerate(args) if a == name and i + 1 < len(args)), None)
 
 
+if os.environ.get("FAKE_PODMAN_IMAGES") and (args[:1] == ["images"] or args[:2] in (
+        ["image", "rm"], ["system", "df"], ["image", "ls"])):
+    table = Path(os.environ["FAKE_PODMAN_IMAGES"])
+    rows = json.loads(table.read_text())
+    parents = {row.get("ParentId") for row in rows if row.get("ParentId")}
+    if args[:2] == ["image", "rm"]:
+        ref = args[-1]
+        found = [row for row in rows if row["Id"].startswith(ref) or ref in row.get("Names", [])]
+        if not found:
+            print(f"Error: {ref}: image not known", file=sys.stderr)
+            sys.exit(1)
+        row = found[0]
+        if row.get("Containers") or ref in os.environ.get("FAKE_PODMAN_IMAGE_IN_USE", "").split(","):
+            print(f"Error: image {ref} is in use by a container", file=sys.stderr)
+            sys.exit(2)
+        if ref in row.get("Names", []) and len(row["Names"]) > 1:
+            row["Names"].remove(ref)
+        else:
+            rows.remove(row)
+        table.write_text(json.dumps(rows))
+        print(ref)
+        sys.exit(0)
+    if args[:2] == ["system", "df"]:
+        if "-v" in args:
+            print(json.dumps({"Images": [{"ImageID": row["Id"][:12], "Size": row.get("Size", 0),
+                                          "UniqueSize": row.get("UniqueSize", row.get("Size", 0)),
+                                          "Containers": row.get("Containers", 0)} for row in rows],
+                              "Containers": [], "Volumes": []}))
+        else:
+            total = sum(row.get("UniqueSize", row.get("Size", 0)) for row in rows)
+            used = sum(row.get("UniqueSize", row.get("Size", 0)) for row in rows if row.get("Containers"))
+            active = sum(1 for row in rows if row.get("Containers"))
+            print(json.dumps([{"Type": "Images", "Total": len(rows), "Active": active, "RawSize": total,
+                               "RawReclaimable": total - used}]))
+        sys.exit(0)
+    if "dangling=true" in args:
+        rows = [row for row in rows if not row.get("Names") and row["Id"] not in parents]
+    print(json.dumps([{**row, "Labels": row.get("Labels") or None} for row in rows]))
+    sys.exit(0)
 if args[:1] == ["info"]:
     print(root)
     sys.exit(0)
@@ -126,6 +200,8 @@ if args[:2] == ["image", "inspect"]:
         print("f" * 64, found["labels"].get(shape.split('"')[1], "<no value>"))
     elif "Labels" in shape:
         print(json.dumps(found["labels"]))
+    elif shape == "{{.Size}}":
+        print(found.get("size", 52428800))
     else:
         print("")
     sys.exit(0)
@@ -134,8 +210,59 @@ if args[:2] in (["pod", "inspect"], ["pod", "exists"]):  # (no pod is ever made:
         print(f"Error: no such pod {args[-1]}", file=sys.stderr)
     sys.exit(125 if args[1] == "inspect" else 1)
 if args[:1] == ["pull"]:
+    registry = os.environ.get("FAKE_PODMAN_REGISTRY")  # a JSON list of the references a pull finds
+    if registry and args[-1] in json.loads(Path(registry).read_text()):
+        found = images()
+        found[norm(args[-1])] = {"labels": {}, "pulled": True}
+        root.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps(found))
+        print("Copying blob 0123 done")
+        sys.exit(0)
     print(f"Error: the fake podman pulls nothing: {args[-1]}", file=sys.stderr)
     sys.exit(125)
+if args[:1] == ["save"]:  # an archive of one image: FAKEIMAGE and its JSON
+    found = images().get(norm(args[-1]))
+    if found is None:
+        print(f"Error: {args[-1]}: image not known", file=sys.stderr)
+        sys.exit(125)
+    # An OCI archive as podman save writes one: index.json (FAKE_PODMAN_SAVE_NAMES: the names a hostile host's
+    # archive carries, a JSON list), and the fake's own record of the image.
+    import io, tarfile
+    names = json.loads(os.environ.get("FAKE_PODMAN_SAVE_NAMES") or "[null]")
+    members = {"oci-layout": {"imageLayoutVersion": "1.0.0"},
+               "index.json": {"schemaVersion": 2, "manifests": [
+                   {"annotations": {"org.opencontainers.image.ref.name": name} if name else {}} for name in names]},
+               "fake-image.json": {"ref": args[-1], **found}}
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tar:
+        for name, value in members.items():
+            content = json.dumps(value).encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    sys.exit(0)
+if args[:1] == ["load"]:  # FAKE_PODMAN_LOAD_DIGEST=lost: the image arrives without its registry digest
+    import tarfile
+    source = args[args.index("--input") + 1] if "--input" in args else None
+    try:
+        with (tarfile.open(source) if source else tarfile.open(fileobj=sys.stdin.buffer, mode="r|")) as tar:
+            members = {member.name: json.loads(tar.extractfile(member).read()) for member in tar}
+        loaded = members["fake-image.json"]
+    except (tarfile.TarError, KeyError, ValueError, OSError):
+        print("Error: payload does not match any of the supported image formats", file=sys.stderr)
+        sys.exit(125)
+    ref = loaded.pop("ref")
+    if os.environ.get("FAKE_PODMAN_LOAD_DIGEST") == "lost":
+        ref = "localhost/loaded:latest"
+    found = images()
+    found[norm(ref)] = {**loaded, "loaded": True}
+    for manifest in members["index.json"]["manifests"]:  # as Podman does: every name the archive says
+        name = (manifest.get("annotations") or {}).get("org.opencontainers.image.ref.name")
+        if name:
+            found[norm(name)] = {**loaded, "loaded": True}
+    root.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps(found))
+    print(f"Loaded image: {ref}")
+    sys.exit(0)
 def failing(variable):
     """FAKE_PODMAN_...=STATUS:MESSAGE: MESSAGE on standard error, exit STATUS."""
     given = os.environ.get(variable)
@@ -193,12 +320,51 @@ if os.environ.get("FAKE_PODMAN_RUN") is not None and (args[:2] == ["pod", "creat
     if keep:  # FAKE_PODMAN_KEEP=DIR: the session directory the sandbox got (its config.json: the agent's command)
         import shutil
         for arg in args:
-            if arg.startswith("type=bind,") and ",dst=/sandbox/session," in arg:
-                shutil.copytree(arg.split("src=", 1)[1].split(",dst=", 1)[0], Path(keep) / "session",
-                                dirs_exist_ok=True)
+            # (and the connection proxy's private directory, /sandbox/proxy: its proxy.json, to DIR/proxy)
+            for folder in ("session", "proxy"):
+                if arg.startswith("type=bind,") and f",dst=/sandbox/{folder}," in arg:
+                    shutil.copytree(arg.split("src=", 1)[1].split(",dst=", 1)[0], Path(keep) / folder,
+                                    dirs_exist_ok=True)
+    if os.environ.get("FAKE_PODMAN_WIPE_WORK"):  # an agent that deletes everything in /work (its bind source)
+        import shutil
+        for arg in args:
+            if arg.startswith("type=bind,") and ",dst=/work," in arg:
+                work = Path(arg.split("src=", 1)[1].split(",dst=", 1)[0])
+                for child in work.iterdir():
+                    shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
+    if os.environ.get("FAKE_PODMAN_WRITE_WORK"):  # an agent that writes these files ({relative: text}) in /work
+        for arg in args:
+            if arg.startswith("type=bind,") and ",dst=/work," in arg:
+                work = Path(arg.split("src=", 1)[1].split(",dst=", 1)[0])
+                for relative, text in json.loads(os.environ["FAKE_PODMAN_WRITE_WORK"]).items():
+                    (work / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (work / relative).write_text(text)
+    if os.environ.get("FAKE_PODMAN_WRITE_HOME"):  # an agent that writes these files ({relative: text}) in its HOME
+        for arg in args:
+            if arg.startswith("type=bind,") and arg.split("src=", 1)[1].split(",dst=", 1)[0].endswith("/home"):
+                home = Path(arg.split("src=", 1)[1].split(",dst=", 1)[0])
+                for relative, text in json.loads(os.environ["FAKE_PODMAN_WRITE_HOME"]).items():
+                    (home / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (home / relative).write_text(text)
     print("fake podman: the sandbox runs", file=sys.stderr)
+    if os.environ.get("FAKE_PODMAN_SAYS"):  # what the sandbox's program prints (the file's bytes, as they are)
+        sys.stdout.buffer.write(Path(os.environ["FAKE_PODMAN_SAYS"]).read_bytes())
+        sys.stdout.flush()
     time.sleep(float(seconds or 0))
     sys.exit(int(status or 0))
+if args[:1] == ["stats"] and os.environ.get("FAKE_PODMAN_STATS"):
+    # FAKE_PODMAN_STATS=FILE: `podman stats` of every pod made (POD-agent), from FILE's JSON object: each counter
+    # grows by its value at every call (CPUNano, NetInput, ...), the others are as they are (MemUsage, MemLimit, PIDs).
+    given = Path(os.environ["FAKE_PODMAN_STATS"])
+    counter = given.with_name(given.name + ".calls")
+    calls = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(calls))
+    row = json.loads(given.read_text())
+    grown = {key: value * calls if key in ("CPUNano", "NetInput", "NetOutput", "BlockInput", "BlockOutput") else value
+             for key, value in row.items()}
+    for name in pods():
+        print(json.dumps({**grown, "Name": f"{name}-agent"}))
+    sys.exit(0)
 if args[:2] in (["pod", "exists"], ["pod", "inspect"]):
     if args[-1] not in pods():
         print(f"Error: no such pod {args[-1]}", file=sys.stderr)
@@ -206,6 +372,7 @@ if args[:2] in (["pod", "exists"], ["pod", "inspect"]):
     print("{}")
     sys.exit(0)
 if args[:2] == ["pod", "rm"]:
+    failing("FAKE_PODMAN_POD_RM_FAIL")
     made = pods()
     if args[-1] in made:
         del made[args[-1]]
@@ -213,14 +380,46 @@ if args[:2] == ["pod", "rm"]:
     sys.exit(0)
 if args[:2] in (["pod", "stop"], ["pod", "kill"]):
     sys.exit(0)
+if args[:2] in (["pod", "pause"], ["pod", "unpause"]):
+    failing("FAKE_PODMAN_POD_PAUSE_FAIL")
+    sys.exit(0)
+if args[:2] in (["volume", "ls"], ["volume", "rm"]):
+    volumes_file = root / "fake-volumes.json"
+    try:
+        volumes = json.loads(volumes_file.read_text())
+    except (OSError, ValueError):
+        volumes = []
+    rows = [{"Name": v, "Labels": {}} if isinstance(v, str) else v for v in volumes]  # (a name, or Name and Labels)
+    if args[1] == "ls":
+        if "json" in (option("--format") or ""):
+            print(json.dumps([{"Name": row["Name"], "Labels": row.get("Labels") or None} for row in rows]))
+        else:
+            print("\n".join(row["Name"] for row in rows))
+        sys.exit(0)
+    if args[-1] in os.environ.get("FAKE_PODMAN_VOLUME_IN_USE", "").split(","):
+        print(f"Error: volume {args[-1]} is being used by the following container(s): 0123: volume is being used",
+              file=sys.stderr)
+        sys.exit(2)
+    if any(row["Name"] == args[-1] for row in rows):
+        volumes = [v for v, row in zip(volumes, rows) if row["Name"] != args[-1]]
+        volumes_file.write_text(json.dumps(volumes))
+    sys.exit(0)
 if args[:2] == ["pod", "ps"]:
+    if (os.environ.get("FAKE_PODMAN_POD_RM_FAIL") or os.environ.get("FAKE_PODMAN_POD_LIVE")) and \
+            not os.environ.get("FAKE_PODMAN_POD_GONE") and \
+            "json" in json.dumps(args):  # what was made runs on (FAKE_PODMAN_POD_GONE: ended after all)
+        print(json.dumps([{"Name": name, "Status": "Running", "InfraId": "infra", "Labels": {},
+                           "Containers": [{"Id": "infra", "Status": "running"}, {"Id": name, "Status": "running"}]}
+                          for name in pods()]))
+        sys.exit(0)
     print("[]" if "json" in json.dumps(args) else "")
     sys.exit(0)
 if args[:2] == ["pod", "create"] or args[:1] == ["run"]:
     hold = os.environ.get("FAKE_PODMAN_POD_HOLD")
     stop = os.environ.get("FAKE_PODMAN_STOP_AT")
-    if stop:
-        Path(stop).write_text(json.dumps(args))
+    if stop:  # (whole or not at all: the test reads it while this runs - an empty file was a JSON error under load)
+        Path(stop + ".part").write_text(json.dumps(args))
+        os.replace(stop + ".part", stop)
     if hold:
         for _ in range(1200):
             if Path(hold).exists():
@@ -376,6 +575,7 @@ if __name__ == "__main__" and sys.argv[1:] == ["tor"]:
 # tunnel: each container that got one says a digest of it and whether it found it in its command line or environment
 # (it must come on standard input only), and keeps it in FAKE_VPN_DIR/tokens/CONTAINER for the test to look for in
 # logs. FAKE_VPN_LEND_FAIL: the lender cannot start (its socket cannot be bound), with that text.
+# FAKE_VPN_LEND_FULL: every connection the lender serves at once is in use (its slots are taken; a look still finds it).
 FAKE_VPN = r'''
 import hashlib, importlib.util, json, os, re, subprocess, sys
 from pathlib import Path
@@ -445,6 +645,17 @@ def container(args):
         def no_lender(self):
             raise OSError(os.environ["FAKE_VPN_LEND_FAIL"])
         rt.Lender.start = no_lender
+    if os.environ.get("FAKE_VPN_LEND_FULL"):
+        # Every connection the lender serves at once is in use (the start's other servers): its slots are taken.
+        import threading
+        lender_start = rt.Lender.start
+
+        def full_lender(self):
+            self.slots = threading.BoundedSemaphore(1)
+            self.slots.acquire()
+            event(container=name, lender="full")
+            return lender_start(self)
+        rt.Lender.start = full_lender
 
     def wireguard(payload, runner, *more, **kw):
         event(container=name, up="wireguard", secrets=sorted(payload.get("secrets") or {}),
@@ -487,6 +698,86 @@ echo "fake npm: $*" >&2
 exit 1
 '''
 
+SSHFS = r'''#!PYTHON
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ.get("FAKE_SSHFS_LOG", os.devnull), "a") as stream:
+    stream.write(json.dumps({"tool": "sshfs", "args": args, "tty": os.isatty(0)}) + "\n")
+failing = os.environ.get("FAKE_SSHFS_FAIL")
+if failing:
+    status, _, message = failing.partition(":")
+    print(message, file=sys.stderr)
+    sys.exit(int(status))
+positional = [a for i, a in enumerate(args) if not a.startswith("-") and not (i and args[i - 1] in ("-o", "-p"))]
+source, point = positional[0], Path(positional[1])
+if not point.is_dir():
+    print(f"fuse: bad mount point `{point}': No such file or directory", file=sys.stderr)
+    sys.exit(1)
+(point / "REMOTE.txt").write_text(source + "\n")
+mounts = Path(os.environ["FAKE_FUSE_MOUNTS"])
+known = json.loads(mounts.read_text()) if mounts.exists() else []
+mounts.write_text(json.dumps(known + [str(point)]))
+'''
+
+FUSERMOUNT = r'''#!PYTHON
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open(os.environ.get("FAKE_SSHFS_LOG", os.devnull), "a") as stream:
+    stream.write(json.dumps({"tool": "fusermount3", "args": args}) + "\n")
+failing = os.environ.get("FAKE_FUSERMOUNT_FAIL")
+if failing and "-z" not in args:
+    status, _, message = failing.partition(":")
+    print(message, file=sys.stderr)
+    sys.exit(int(status))
+point = Path(args[-1])
+mounts = Path(os.environ["FAKE_FUSE_MOUNTS"])
+known = json.loads(mounts.read_text()) if mounts.exists() else []
+if str(point) not in known:
+    print(f"fusermount3: entry for {point} not found in /etc/mtab", file=sys.stderr)
+    sys.exit(1)
+(point / "REMOTE.txt").unlink(missing_ok=True)
+mounts.write_text(json.dumps([p for p in known if p != str(point)]))
+'''
+
+SUDO = r'''#!PYTHON
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+entry = {"tool": "sudo", "args": args}
+for arg in args:
+    for option in arg.split(","):
+        if option.startswith("credentials="):
+            entry["credentials"] = Path(option.split("=", 1)[1]).read_text()
+with open(os.environ.get("FAKE_SSHFS_LOG", os.devnull), "a") as stream:
+    stream.write(json.dumps(entry) + "\n")
+failing = os.environ.get("FAKE_SUDO_FAIL")
+if failing:
+    status, _, message = failing.partition(":")
+    print(message, file=sys.stderr)
+    sys.exit(int(status))
+words = [a for a in args if a != "-n"]
+mounts = Path(os.environ["FAKE_FUSE_MOUNTS"])
+known = json.loads(mounts.read_text()) if mounts.exists() else []
+if words[:1] == ["mount"]:
+    point = next(Path(a) for a in words[1:] if a.startswith("/") and Path(a).is_dir())
+    source = next(a for a in words[1:] if ":" in a or a.startswith("//"))
+    (point / "REMOTE.txt").write_text(source + "\n")
+    mounts.write_text(json.dumps(known + [str(point)]))
+    sys.exit(0)
+if words[:1] == ["umount"]:
+    point = Path(words[-1])
+    if str(point) not in known:
+        print(f"umount: {point}: not mounted.", file=sys.stderr)
+        sys.exit(32)
+    (point / "REMOTE.txt").unlink(missing_ok=True)
+    mounts.write_text(json.dumps([p for p in known if p != str(point)]))
+    sys.exit(0)
+print("fake sudo: " + " ".join(args), file=sys.stderr)
+sys.exit(1)
+'''
+
 UIDSHIM = '''"""python3 as an ordinary user (live_fakes.py): os.geteuid() says 1000 instead of 0, nothing else changes."""
 import os
 import runpy
@@ -503,10 +794,46 @@ if args[:1] == ["-c"]:
 elif args[:1] == ["-m"]:
     sys.argv = [args[1], *args[2:]]
     runpy.run_module(args[1], run_name="__main__", alter_sys=True)
+elif args[:1] == ["-"]:  # the script on standard input (install.sh's helpers: python3 -I - ARGS <<'PY')
+    sys.argv = args
+    exec(compile(sys.stdin.read(), "<stdin>", "exec"), {"__name__": "__main__"})
 else:
     sys.argv = args
     runpy.run_path(args[0], run_name="__main__")
 '''
+
+# Host.fake_resolver(): python3 with this machine's resolver stood in for (socket.getaddrinfo), the uid as UIDSHIM
+# says when FAKE_RESOLVE_EUID is set; every name looked up is appended to FAKE_RESOLVE_LOG.
+RESOLVESHIM = '''"""python3 with a fake resolver (live_fakes.py): FAKE_RESOLVE {name: [addresses] | "NONAME" | "NODATA" |
+"AGAIN"}; a name it does not list fails as one that does not exist. Every name asked goes to FAKE_RESOLVE_LOG."""
+import json
+import os
+import runpy
+import socket
+import sys
+
+_TABLE = json.loads(os.environ.get("FAKE_RESOLVE") or "{}")
+_ERRORS = {"NONAME": (socket.EAI_NONAME, "Name or service not known"),
+           "NODATA": (getattr(socket, "EAI_NODATA", -5), "No address associated with hostname"),
+           "AGAIN": (socket.EAI_AGAIN, "Temporary failure in name resolution")}
+
+
+def _getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    name = host.decode() if isinstance(host, bytes) else str(host)
+    with open(os.environ["FAKE_RESOLVE_LOG"], "a") as log:
+        log.write(name + "\\n")
+    found = _TABLE.get(name, "NONAME")
+    if isinstance(found, str):
+        raise socket.gaierror(*_ERRORS[found])
+    return [(socket.AF_INET6 if ":" in a else socket.AF_INET, socket.SOCK_STREAM, 6, "",
+             (a, port or 0, 0, 0) if ":" in a else (a, port or 0)) for a in found]
+
+
+socket.getaddrinfo = _getaddrinfo
+if os.environ.get("FAKE_RESOLVE_EUID"):
+    os.geteuid = lambda: 1000
+''' + UIDSHIM.split("os.geteuid = lambda: 1000\n", 1)[1].replace("import os\nimport runpy\nimport sys\n", "")
+
 
 # A variant tor of dsh as `sandbox-ai images recipe tor --from dsh` made it before 0.1.95's fixes: in the old layout
 # (~/.config/sandbox-ai/images/tor, one agent per name), with the recipe tor that is gone now.
@@ -537,10 +864,123 @@ DROPPED = ("SANDBOX_AI_NO_AUTO_BUILD", "SANDBOX_AI_MCP_NO_IMAGE_CHECK", "SANDBOX
            "CONTAINERS_STORAGE_CONF", "CONTAINERS_CONF", "TMUX", "SUDO_USER", "SANDBOX_AI_APP_TAB")
 
 
+# Every Host made in this process: conftest.py's guard looks, after each test, at those the test made (guard).
+HOSTS = []
+
+
+def naming(directory, proc=Path("/proc")):
+    """{pid: command line} of the processes (this one aside) whose command line names DIRECTORY (an absolute path;
+    DIRECTORY/... too, never a folder whose name only starts the same)."""
+    text = str(directory)
+    if not text.startswith("/") or len(Path(text).parts) < 3:
+        raise ValueError(f"not a test's folder: {text!r}")
+    text = text.rstrip("/")
+    found = {}
+    for entry in Path(proc).iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            line = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        at = line.find(text)
+        while at >= 0:
+            after = line[at + len(text):at + len(text) + 1]
+            if after in ("", "/", " ", "'", '"', ":", ","):
+                found[int(entry.name)] = line
+                break
+            at = line.find(text, at + 1)
+    return found
+
+
+def _started(pid, proc=Path("/proc")):
+    """The start time of process PID (field 22 of /proc/PID/stat), or None when it is gone."""
+    try:
+        return (Path(proc) / str(pid) / "stat").read_text().rpartition(")")[2].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def end_processes(found, grace=3.0):
+    """Each process of FOUND ({pid: command line}, as naming gives it) ended by its exact PID: SIGTERM, after GRACE
+    seconds SIGKILL - only while it is still the process that was seen (its start time, its command line). The PIDs
+    it signalled, sorted."""
+    import signal
+    import time
+    seen = {pid: _started(pid) for pid in found}
+    signalled = []
+
+    def same(pid):
+        if seen[pid] is None or _started(pid) != seen[pid]:
+            return False
+        try:
+            return (Path("/proc") / str(pid) / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                errors="replace").strip() == found[pid]
+        except OSError:
+            return False
+    for pid in found:
+        if same(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                signalled.append(pid)
+            except OSError:
+                pass
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(same(pid) and not _zombie(pid) for pid in signalled):
+        time.sleep(0.05)
+    for pid in signalled:
+        if same(pid) and not _zombie(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    return sorted(signalled)
+
+
+def _zombie(pid):
+    try:
+        return (Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()[0] == "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def outliving(directory, wait=3.0):
+    """naming(DIRECTORY) without the processes that end within WAIT seconds (a launcher's child may be ending just
+    as the test does) and without zombies."""
+    import time
+    deadline = time.monotonic() + wait
+    while True:
+        found = {pid: line for pid, line in naming(directory).items() if not _zombie(pid)}
+        if not found or time.monotonic() >= deadline:
+            return found
+        time.sleep(0.1)
+
+
+def guard(hosts, wait=3.0):
+    """What the HOSTS (made by one test) left running - a line for each process, ended now by its exact PID; [] when
+    nothing. conftest.py fails the test with these lines: it stops what it started (an MCP server outlives its start:
+    `sandbox-ai mcp stop NAME`, Host.leftovers)."""
+    problems = []
+    for host in hosts:
+        found = outliving(host.directory, wait=wait)
+        if found:
+            end_processes(found)
+            problems += [f"PID {pid}: {line[:400]}" for pid, line in sorted(found.items())]
+    return problems
+
+
+def guard_since(before, wait=3.0):
+    """guard() of the Hosts made since there were BEFORE of them (one test's), which then are no longer kept."""
+    made = HOSTS[before:]
+    del HOSTS[before:]
+    return guard(made, wait=wait)
+
+
 class Host:
     """A user (HOME, XDG folders, their own Podman image store) with the fakes on PATH, below DIRECTORY."""
 
     def __init__(self, directory, user="user"):
+        HOSTS.append(self)
         self.directory = Path(directory)
         self.bin = self.directory / "fake-bin"
         self.home = self.directory / user
@@ -597,7 +1037,10 @@ class Host:
 
     def calls(self):
         """Every podman call so far ([args])."""
-        return [json.loads(line) for line in self.log_path.read_text().splitlines()] if self.log_path.exists() else []
+        if not self.log_path.exists():
+            return []
+        # (whole lines only: the fake may be writing the last one just now)
+        return [json.loads(line) for line in self.log_path.read_text().rpartition("\n")[0].splitlines()]
 
     def builds(self):
         return [call for call in self.calls() if "build" in call[:3]]
@@ -605,6 +1048,50 @@ class Host:
     def stopped_at(self):
         """The arguments of the `pod create` (or `run`) the start stopped at, else None."""
         return json.loads(self.stop_path.read_text()) if self.stop_path.exists() else None
+
+    def add_sshfs(self):
+        """sshfs and fusermount3 fakes on PATH (see above); their calls: sshfs_calls(), what is mounted: fuse_mounts()."""
+        for name, text in (("sshfs", SSHFS), ("fusermount3", FUSERMOUNT)):
+            (self.bin / name).write_text(text.replace("PYTHON", sys.executable, 1))
+            (self.bin / name).chmod(0o755)
+        self.env.update(FAKE_SSHFS_LOG=str(self.directory / "sshfs.log"),
+                        FAKE_FUSE_MOUNTS=str(self.directory / "fuse-mounts.json"))
+
+    def add_sudo(self):
+        """sudo (with mount and umount) and mount.nfs, mount.cifs fakes on PATH (see above), with add_sshfs's log."""
+        if "FAKE_FUSE_MOUNTS" not in self.env:
+            self.add_sshfs()
+        (self.bin / "sudo").write_text(SUDO.replace("PYTHON", sys.executable, 1))
+        (self.bin / "sudo").chmod(0o755)
+        for name in ("mount.nfs", "mount.cifs"):
+            (self.bin / name).write_text("#!/bin/sh\nexit 1\n")
+            (self.bin / name).chmod(0o755)
+
+    def sshfs_calls(self):
+        path = self.directory / "sshfs.log"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def fuse_mounts(self):
+        path = self.directory / "fuse-mounts.json"
+        return json.loads(path.read_text()) if path.exists() else []
+
+    def leftovers(self, wait=3.0):
+        """{pid: command line} of what still runs of this user's (every process naming its folder), after WAIT
+        seconds for those ending just now: {} once a test stopped what it started."""
+        return outliving(self.directory, wait=wait)
+
+    def fake_resolver(self, table):
+        """python3 on PATH with this machine's resolver stood in for (RESOLVESHIM): TABLE {name: [addresses] |
+        "NONAME" | "NODATA" | "AGAIN"}; every other name does not exist. Returns the file of the names looked up."""
+        log = self.directory / "resolved.log"
+        log.write_text("")
+        (self.bin / "resolveshim.py").write_text(RESOLVESHIM)
+        (self.bin / "python3").write_text(f'#!/bin/sh\nexec {sys.executable} -I "{self.bin}/resolveshim.py" "$@"\n')
+        (self.bin / "python3").chmod(0o755)
+        self.env.update(FAKE_RESOLVE=json.dumps(table), FAKE_RESOLVE_LOG=str(log), FAKE_PYTHON=str(self.bin / "python3"))
+        if self.shimmed:
+            self.env["FAKE_RESOLVE_EUID"] = "1"
+        return log
 
     def command(self, *args):
         return [str(ROOT / "sandbox-ai"), *map(str, args)]

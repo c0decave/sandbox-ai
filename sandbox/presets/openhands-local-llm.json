@@ -1,0 +1,39 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "openhands-local-llm",
+  "title": "OpenHands with a local model",
+  "description": "OpenHands with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one) and nothing else: only the server's address is opened, the provider's hosts stay closed, and the loop guard keeps a small model from going round in circles.",
+  "translations": {
+    "de": {
+      "title": "OpenHands mit einem lokalen Modell",
+      "description": "OpenHands mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler) und sonst nichts: nur die Adresse des Servers ist offen, die Hosts des Anbieters bleiben zu, und der Schleifenschutz hält ein kleines Modell davon ab, sich im Kreis zu drehen."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "openhands"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "loop_guard=on"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent openhands asks it for the API OpenHands uses.",
+    "OpenHands gets the server as LiteLLM's OpenAI provider at the server's /v1 URL with the model, the context window when known and the key as a placeholder the connection proxy replaces, in the settings its start applies (/etc/openhands/settings.json, read-only); the loop guard's turn limit and instructions too.",
+    "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
+    "OpenHands' web UI is on the sandbox's loopback: add --browser to see it in the sandbox's own browser (the app's Browser button; Podman).",
+    "OpenHands is not live-tested yet (a start says so); its image first: sandbox-ai build openhands."
+  ]
+}

@@ -82,6 +82,8 @@ def test_the_checks_build_now_builds_in_a_tab_then_checks_again(page, monkeypatc
     steps = json.loads(argv[-1])
     assert [step[0] for step in steps] == ["build qwen", "build browser"]
     assert steps[0][1][-2:] == ["build", "qwen"], "sandbox-ai build qwen, on the board's host"
+    # (its last line: Build now starts nothing - not "the start goes on")
+    assert "--end=the board is checked again; Start starts it" in argv
     ended(0)
     assert checks == [True] and page.build_button.isEnabled(), "checked again at its end"
     # The launcher accepts the board now: no Build now any more.

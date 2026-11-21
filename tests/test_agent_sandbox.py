@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import time
@@ -270,12 +271,18 @@ class SandboxTests(unittest.TestCase):
         self.assertIn("policy drop", rules)
 
     def test_log_dir_must_stay_outside_agent_visible_trees(self):
+        """A --log-dir the agent can reach is yours to choose: given, with the warning that it can rewrite the log."""
         with tempfile.TemporaryDirectory() as d:
             for log in [d, str(Path(d) / "logs"), str(Path(d).parent)]:
-                with self.subTest(log=log), self.assertRaisesRegex(ValueError, "outside"):
+                said = []
+                with self.subTest(log=log), patch.object(s, "warner", lambda warn=None: warn or said.append):
                     s.validate(s.parse_args(["codex", "--workspace", d, "--log-dir", log]))
+                    self.assertTrue(any("--log-dir" in text and "connection log" in text for text in said), said)
             with tempfile.TemporaryDirectory() as other:
-                s.validate(s.parse_args(["codex", "--workspace", d, "--log-dir", other]))
+                said = []
+                with patch.object(s, "warner", lambda warn=None: warn or said.append):
+                    s.validate(s.parse_args(["codex", "--workspace", d, "--log-dir", other]))
+                self.assertFalse(any("--log-dir" in text for text in said), said)
 
     def test_logging_adds_denied_sets_and_local_dns_stub(self):
         rules = s.firewall_rules([], ["203.0.113.4"], log=True)
@@ -300,7 +307,7 @@ class SandboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             a = s.parse_args(["codex", "--workspace", str(Path(d) / "w"), "--log-dir", str(Path(d) / "logs")])
             _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
-            self.assertIn(f"type=bind,src={Path(d).resolve() / 'logs'},dst=/sandbox/log,rw,nodev", run)
+            self.assertIn(f"type=bind,src={Path(d).resolve() / 'logs'},dst=/sandbox/log,rw,nodev,nosuid", run)
             self.assertIn("NET_BIND_SERVICE", run)
             self.assertNotIn("NET_BIND_SERVICE", s.pod_commands(s.parse_args(["codex"]), "pod", Path(d), Path(d))[1])
             a.backend = "bwrap"
@@ -416,8 +423,11 @@ class SandboxTests(unittest.TestCase):
             self.assertFalse(logger.is_alive())
             seen = {(r.get("action"), r.get("path")) for r in records}
             for expected in [("create", str(root / "a.txt")), ("write", str(root / "a.txt")),
-                             ("read", str(root / "a.txt")), ("write", str(root / "sub/b.txt"))]:
+                             ("write", str(root / "sub/b.txt"))]:
                 self.assertIn(expected, seen)
+            # reads: summed per folder (runtime.FileReads), written when the logger stops at the latest
+            records = [json.loads(l) for l in (log / "files.jsonl").read_text().splitlines()]
+            self.assertIn(("read", str(root), 1), {(r.get("action"), r.get("folder"), r.get("files")) for r in records})
 
     def test_real_inotify_drains_events_queued_before_stop(self):
         with tempfile.TemporaryDirectory() as logs, patch.object(sr, "LOG_DIR", Path(logs)), tempfile.TemporaryDirectory() as root:
@@ -536,9 +546,9 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(a.workspaces, [str(main), str(lib), str(docs)])
             _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
             binds = [value for value in run if value.startswith("type=bind")]
-            self.assertIn(f"type=bind,src={main},dst=/work,rw,nodev", binds)
-            self.assertIn(f"type=bind,src={lib},dst=/workspaces/lib,rw,nodev", binds)
-            self.assertLess(binds.index(f"type=bind,src={main},dst=/work,rw,nodev"), binds.index(f"type=bind,src={lib},dst=/workspaces/lib,rw,nodev"))
+            self.assertIn(f"type=bind,src={main},dst=/work,rw,nodev,nosuid", binds)
+            self.assertIn(f"type=bind,src={lib},dst=/workspaces/lib,rw,nodev,nosuid", binds)
+            self.assertLess(binds.index(f"type=bind,src={main},dst=/work,rw,nodev,nosuid"), binds.index(f"type=bind,src={lib},dst=/workspaces/lib,rw,nodev,nosuid"))
             a.backend = "bwrap"
             cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
             index = cmd.index("/workspaces/docs")
@@ -549,7 +559,7 @@ class SandboxTests(unittest.TestCase):
             a = s.parse_args(["codex", "--workspace-ro", "--workspace", f"{d}/a,{d}/b"])
             s.validate(a)
             _, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
-            self.assertIn(f"type=bind,src={d}/b,dst=/workspaces/b,ro,nodev", run)
+            self.assertIn(f"type=bind,src={d}/b,dst=/workspaces/b,ro,nodev,nosuid", run)
             a.backend = "bwrap"
             cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
             self.assertEqual(cmd[cmd.index("/workspaces/b") - 2], "--ro-bind")
@@ -587,16 +597,21 @@ class SandboxTests(unittest.TestCase):
         self.assertFalse((Path(d) / "main").exists())
 
     def test_log_dir_inside_extra_workspace_is_rejected(self):
-        with tempfile.TemporaryDirectory() as d:
-            with self.assertRaisesRegex(ValueError, "outside"):
-                s.validate(s.parse_args(["codex", "--workspace", f"{d}/main,{d}/lib", "--log-dir", f"{d}/lib/logs"]))
+        """You decide: a --log-dir inside a workspace is given, with the warning that the agent can rewrite the log."""
+        said = []
+        with tempfile.TemporaryDirectory() as d, patch.object(s, "warner", lambda warn=None: warn or said.append):
+            s.validate(s.parse_args(["codex", "--workspace", f"{d}/main,{d}/lib", "--log-dir", f"{d}/lib/logs"]))
+        self.assertTrue(any("--log-dir" in text and "connection log" in text for text in said), said)
 
     def test_gui_options_validate(self):
         with tempfile.TemporaryDirectory() as d:
-            for options in [["--gui-screen", "1920x1080"], ["--gui-screen", "0x0x24"], ["--gui-screen", "99999x1x24"],
-                            ["--gui-vnc", d + "/w/vnc"]]:
+            for options in [["--gui-screen", "1920x1080"], ["--gui-screen", "0x0x24"], ["--gui-screen", "99999x1x24"]]:
                 with self.subTest(options=options), self.assertRaises(ValueError):
                     s.validate(s.parse_args(["codex", "--workspace", d + "/w", "--gui", *options]))
+            said = []  # --gui-vnc inside the workspace: given (you decide), said
+            with patch.object(s, "warner", lambda warn=None: warn or said.append):
+                s.validate(s.parse_args(["codex", "--workspace", d + "/w", "--gui", "--gui-vnc", d + "/w/vnc"]))
+            self.assertTrue(any("--gui-vnc" in text and "VNC socket" in text for text in said), said)
             a = s.parse_args(["codex", "--workspace", d + "/w", "--gui-vnc", d + "/vnc"])
             s.validate(a)
             self.assertTrue(a.gui)
@@ -617,8 +632,8 @@ class SandboxTests(unittest.TestCase):
                     self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/0")
                     create, run = s.pod_commands(a, "pod", Path(d), Path(d) / "home")
                     self.assertIn("--shm-size=1g", create)
-                    self.assertIn(f"type=bind,src={Path(d).resolve() / 'vnc'},dst=/sandbox/vnc,rw,nodev", run)
-                    self.assertIn(f"type=bind,src={runtime / 'wayland-1'},dst=/run/user/0/wayland-0,rw,nodev", run)
+                    self.assertIn(f"type=bind,src={Path(d).resolve() / 'vnc'},dst=/sandbox/vnc,rw,nodev,nosuid", run)
+                    self.assertIn(f"type=bind,src={runtime / 'wayland-1'},dst=/run/user/0/wayland-0,rw,nodev,nosuid", run)
                     a.backend = "bwrap"
                     cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
                     self.assertEqual(cmd[cmd.index("/dev/shm") - 1], "--tmpfs")
@@ -788,7 +803,7 @@ class SandboxTests(unittest.TestCase):
             s.validate(a)
             self.assertEqual(s.agent_environment(a)["TMUX_TMPDIR"], "/sandbox/tmux")
             _, run = s.pod_commands(a, "agent-session-x", Path(d), Path(d) / "home")
-            self.assertIn(f"type=bind,src={tmux.resolve()},dst=/sandbox/tmux,rw,nodev", run)
+            self.assertIn(f"type=bind,src={tmux.resolve()},dst=/sandbox/tmux,rw,nodev,nosuid", run)
             self.assertEqual(run[run.index("--name") + 1], "agent-session-x-agent")
             a.backend = "bwrap"
             cmd = s.bwrap_command(a, Path(d), Path(d) / "home")
@@ -1019,20 +1034,36 @@ class SandboxTests(unittest.TestCase):
     def test_review_mcp_socket_appears_only_once_listening(self):
         # Regression: bind() creates the file before listen(); an early client was refused.
         refused = 0
-        base = Path(tempfile.mkdtemp())  # kept: server threads outlive each iteration
-        for index in range(60):
-            sock = base / f"s{index}.sock"
-            threading.Thread(target=s.mcp_serve, args=(str(sock), ["true"]), kwargs={"cwd": str(base)}, daemon=True).start()
-            while not sock.exists():
-                pass
-            client = socket.socket(socket.AF_UNIX)
-            try:
-                client.connect(str(sock))
-            except ConnectionRefusedError:
-                refused += 1
-            finally:
-                client.close()
+        base = Path(tempfile.mkdtemp())
+        relays, servers = [], []
+        try:
+            for index in range(60):
+                sock = base / f"s{index}.sock"
+                # (each server with a relay of its own: closed at the end, its thread ends - 60 listeners and their
+                # threads were left for the rest of the run)
+                relay = s.RUNTIME.McpRelay(None)
+                relays.append(relay)
+                server = threading.Thread(target=s.mcp_serve, args=(str(sock), ["true"]),
+                                          kwargs={"cwd": str(base), "relay": relay}, daemon=True)
+                server.start()
+                servers.append(server)
+                while not sock.exists():
+                    pass
+                client = socket.socket(socket.AF_UNIX)
+                try:
+                    client.connect(str(sock))
+                except ConnectionRefusedError:
+                    refused += 1
+                finally:
+                    client.close()
+        finally:
+            for relay in relays:
+                relay.close()
+            for server in servers:
+                server.join(5)
+            shutil.rmtree(base, ignore_errors=True)
         self.assertEqual(refused, 0)
+        self.assertFalse(any(server.is_alive() for server in servers))
 
     def claude_host(self, d, expires=1000):
         host = Path(d) / "host"
@@ -1183,18 +1214,29 @@ class SandboxTests(unittest.TestCase):
                 s.parse_mount("/does-not-exist:/mnt/data:ro")
 
     def test_mount_rejects_special_file(self):
-        # Socket creation is forbidden by the host sandbox; a FIFO exercises
-        # the same regular-file/directory check without requiring networking.
+        """A FIFO (or a socket) you name is mounted (you decide; a socket's warning comes with the start's checks); a
+        device node cannot be used through a mount (nodev): refused, with --device as the way."""
         with tempfile.TemporaryDirectory() as d:
             path = str(Path(d) / "pipe")
             os.mkfifo(path)
-            with self.assertRaises(ValueError):
-                s.parse_mount(path + ":/mnt/pipe:rw")
+            self.assertEqual(s.parse_mount(path + ":/mnt/pipe:rw"), (path, "/mnt/pipe", "rw"))
+        if Path("/dev/null").is_char_device():
+            with self.assertRaisesRegex(ValueError, "--device"):
+                s.parse_mount("/dev/null:/mnt/null:rw")
 
     def test_invalid_network_input(self):
-        for args in (["--allow", "1.2.3.4;accept"], ["--allow-host", "example.com\naccept"], ["--network", "host"], ["--network", "container:abc"], ["--ip", "192.0.2.4"], ["--backend", "bwrap", "--network", "lab"]):
+        for args in (["--allow", "1.2.3.4;accept"], ["--allow-host", "example.com;accept"],
+                     ["--allow-host", "example.com\n;accept"], ["--allow-host", "example.com\x0baccept{"],
+                     ["--network", "host"], ["--network", "container:abc"], ["--ip", "192.0.2.4"],
+                     ["--backend", "bwrap", "--network", "lab"]):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 s.validate(s.parse_args(["codex", *args]))
+        # Whitespace - a line break too - separates the items of an allow-type option (LIST_OPTIONS): what follows
+        # it is a host of its own, checked as one, never a part of the first one's rule.
+        a = s.parse_args(["codex", "--allow-host", "example.com\naccept"])
+        self.assertEqual(a.allow_host, ["example.com", "accept"])
+        with self.assertRaises(ValueError):
+            s.validate(s.parse_args(["codex", "--allow-host", "example.com\nbad;accept"]))
 
     def test_rules_deny_by_default_for_both_families(self):
         rules = s.firewall_rules(["198.51.100.0/24", "2001:db8::/32"], ["203.0.113.2", "2001:db8:1::1"])
@@ -1304,7 +1346,7 @@ class SandboxTests(unittest.TestCase):
     def test_failed_pod_creation_does_not_delete_unowned_pod(self):
         a = s.parse_args(["codex", "--offline"])
         with patch.object(s.subprocess, "run", side_effect=[Mock(), subprocess.CalledProcessError(1, "create")]) as run:
-            with self.assertRaises(subprocess.CalledProcessError):
+            with self.assertRaises(ValueError):  # (said in words: "Podman did not create the pod ...")
                 s.run_pod(a, Path("/tmp/session"), Path("/tmp/home"))
         self.assertEqual(run.call_count, 2)
 

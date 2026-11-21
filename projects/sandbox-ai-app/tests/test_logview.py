@@ -87,12 +87,12 @@ def test_unread_warnings_are_counted_until_the_panel_is_watched(qapp, monkeypatc
     applog.log("INFO", "x", "not counted")
     applog.log("WARNING", "x", "one")
     applog.log("ERROR", "x", "two")
-    qapp.processEvents()  # (entries arrive through the event loop)
-    assert counts == [1, 2]
+    qapp.processEvents()  # (entries arrive through the event loop: together, counted once - test_leaks_perf_1)
+    assert counts == [2]
     panel.set_watching(True)
     applog.log("WARNING", "x", "seen")
     qapp.processEvents()
-    assert counts == [1, 2, 0]
+    assert counts == [2, 0]
 
 
 def test_debug_entries_only_when_wanted_and_not_on_a_terminal(qapp, monkeypatch):
@@ -144,23 +144,26 @@ def test_the_log_window_is_on_every_page_folded_at_first(window, qapp):
 
 
 def test_a_question_is_answered_from_its_notification(window, monkeypatch):
-    """One prompt per question: the app's, with Allow, Allow always…, Block and Block always… (the Approvals page's
-    answer with its caps; asked once more only for "always") and the way to its page; a canary only leads to its
-    page."""
+    """One prompt per question: the app's, with Allow once, Always allow, Always, also for later sessions, Block and
+    Block always (the Approvals page's answer with its caps; never asked once more, "always" neither) and the way to
+    its page; a canary only leads to its page."""
     actions = window.question_actions(("local", "claude-1", "q1"))
-    assert [label for label, _ in actions] == ["Allow", "Allow always…", "Block", "Block always…", "Open approvals"]
+    assert [label for label, _ in actions] == ["Allow once", "Always allow", "Always, also for later sessions", "Block",
+                                               "Block always", "Open approvals"]
     sent = []
     monkeypatch.setattr(window.approvals, "answer", lambda decision, scope, entry=None, parent=None, asked=False:
                         sent.append((decision, scope, entry, asked)))
     question = {"id": "q1", "kind": "dns", "name": "a.example"}
     window.approvals.questions = {("local", "claude-1", "q1"): ("claude-1", question, "local")}
-    dict(actions)["Allow always…"]()
-    dict(actions)["Block always…"]()
-    assert sent == [("allow", "always", ("claude-1", question, "local"), True),
+    dict(actions)["Always allow"]()
+    dict(actions)["Always, also for later sessions"]()
+    dict(actions)["Block always"]()
+    assert sent == [("allow", "run", ("claude-1", question, "local"), True),
+                    ("allow", "always", ("claude-1", question, "local"), True),
                     ("deny", "always", ("claude-1", question, "local"), True)]
     window.approvals.questions = {}
     dict(actions)["Block"]()
-    assert len(sent) == 2, "a question answered meanwhile is left alone"
+    assert len(sent) == 3, "a question answered meanwhile is left alone"
     canary = window.question_actions(("local", "claude-1", "q2"), canary=True)
     assert isinstance(canary, tuple) and canary[0] == "Open approvals"
 
@@ -295,7 +298,8 @@ def test_a_dialog_larger_than_the_screen_is_fitted_into_it(qapp, monkeypatch):
     small = QDialog()
     small.resize(300, 200)
     small.show()
-    assert (small.width(), small.height()) == (300, 200)  # one that fits keeps its size
+    # One that fits keeps its size - at least the least width of every dialog (widgets.least_width: 420 px).
+    assert (small.width(), small.height()) == (max(300, widgets.least_width(small)), 200)
     small.hide()
 
 

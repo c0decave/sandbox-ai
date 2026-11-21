@@ -49,6 +49,8 @@ def test_stop_all_asks_with_the_list_then_stops_here_and_on_the_hosts(window, fa
     page.instances = {i.key: i for i in (start("web"), start("held", "paused"), start("old", "stopped"),
                                          start("fetch", kind="mcp"))}
     page.remote = {"box": [start("far", host="box"), start("gone", "stopped", host="box")]}
+    # (the real re-read after Stop all, due a moment later, emptied page.remote below on a loaded machine)
+    monkeypatch.setattr(page, "refresh_soon", lambda *a, **k: fake.append(("refresh_soon",)))
     targets = page.stop_all_targets()
     assert {host: [i.name for i in found] for host, found in targets.items()} == {"local": ["web", "held"],
                                                                                  "box": ["far"]}

@@ -6,7 +6,8 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 
-from sandbox_ai_app import theme  # noqa: E402
+from PySide6 import QtGui  # noqa: E402
+from sandbox_ai_app import i18n, theme  # noqa: E402
 
 NAMES = list(theme.THEMES_DATA)
 # Well-known editor themes, in their upstream palettes; the parametrised tests below check them like the others.
@@ -54,8 +55,8 @@ def test_every_theme_has_every_token(name):
 
 def test_the_choices_name_every_theme_once():
     keys = [key for key, _ in theme.choices()]
-    assert keys == list(theme.THEMES) and len(set(keys)) == len(keys) == 19
-    assert {"light", "dark", "hacker", "cyberpunk", "amber", "unicorn", "win311", "mac", "fallout"} <= set(keys)
+    assert keys == list(theme.THEMES) and len(set(keys)) == len(keys) == 20
+    assert {"light", "dark", "hacker", "hacker_neon", "cyberpunk", "amber", "unicorn", "win311", "mac", "fallout"} <= set(keys)
     assert set(EDITOR_THEMES) <= set(keys)
 
 
@@ -252,3 +253,25 @@ def test_the_keyboard_focus_is_visible_on_every_control(qapp, name, kind):
     finally:
         holder.close()
         theme.apply("system")
+
+
+def test_a_second_hacker_look_has_turquoise_orange_yellow_and_two_greens():
+    """User 2026-11-17: "für den hacker mode noch einen zweiten theme mode, da sollen aber farben wie z.b. türkis,
+    orange, gelb und helles und dunkles grün ebenfalls vorhanden sein" - the same terminal costume as hacker, on
+    black, its marks in those colours (each readable: test_every_theme_is_readable checks it like every theme)."""
+    neon = theme.THEMES_DATA["hacker_neon"]
+    assert neon["dark"] and neon["extra"] == "hacker" and neon["font"] == theme.THEMES_DATA["hacker"]["font"]
+
+    def hue(color):
+        return QtGui.QColor(color).hslHue()
+
+    used = {*neon["colors"].values(), *neon["status"].values(), *neon["terminal"].values()}
+    turquoise = [c for c in used if 165 <= hue(c) <= 190 and QtGui.QColor(c).saturation() > 150]
+    orange = [c for c in used if 25 <= hue(c) <= 40 and QtGui.QColor(c).saturation() > 150]
+    yellow = [c for c in used if 48 <= hue(c) <= 62 and QtGui.QColor(c).saturation() > 150]
+    greens = [QtGui.QColor(c).lightness() for c in used if 95 <= hue(c) <= 150 and QtGui.QColor(c).saturation() > 100]
+    assert turquoise and orange and yellow, (turquoise, orange, yellow)
+    assert max(greens) >= 150 and min(greens) <= 70, greens  # a light and a dark green
+    assert neon["colors"]["accent"] in turquoise and neon["status"]["warn"] in orange
+    assert neon["colors"]["title"] in yellow
+    assert i18n.tr(neon["label"]) and neon["label"] != theme.THEMES_DATA["hacker"]["label"]

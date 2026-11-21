@@ -2,7 +2,8 @@
 
 ## macOS support (required, 2026-11-05)
 
-Linux and macOS are both required. As of 0.1.35 there is no macOS code at all. On a Mac,
+Linux and macOS are both required. Up to 0.1.35 there was no macOS code; stages 0-5 are in the code now (Done
+below), what is open is a live run on a real Mac (Open below). On a Mac,
 Podman runs containers in a Linux VM (`podman machine`), so everything **inside** the sandbox
 (runtime.py's bootstrap, guard, proxy, Firejail, nft, loggers, ApprovalBroker) stays as it is;
 only the host side is ported. `podman` on a Mac is the remote client, so most host checks
@@ -33,7 +34,7 @@ memory), every host path a start mounts checked against the machine's shares, --
 
 Done (stages 2-5 in code, tested on Linux with macOS simulated: tests/test_macos_host.py,
 tests/test_macos_integration.py, projects/sandbox-ai-app/tests/test_macos_app.py; the CI's macOS job runs the
-first two against the real kernel of a macos-14 runner, plus install.sh; NOT yet run against a real podman machine):
+first two against the real kernel of a macos-15 runner, plus install.sh; NOT yet run against a real podman machine):
 
 - **Stage 2.** sandbox/procinfo.py: start time, state, owner, parent, children, command line and working directory
   of a process - /proc on Linux (as before, also a fake /proc a test hands in), on macOS ctypes sysctl
@@ -98,6 +99,10 @@ Open (precise):
   which is in the VM).
 - The app on macOS: crashguard's memory figure and hardware.py read /proc (no figure on a Mac); a `.app` with its
   own bundle id for Qt's own notifications; the app's tests do not run on the macOS CI job (PySide6 there).
+- The system monitor (0.1.98) on macOS: the collector takes `podman stats` of podman machine's VM every 30 s (no
+  PSI, no per-run GPU; the host line is the Mac's: load, vm_stat, vm.swapusage); tested only with a fake `podman
+  stats` (tests/test_monitor_e2e.py, both its raw ContainerStats and its printed --format json): check the numbers
+  on a real Mac, and whether the VM's own memory (not the Mac's) should be the host line there.
 - `webui.py` needs OpenSSL's `-addext`; macOS ships LibreSSL, so check it or fall back.
 - Optional later: `--gui-vnc` over TCP, GPU through krunkit.
 
@@ -156,11 +161,12 @@ Open:
   (pidfds from the scan would close it); the file log keeps its watches on a removed workspace's host inodes.
 - `net.alive` compares start times from this PID namespace: a CLI run in another one would take a live run for
   ended (not reachable by the agent).
-- Done in 0.1.78: the push check takes an added workspace (push-added.json beside push.json, written by `workspace
-  add/remove` on the host with the run's derived rules and the project's own; the checker reads it for every push),
-  and the after-run privacy check covers the writable ones added during the run.
 - macOS: inside the podman machine VM (stage 4 of macOS support).
-- The app and the web interface: a button for it.
+
+Done since: the push check takes an added workspace (0.1.78, 602c4c76: push-added.json beside push.json, written by
+`workspace add/remove` on the host with the run's derived rules and the project's own; the checker reads it for
+every push), and the after-run privacy check covers the writable ones added during the run; the app and the web
+interface add and remove workspaces of a running start (d2030db6, 2026-11-08).
 
 ## The app: a native crash in the board's drop test on CI (2026-11-08)
 
@@ -265,17 +271,20 @@ Open:
   with…* (free text, with options to take out), *Restore HOME* after a HOME
   review that was not resumed (every restorable file at once; choosing single
   files, `--path`, is not offered), *Reload rules* for a running sandbox and
-  `rules check`/`rules show` beside the ruleset field. The web interface has
-  none of them yet (no route: `start-options`, `home-restore` and
-  `rules-reload` are the app's own confirmations).
+  `rules check`/`rules show` beside the ruleset field. The web interface shows
+  the HOME review (`resume --review-home`, 0c214313) but has no *Resume with…*,
+  *Restore HOME* or *Reload rules* yet (no route: `start-options`,
+  `home-restore` and `rules-reload` are the app's own confirmations).
 
 ## Future: GitHub push proxy on the host (token kept outside)
 
 Partly done in 0.1.21: `--token-proxy` gives the Git tokens only to the
 connection proxy inside the sandbox (its directory is hidden from the agent),
-which adds them to Git's smart-HTTP requests to the token's HTTPS server. Still
-open below: plain-http loopback servers, a ref policy, and the proxy running on
-the host rather than in the pod.
+which adds them to Git's smart-HTTP requests to the token's HTTPS server; since
+2026-11-06 (a534d090) `sandbox-ai git-logins` keeps logins in that proxy for
+every sandbox, never inside one (plain-http loopback servers included). Still
+open below: a ref policy, an audit log of pushes, and the proxy running on the
+host rather than in the pod.
 
 `--git-token-env`/`--git-token-file` put the token into the sandbox, where the agent can read
 it. A push proxy would give the agent the ability to push without the secret:
@@ -321,14 +330,17 @@ it. A push proxy would give the agent the ability to push without the secret:
 ## LLM servers (`--llm`): what stays open
 
 Done: endpoints of `sandbox-ai llm` (Ollama, LM Studio, llama.cpp, vLLM, any
-OpenAI-compatible server), `--llm NAME[:MODEL]` for all three agents, the key
+OpenAI-compatible server), `--llm NAME[:MODEL]` for every agent, the key
 added on the wire by the connection proxy, `llm models`/`llm check`, the
 wizard's model step, and the VPN wiring: an endpoint added with `--vpn
 PROFILE` makes `--llm` start behind that VPN (`llm.apply_vpn`: it sets `--vpn`,
 another `--vpn` is refused, `forbid`/`require_vpn` see it), and the server's
 name is resolved through the tunnel with the other names (`llm.pinned_names`).
-The context window the server reports reaches Codex (`model_context_window`)
-and OpenCode (`limit.context`, `limit.output`).
+The context window the server reports (Ollama: the one it serves the model with,
+b0446710) reaches every agent that takes one (Codex `model_context_window`,
+OpenCode `limit.context`/`limit.output`, Claude Code's variables, Qwen Code,
+Goose, DSH, Pi, OpenHands, nanobot, Hermes); when it is not known, the start
+says what the agent assumes and how to set it (fe71e854).
 Open:
 
 - **`llm check|models|status` through the VPN** (done 2026-11-10): the profile comes up in a container of its own
@@ -344,19 +356,20 @@ Open:
   would still show them to the agent. Masking the values in identity-encoded
   answers (same length, so the framing holds) would close the common case;
   compressed answers would remain.
-- **Context window: through the VPN, and Claude Code.** Codex's
-  `model_context_window` and OpenCode's `limit.context`/`limit.output` are set
-  from what the server reports (done, README "Context window"), but not for a
-  server behind its VPN (the host cannot ask it; same fix as `llm check`
-  above). Claude Code gets it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (0.1.96).
+- **Context window through the VPN.** The agents are told the window the
+  server reports (above), but not for a server behind its VPN: the host cannot
+  ask it (same fix as `llm check` above); the start says so and what the agent
+  assumes. Letta Code takes no window from sandbox-ai at all.
 - **Older and newer agents.** Codex before 0.134 has no profile files
   (`--profile` selected `[profiles.x]`); `-c` overrides would cover it.
   OpenCode 2's native `providers` shape is not written (it reads the v1 shape
   written now).
 - **Not supported:** TLS client certificates (mTLS) to the server, rotating
   keys (an `apiKeyHelper`-like command); keys are static secrets.
-- **Live tests** against real servers: `tests/test_live_e2e.py` has
-  `--local-llm` for OpenCode only; extend it to `--llm NAME` with each agent.
+- **Live tests** against real servers: `tests/test_agent_sandbox_live.py` has
+  `--local-llm` for OpenCode only; extend it to `--llm NAME` with each agent
+  (the local-model research ran every harness against LM Studio by hand:
+  docs/LOCAL_MODELS.md).
 
 ## Open findings from the security review (2026-11-01)
 
@@ -397,9 +410,10 @@ start time, not the PID alone (0.1.76). Still open, low severity:
 - **Xvfb outside Firejail.** It runs in the outer mount namespace where
   `/sandbox/log` and `/sandbox/vnc` are visible; run it inside Firejail with
   the same blacklist.
-- **Tokens inside the sandbox.** `--git-token-*` and `--git-credentials` hand
-  the tokens (every login in the file) to the agent; the push proxy above would
-  keep them on the host.
+- **Tokens inside the sandbox.** `--git-credentials` hands every login in the
+  file to the agent, and `--git-token-*` without `--token-proxy` the token;
+  `--token-proxy` (0.1.21) and `sandbox-ai git-logins` (a534d090) keep them in
+  the connection proxy instead. The push proxy above would keep them on the host.
 
 ## Open findings from the reviews of 2026-11-03
 
@@ -610,8 +624,11 @@ Kits carry the agent's hooks in `AGENT/hooks/`: Claude Code's and Codex's
     a symlinked hook file or folder, a trust file inside the kit, a project
     file with its own approval.
 - **Open:**
-  - The desktop app's Kits page: inspect, upload and approve. The app agent
-    does this on top of `kits list --json`, `add-hook` and `trust-hooks --yes`.
+  - ~~The desktop app's Kits page: inspect, upload and approve.~~ Done: the
+    Kits & plugins page shows every kit's hooks, adds and removes them
+    (`add-hook`, `remove-hook`) and opens `kits trust-hooks KIT` in a terminal
+    for the approval, which the human types there (the app never passes
+    `--yes`).
   - Claude Code runs matching hooks in parallel, so "rule hooks first" is
     their order in the configuration, not in time. A kit hook may run for a
     call the rules refuse (its answer never overrides the refusal).
@@ -653,6 +670,10 @@ xterm.js is vendored as files, as the app does).
   the app is Qt-free and reusable).
 - **App:** a host selector; its backend's commands through hosts.argv.
 
+Done: all of the above - `sandbox-ai web` (webui.py, since 071cad4b, 2026-11-05) with its login, hosts, starts
+(an agent's start in a terminal tab), approvals, doctor, activity and the rest, and the app's host chooser
+(host_choice.py). The Board itself stays the app's.
+
 ## Several agents in one setup (requested 2026-11-05)
 
 Claude Code, Codex and OpenCode working together, any of them as the lead.
@@ -678,8 +699,8 @@ Three modes, built in this order:
    calls `codex exec` / `opencode run` from Bash. Weaker isolation: one
    network, one HOME, one workspace.
 3. **A team of sandboxes** (done 2026-11-05: `sandbox-ai team`,
-   `team_board.py`; open: a live run, the board knowing its caller, the
-   desktop app). One sandbox per agent on a shared workspace,
+   `team_board.py`; open: a live run, the board knowing its caller; the
+   desktop app's Teams page: 39ccb6fb). One sandbox per agent on a shared workspace,
    started and stopped together (`sandbox-ai team`, a board preset), with a
    coordinator handing tasks between them.
    - Later (noted 2026-11-15, hotfix 0.1.96): **Teams on the Board.** A team
@@ -714,8 +735,9 @@ newest refusals with these fields. Open:
 - **Timing.** A refusal waits 50 ms for the lookup (the kernel forgets a
   socket once it is reset); a busier sandbox may need more, or a lookup
   started before the decision for every new connection.
-- **Formatting.** `sandbox-ai logs` prints the refusals plainly; main's
-  `textout.py` tables are not used on this branch yet.
+- **Formatting.** `sandbox-ai logs` prints the refusals plainly, without the
+  `textout.py` tables (27affc40) that `net list`, `approvals`, `doctor` and the
+  other list commands use.
 - **Debug for the MCP gateway**: `--log-debug` does not reach the relay of
   a server sandbox.
 
@@ -813,11 +835,9 @@ container and pod command lines, the checks with faked answers, MCP, policy and 
   pushed `dhcp-option DNS` comes through the route-up hook (OpenVPN 2.6 `--dns` options too).
 - **Remote Podman** (`--podman-url`, done 2026-11-10): the host's own public address for the comparison is asked
   on the engine's machine, from a plain container of the VPN image (`vpn_runtime.py baseline`). Open: live test.
-- **Desktop app**: the board keeps `--vpn` among the options no node owns, and the app's
-  `test_every_launcher_option_is_in_the_form` fails until its option groups list `--vpn` and `--vpn-check`. A
-  patch for projects/sandbox-ai-app (a VPN node with its problems and policy checks, the options in the Network
-  group, German texts, tests) was prepared beside this change; a profile picker (`sandbox-ai vpn list --json`)
-  is still to do.
+- ~~**Desktop app**~~: done - the Board has a VPN node (`--vpn`, `--vpn-check`, `--vpn-bypass-host-ports`,
+  `--vpn-bypass-tcp`) with its checks, and offers the profiles of `sandbox-ai vpn list --json` (in the app since
+  it joined the repository, 57266dfe; backend.vpn_profiles).
 - **Lookups during a run** (done 2026-11-10): names allowed while a sandbox runs (`net allow --allow-host`, approved
   lookups, wildcard names) are resolved by the VPN's resolvers in its running container (`podman exec ...
   vpn_runtime.py resolve`; run.json `vpn_container`). Open: live test with real Podman.
@@ -866,7 +886,7 @@ Done: Git logins (`net allow --git-token-*`, since 0.1.37) and API keys (`net al
   maintainer publishes the release files. A GitHub draft release that the
   maintainer only signs and publishes would save the upload; not done (drafts
   are invisible to the tag API that `publish_release.py` uses).
-- **PyPI.** `pip install -U sandbox-ai` relies on PyPI's own trusted publishing;
+- **PyPI.** `pip install -U sandbox-ai-app` relies on PyPI's own trusted publishing;
   the SSH signature covers only `install.sh` installations.
 
 ## Canary files (2026-11-04)
@@ -899,8 +919,8 @@ list|resume`. Open:
 - **Earlier runs' tokens.** Only the tokens of this run (and of a kept HOME)
   are searched; a token of a throwaway HOME the agent stashed in the
   workspace leaves unnoticed in a later run.
-- **App.** The desktop app shows canary records as approvals; a page of its
-  own (`sandbox-ai canaries list --json`) is not written.
+- ~~**App.**~~ Done (58684ad1, 2026-11-07): a Canaries tab on the Activity
+  page (`sandbox-ai canaries list --json`).
 - **Not run here:** planting and detection through real Podman and
   Bubblewrap sandboxes (the unit tests use real inotify, a real proxy with
   TLS and real Git, but no sandbox).

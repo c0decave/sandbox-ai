@@ -45,7 +45,7 @@ SAMPLE = float(os.environ.get("SOAK_SAMPLE", "60"))  # seconds between two rows 
 STALL = 0.2  # seconds without a turn of the event loop that count as a stall
 BEAT = 0.025  # the heartbeat's interval
 THEMES = ("dark", "light", "hacker", "amber", "system", "unicorn", "mac")
-PAGE_KEYS = ("launch", "board", "sandboxes", "approvals", "terminals", "connections", "activity", "statistics",
+PAGE_KEYS = ("launch", "board", "sandboxes", "terminals", "approvals", "connections", "activity", "statistics",
              "files", "kits", "mcp", "llm", "team", "images", "credentials", "system", "hosts", "help")
 
 
@@ -285,6 +285,10 @@ class Soak:
 
     def logged(self, entry):
         level = entry.get("level")
+        message = str(entry.get("message"))
+        if level == "ERROR" and (entry.get("where") == "notifications" and message.startswith("soak ") or
+                                 ".example has no address" in message):
+            level = "SOAK"  # (the soak's own: its notifications of level error, its allows for made-up hosts)
         if level in ("ERROR", "FATAL"):
             self.errors.append(f"{entry.get('where')}: {str(entry.get('message'))[:2000]}")
         elif level == "WARNING":

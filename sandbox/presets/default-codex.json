@@ -3,11 +3,11 @@
   "version": 1,
   "id": "default-codex",
   "title": "Codex (default)",
-  "description": "Codex on your project with sandbox-ai's defaults and nothing more: only its maker's model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "description": "Codex on your project with sandbox-ai's defaults and nothing more: only its model is reachable, everything else is refused or asked; its telemetry is always off.",
   "translations": {
     "de": {
       "title": "Codex (Standard)",
-      "description": "Codex an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur das Modell seines Herstellers ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+      "description": "Codex an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur sein Modell ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
     }
   },
   "category": "agents",
@@ -16,8 +16,8 @@
   ],
   "options": [],
   "notes": [
-    "The model: OpenAI's API and ChatGPT (your ChatGPT login: sandbox-ai login codex, or the host's). Its hosts are open by default; nothing else of the provider's.",
-    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-codex (PyPI, npm, GitHub) or sandbox-ai net allow during the run.",
+    "The model: your ChatGPT login (sandbox-ai login codex once, or the host's) or OPENAI_API_KEY; OpenAI's hosts are open by default, nothing else of the provider's. A server of yours instead: the preset codex-local-llm.",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-codex or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on."
   ]
 }

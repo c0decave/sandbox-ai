@@ -74,6 +74,20 @@ def test_no_visible_string_is_left_untranslated():
     assert not found, "\n".join(found)
 
 
+def test_german_addresses_the_user_with_sie_and_names_things_alike():
+    """No "du" in the German texts: no imperative of the familiar form at the start of a sentence (a status line
+    says what is done, "Datei wird angelegt…"), and one word for the emergency stop (Notaus, not Not-Aus)."""
+    imperatives = re.compile(r"(?:^|[.:;!?] |\n|\()(Wähle|Gib|Lege|Öffne|Klicke|Prüfe|Starte|Füge|Nimm|Setze|Stelle|"
+                             r"Gehe|Schließe|Speichere|Lösche|Entferne|Bearbeite|Ändere|Warte|Beachte|Achte|Trage|"
+                             r"Tippe|Drücke|Benutze|Verwende|Erstelle|Erlaube|Aktiviere|Wechsle|Lies|Zeige)\b")
+    familiar = re.compile(r"\b(du|dich|dir|dein|deine|deinen|deinem|deiner|euch|euer|eure)\b")
+    for key, entry in i18n.TEXTS.items():
+        german = re.sub(r"`[^`]*`|\{[^}]*\}|--[\w-]+", "", entry["de"])
+        assert not imperatives.search(german), entry["de"]
+        assert not familiar.search(german), entry["de"]
+        assert "Not-Aus" not in entry["de"], entry["de"]
+
+
 def test_language_choice():
     assert i18n.system_language({"LANG": "de_DE.UTF-8"}) == "de"
     assert i18n.system_language({"LC_ALL": "en_GB.UTF-8", "LANG": "de_DE.UTF-8"}) == "en"

@@ -283,7 +283,12 @@ jobs:
           - {name: qwen, builds: "codex qwen", suite: tests/test_qwen_live.py}
           - {name: dsh, builds: "codex dsh", suite: tests/test_dsh_live.py}
           - {name: goose, builds: "codex goose", suite: tests/test_goose_live.py}
-          - {name: cairn, builds: "team cairn", suite: tests/test_cairn_live.py}
+          - {name: openhands, builds: "codex openhands", suite: tests/test_openhands_live.py}
+          - {name: nanobot, builds: "codex nanobot", suite: tests/test_nanobot_live.py}
+          - {name: letta, builds: "codex letta", suite: tests/test_letta_live.py}
+          - {name: opencode2, builds: "codex opencode2", suite: tests/test_opencode2_live.py}
+          - {name: pi, builds: "codex pi", suite: tests/test_pi_live.py}
+          - {name: cairn, builds: "claude cairn browser", suite: tests/test_cairn_live.py}
     name: agents-live (${{ matrix.name }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, published 2026-07-20
@@ -345,6 +350,9 @@ jobs:
           for c in "sandbox-ai --version" "sandbox-ai build --help" "sandbox-ai wizard --help" "sandbox-ai mcp --help"; do
             /tmp/venv/bin/$c >/dev/null
           done
+          # the app without the extra [gui]: no PySide6, so it says how to add it (and ends with 1)
+          if /tmp/venv/bin/sandbox-ai-app --self-test 2>/tmp/app-no-gui.txt; then exit 1; fi
+          grep -F "'sandbox-ai-app[gui]'" /tmp/app-no-gui.txt
       - name: sandbox-ai.pyz (the release workflow checks it and the app packages in full)
         run: scripts/e2e_package.sh pyz dist/sandbox-ai.pyz --python python
       - name: The package build scripts parse

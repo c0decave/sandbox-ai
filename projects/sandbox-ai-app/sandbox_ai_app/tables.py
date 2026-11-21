@@ -1,30 +1,34 @@
-"""Column widths of the app's tables and trees: as wide as their titles and content, the long column takes the rest.
+"""Column widths of the app's tables and trees: every column as wide as its title and content, the long one the rest.
 
 Every table (widgets.table(), the Sandboxes tree, the Activity timeline, the dialogs' tables) is set up once with
-setup(VIEW, STRETCH, COMPACT) and fitted with fit_columns(VIEW) when its rows are set:
+setup(VIEW, STRETCH, COMPACT) and fitted with fit_columns(VIEW) when its rows are set, again when its width changes:
 
-- STRETCH, the column of long text (a name, a path, a URL, a description), takes the width the others leave;
-- COMPACT columns (a state, a kind, a time, a size, a count, a check mark) are as wide as their widest cell or their
-  title, whichever is wider, and never shrink below that;
-- every other column is as wide as its content too, but at most CAP of the view, and gives way (down to its title)
-  when the view is too narrow for the stretch column to keep STRETCH_SHARE of it: a horizontal scroll bar only when
-  the titles and compact columns alone are wider than the view;
+- every column is first given what its widest cell or its title needs (the sort arrow counted in the column sorted
+  by), whichever is wider;
+- when all of that fits, nothing is cut: STRETCH, the column of long text (a name, a path, a URL, a description),
+  takes the room that is left over;
+- only when the view is narrower than the sum, columns give way, in this order: the STRETCH column (down to
+  STRETCH_MIN, or its content if shorter), then the other long columns (first down to CAP of the view, then down to
+  their titles), at last a COMPACT column (a state, a kind, a time, a size, a count, a check mark) wider than CAP; a
+  horizontal scroll bar only when even that is wider than the view. A short column is never cut for a long one;
 - no column is ever narrower than its title (with room for the sort arrow).
 
 A view with stretch_interactive True (the Files page's panes) keeps every column Interactive, the stretch column too
 (its edge can be dragged): it is given the room the others leave each time the columns are fitted (also when the
-view's width changes, until the human sizes a column). Nothing is stretched by Qt: what Qt's last-section stretching
-gives depends on the width the view had when it was first fitted, and it moved columns at a change of folder.
+view's width changes). Nothing is stretched by Qt: what Qt's last-section stretching gives depends on the width the
+view had when it was first fitted, and it moved columns at a change of folder.
 
-Widths are measured with the font's metrics on at most SAMPLE rows (the first ones and some spread over the rest),
-never with ResizeToContents on every row: a folder of 20,000 files is fitted in a few milliseconds. A table is
+Widths are measured on at most SAMPLE rows (the first ones and some spread over the rest), never with
+ResizeToContents on every row: a folder of 20,000 files is fitted in a few milliseconds. A table is
 fitted in full when its first rows arrive; later fills only widen a column whose content became wider (nothing
-jumps while the human reads), fit_columns(VIEW, force=True) fits it again from scratch. A text cut to fit its
-column shows itself in full on hover.
+jumps while the human reads) - unless the widths earlier rows needed would cut a cell of the rows shown now that
+would be whole without them (a view with fit_steady keeps them even then); fit_columns(VIEW, force=True) fits it again from scratch. A text cut to fit its
+column is cut in the middle (a path keeps its start and its file name) and shows itself in full on hover.
 
-Widths the human drags are the human's: state.State.table keeps them (per page and table, keep_tables() registers
-every page's tables) and they come back at the next start; only a column narrower than its title (another language)
-is widened then.
+Widths the human drags are the human's, column by column (view.user_columns): state.State.table keeps them (per
+page and table, keep_tables() registers every page's tables) and they come back at the next start - only a column
+narrower than its title (another language) is widened then. The other columns of that table are still fitted: a
+width the app chose in a small window is never kept.
 """
 from __future__ import annotations
 
@@ -35,11 +39,10 @@ from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView, QToolTip, QTreeView, QWidget
 
 SAMPLE = 200  # rows measured: the first half of them, the rest spread evenly over the other rows
-LONGEST = 12  # texts of a column measured with the font: its longest ones
-CAP = 0.4  # a column other than the stretch column: at most this share of the view's width
-CAP_MIN = 140  # px: ... but a cap never below this
-STRETCH_SHARE = 0.3  # the stretch column keeps this share of the view (or less, if its content is shorter) ...
-STRETCH_MIN = 180  # px: ... and at least this much of its content: in a narrow view the others scroll
+LONGEST = 12  # texts of a column measured (the delegate's size hint): its longest ones
+CAP = 0.4  # a view too narrow for every column's content: a column other than the stretch column gives way to
+CAP_MIN = 140  # px: ... this share of the view's width, but a cap never below this
+STRETCH_MIN = 180  # px: the stretch column gives way first, down to this much of its content: then the others
 FALLBACK_WIDTH = 900  # px: the width assumed for a view not laid out yet (fitted again when it is)
 MAXIMUM = 4000  # px: the widest a column may be dragged (the stretch column takes any width)
 MINIMUM = 32  # px
@@ -64,6 +67,8 @@ def setup(view, stretch=None, compact=()):
     header.setMinimumSectionSize(MINIMUM)
     header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     header.setStretchLastSection(False)
+    if view.textElideMode() == Qt.TextElideMode.ElideRight:  # (Qt's default) a path keeps its start and its end
+        view.setTextElideMode(Qt.TextElideMode.ElideMiddle)
     if not view.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff:
         view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     if stretch is not None and not getattr(view, "stretch_interactive", False):
@@ -123,9 +128,9 @@ def _sample(model, tree, limit=SAMPLE):
 
 
 def _measure(view, header, model, columns):
-    """{column: px} the widest sampled cell of each column needs (text, icon, margins, a tree's indentation). Only
-    the LONGEST texts of a column (by characters) are measured with the font: the widest is among them."""
-    metrics = {None: QFontMetrics(view.font())}
+    """{column: px} the widest sampled cell of each column needs (text, icon, margins, a tree's indentation): what
+    the view's delegate asks for, so a cell given it is never cut. Only the LONGEST texts of a column (by characters)
+    are measured: the widest is among them."""
     tree = isinstance(view, QTreeView)
     grid = 1 if isinstance(view, QTableView) and view.showGrid() else 0
     indent = view.indentation() if tree else 0
@@ -155,26 +160,17 @@ def _measure(view, header, model, columns):
                     continue
                 text = model.data(index, display)
             text = "" if text is None else str(text)
-            if text and text not in found[column]:
-                found[column][text] = (first, depth)
+            if text and (text not in found[column] or depth > found[column][text][1]):
+                found[column][text] = (first, depth)  # (a tree: the deepest row with the text, the most indented)
     for column, texts in found.items():
         if not texts:
             continue
         indented = tree and column == first_column
         longest = sorted(texts, key=lambda t: len(t) + (texts[t][1] * 4 if indented else 0), reverse=True)[:LONGEST]
-        padding = None
         for text in longest:
             first, depth = texts[text]
             index = first if column == 0 else first.siblingAtColumn(column)
-            font = model.data(index, Qt.ItemDataRole.FontRole)
-            key = font.key() if isinstance(font, QFont) else None
-            if key not in metrics:
-                metrics[key] = QFontMetrics(font)
-            advance = max(metrics[key].horizontalAdvance(line) for line in text.split("\n"))
-            if padding is None:
-                # The delegate's margins, icon and decoration, from one real cell of the column.
-                padding = min(80, max(8, view.sizeHintForIndex(index).width() - advance))
-            width = advance + padding + grid
+            width = view.sizeHintForIndex(index).width() + grid  # its text, font, icon and margins
             if indented:
                 width += (depth + (1 if view.rootIsDecorated() else 0)) * indent
             widths[column] = max(widths[column], width)
@@ -213,13 +209,67 @@ def fit_columns(view, stretch=None, compact=None, force=False):
         others = [c for c in columns if c not in view.fit_compact] or columns
         view.fit_auto_stretch = max(others, key=lambda c: (content[c], -c)) if rows else \
             getattr(view, "fit_auto_stretch", None) or (others[-1] if others else None)
+    view.fit_measured = content  # the rows shown now
     grow = view.fit_done and not force
     if grow:
         content = {column: max(content[column], view.fit_content.get(column, 0)) for column in columns}
     view.fit_titles, view.fit_content = titles, content
+    view.fit_font = _fonts(view)
     view.fit_done = view.fit_done or rows
     apply(view)
     return time.perf_counter() - began
+
+
+def _fonts(view):
+    """The fonts the cells and titles are measured with (a style sheet's font comes with the view's first show)."""
+    return view.font().key(), header_of(view).font().key()
+
+
+def user_columns(view, titles=()):
+    """The columns of VIEW (of TITLES) whose width the human set (dragged an edge, double-clicked one): kept."""
+    if not getattr(view, "user_sized", False):
+        return set()
+    return set(getattr(view, "user_columns", None) or ()) & set(titles)
+
+
+def _give(widths, floors, over):
+    """Take OVER px from WIDTHS (in place), from each column in FLOORS ({column: px}) in proportion to what it has
+    above its floor, never below it. Returns what could not be taken."""
+    spare = {column: widths[column] - floor for column, floor in floors.items() if widths[column] > floor}
+    total = sum(spare.values())
+    if over <= 0 or total <= 0:
+        return over
+    share = min(1.0, over / total)
+    for column, extra in spare.items():
+        taken = min(extra, over, int(extra * share + 0.999))
+        widths[column] -= taken
+        over -= taken
+    return max(0, over)
+
+
+def plan(titles, content, room, stretch=None, compact=(), fixed=None):
+    """({column: px}, squeezed) for a view of ROOM px: what each column gets (see the module). TITLES and CONTENT:
+    {column: px} its title and its widest cell need; FIXED: {column: px} the human's widths, kept. SQUEEZED: even
+    cut as far as they may be, the columns are wider than ROOM (the view scrolls sideways)."""
+    fixed = dict(fixed or {})
+    widths = {column: fixed.get(column, max(titles[column], content.get(column, 0))) for column in titles}
+    free = [column for column in titles if column not in fixed]
+    over = sum(widths.values()) - room
+    if over <= 0:
+        if stretch in free:
+            widths[stretch] -= over  # the room left over
+        return widths, False
+    if stretch in free:  # 1. the long column first
+        over = _give(widths, {stretch: max(titles[stretch], min(widths[stretch], STRETCH_MIN))}, over)
+    cap = max(CAP_MIN, int(CAP * room))
+    others = [column for column in free if column != stretch and column not in compact]
+    # 2. the other long columns: down to a share of the view, then down to their titles
+    over = _give(widths, {column: max(titles[column], min(widths[column], cap)) for column in others}, over)
+    over = _give(widths, {column: titles[column] for column in others}, over)
+    # 3. a short column only when its content is longer than a long column may be
+    over = _give(widths, {column: max(titles[column], cap) for column in free if column in compact
+                          and column != stretch}, over)
+    return widths, over > 0
 
 
 def apply(view):
@@ -227,43 +277,32 @@ def apply(view):
     header = header_of(view)
     stretch = stretch_of(view)
     titles, content = getattr(view, "fit_titles", {}), getattr(view, "fit_content", {})
-    if not titles or getattr(view, "user_sized", False):
-        _modes(view, header, stretch)
     if not titles:
+        _modes(view, header, stretch)
         return
     view.fitting = True
     try:
-        if getattr(view, "user_sized", False):
-            for column, title in titles.items():  # the human's widths; only a title cut short is made whole
-                if column != stretch and header.sectionSize(column) < title:
-                    header.resizeSection(column, title)
-            return
+        human = user_columns(view, titles)
         laid_out = view.isVisible() and view.viewport().width() > 60
         # less the corner a (?) keeps free in the header (help_view.Corner.make_room)
         room = view.viewport().width() - header.viewportMargins().right() if laid_out else FALLBACK_WIDTH
-        cap = max(CAP_MIN, int(CAP * room))
-        compact = getattr(view, "fit_compact", set())
-        widths = {column: max(titles[column], min(content[column], cap))
-                  for column in titles if column != stretch}
-        need, squeezed = 0, False
-        if stretch in titles:
-            need = max(titles[stretch], min(content[stretch], max(int(STRETCH_SHARE * room), STRETCH_MIN)))
-            over = sum(widths.values()) + need - room
-            give = {column: widths[column] - titles[column] for column in widths if column not in compact}
-            spare = sum(give.values())
-            if over > 0 and spare > 0:
-                share = min(1.0, over / spare)
-                for column, extra in give.items():
-                    widths[column] -= int(extra * share + 0.999)
-            # Titles and short columns alone wider than the view: the stretch column keeps its share, the view scrolls.
-            squeezed = laid_out and sum(widths.values()) + need > room
+        interactive = getattr(view, "stretch_interactive", False)
+        fixed = {column: max(titles[column], header.sectionSize(column)) for column in human
+                 if column != stretch or interactive}
+        measured = getattr(view, "fit_measured", None) or content
+        kept, now = (sum(fixed.get(c, need.get(c, 0)) for c in titles) for need in (content, measured))
+        if kept > room >= now and not getattr(view, "fit_steady", False):
+            # Wider than earlier rows needed only: the rows shown now are whole when those widths are given up (not
+            # in a view with fit_steady: the Files page's panes are fitted to typical rows first, so that a change of
+            # folder moves no column).
+            content = measured
+        widths, squeezed = plan(titles, content, room, stretch, getattr(view, "fit_compact", set()), fixed)
+        squeezed = squeezed and laid_out
         _modes(view, header, stretch, squeezed)
-        if squeezed:
-            widths[stretch] = need
-        elif stretch in titles and getattr(view, "stretch_interactive", False):
-            # Interactive: the stretch column is given the room the others leave.
-            widths[stretch] = max(need, room - sum(width for column, width in widths.items() if column != stretch))
+        stretched = stretch in titles and not squeezed and not interactive  # Qt gives it the rest
         for column, width in widths.items():
+            if column == stretch and stretched:
+                continue
             if header.sectionSize(column) != width:
                 header.resizeSection(column, width)
         view.fit_room = room if laid_out else None
@@ -295,8 +334,14 @@ class _Watcher(QObject):
             # Shown before its first fill (or never filled: a listing that failed): fitted to its titles now that
             # the theme's font is on them, not left at Qt's 100 px each ("gent versio").
             fit_columns(view)
-        elif kind in (QEvent.Type.Resize, QEvent.Type.Show) and getattr(view, "fit_titles", None):
-            if not view.fitting and view.viewport().width() != getattr(view, "fit_room", None):
+        elif kind in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.FontChange, QEvent.Type.StyleChange) \
+                and getattr(view, "fit_titles", None) and not view.fitting:
+            if getattr(view, "fit_font", None) != _fonts(view):
+                # Measured with another font (filled before its first show, before the theme's style sheet, a
+                # change of the font size): measured again, else its cells would be cut by the difference (widths
+                # earlier rows needed are kept: a pane fitted to typical rows stays put).
+                fit_columns(view)
+            elif view.viewport().width() != getattr(view, "fit_room", None):
                 apply(view)
         elif kind == QEvent.Type.ToolTip and watched is view.viewport():
             return self.tooltip(event)

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QObject, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QWidget
 
 from .files import printable, printable_text
@@ -148,6 +148,9 @@ class HostChooser(QWidget):
         self.box.setToolTip(safe_tooltip(tooltip or tr("This machine, or a host of sandbox-ai hosts (over SSH)")))
         self.box.currentIndexChanged.connect(lambda _=0: self.changed.emit(self.host()))
         row.addWidget(self.box, 1)
+        # Whose host it shows when the window's pages follow the Sandboxes page's host (HostFollow): hidden otherwise.
+        self.note = follow_note()
+        row.addWidget(self.note)
         self.problem = None
         self.load()
         follow_hosts(self, self.load)  # a host added, renamed or removed on the Hosts page: here at once
@@ -192,3 +195,122 @@ class HostChooser(QWidget):
 
     def label(self, host=None):
         return host_label(host or self.host())
+
+
+# -- the pages follow the Sandboxes page's host --
+
+def follow_note():
+    """The line beside a page's host chooser that says whose host the page shows (HostFollow fills it)."""
+    note = plain_label(role="secondary", word_wrap=False)
+    note.hide()
+    return note
+
+
+def follow_label(host):
+    return tr("All hosts") if host is None else host_label(host)
+
+
+class HostFollow(QObject):
+    """The host chosen on the Sandboxes page, for every page with a host chooser of its own (the window attaches
+    them): such a page shows that host from then on, until the human chooses another one on the page itself - which
+    holds until the Sandboxes page's host changes again. "All hosts" there changes only a page that can show all of
+    them (its chooser has an entry None). A page that is hidden takes the host when it is shown next (before it
+    reads, then once: no SSH for a page nobody looks at); the page's own host change drops what its reads of the
+    host before still bring. The note beside each chooser says whose host the page shows."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.host, self.chosen = None, False  # the Sandboxes page's host (None: all hosts); chosen there yet
+        self.pages, self.pending = {}, {}  # {key: (page, [combo], note)}, {key: host it takes when shown}
+        self.applying = None  # the page given the host now (its chooser's change is not the human's)
+
+    def attach(self, key, page, combos, note=None):
+        """PAGE (KEY) follows with COMBOS (QComboBoxes whose item data are host names; the first one is the page's
+        host), NOTE (a follow_note()) beside the first one."""
+        combos = [combo for combo in combos if combo is not None]
+        if not combos:
+            return
+        self.pages[key] = (page, combos, note)
+        combos[0].currentIndexChanged.connect(lambda _=0, k=key: self.changed_on_page(k))
+        page.destroyed.connect(lambda *_, k=key: (self.pages.pop(k, None), self.pending.pop(k, None)))
+        if self.chosen:
+            self.offer(key)
+
+    def choose(self, host):
+        """The Sandboxes page's host is HOST now (None: all hosts)."""
+        self.host, self.chosen = host, True
+        for key in list(self.pages):
+            self.offer(key)
+
+    def takes(self, combo, host):
+        return combo.findData(host) >= 0
+
+    def offer(self, key):
+        page, combos, _note = self.pages[key]
+        if not any(self.takes(combo, self.host) for combo in combos):
+            self.pending.pop(key, None)  # (all hosts, or a host it does not list: its own choice stays)
+            page.removeEventFilter(self)
+            self.show_note(key)
+            return
+        self.pending[key] = self.host
+        if page.isVisible():
+            self.apply(key)
+        else:
+            page.installEventFilter(self)  # (only while a host waits for it: shown some other way, it still takes it)
+
+    def before_show(self, key):
+        """Page KEY is about to be shown: the host it was given meanwhile, while it is still hidden (its own show
+        then reads that host's, once), and the line that says whose host it shows."""
+        if key in self.pending:
+            self.apply(key)
+        elif key in self.pages:
+            self.show_note(key)
+
+    def apply(self, key):
+        page, combos, _note = self.pages[key]
+        host = self.pending.pop(key)
+        page.removeEventFilter(self)
+        self.applying = key
+        try:
+            for combo in combos:
+                index = combo.findData(host)
+                if index >= 0 and index != combo.currentIndex():
+                    combo.setCurrentIndex(index)  # as the human would: the page's own host change runs
+        finally:
+            self.applying = None
+        self.show_note(key)
+
+    def changed_on_page(self, key):
+        """Page KEY's own host changed: chosen there (or by what opened it on a host: Secrets and logins on HOST…,
+        Show questions): that choice is newer than a host still waiting for the page, which then goes."""
+        if self.applying != key and key in self.pending:
+            del self.pending[key]
+            self.pages[key][0].removeEventFilter(self)
+        self.show_note(key)
+
+    def show_note(self, key):
+        entry = self.pages.get(key)
+        if entry is None or entry[2] is None:
+            return
+        _page, combos, note = entry
+        shown = combos[0].currentData()
+        if not self.chosen or (self.host is None and not self.takes(combos[0], None)) or \
+                (self.host is None and shown is None):
+            note.hide()  # (all hosts there and here, or all hosts there and a page of one host: nothing to say)
+            return
+        if shown == self.host:
+            text = tr("{host}, as on the Sandboxes page", host=follow_label(shown))
+        else:
+            text = tr("{host}, chosen here; the Sandboxes page shows {other}", host=follow_label(shown),
+                      other=follow_label(self.host))
+        note.setText(text)
+        note.setToolTip(safe_tooltip(text))
+        note.show()
+
+    def eventFilter(self, watched, event):  # noqa: N802 - Qt's name
+        """A page shown some other way than through the window's navigation: its host before its own showEvent."""
+        if event.type() == QEvent.Type.Show:
+            key = next((k for k, (page, _c, _n) in self.pages.items() if page is watched), None)
+            if key is not None:
+                self.before_show(key)
+        return False

@@ -7,6 +7,13 @@
 # good SHA256SUMS.sig. The signing key never comes near CI, so this workflow then publishes no release
 # files; the maintainer downloads the packages built here, signs and uploads (RELEASING.md, "Signed releases").
 #
+# Every file of a release that CI can build is built here (sandbox/release_assets.py lists them: both AppImages,
+# both disk images, sandbox-ai.pyz, wheel, sdist, bundle, install.sh, SHA256SUMS); the job "release" stops unless
+# every one is there, listed in SHA256SUMS and works (scripts/release_check.py --ci). The videos and the signature
+# are added where the release is signed; scripts/publish_release.py refuses a release that lacks any file.
+# Every kind of installation updates itself from these files (sandbox-ai update): tests/test_update_github.py
+# runs each kind's update against a fake GitHub with the suite below.
+#
 # Every action is pinned by its full commit SHA, each at least 14 days old when pinned (the date stands beside
 # it); every download of the package builds is pinned by SHA-256 (packaging/). tests/test_dist_packaging.py
 # checks both.
@@ -61,6 +68,7 @@ jobs:
         with:
           name: dist
           path: dist/
+          if-no-files-found: error
 
   # sandbox-ai.pyz is built by make_dist.py in "build" (it lands in dist/ with the bundle it is made of); here it
   # runs on the oldest and the newest Python it supports.
@@ -168,7 +176,7 @@ jobs:
           status=0; docker run --rm -v "$PWD:/src:ro" "${{ matrix.image }}" bash -euc '
             apt-get update -q >/dev/null
             apt-get install -y -q --no-install-recommends ca-certificates libegl1 libgl1 libopengl0 libxkbcommon0 \
-              libfontconfig1 libglib2.0-0 libdbus-1-3 >/dev/null
+              libfontconfig1 libglib2.0-0 libdbus-1-3 libgssapi-krb5-2 >/dev/null  # (QtNetwork links GSSAPI)
             useradd -m tester
             su tester -c "/src/scripts/e2e_package.sh appimage /src/packages/sandbox-ai-${{ matrix.arch }}.AppImage --extract-and-run ${{ matrix.only }}"' > e2e.log 2>&1 || status=$?
           cat e2e.log
@@ -267,12 +275,14 @@ jobs:
           merge-multiple: true
       - name: SHA256SUMS over every release file
         run: python3 scripts/make_dist.py --sums-only --out dist --add packages/*
+      - name: Every file CI builds is there, listed in SHA256SUMS and works
+        run: python3 scripts/release_check.py --dir dist --ci
       - name: Signed releases are published by the maintainer
         id: signing
         run: |
           if grep -q '^release@sandbox-ai ' sandbox/release-signers 2>/dev/null; then
             echo "signed=1" >> "$GITHUB_OUTPUT"
-            echo "::notice::sandbox/release-signers lists keys: sign and publish locally (RELEASING.md, Signed releases): gh run download ${{ github.run_id }} -n dist -D dist && gh run download ${{ github.run_id }} -p 'appimage-*' -p 'macos-*' -D packages && python3 scripts/make_dist.py --sums-only --out dist --add packages/*/* --sign KEY && python3 scripts/publish_release.py --source URL dist/*"
+            echo "::notice::sandbox/release-signers lists keys: sign and publish locally (RELEASING.md, Signed releases): gh run download ${{ github.run_id }} -n dist -D dist && gh run download ${{ github.run_id }} -p 'appimage-*' -p 'macos-*' -D packages && python3 scripts/make_dist.py --sums-only --out dist --add packages/*/* --videos DIR --sign KEY && python3 scripts/release_check.py --dir dist && python3 scripts/release_notes.py --version ${GITHUB_REF_NAME#v} > notes.md && python3 scripts/publish_release.py --source URL --draft --notes-file notes.md dist/* && python3 scripts/release_check.py --source URL && python3 scripts/publish_release.py --source URL --publish"
           fi
       - name: GitHub release
         if: github.server_url == 'https://github.com' && steps.signing.outputs.signed != '1'
@@ -288,14 +298,18 @@ jobs:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          python3 scripts/publish_release.py --source "$SOURCE" --token-env RELEASE_TOKEN \
-            --notes "$(python3 scripts/release_notes.py --source "$SOURCE")" dist/*
+          # --partial: no videos here (rendered where a release is signed), and a Gitea without macOS runners
+          # has no disk images; publish_release.py names what the release goes up without.
+          python3 scripts/release_notes.py --source "$SOURCE" > "$RUNNER_TEMP/notes.md"
+          python3 scripts/publish_release.py --source "$SOURCE" --token-env RELEASE_TOKEN --partial \
+            --notes-file "$RUNNER_TEMP/notes.md" dist/*
 
   pypi:
     needs: [build, e2e-pyz, e2e-appimage, e2e-macos]
     if: github.server_url == 'https://github.com' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
-    # Trusted publishing: register this repository, workflow release.yml and environment "pypi" on PyPI first.
+    # Trusted publishing: PyPI project sandbox-ai-app, publisher GitHub: owner c0decave, repository sandbox-ai,
+    # workflow release.yml, environment "pypi".
     environment: pypi
     permissions:
       id-token: write
@@ -305,7 +319,7 @@ jobs:
           name: dist
           path: dist/
       - name: Only the Python package goes to PyPI
-        run: mkdir pypi && cp dist/*.whl dist/sandbox_ai-*.tar.gz pypi/
+        run: mkdir pypi && cp dist/sandbox_ai_app-*.whl dist/sandbox_ai_app-*.tar.gz pypi/
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3, published 2026-10-20
         with:
           packages-dir: pypi/

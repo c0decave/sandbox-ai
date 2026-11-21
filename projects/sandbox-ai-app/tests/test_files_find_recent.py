@@ -526,9 +526,13 @@ def test_home_up_and_refresh_are_icons_named_for_screen_readers_and_follow_the_t
     from sandbox_ai_app import theme
     page, ws, host, _ = setup
     left, right = glyph_buttons(page.left), glyph_buttons(page.right)
-    assert set(left) == {"Refresh", "Up"} and len([b for b in page.left.findChildren(QtWidgets.QPushButton)
-                                                    if getattr(b, "glyph", None)]) == 2 + 1, "Refresh twice, Up"
-    assert set(right) == {"Home", "Up", "Refresh"}
+    # (Home in the left pane too since 0.1.98: either pane may show this machine or a remote system)
+    # (Search… since the file manager's search: the magnifying glass beside Refresh)
+    assert set(left) == {"Home", "Refresh", "Up", "Search…"} and len(
+        [b for b in page.left.findChildren(QtWidgets.QPushButton) if getattr(b, "glyph", None)]) == 4 + 1, \
+        "Refresh twice, Up, Home, Search"
+    assert set(right) == {"Home", "Up", "Refresh", "Search…"}
+    assert "Ctrl+Shift+F" in right["Search…"].toolTip()
     for button in [*left.values(), *right.values()]:
         assert button.text() == "" and not button.icon().isNull() and button.toolTip(), button.accessibleName()
         assert button.icon().availableSizes(), "drawn"

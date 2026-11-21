@@ -98,10 +98,25 @@ def test_the_slow_part_runs_in_a_terminal_tab_and_the_start_goes_on_at_its_end(p
     assert lines[1] == "agent-sandbox: build --variant tor working"
     assert lines[2].startswith("agent-sandbox: building the image variant tor: done in ")
     assert lines[3] == "agent-sandbox: preparing the start (2/2): adding the MCP server fetch (its image is pulled)…"
-    assert lines[-1].startswith("agent-sandbox: prepared in ") and lines[-1].endswith("; the start goes on")
+    assert lines[-1].startswith("agent-sandbox: prepared in ") and \
+        lines[-1].endswith("; the start goes on in a tab of its own")
     ended(0)
     assert started == [True], "the start goes on once the tab says it is prepared"
     assert ("notice-ok", "Made for the start: identity work, built tor, MCP server fetch.") in page.notes
+
+
+def test_a_preparation_no_start_waits_for_says_that_nothing_starts(page):
+    """User report 2026-11-19: a preset's needs prepared in the tab (no Start pressed) ended with "prepared in 5 s; the
+    start goes on" - and nothing started. Its last line says that nothing starts by itself (Start starts it); the tab
+    of a start says where the start goes on."""
+    page.provide({"--mcp": ["fetch"]}, [], "local", ("local", "{}"), None, "preset", context="local", agent="claude")
+    argv, title, embedded, ended = page.tabs[0]
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    last = done.stdout.splitlines()[-1]
+    assert done.returncode == 0 and last.startswith("agent-sandbox: prepared in ")
+    assert "the start goes on" not in last and last.endswith(
+        "; nothing starts by itself: Start starts it (a Start pressed meanwhile goes on now, in a tab of its own)")
+    ended(0)
 
 
 def test_a_failed_step_stops_there_and_the_start_waits(page, monkeypatch):

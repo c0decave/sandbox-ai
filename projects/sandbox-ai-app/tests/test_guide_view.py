@@ -62,7 +62,7 @@ def test_cancel_changes_nothing_and_the_setting_turns_it_off(window, monkeypatch
     monkeypatch.setattr(guide_view.NodeGuide, "exec",
                         lambda self: opened.append(self.node.kind) or QtWidgets.QDialog.DialogCode.Rejected)
     board.add_node("limits", guided=True)
-    assert opened == ["limits"] and "--memory" not in board.board.first("limits").props
+    assert opened == ["limits"] and board.board.first("limits") is None, "cancelled: a new part is not added"
     board.settings = lambda: {"guide_nodes": False}
     board.add_node("display", guided=True)
     assert opened == ["limits"], "no guide when the setting says no"
@@ -342,3 +342,29 @@ def test_the_last_step_is_shown_only_when_the_board_finds_something(window):  # 
     dialog.next.click()
     texts = [dialog.summary.item(i).text() for i in range(dialog.summary.count())]
     assert texts == ["✘ Server is not set yet"]
+
+
+def test_the_guide_asks_the_effort_the_chosen_model_takes(window, monkeypatch):  # noqa: F811
+    """The agent part's guide: the models grouped by provider, the effort's levels those of the model chosen; another
+    model resets a level it does not take (said below the choice); the answers reach the board as one step."""
+    from sandbox_ai_app import models as M
+    board = window.board
+    agent = board.board.first("agent")
+    agent.props.update(agent="claude", model="claude-opus-5-5", effort="xhigh")
+
+    def answer(dialog):
+        _, model = dialog.inputs["model"]
+        _, effort = dialog.inputs["effort"]
+        assert model.findData(M.HEADER + "Anthropic") > 0
+        assert [effort.itemData(i) for i in range(effort.count())] == ["", "low", "medium", "high", "xhigh", "max"]
+        assert effort.currentData() == "xhigh"
+        model.setCurrentIndex(model.findData("claude-sonnet-4-6"))
+        assert [effort.itemData(i) for i in range(effort.count())] == ["", "low", "medium", "high", "max"]
+        assert effort.currentData() == "" and not dialog.effort_note.isHidden()
+        assert "The effort xhigh was reset: claude-sonnet-4-6" in dialog.effort_note.text()
+        effort.setCurrentIndex(effort.findData("max"))
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(guide_view.NodeGuide, "exec", lambda self: answer(self))
+    board.guide_node(agent.id)
+    agent = board.board.first("agent")
+    assert agent.props["model"] == "claude-sonnet-4-6" and agent.props["effort"] == "max"

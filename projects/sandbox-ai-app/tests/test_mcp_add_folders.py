@@ -109,7 +109,9 @@ def test_another_host_reads_its_catalog_and_the_folder_is_typed(make, monkeypatc
     page = make(["--workspace", "/home/me/w", "--mcp", "exiftool"])
     page.host = lambda: "box"
     monkeypatch.setattr(widgets, "AUTO_CHOICE", "other")
-    monkeypatch.setattr(QtWidgets.QInputDialog, "getText", lambda *a, **k: ("/data/pics", True))
+    # The folder: chosen from box's folders (remote_chooser), never this machine's
+    from sandbox_ai_app import remote_chooser
+    monkeypatch.setattr(remote_chooser, "choose", lambda parent, host, *a, **k: "/data/pics" if host == "box" else "")
     page.provide({"--mcp": ["exiftool"]}, [], "box", ("box", "{}"), None, "start", context="box", agent="claude")
     assert page.sai.asked_hosts == [("box", ("mcp", "catalog", "--json"))]
     assert page.sai.ran[-1] == ("box", ("mcp", "add", "exiftool", "--mount", "/work=/data/pics"))

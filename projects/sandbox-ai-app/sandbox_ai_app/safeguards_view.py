@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 from . import backend, tables, theme
 from .files import printable, printable_text
 from .i18n import N_, tr
-from .widgets import MONO, background, plain_label, safe_tooltip
+from .widgets import MONO, background, explanation, plain_label, safe_tooltip
 
 COLUMNS = (N_("Time"), N_("Run"), N_("Kind"), N_("What"), N_("Why"), N_("To allow it"))
 RECORD_ROLE = Qt.ItemDataRole.UserRole + 31
@@ -43,6 +43,12 @@ TITLES = {
     "canary": N_("a canary went off"), "oom": N_("out of memory: the kernel ended a process"),
     "mcp-server": N_("an MCP server's process ended or failed"),
     "loop": N_("loop guard intervened"),
+    "resources": N_("resource warning"),
+    "hidden-text": N_("hidden text in what the agent reads"),
+    "workspace-review": N_("the agent changed a file your host runs or trusts"),
+    "package": N_("package guard"),
+    "secret-send": N_("a secret on its way to another host"),
+    "secret-context": N_("a secret entered the model's context"),
 }
 # The grouped popup of each kind: {count} in the last minute, {target} where.
 GROUPED = {
@@ -54,6 +60,12 @@ GROUPED = {
     "push": N_("{count} pushes to {target} refused in the last minute"),
     "publish": N_("{count} publishing requests to {target} refused in the last minute"),
     "loop": N_("{count} loop guard interventions at {target} in the last minute"),
+    "resources": N_("{count} resource warnings ({target}) in the last minute"),
+    "hidden-text": N_("hidden text found {count} times in the last minute ({target})"),
+    "workspace-review": N_("{count} workspace reviews with changes in the last minute ({target})"),
+    "package": N_("{count} package guard findings ({target}) in the last minute"),
+    "secret-send": N_("{count} requests carried a secret to {target} in the last minute"),
+    "secret-context": N_("secrets entered the model's context {count} times in the last minute ({target})"),
 }
 
 
@@ -122,6 +134,7 @@ class SafeguardsView(QWidget):
     def __init__(self, sai):
         super().__init__()
         self.sai, self.loaded_once, self.token, self.records = sai, False, 0, []
+        self.host = "local"  # whose records: this machine's, or a host's (the Activity page's host chooser)
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.refresh_button = QPushButton(tr("Refresh"))
@@ -160,7 +173,7 @@ class SafeguardsView(QWidget):
         self.copy_button.clicked.connect(lambda _=False: self.copy_fix())
         self.copy_button.setEnabled(False)
         row.addWidget(self.copy_button)
-        row.addWidget(plain_label(tr("Mute kinds: Settings > Window (they are still listed here)."), role="secondary"), 1)
+        row.addWidget(explanation(tr("Mute kinds: Settings > Window (they are still listed here).")), 1)
         from .widgets import list_menu
         list_menu(self.tree, lambda: [self.copy_button, None, self.refresh_button])
         lower_layout.addWidget(self.detail, 1)
@@ -175,16 +188,33 @@ class SafeguardsView(QWidget):
         if not self.loaded_once:
             self.refresh()
 
+    def set_host(self, host):
+        """The records of HOST from now on (the Activity page's host chooser): nothing of the host before stays."""
+        host = host or "local"
+        if host == self.host:
+            return
+        self.host = host
+        self.token += 1
+        self.records = []
+        self.tree.clear()
+        self.detail.clear()
+        self.copy_button.setEnabled(False)
+        self.status.setText("")
+        if self.loaded_once:
+            self.refresh()
+
     def refresh(self):
-        """`sandbox-ai safeguards --all --json`, in the background."""
+        """`sandbox-ai safeguards --all --json`, in the background (on the host chosen)."""
         self.loaded_once = True
-        if not getattr(self.sai, "has_safeguards", lambda: False)():
+        host = self.host
+        if host == "local" and not getattr(self.sai, "has_safeguards", lambda: False)():
             self.status.setText(tr("This sandbox-ai records no safeguards yet; update it with: sandbox-ai update"))
             return
         self.token += 1
         token = self.token
-        self.status.setText(tr("Reading the safeguard records…"))
-        background(self.sai.safeguards, owner=self, source=self.refresh_button, timeout=90,
+        self.status.setText(tr("Reading the safeguard records…") if host == "local" else
+                            tr("Reading the safeguard records of {host}…", host=printable(host)))
+        background(self.sai.safeguards, *(() if host == "local" else (None, 1000, host)), owner=self, source=self.refresh_button, timeout=120,
                    done=lambda result, error: self.loaded(token, result, error))
 
     def loaded(self, token, result, error):
@@ -196,8 +226,9 @@ class SafeguardsView(QWidget):
         self.show_records([r for r in result or [] if isinstance(r, dict)])
 
     def add_live(self, records):
-        """New records of running sandboxes (the popups' feed): shown at once, without a refresh."""
-        if not records or not self.loaded_once:
+        """New records of this machine's running sandboxes (the popups' feed): shown at once, without a refresh (not
+        while a host's records are shown)."""
+        if not records or not self.loaded_once or self.host != "local":
             return
         known = {r.get("id") for r in self.records}
         fresh = [r for r in records if isinstance(r, dict) and r.get("id") not in known]

@@ -12,6 +12,9 @@
   sandbox-ai hosts update NAME...|--all [--version X.Y.Z] [--sudo] [--jobs N] [--json]
                                                        the host's own `sandbox-ai update` (signed, as install.sh
                                                        installed it): old -> new version per host, a summary
+  sandbox-ai hosts update NAME...|--all --mode off|notify|download|auto [--at HH:MM[-HH:MM]] [--json]
+                                                       the host's own update mode (sandbox-ai update mode there,
+                                                       its timer as the SSH user); hosts list shows each one's
   sandbox-ai hosts install NAME [--user|--system [--prefix DIR]] [--sudo|--no-sudo] [--from-here|--download
                        [--version X.Y.Z]] [--json]     install sandbox-ai there: this machine's copy (default) or
                                                        the signed release the host downloads; for the SSH user, or
@@ -92,8 +95,9 @@ VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.+-][0-9A-Za-z.+-]+)?")
 # What sudo -n says when it would need a password (or a terminal to ask for one), and when it is not allowed.
 SUDO_PASSWORD = ("a password is required", "a terminal is required", "no tty present", "askpass")
 SUDO_REFUSED = ("not in the sudoers", "is not allowed to run sudo", "may not run sudo")
-INSTALL_HINT = ("install it there with install.sh (see the README: curl -fsSL https://raw.githubusercontent.com/"
-                "c0decave/sandbox-ai/main/install.sh | bash); it updates signed from then on")
+# The README's command: the release's install.sh, which carries the release keys (the file on main carries none)
+INSTALL_HINT = ("install it there with install.sh (see the README: curl -fsSL https://github.com/c0decave/sandbox-ai/"
+                "releases/latest/download/install.sh | bash); it updates signed from then on")
 
 
 def config_file():
@@ -286,6 +290,31 @@ _failed = {}  # str(control path) -> time.monotonic() of a master start that fai
 _failed_lock = threading.Lock()
 
 
+def temp_root(base=None, make=True):
+    """BASE/sandbox-ai-UID (BASE: $TMPDIR, else /tmp) when it is this user's folder (made 0700 when MAKE; not a link,
+    nobody else's, no bit for others) - else, when another user made it first or it is a link, the user's own
+    $XDG_CACHE_HOME/sandbox-ai/run (~/.cache: nobody else can make that; made 0700 when MAKE): never a folder another
+    user owns. (hosts.temp_root, secret_store.temp_root and remotefs.temp_root are the same.)"""
+    temporary = Path(base or os.environ.get("TMPDIR") or "/tmp") / f"sandbox-ai-{os.getuid()}"
+    try:
+        if make:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(temporary, 0o700)
+        info = os.lstat(temporary)
+    except FileNotFoundError:
+        return temporary  # (not made yet: a question makes nothing)
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
+        return temporary
+    cache = os.environ.get("XDG_CACHE_HOME") or ""
+    fallback = Path(cache if os.path.isabs(cache) else Path.home() / ".cache") / "sandbox-ai" / "run"
+    if make:
+        with contextlib.suppress(OSError):
+            fallback.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return fallback
+
+
 def control_folders(platform=None):
     """[(folder, mode bits it must not have)]: the folders sandbox-ai makes for the control sockets, the socket
     folder last (see above)."""
@@ -295,7 +324,7 @@ def control_folders(platform=None):
     elif platform == "darwin":
         top = [(Path.home() / "Library" / "Caches" / "sandbox-ai", 0o022)]
     else:
-        top = [(Path(os.environ.get("TMPDIR") or "/tmp") / f"sandbox-ai-{os.getuid()}", 0o077)]
+        top = [(temp_root(make=False), 0o077)]  # (another user's sandbox-ai-UID is never used: temp_root)
     return [*top, (top[0][0] / "ssh", 0o077)]
 
 
@@ -319,8 +348,9 @@ def control_path(entry, platform=None):
     if len(os.fsencode(path)) > SOCKET_LIMIT or re.search(r"[\s\"'%]", str(path)):
         return None
     try:
-        if platform == "darwin" or (platform is None and sys.platform == "darwin"):
-            folders[0][0].parent.mkdir(parents=True, exist_ok=True)  # ~/Library/Caches
+        if platform == "darwin" or (platform is None and sys.platform == "darwin") or \
+                folders[0][0].name == "run":  # ~/Library/Caches, the cache's sandbox-ai (temp_root's fallback)
+            folders[0][0].parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not all(private_folder(folder, forbidden) for folder, forbidden in folders):
             return None
     except OSError:
@@ -457,6 +487,11 @@ def ssh_base(entry, tty=False, control=None):
     if control is not None:
         # Use the shared connection if it answers, else connect as usual (never become a master here).
         options += ["-o", f"ControlPath={control}", "-o", "ControlMaster=no"]
+    if tty:
+        # A terminal (a tab of the app, the web's, a terminal window) shows what ssh says too: with a terminal it says
+        # "Connection to HOST closed." at every end - noise under the command's own output (user report 2026-11-19).
+        # Its errors (refused, no key, a changed host key) are still said.
+        options += ["-o", "LogLevel=ERROR"]
     return ["ssh", "-tt" if tty else "-T", *options, "--", entry["ssh"]]
 
 
@@ -721,7 +756,9 @@ def test(name, path=None, runner=subprocess.run):
 
 def failure(status, out, err):
     """What a failed remote sandbox-ai said, in one short printable piece (with the SSH hint for status 255)."""
-    text = printable((err or out).strip()[-500:]) or f"exit status {status}"
+    # One line for the lists and the app: the remote's lines joined by "; " (not escaped: they showed as "\x0a").
+    said = "; ".join(line.strip() for line in (err or out).strip()[-500:].splitlines() if line.strip())
+    text = printable(said) or f"exit status {status}"
     if status == 255:
         text += " (SSH: is the key in ~/.ssh/authorized_keys there, and the host reachable?)"
     return text
@@ -802,7 +839,8 @@ def installation(text):
     """{"version", "path", "kind", "prefix"} of what `sandbox-ai version --verbose` printed. KIND: "user" (install.sh
     in ~/.local/share/sandbox-ai or XDG_DATA_HOME), "system" (install.sh in PREFIX/lib/sandbox-ai), "package"
     (pyz, AppImage, macOS app), "pip", "checkout", or "unknown" (a version before --verbose: it says only its
-    version)."""
+    version). "self_update": a package or a pip installation whose own `sandbox-ai update` replaces it (the releases
+    after 0.1.98, where whoever runs it may write it)."""
     info = {"version": None, "path": None, "kind": "unknown", "prefix": None}
     for line in text.splitlines():
         if line.startswith("sandbox-ai ") and info["version"] is None:
@@ -814,6 +852,10 @@ def installation(text):
             info["kind"], info["package"] = "package", line[len("package: "):].strip()[:40]
         elif line.startswith("updates: not through install.sh"):
             info["kind"] = "pip"
+        elif line.startswith("self-update: "):
+            info["self_update"] = line[len("self-update: "):].strip() == "yes"
+        elif line.startswith("update mode: ") and line[len("update mode: "):].strip() in UPDATE_MODES:
+            info["update_mode"] = line[len("update mode: "):].strip()  # (0.1.122 on: sandbox-ai update mode)
     if info["kind"] == "unknown" and info["path"]:
         found = re.fullmatch(r"(/.*)/versions/[^/]+", info["path"])
         if found is None:
@@ -828,14 +870,37 @@ def installation(text):
 def not_updatable(name, info):
     """Why the sandbox-ai of host NAME (INSTALLATION info) is not updated over SSH, with the way to do it, or None."""
     where = printable(info.get("path") or "?")
+    if info.get("self_update") and info["kind"] in ("pip", "package"):
+        return None  # (its own `sandbox-ai update` replaces it with the release's file, signed)
     if info["kind"] == "checkout":
         return f"{name}: sandbox-ai there is a checkout ({where}): update it with git there (git pull), or {INSTALL_HINT}"
     if info["kind"] == "pip":
-        return f"{name}: sandbox-ai there is a pip installation: pip install -U sandbox-ai there, or {INSTALL_HINT}"
+        return (f"{name}: sandbox-ai there is a pip installation that does not replace itself (0.1.98 or older, or "
+                f"in a folder its user cannot write): pip install -U sandbox-ai-app there, or {INSTALL_HINT}")
     if info["kind"] == "package":
-        return (f"{name}: sandbox-ai there runs from a package ({printable(info.get('package'))}): download the new one "
-                f"from the release page there, or {INSTALL_HINT}")
+        return (f"{name}: sandbox-ai there runs from a package ({printable(info.get('package'))}) that does not "
+                "replace itself (0.1.98 or older, or its file is not writable there): download the new one from "
+                f"the release page there, or {INSTALL_HINT}")
     return None
+
+
+# The first release without the old single commands (claude-sandbox, codex-sandbox, ...): the installer of a
+# sandbox-ai before it requires them in every tree it installs, so its own `update` refuses every release from this one
+# on ("not a sandbox-ai tree: claude-sandbox missing"; said after its try: which release it takes is its own business,
+# an older one it may still install). This machine's copy (--from-here) brings the new installer.
+NEW_LAYOUT = (0, 1, 92)
+OLD_LAYOUT_REFUSAL = re.compile(r"not a sandbox-ai tree: (?:claude|codex|opencode)-sandbox|not a sandbox-ai tree: "
+                                r"sandbox-(?:session|mcp|wizard|build-image)")
+
+
+def old_layout_hint(name, before):
+    """Why host NAME's own update cannot install the releases since NEW_LAYOUT, and the way that works."""
+    key, since = version_key(before), ".".join(map(str, NEW_LAYOUT))
+    who = (f"sandbox-ai {printable(before)} on {name} is older than {since}" if key and key < NEW_LAYOUT
+           else f"the installer of sandbox-ai on {name} is older than {since}")
+    return (f"{who}: its installer still requires the old single commands (claude-sandbox "
+            f"...), which the releases since then no longer have, so its own update refuses them; update it with this "
+            f"machine's copy instead: sandbox-ai hosts update {name} --from-here")
 
 
 def update_args(info, version=None):
@@ -853,14 +918,14 @@ def host_status(name, path=None, runner=subprocess.run):
     sandbox-ai of host NAME and whether a newer release is there (its own `update --check`: the release it would
     install, checked as it would check it)."""
     result = {"name": name, "version": None, "kind": None, "path": None, "prefix": None, "available": None,
-              "update": None, "error": None, "fixed": [], "checked": int(time.time())}
+              "update": None, "update_mode": None, "error": None, "fixed": [], "checked": int(time.time())}
     status, out, err, result["fixed"], _ = run_fixing(name, ["version", "--verbose"], path=path, runner=runner)
     if status != 0:
         result["error"] = failure(status, out, err)
         return result
     info = installation(out)
-    result.update({key: info.get(key) for key in ("version", "kind", "path", "prefix")})
-    if info["kind"] in ("checkout", "pip"):
+    result.update({key: info.get(key) for key in ("version", "kind", "path", "prefix", "update_mode")})
+    if info["kind"] == "checkout" or (info["kind"] == "pip" and not info.get("self_update")):
         return result
     # As your user `update --check` of a system installation reads none (it would install for you): only the
     # newest release it names counts; the installed version is the one --verbose said.
@@ -937,19 +1002,53 @@ def forget_status(name):
 
 
 def status_text(info):
-    """One short column for hosts list: the version, and whether an update is there."""
+    """One short column for hosts list: the version, whether an update is there, and the host's own update mode
+    (sandbox-ai update mode there; 0.1.122 on)."""
     if not info:
         return "?"
     version = printable(info.get("version") or "?")
     if not info.get("version"):
         return "unreachable" if info.get("error") else "?"
+    mode = f"; updates: {info['update_mode']}" if info.get("update_mode") in UPDATE_MODES else ""
     if info.get("kind") in ("checkout", "pip", "package"):
-        return f"{version} ({info['kind']})"
+        return f"{version} ({info['kind']}){mode}"
     if info.get("update"):
-        return f"{version}, update: {printable(info.get('available'))}"
+        return f"{version}, update: {printable(info.get('available'))}{mode}"
     if info.get("update") is False:
-        return f"{version}, up to date"
-    return f"{version}, update unknown"
+        return f"{version}, up to date{mode}"
+    return f"{version}, update unknown{mode}"
+
+
+UPDATE_MODES = ("off", "notify", "download", "auto")  # updates.py MODES: a host's own update mode
+
+
+def update_mode(name, mode, at=None, path=None, runner=subprocess.run):
+    """Host NAME's own update mode (`sandbox-ai update mode MODE [--at WINDOW] --json` there, as its SSH user: its
+    timer runs as that user): {"name", "mode", "error", "status"} - status: what `update mode --json` said there."""
+    if mode not in UPDATE_MODES:
+        raise ValueError(f"--mode is one of {', '.join(UPDATE_MODES)}")
+    if at is not None and (mode != "auto" or not re.fullmatch(r"[0-9]{2}:[0-9]{2}(-[0-9]{2}:[0-9]{2})?", at)):
+        raise ValueError("--at HH:MM[-HH:MM] is the window of --mode auto")
+    status, out, err = run(name, ["update", "mode", mode, *(["--at", at] if at else []), "--json"], timeout=180,
+                           path=path, runner=runner)
+    result = {"name": name, "mode": None, "error": None, "status": None}
+    try:
+        found = json.loads(out) if status == 0 else None
+    except (ValueError, RecursionError):  # (deep nesting from the host: damaged too)
+        found = None
+    if isinstance(found, dict) and found.get("mode") in UPDATE_MODES:
+        result.update(mode=found["mode"], status={key: found.get(key) for key in (
+            "mode", "window", "kind", "manual", "last_check", "next_check", "timer", "installed")})
+        kept = load_statuses()
+        if name in kept and isinstance(kept[name], dict):
+            kept[name]["update_mode"] = found["mode"]
+            save_statuses(kept)
+    elif status == 2 and ("Usage: install.sh" in (err or "") or "unknown" in (err or "")):
+        result["error"] = (f"{name}: the sandbox-ai there has no update mode yet (0.1.122 or later): update it first "
+                           f"(sandbox-ai hosts update {name})")
+    else:
+        result["error"] = f"{name}: " + failure(status, out, err)
+    return result
 
 
 def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from_here=False, terminal=False):
@@ -981,6 +1080,12 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
             raise ValueError("--from-here is for another host (this machine updates with: sandbox-ai update)")
         if version is not None:
             raise ValueError("--from-here installs this machine's version; --version is for the signed release")
+        if info["kind"] in ("pip", "package"):
+            what = "a pip installation" if info["kind"] == "pip" else f"a package ({printable(info.get('package'))})"
+            result["error"] = (f"{name}: sandbox-ai there is {what}, which --from-here does not replace (it installs "
+                               f"with install.sh): its own signed update is sandbox-ai hosts update {name}; to move "
+                               f"it to install.sh's installation: sandbox-ai hosts install {name}")
+            return result
         mode = "system" if info["kind"] == "system" else "user"
         done = install(name, mode, info.get("prefix") if mode == "system" else None,
                        (bool(entry.get("update_sudo")) or None) if sudo is None else sudo, "here", None, path, runner,
@@ -1020,6 +1125,8 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
             result["error"] = (f"the installation in {printable(info['prefix'])}/lib/sandbox-ai on {name} belongs to "
                                f"root: update it with --sudo (or for good: sandbox-ai hosts set {name} --update-sudo "
                                "on)")
+        elif OLD_LAYOUT_REFUSAL.search(said):
+            result["error"] = f"{failure(status, out, err)}; {old_layout_hint(name, result['before'])}"
         else:
             result["error"] = failure(status, out, err)
             if "no published release" in said:
@@ -1449,20 +1556,32 @@ def summary(results):
             f"{len(results) - updated - failed} up to date, {failed} not updated")
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def cli(argv_, out=print):
-    parser = argparse.ArgumentParser(prog="sandbox-ai hosts", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="sandbox-ai hosts", formatter_class=help_style,
+                                     description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="the hosts, with their sandbox-ai version and update")
-    listing.add_argument("--json", action="store_true")
+    listing.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
     asking = listing.add_mutually_exclusive_group()
     asking.add_argument("--cached", action="store_true", help="ask no host: what was found the last time")
     asking.add_argument("--refresh", action="store_true", help="ask every host now")
     adding = commands.add_parser("add", help="add a host reached over SSH")
     adding.add_argument("name")
     adding.add_argument("ssh", metavar="USER@HOST")
-    adding.add_argument("--port", type=int, default=22)
+    adding.add_argument("--port", type=int, default=22, help="the SSH port (default 22)")
     adding.add_argument("--identity", metavar="FILE", help="the SSH key to use (default: your SSH agent's)")
-    adding.add_argument("--description", default="")
+    adding.add_argument("--description", default="", help="a note about this host, shown in the list")
     adding.add_argument("--command", dest="remote_command", metavar="PATH",
                         help="sandbox-ai's path there, if not the usual")
     adding.add_argument("--update-sudo", action="store_true",
@@ -1475,7 +1594,7 @@ def cli(argv_, out=print):
     removing.add_argument("name")
     testing = commands.add_parser("test", help="SSH, the host's sandbox-ai and its doctor")
     testing.add_argument("name")
-    testing.add_argument("--json", action="store_true")
+    testing.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
     updating = commands.add_parser("update", help="update sandbox-ai on hosts (their own signed update)")
     updating.add_argument("names", nargs="*", metavar="NAME")
     updating.add_argument("--all", action="store_true", help="every host of the list (not this machine)")
@@ -1484,10 +1603,14 @@ def cli(argv_, out=print):
                           help="as root with sudo -n (a system installation); a password is asked in a terminal")
     updating.add_argument("--no-sudo", dest="sudo", action="store_false", help="without sudo, whatever the host says")
     updating.add_argument("--jobs", type=int, default=1, metavar="N", help="hosts at a time (1-8, default 1)")
-    updating.add_argument("--json", action="store_true")
+    updating.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
     updating.add_argument("--from-here", action="store_true",
                           help="install this machine's copy there instead of the signed release (no release server "
                                "needed; the same kind of installation)")
+    updating.add_argument("--mode", choices=UPDATE_MODES,
+                          help="set the host's own update mode instead (off, notify, download, auto: sandbox-ai "
+                               "update mode there); nothing is installed now")
+    updating.add_argument("--at", metavar="HH:MM[-HH:MM]", help="with --mode auto: its window there (local time)")
     installing = commands.add_parser("install", help="install sandbox-ai on a host (from here, or its signed release)")
     installing.add_argument("name")
     target = installing.add_mutually_exclusive_group()
@@ -1507,7 +1630,7 @@ def cli(argv_, out=print):
     installing.add_argument("--version", dest="release", metavar="X.Y.Z", help="with --download: this release")
     installing.add_argument("--dry-run", action="store_true",
                             help="only say what would be done (user or system, as root or with sudo)")
-    installing.add_argument("--json", action="store_true")
+    installing.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
     running = commands.add_parser("run", help="sandbox-ai ARGS on a host")
     running.add_argument("name")
     running.add_argument("args", nargs=argparse.REMAINDER)
@@ -1550,6 +1673,30 @@ def cli(argv_, out=print):
         if not names:
             out("no hosts to update; add one with: sandbox-ai hosts add NAME USER@HOST")
             return 0
+        if a.at is not None and a.mode is None:
+            raise ValueError("--at is the window of --mode auto")
+        if a.mode is not None:
+            if a.release is not None or a.from_here or a.sudo is not None:
+                raise ValueError("--mode sets the host's update mode; --version, --from-here and --sudo are for an "
+                                 "update now")
+            hosts = load()
+            for name in names:
+                if name != LOCAL and name not in hosts:
+                    raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
+            results = [update_mode(name, a.mode, a.at) for name in names]
+            if a.json:
+                out(json.dumps(results, indent=2))
+            for result in [] if a.json else results:
+                if result["error"]:
+                    out(f"{result['name']}: {result['error'].removeprefix(result['name'] + ': ')}")
+                    continue
+                state = result["status"] or {}
+                timer = state.get("timer") or {}
+                out(f"{result['name']}: update mode {result['mode']}" +
+                    (f", window {state.get('window')}" if result["mode"] == "auto" else "") +
+                    ("" if result["mode"] == "off" else ", timer made" if timer.get("installed") else ", no timer") +
+                    (f" ({state['manual']})" if state.get("manual") else ""))
+            return 1 if any(result["error"] for result in results) else 0
         if not 1 <= a.jobs <= 8:
             raise ValueError("--jobs is 1-8")
         if a.release is not None and not VERSION.fullmatch(a.release):
@@ -1666,7 +1813,8 @@ def cli(argv_, out=print):
                 out(f"  key: {fixed_text(change)}")
             for warning in result["warnings"]:
                 out(f"  note: {warning}")
-            out(f"{a.name}: " + (f"ssh ok, {printable(result['version'])}" if result["ssh"] else "ssh failed")
+            reached = "this machine, no SSH" if a.name == LOCAL else "ssh ok"  # (local: sandbox-ai here, no SSH)
+            out(f"{a.name}: " + (f"{reached}, {printable(result['version'])}" if result["ssh"] else "ssh failed")
                 + (" (after making the key private, tried again)" if result["fixed"] else ""))
             if result["error"]:
                 out(f"  {printable(result['error'])}")

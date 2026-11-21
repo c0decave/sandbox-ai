@@ -19,11 +19,11 @@ from . import backend, theme, widgets
 from .approvals_sections import AllowedSection, BlockedSection, ContextHeader, run_for_tab
 from .files import printable, printable_text
 from .state import choose_folder
-from .i18n import language as i18n_language, tr
+from .i18n import N_, language as i18n_language, tr
 from .widgets import (
-    MONO, SORT_ROLE, AsyncCommand, ago, ask_first, background, bars, compact_combo, confirm, disclosure, fill, find_row,
-    fit_columns, flow, outcome,
-    plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn, shown_as_text,
+    MONO, SORT_ROLE, AsyncCommand, ago, ask_first, background, bars, compact_combo, confirm, disclosure, explanation,
+    fill, find_row, fit_columns, flow, outcome,
+    plain_label, row_key, safe_tooltip, selected, selected_rows, set_enabled, table, warn,
 )
 
 
@@ -34,14 +34,53 @@ REMOTE_BACKOFF = 30  # s at most between two looks at a host that does not answe
 REMOTE_GRACE = 60  # seconds the questions of a host that stopped answering stay listed after its last answer
 WAKE_SECONDS = 120  # seconds a host is asked for questions after the app started something (it may not be listed yet)
 LOCAL = "local"  # the host of this machine's own questions
+BLOCKED_REFRESH = 10  # seconds between two reads of what was refused without a question, while it is shown
+UNDO_MS = 8000  # how long "Undo" is offered after an answer given on the page
+# The tabs of the one table: the questions waiting for an answer, those answered (allowed, refused - with what the
+# sandboxes refused without a question), those nobody answered in time (still answerable), all of them.
+STATE_TABS = (("open", N_("tab|Open")), ("allowed", N_("tab|Allowed")), ("refused", N_("tab|Refused")),
+              ("timeout", N_("tab|Timed out")), ("all", N_("tab|All")))
 SNAPSHOT_WAIT = 30  # seconds a scan of the questions may take before the next one is tried
 POLL_WAIT = 0.2  # seconds a scan on the GUI thread waits for one running in a thread
+
+
+class BlockedRow(dict):
+    """What a sandbox refused without a question of its own (sandbox-ai approvals blocked: a rule, the network
+    options, the mode, the policy, the kill switch), as a row of the Approvals table's Refused tab. Its "id" is its
+    own key (no question's); "blocked" is the entry itself, which the Blocked section acts on."""
+
+    def __init__(self, item, ident):
+        super().__init__(id=ident, kind=item.get("question_kind") or "blocked", time=item.get("time") or "",
+                         question=printable(item.get("what") or ""), state="refused", blocked=item,
+                         question_id=item.get("question"))
+
+
+def entry_state(question):
+    """open, timeout, allowed or refused (backend.question_state); a refusal without a question is refused."""
+    return "refused" if isinstance(question, BlockedRow) else backend.question_state(question)
+
+
+def state_text(question):
+    """What the State column says of QUESTION when it does not count down: answered how, timed out, refused why."""
+    state = entry_state(question)
+    if isinstance(question, BlockedRow):
+        from .approvals_sections import kind_label
+        return tr("refused: {why}", why=kind_label(question["blocked"].get("kind")))
+    result = question.get("result") if isinstance(question.get("result"), dict) else {}
+    scope = {"once": tr("once"), "run": tr("for this run"), "always": tr("always")}.get(result.get("scope"), "")
+    if state == "timeout":
+        return tr("timed out - still answerable") if backend.answerable(question) else tr("timed out")
+    if state in ("allowed", "refused"):
+        text = (tr("allowed") if state == "allowed" else tr("refused")) + (f" ({scope})" if scope else "")
+        return text + (", " + tr("asked again") if question.get("asked_again") or result.get("forgotten") else "")
+    return ""
 
 
 def kind_name(kind):
     return {"connect": tr("connection"), "dns": tr("name lookup"), "push": tr("push"),
             "browser": tr("open a URL"), "mcp": tr("MCP tool call"), "http": tr("HTTP request"),
-            "tool": tr("agent tool"), "device": tr("device"), "canary": tr("canary")}.get(kind, printable(kind))
+            "tool": tr("agent tool"), "device": tr("device"), "canary": tr("canary"),
+            "bridge": tr("session bridge")}.get(kind, printable(kind))
 
 
 def shown(value, limit=300):
@@ -55,6 +94,92 @@ def shown(value, limit=300):
     return value if len(value) <= limit else value[:limit - 1] + "…"
 
 
+def package_of(question):
+    """The package of a question the package guard asks (a request's, with "package": {"ecosystem", "name",
+    "version", "age_days", "malicious", "new_name_days", "allow"}), or None."""
+    if isinstance(question, (backend.RemoteQuestion, BlockedRow)) or question.get("kind") != "http":
+        return None
+    package = question.get("package")
+    return package if isinstance(package, dict) and package.get("name") else None
+
+
+def malicious_package(question):
+    """QUESTION is about a download the package guard holds as a known malicious version (its advisory)."""
+    package = package_of(question)
+    return bool(package and package.get("malicious"))
+
+
+def package_rich(package, url):
+    """What a package question asks, as rich_notice.Rich: the package and its version monospaced, then its advisory
+    (a known malicious version), its age and whether its name is brand new. Everything the agent's request chose is
+    escaped (shown)."""
+    from . import rich_notice as R
+    number = lambda value: isinstance(value, int) and not isinstance(value, bool)  # noqa: E731
+    name = shown(package.get("name", "?"), 214) + (f" {shown(package['version'], 128)}" if package.get("version")
+                                                   else "")
+    parts = list(R.fmt(tr("download the {ecosystem} package {package}"),
+                       ecosystem=shown(package.get("ecosystem", "?"), 10), package=R.code(name)).lines[0])
+    facts = []
+    if package.get("malicious"):
+        facts.append(tr("KNOWN MALICIOUS (advisory {advisory})", advisory=shown(package["malicious"], 64)))
+    age = package.get("age_days")
+    facts.append(tr("release age unknown") if not number(age) else tr("released 1 day ago") if age == 1
+                 else tr("released {days} days ago", days=age))
+    if number(package.get("new_name_days")):
+        facts.append(tr("first release {days} days ago: possibly a hallucinated or slopsquatted name",
+                        days=package["new_name_days"]))
+    parts.append(("text", ": " + ", ".join(facts) + " ("))
+    parts += [*R.fmt("{url}", url=R.address(shown(url, 500))).lines[0], ("text", ")")]
+    return R.Rich([parts])
+
+
+SECRET_PLACES = {"url": N_("the URL"), "header": N_("a header"), "body": N_("the body")}
+
+
+def secret_of(question):
+    """What the secret guard found in a request it asks about (a request's, with "secret": {"host", "found": [{"id",
+    "kind", "label", "where", "encoding"}], "allow"}), or None. Never a value: only what kind of one."""
+    if isinstance(question, (backend.RemoteQuestion, BlockedRow)) or question.get("kind") != "http":
+        return None
+    secret = question.get("secret")
+    found = secret.get("found") if isinstance(secret, dict) else None
+    return secret if isinstance(found, list) and found and all(isinstance(item, dict) for item in found) else None
+
+
+def secret_words(texts):
+    """TEXTS as one list in a sentence: "a, b and c"."""
+    texts = list(dict.fromkeys(texts))
+    return texts[0] if len(texts) == 1 else tr("{list} and {last}", list=", ".join(texts[:-1]), last=texts[-1])
+
+
+def secret_phrases(secret):
+    """(what was found, where in the request, how it was encoded) of a secret guard question, each as words. A value
+    the start handed out is named by its label (its variable and option), a token by its shape ("what looks like:
+    GitHub token"); everything is escaped (shown)."""
+    said, places, encodings = [], [], []
+    for finding in secret["found"][:8]:
+        label = shown(finding.get("label") or finding.get("id") or "?", 120)
+        said.append(label if finding.get("kind") == "value" else tr("what looks like a credential ({shape})",
+                                                                  shape=label))
+        places.append(tr(SECRET_PLACES.get(finding.get("where"), SECRET_PLACES["body"])))
+        encodings += [shown(part, 20) for part in str(finding.get("encoding") or "").split("+")
+                      if part and part != "plain"]
+    return secret_words(said), secret_words(places), secret_words(encodings) if encodings else ""
+
+
+def secret_rich(secret, method, url):
+    """What a secret guard question asks, as rich_notice.Rich: what kind of secret, the host monospaced, then the
+    request and where in it the secret is. Everything the request chose is escaped (shown)."""
+    from . import rich_notice as R
+    what, places, encodings = secret_phrases(secret)
+    parts = list(R.fmt(tr("send {what} to {host}"), what=what,
+                       host=R.address(shown(secret.get("host", "?"), 253))).lines[0])
+    parts.append(("text", " ("))
+    parts += R.fmt("{method} {url}", method=R.code(shown(method, 20)), url=R.address(shown(url, 500))).lines[0]
+    parts.append(("text", ", " + tr("in {places}", places=places) + (f", {encodings}" if encodings else "") + ")"))
+    return R.Rich([parts])
+
+
 def describe(question):
     """What a question asks, in the app's language; everything the agent chose is escaped. A question of another
     host is said as that host's sandbox-ai says it (escaped there and here). Plain text: describe_rich's."""
@@ -65,7 +190,7 @@ def describe_rich(question):
     """describe() as rich_notice.Rich, for a notification: the address it asks for in the accent colour, the tool, the
     arguments and the device monospaced, the rest recognised."""
     from . import rich_notice as R
-    if isinstance(question, backend.RemoteQuestion):
+    if isinstance(question, (backend.RemoteQuestion, BlockedRow)):
         return R.recognise(printable(question.get("question") or question.get("kind") or "?"))
     kind = question.get("kind")
     if kind == "connect":
@@ -86,6 +211,12 @@ def describe_rich(question):
                      refs=R.code(", ".join(printable(r) for r in refs[:10])), url=R.address(question.get("url", "?")))
     if kind == "browser":
         return R.fmt(tr("open {url} in your browser"), url=R.address(question.get("url", "?")))
+    if kind == "bridge":  # sandbox-ai bridge: a call across it (a write: its diff in full below)
+        text = tr("bridge {bridge}: {source} wants to {tool} on {target}: {arguments}",
+                  bridge=shown(question.get("bridge", "?"), 8), source=shown(question.get("from", "?"), 80),
+                  tool=shown(question.get("tool", "?"), 40), target=shown(question.get("to", "?"), 80),
+                  arguments=shown(question.get("arguments", "")))
+        return text + (" " + tr("(this answer covers this one write only)") if question.get("write") else "")
     # Rules of the project ask for these: which call it is must be seen before it is allowed.
     rule = tr("rule {rule} of {ruleset}", rule=shown(question.get("rule", "?"), 80),
               ruleset=shown(question.get("ruleset", "?"), 120))
@@ -106,6 +237,10 @@ def describe_rich(question):
             return R.fmt(tr("let {agent} use its tool {tool} with {arguments} ({rule})"), **values)
         return R.fmt(tr("let {agent} use its tool {tool} (arguments shortened here: in full below) with {arguments} "
                         "({rule})"), **values)
+    if kind == "http" and package_of(question):  # the package guard's: the package, its age, the advisory
+        return package_rich(package_of(question), question.get("url", "?"))
+    if kind == "http" and secret_of(question):  # the secret guard's: what kind of secret, to which host
+        return secret_rich(secret_of(question), question.get("method", "?"), question.get("url", "?"))
     if kind == "http":
         return R.fmt("{method} {url} ({rule})", method=R.code(shown(question.get("method", "?"), 20)),
                      url=R.address(shown(question.get("url", "?"), 500)), rule=rule)
@@ -127,6 +262,23 @@ def why_asked(question):
     kind = question.get("kind")
     if kind in ("connect", "dns"):
         return tr("Asked because the sandbox's network settings do not allow it.")
+    if malicious_package(question):
+        return tr("Asked by the package guard: this version is on the list of known malicious packages (advisory "
+                  "{advisory}, https://osv.dev/vulnerability/{advisory}). Deny it unless you know why you need it; "
+                  "an allow covers this one download only.", advisory=shown(package_of(question)["malicious"], 64))
+    if package_of(question):
+        command = package_of(question).get("allow")
+        return tr("Asked by the package guard: a version this young, or a package this new, may be malware nobody "
+                  "has reported yet, or a made-up name somebody registered.") + \
+            (" " + tr("To allow the package in every run of the project: {command}", command=shown(command, 300))
+             if command else "")
+    if secret_of(question):
+        command = secret_of(question).get("allow")
+        return tr("Asked by the secret guard: this request carries a secret to a host it was not given for. The "
+                  "value is never shown, only what kind it is. Deny it unless you know that it belongs there (a test "
+                  "fixture, a token of that host).") + \
+            (" " + tr("To allow that kind of value for that host in every run of the project: {command}",
+                      command=shown(command, 600)) if command else "")
     if kind in ("http", "mcp", "tool", "device"):
         return tr("Asked because rule {rule} of the ruleset {ruleset} asks before it. The network settings do not "
                   "change that.", rule=shown(question.get("rule", "?"), 80), ruleset=shown(question.get("ruleset", "?"),
@@ -137,7 +289,19 @@ def why_asked(question):
         return tr("The agent asks to open this page in your browser.")
     if kind == "canary":
         return tr("A decoy file was touched: nothing legitimate uses it. The sandbox waits for you.")
+    if kind == "bridge":
+        return tr("Asked because the session bridge asks before calls across it (its --ask), and before every write, "
+                  "with the diff below.")
     return ""
+
+
+def needs_details(question, arguments):
+    """QUESTION cannot be answered safely from its line alone: its call's arguments are shortened there (ARGUMENTS,
+    its ArgumentsBox, opened them by itself: a long post, a write's diff across a bridge), or a decoy file was
+    touched (why_asked says what that means). Its Details open by themselves."""
+    if getattr(arguments, "needed", False):
+        return True
+    return not isinstance(question, backend.RemoteQuestion) and question.get("kind") == "canary"
 
 
 def openable_url(text):
@@ -148,9 +312,33 @@ def openable_url(text):
     return None
 
 
-def scope_items(combo):
-    for scope, text in (("once", tr("once")), ("run", tr("for this run")), ("always", tr("always (this project)"))):
-        combo.addItem(text, scope)
+# One button per scope of an allow (user 2026-11-19: "'immer erlauben', 'immer auch für Folgesessions' ebenfalls als
+# eigene Buttons"): (action of the buttons and keys, scope sandbox-ai is sent, label).
+ALLOW_SCOPES = (("allow", "once", N_("Allow once")), ("allow-for-run", "run", N_("Always allow")),
+                ("allow-always", "always", N_("Always, also for later sessions")))
+SCOPE_OF = {action: scope for action, scope, _ in ALLOW_SCOPES}
+ONCE_ONLY = ("canary", "browser")  # a canary's alarm (Continue) and a page to open: answered this once, nothing kept
+
+
+def allow_buttons(owner, keys):
+    """The three Allow buttons of OWNER (the Approvals page, the Questions window), each answering with its scope at
+    once: Allow once, Always allow (every same request of this run), Always, also for later sessions (remembered for
+    the project: its next starts and resumed sessions too). KEYS: the keys each tooltip names."""
+    tips = {"once": tr("Allowed this time only: the next same request is asked again ({keys})", keys=keys["once"]),
+            "run": tr("Every same request of this run (this session) is allowed without a question ({keys})",
+                      keys=keys["run"]),
+            "always": tr("Allowed now and remembered for the project: also at its later starts and resumed "
+                         "sessions, without a question (Forget… under Remembered lifts it; {keys})",
+                         keys=keys["always"])}
+    made = []
+    for action, scope, label in ALLOW_SCOPES:
+        button = QPushButton(tr(label))
+        button.setAccessibleName(tr(label))
+        button.setToolTip(safe_tooltip(tips[scope]))  # (the app's own words: escaped all the same)
+        button.clicked.connect(lambda _=False, a=action: owner.act(a))
+        made.append(button)
+    owner.allow_button, owner.allow_run_button, owner.allow_always_button = made
+    return made
 
 
 # The kinds sandbox-ai approves at most for the run (approvals.widest_answer): a push, a request, a tool call, a device.
@@ -160,6 +348,11 @@ RUN_AT_MOST = ("push", "http", "mcp", "tool", "device")
 # icons); they are taken while the focus is in the open questions, before any shortcut of the window.
 SHORTCUTS = {(Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier): "allow",
              (Qt.Key.Key_Enter, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.KeypadModifier): "allow",
+             # Always allow (this run) and Always, also for later sessions: Ctrl+Shift+Return, Ctrl+Shift+A.
+             (Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "always",
+             (Qt.Key.Key_Enter, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+              | Qt.KeyboardModifier.KeypadModifier): "always",
+             (Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "always-later",
              (Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "deny",
              (Qt.Key.Key_K, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier): "block",
              # In the list of questions only (PLAIN_KEYS): Enter allows for this run, Delete denies.
@@ -176,7 +369,7 @@ def in_question_list(widget):
     from PySide6.QtWidgets import QAbstractItemView
     while widget is not None:
         if isinstance(widget, QAbstractItemView):
-            return widget.accessibleName() == tr("Open questions")
+            return widget.accessibleName() in (tr("Open questions"), tr("Questions"))
         widget = widget.parentWidget()
     return False
 
@@ -202,6 +395,8 @@ def local_widest(policy, record, question):
         caps.append(mode["approval_scope"])
     if isinstance(question, dict) and question.get("kind") in RUN_AT_MOST:
         caps.append("run")
+    if isinstance(question, dict) and malicious_package(question):
+        caps.append("once")  # a known malicious package version: this one download (approvals.widest_answer)
     widest = min(caps, key=backend.SCOPES.index)
     if isinstance(question, dict) and question.get("kind") == "dns" and widest == "once":
         return None
@@ -278,6 +473,8 @@ class ArgumentsBox(QWidget):
         layout.addWidget(self.note)
         layout.addWidget(self.text)
         self.shown_text = None
+        self.needed = False  # the question's line shows them shortened (opened by itself: needs_details)
+        self.what = "arguments"  # "arguments" (a tool call's JSON), "diff" (a bridge's write), "content" (a bridge's)
         self.opened(False)
         self.hide()
 
@@ -286,19 +483,32 @@ class ArgumentsBox(QWidget):
         text, whole = backend.question_details(question) if question is not None else ("", True)
         if not text:
             self.shown_text = None
+            self.needed = False
             self.hide()
             return
+        self.needed = not whole  # (shortened in the question's line: what is allowed must be seen whole)
+        # A session bridge's question carries what the call moves (a write: its diff), as it is: neither JSON nor
+        # redacted - the human sees the token a hostile agent would write or send.
+        bridge = question.get("kind") == "bridge"
+        self.what = ("diff" if question.get("write") else "content") if bridge else "arguments"
         if text != self.shown_text:  # another question (the same one again keeps what you opened or closed)
             self.shown_text = text
             self.text.setPlainText(text)
             self.toggle.setChecked(not whole)
-            self.opened(not whole)
-        self.note.setText(tr("As the call will send them (pretty-printed JSON; credentials redacted).")
-                          + ("" if whole else " " + tr("The question's line shows them shortened.")))
+        self.opened(self.toggle.isChecked())
+        note = {"arguments": tr("As the call will send them (pretty-printed JSON; credentials redacted)."),
+                "diff": tr("The write's diff in full, as it will be written (nothing redacted)."),
+                "content": tr("What the call moves across the bridge, in full (nothing redacted).")}[self.what]
+        self.note.setText(note + ("" if whole else " " + tr("The question's line shows them shortened.")))
         self.show()
 
     def opened(self, on):
-        self.toggle.setText(tr("Hide the arguments") if on else tr("Show the arguments in full"))
+        if self.what == "diff":
+            self.toggle.setText(tr("Hide the diff") if on else tr("Show the diff in full"))
+        elif self.what == "content":
+            self.toggle.setText(tr("Hide it") if on else tr("Show it in full"))
+        else:
+            self.toggle.setText(tr("Hide the arguments") if on else tr("Show the arguments in full"))
         self.note.setVisible(on)
         self.text.setVisible(on)
 
@@ -307,7 +517,8 @@ class QuestionsWindow(QDialog):
     """The open questions while another dialog is open. A modal dialog (the wizard, Settings, the gallery) blocks the
     main window, and with it the Approvals page, while a question is refused without an answer after a while. This
     window is application-modal itself, so it is above that dialog and gets the input; it answers through the
-    Approvals page (the same path, the same checks, the same keys: Ctrl+Return, Ctrl+Shift+D, Ctrl+Shift+K)."""
+    Approvals page (the same path, the same checks, the same buttons and keys: Ctrl+Return, Ctrl+Shift+Return,
+    Ctrl+Shift+A, Ctrl+Shift+D, Ctrl+Shift+K)."""
 
     def __init__(self, page):
         super().__init__(page)
@@ -327,32 +538,33 @@ class QuestionsWindow(QDialog):
         layout.addWidget(self.arguments)
         row = QHBoxLayout()
         self.table.setAccessibleName(tr("Open questions"))
-        self.allow_button = QPushButton(tr("Allow once"))
-        self.allow_button.setAccessibleName(tr("Allow once"))
-        self.allow_button.setToolTip(tr("Allowed this time only (Ctrl+Return)"))
-        self.allow_button.clicked.connect(lambda: self.answer("allow"))
+        # Allow once (Enter in the list does what it says), Always allow, Always, also for later sessions.
+        allow_buttons(self, {"once": tr("Ctrl+Return; Enter in the list"), "run": tr("Ctrl+Shift+Return"),
+                             "always": tr("Ctrl+Shift+A")})
         self.deny_button = QPushButton(tr("Deny for this run"))
         self.deny_button.setAccessibleName(tr("Deny for this run"))
         self.deny_button.setToolTip(tr("Refused; not asked again in this run (Ctrl+Shift+D)"))
         self.deny_button.clicked.connect(lambda: self.answer("deny"))
-        self.block_button = QPushButton(tr("Block always…"))
+        self.block_button = QPushButton(tr("Block always"))
         self.block_button.setAccessibleName(tr("Block always"))
         self.block_button.setProperty("role", "danger")
         self.block_button.setToolTip(tr("Refused now and at every later start of this project, without a question "
-                                        "(Ctrl+Shift+K, asked first)"))
+                                        "(Ctrl+Shift+K)"))
         self.block_button.clicked.connect(lambda: self.answer("block"))
         close = QPushButton(tr("Close"))
         close.clicked.connect(self.reject)
-        for widget in (self.allow_button, self.deny_button, self.block_button):
-            row.addWidget(widget)
-        row.addStretch()
-        row.addWidget(close)
+        # (a row that wraps when the window is narrow: six buttons, longer in German)
+        row.addWidget(flow(self.allow_button, self.allow_run_button, self.allow_always_button, self.deny_button,
+                           self.block_button), 1)
+        row.addWidget(close, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(row)
-        for first, second in ((self.table, self.allow_button), (self.allow_button, self.deny_button),
-                              (self.deny_button, self.block_button), (self.block_button, close)):
+        order = (self.table, self.allow_button, self.allow_run_button, self.allow_always_button, self.deny_button,
+                 self.block_button, close)
+        for first, second in zip(order, order[1:]):
             QWidget.setTabOrder(first, second)
-        widgets.list_menu(self.table, lambda: [self.allow_button, self.deny_button, None, self.block_button])
-        self.resize(620, 280)
+        widgets.list_menu(self.table, lambda: [self.allow_button, self.allow_run_button, self.allow_always_button,
+                                               self.deny_button, None, self.block_button])
+        self.resize(720, 300)
 
     def show_questions(self):
         page = self.page
@@ -372,7 +584,10 @@ class QuestionsWindow(QDialog):
         rules = self.page.answer_rules(entry)
         self.arguments.show_for(entry[1] if entry else None)
         self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else tr("Allow once"))
-        set_enabled(self.allow_button, rules["allow"] is None, rules["allow"])
+        for button, scope in ((self.allow_button, "once"), (self.allow_run_button, "run"),
+                              (self.allow_always_button, "always")):
+            why = rules["allow"] or (self.page.scope_refused(entry, scope) if entry is not None else None)
+            set_enabled(button, why is None, why)
         set_enabled(self.deny_button, rules["deny"] is None, rules["deny"])
         set_enabled(self.block_button, rules["block"] is None, rules["block"])
 
@@ -380,10 +595,20 @@ class QuestionsWindow(QDialog):
         # Enter in the list does what the window's Allow button says (Allow once, or Open here and allow): this window
         # has no scope box, and Enter allowed for the whole run here while the button beside it said "once" - with
         # the confirmation's default Allow, Enter twice allowed for the run.
-        button = {"allow": self.allow_button, "allow-run": self.allow_button, "deny": self.deny_button,
-                  "deny-key": self.deny_button, "block": self.block_button}[action]
+        button = {"allow": self.allow_button, "allow-run": self.allow_button, "always": self.allow_run_button,
+                  "always-later": self.allow_always_button, "deny": self.deny_button, "deny-key": self.deny_button,
+                  "block": self.block_button}[action]
         if button.isEnabled():
             button.click()
+
+    def act(self, action):
+        """An Allow button: the question highlighted allowed with its scope (once, for the run, always)."""
+        entry = self.current()
+        if entry is None:
+            return
+        scope = SCOPE_OF[action]
+        self.page.answer("allow", scope, entry=entry, parent=self,
+                         open_here=scope == "once" and remote_browser(entry))
 
     def answer(self, decision):
         entry = self.current()
@@ -410,7 +635,7 @@ class ApprovalsPage(QWidget):
         super().__init__()
         self.sai = sai
         layout = QVBoxLayout(self)
-        open_box = QGroupBox(tr("Questions waiting for your answer, on every host"))
+        open_box = QGroupBox(tr("Questions of every host"))
         open_layout = QVBoxLayout(open_box)
         self.url = plain_label()
         font = QFont()
@@ -432,27 +657,48 @@ class ApprovalsPage(QWidget):
         questions_of.setBuddy(self.host_filter)
         filter_row.addWidget(questions_of)
         filter_row.addWidget(self.host_filter)
+        from .host_choice import follow_note
+        self.follow_note = follow_note()  # whose questions, when the window's pages follow the Sandboxes page's host
+        filter_row.addWidget(self.follow_note)
         filter_row.addStretch()
         open_layout.addLayout(filter_row)
-        self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Refused in"), tr("Host")],
-                          stretch=2, compact=(1, 3, 4, 5))
-        self.open.setAccessibleName(tr("Open questions"))
+        # One table for every state, its tabs above it with their counts: Open | Allowed | Refused | Timed out | All.
+        self.state_tabs = widgets.ArrowTabBar()  # (the app's one kind of tab row)
+        self.state_tabs.setAccessibleName(tr("Which questions"))
+        self.state_tabs.setExpanding(False)
+        self.state_tabs.setDrawBase(False)
+        for key, label in STATE_TABS:
+            self.state_tabs.addTab(tr(label))
+            self.state_tabs.setTabData(self.state_tabs.count() - 1, key)
+        self.state_tabs.currentChanged.connect(lambda _=0: self.state_tab_changed())
+        open_layout.addWidget(self.state_tabs)
+        self.open = table([tr("Sandbox"), tr("Kind"), tr("Question"), tr("Asked"), tr("Time left / answer"), tr("Host")],
+                          stretch=2, compact=(1, 3, 4, 5), multi=True)  # several at once: their answers together
+        self.open.setAccessibleName(tr("Questions"))
         self.open.itemSelectionChanged.connect(self.selection_changed)
         open_layout.addWidget(self.open)
         self.none_waiting = plain_label(tr("Nothing is waiting for an answer."), role="secondary")
         open_layout.addWidget(self.none_waiting)
+        # What the selected question's line does not say - why it is asked, a call's arguments in full, what the
+        # run's log knows of it - in one Details box below the answers, folded at first and as the human left it
+        # (user 2026-11-18: the parts below the table read as the table again). A question that cannot be answered
+        # safely from its line (its arguments shortened there, a write's diff, a decoy file touched) opens it by
+        # itself. (Below the answers, not above: a box that opens by itself never moves the buttons away.)
+        self.details_box = QWidget()
+        details_layout = QVBoxLayout(self.details_box)
+        details_layout.setContentsMargins(0, 0, 0, 0)
         # Why the selected question is asked, in plain words.
         self.why = plain_label(selectable=True)
         self.why.setAccessibleName(tr("Why it is asked"))
         self.why.hide()
-        open_layout.addWidget(self.why)
+        details_layout.addWidget(self.why)
         # A tool call's arguments in full, as the call will send them (its line in the table may be shortened).
         self.arguments = ArgumentsBox()
-        open_layout.addWidget(self.arguments)
+        details_layout.addWidget(self.arguments)
         # What the selected question means (resolved names, the run's earlier connections): in a thread.
         self.context = plain_label(role="secondary")
         self.context.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        open_layout.addWidget(self.context)
+        details_layout.addWidget(self.context)
         # The run's log entries to the same address or name: quoted, monospace, read-only, under a label that
         # says whose words they are - the agent chose these names and URLs.
         self.context_log_label = plain_label(tr("Last connections of this run to it, from its log (text the agent "
@@ -464,61 +710,87 @@ class ApprovalsPage(QWidget):
         self.context_log.setMaximumHeight(110)
         for widget in (self.context_log_label, self.context_log):
             widget.hide()
-            open_layout.addWidget(widget)
-        row = QHBoxLayout()
-        self.scope = QComboBox()
-        self.scope.setAccessibleName(tr("Scope of an allow"))
-        self.scope.setToolTip(tr("How long an allow lasts: once, for this run, or always for the project"))
-        scope_items(self.scope)
-        self.scope.currentIndexChanged.connect(lambda _=0: self.show_allow_text())
-        # Allow takes the scope of the box; Deny is for the run (as the web interface's and the command line's),
-        # Deny once only this time; Block always is a deny remembered for the project, asked first.
-        self.allow_button = QPushButton(tr("Allow"))
-        self.allow_button.setAccessibleName(tr("Allow"))
-        self.allow_button.setToolTip(tr("Allow for as long as chosen beside it (Ctrl+Return; Enter in the list "
-                                        "allows for this run)"))
-        self.allow_button.clicked.connect(lambda: self.answer("allow"))
+            details_layout.addWidget(widget)
+        self.details = disclosure(QToolButton())  # (an arrow and text: never a button stuck pressed)
+        self.details.setText(tr("Details"))
+        self.details.setAccessibleName(tr("Details of the question"))
+        self.details.setToolTip(tr("Why it is asked, a call's arguments in full and what the run's log knows of it; "
+                                   "it opens by itself where a question needs it to be answered safely"))
+        self.details_wanted = False  # the human's choice, opened or folded (state.json: keep_details)
+        self.details_store = None
+        self.details_key = None  # the question the box was opened or folded for (the same one again keeps it)
+        # One button per scope of an allow (user 2026-11-19), each one click: Allow once, Always allow (every same
+        # request of this run), Always, also for later sessions (remembered for the project); a scope the caps forbid
+        # is a disabled button that says why. Deny is for the run (as the web interface's and the command line's),
+        # Deny once only this time; Block always is a deny remembered for the project. Each acts at once, on every
+        # row selected it fits (no question first: Undo beside the note takes it back for a few seconds).
+        allow_buttons(self, {"once": tr("Ctrl+Return"), "run": tr("Ctrl+Shift+Return; Enter in the list"),
+                             "always": tr("Ctrl+Shift+A")})
         self.deny_button = QPushButton(tr("Deny for this run"))
         self.deny_button.setAccessibleName(tr("Deny for this run"))
         self.deny_button.setToolTip(tr("Refused; not asked again in this run (Delete, Ctrl+Shift+D)"))
-        self.deny_button.clicked.connect(lambda: self.answer("deny"))
+        self.deny_button.clicked.connect(lambda: self.act("deny"))
         self.deny_once_button = QPushButton(tr("Deny once"))
         self.deny_once_button.setAccessibleName(tr("Deny once"))
         self.deny_once_button.setToolTip(tr("Refused this time only: the sandbox may ask again"))
-        self.deny_once_button.clicked.connect(lambda: self.answer("deny", "once"))
-        self.block_button = QPushButton(tr("Block always…"))
+        self.deny_once_button.clicked.connect(lambda: self.act("deny-once"))
+        self.block_button = QPushButton(tr("Block always"))
         self.block_button.setAccessibleName(tr("Block always"))
         self.block_button.setProperty("role", "danger")
         self.block_button.setToolTip(tr("Refused now and at every later start of this project, without a question "
                                         "(Forget… below lifts it; Ctrl+Shift+K)"))
-        self.block_button.clicked.connect(lambda: self.answer("deny", "always"))
+        self.block_button.clicked.connect(lambda: self.act("block"))
+        self.ask_again_button = QPushButton(tr("Ask again"))
+        self.ask_again_button.setAccessibleName(tr("Ask again"))
+        self.ask_again_button.setToolTip(tr("Forget what the run decided: its next try is asked again"))
+        self.ask_again_button.clicked.connect(lambda: self.act("ask-again"))
         # The administrator's max_approval_scope caps the allows (sandbox-ai refuses wider ones anyway); read again
         # at every scan, so a policy changed meanwhile counts.
         self.max_scope = sai.max_scope()
-        scope_label = QLabel(tr("Allow for"))
-        scope_label.setBuddy(self.scope)
         # A row that wraps when the window is narrow (in German it made the window 1100 px wide).
-        open_layout.addWidget(flow(scope_label, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
-                                   self.block_button))
-        widgets.list_menu(self.open, lambda: [self.allow_button, self.deny_button, self.deny_once_button, None,
-                                              self.block_button])
-        # Tab goes from whose questions to the questions, the scope and the answers, in the order they are read.
-        order = (self.host_filter, self.open, self.scope, self.allow_button, self.deny_button, self.deny_once_button,
-                 self.block_button)
+        open_layout.addWidget(flow(self.allow_button, self.allow_run_button, self.allow_always_button,
+                                   self.deny_button, self.deny_once_button, self.block_button, self.ask_again_button))
+        widgets.list_menu(self.open, lambda: [self.allow_button, self.allow_run_button, self.allow_always_button,
+                                              self.deny_button, self.deny_once_button, None, self.block_button,
+                                              self.ask_again_button])
+        # Tab goes from whose questions to the questions and the answers, in the order they are read.
+        order = (self.host_filter, self.state_tabs, self.open, self.allow_button, self.allow_run_button,
+                 self.allow_always_button, self.deny_button, self.deny_once_button, self.block_button,
+                 self.ask_again_button)
         for first, second in zip(order, order[1:]):
             QWidget.setTabOrder(first, second)
+        # What was done (with Undo for a few seconds) and what failed (also a short notice that goes by itself).
         self.message = plain_label(selectable=True, log="approvals")
-        open_layout.addWidget(self.message)
+        self.undo_button = QPushButton(tr("Undo"))
+        self.undo_button.setAccessibleName(tr("Undo"))
+        self.undo_button.setToolTip(tr("Take back the answer just given"))
+        self.undo_button.clicked.connect(lambda: self.undo())
+        self.undo_button.hide()
+        self.undo_timer = QTimer(self)
+        self.undo_timer.setSingleShot(True)
+        self.undo_timer.timeout.connect(lambda: self.undo_button.hide())
+        self.undoable = []  # [(entry, action, scope)] of the last answers, as Undo takes them back
+        message_row = QHBoxLayout()
+        message_row.addWidget(self.message, 1)
+        message_row.addWidget(self.undo_button)
+        open_layout.addLayout(message_row)
+        open_layout.addWidget(self.details, 0, Qt.AlignmentFlag.AlignLeft)
+        open_layout.addWidget(self.details_box)
+        self.details.hide()  # (in the box first: never a window of its own for a moment)
+        self.details_box.hide()
+        self.details.toggled.connect(lambda on: self.details_box.setVisible(on))
+        self.details.clicked.connect(lambda on: self.details_chosen(on))  # (by hand only: kept)
+        QWidget.setTabOrder(self.ask_again_button, self.details)  # (after the answers: in the box now)
         self.remote_note = plain_label(role="secondary")  # hosts that did not answer
         self.remote_note.hide()
         open_layout.addWidget(self.remote_note)
         self.seconds = sai.approval_seconds
-        hint = plain_label(tr("Without an answer within {seconds} seconds a question is refused, and the same "
-                              "request is refused at once for 2 minutes, then asked again (Blocked lists it); a page "
-                              "to open waits until it is answered. A deny lasts at most for the run; “always” is "
-                              "remembered for the project.", seconds=self.seconds))
-        hint.setEnabled(False)
-        open_layout.addWidget(hint)
+        open_layout.addWidget(explanation(tr(
+            "A request waits up to {seconds} seconds for your answer. Unanswered by then it fails, and its question "
+            "stays open under Timed out: allowed later, the request's next try goes through. A page to open waits "
+            "until it is answered. A click answers at once (Undo takes it back); every answer can be changed under "
+            "Allowed and Refused. A deny lasts at most for the run; “always” is remembered for the project.",
+            seconds=self.seconds)))
         history_box = QGroupBox(tr("History"))
         history_layout = QVBoxLayout(history_box)
         # Whose history: this machine's (read at every scan) or a host's (`sandbox-ai approvals history` there, as
@@ -592,13 +864,17 @@ class ApprovalsPage(QWidget):
         self.sections.setAccessibleName(tr("Approvals"))
         self.history_box, self.always_box = history_box, always_box
         self.section_titles = {}
-        for widget, title in ((open_box, tr("Questions")), (self.blocked, tr("Blocked")),
-                              (self.allowed, tr("Allowed now")), (always_box, tr("Remembered")),
-                              (history_box, tr("History"))):
+        # (Blocked and History are tabs of the one table now: Refused, Timed out, All. The Blocked section reads what
+        # the sandboxes refused without a question for it, unseen, and does what is allowed about those.)
+        for widget, title in ((open_box, tr("Questions")), (self.allowed, tr("Allowed now")),
+                              (always_box, tr("Remembered"))):
             self.section_titles[widget] = title
             self.sections.addTab(widget, title)
+        for hidden in (self.blocked, history_box):  # (children of the page: they go with it)
+            hidden.setParent(self)
+            hidden.hide()
         self.section_counts = {}
-        self.blocked.counted.connect(lambda count: self.count_section(self.blocked, count))
+        self.blocked.counted.connect(lambda count: self.show_all())
         self.allowed.counted.connect(lambda count: self.count_section(self.allowed, count))
         self.header.changed.connect(self.context_changed)
         self.sections.currentChanged.connect(lambda _=0: self.section_shown())
@@ -681,7 +957,9 @@ class ApprovalsPage(QWidget):
         self.last_runs = runs  # (read by update_context on the GUI thread: one assignment)
         if not runs:
             return self.sai.approvals_snapshot(runs={}, wait=wait), getattr(self, "max_scope", "once")
-        snapshot = self.sai.approvals_snapshot(runs=runs, wait=wait)
+        # A session bridge (sandbox-ai bridge) asks from its own folder: its questions are answered here as well.
+        bridges = self.sai.bridge_runs() if hasattr(self.sai, "bridge_runs") else {}
+        snapshot = self.sai.approvals_snapshot(runs={**runs, **bridges}, wait=wait)
         try:
             widest = self.sai.max_scope()
         except Exception as _exc:  # noqa: BLE001
@@ -717,21 +995,32 @@ class ApprovalsPage(QWidget):
             self.message.setText(tr("Cannot read the questions: {error}", error=printable_text(error)))
             return
         self.update_context()
+        # What the sandboxes refused without a question (the Refused tab): read again now and then while it is shown.
+        if self.state_tab() in ("refused", "all") and self.shown_now() and \
+                time.monotonic() - getattr(self, "blocked_read", 0) > BLOCKED_REFRESH:
+            self.blocked_read = time.monotonic()
+            self.blocked.refresh()
         pending, answered = result
         read, previous = (pending, answered, self.max_scope), self.local_read
         self.local_read = read
-        if read == previous and not self.questions:
+        if read == previous and not any(entry_state(q) == "open" for _, q, _ in self.questions.values()):
             return  # nothing new, and no question anywhere whose time runs: the page stays as it is
-        self.local_pending = pending
+        self.local_pending, self.local_answered = pending, answered
         if previous is None or answered != previous[1]:
             self.show_history(answered)
         self.show_all(now)
 
     def show_all(self, now=None):
-        """This machine's open questions and the other hosts' in one table; new ones are announced once."""
-        pending = [(LOCAL, run, record, q) for run, record, q in self.local_pending] + [
+        """Every question of this machine and of the other hosts in one table (the tab chosen: open, allowed, refused,
+        timed out, all), with what the sandboxes here refused without a question (Refused); new open ones are
+        announced once, and only the open ones are counted as waiting."""
+        rows = [(LOCAL, run, record, q) for run, record, q in self.local_pending] + \
+            [(LOCAL, run, record, q) for run, record, q in getattr(self, "local_answered", [])] + [
             (host, q.get("run", ""), {}, q) for host in sorted(self.remote) for q in self.remote[host]]
-        self.show_open(pending, now)
+        known = {(host, run, q.get("id")) for host, run, _, q in rows}
+        rows += [entry for entry in self.blocked_rows() if (entry[0], entry[1], entry[3].get("question_id")) not in known]
+        self.show_open(rows, now)
+        pending = [row for row in rows if entry_state(row[3]) == "open"]
         keys = {(host, run, q.get("id")) for host, run, _, q in pending}
         new = [(self.label_of(host, run, record, q), q, (host, run, q.get("id"))) for host, run, record, q in pending
                if (host, run, q.get("id")) not in self.seen]
@@ -739,6 +1028,29 @@ class ApprovalsPage(QWidget):
         self.seen = keys
         self.offer_questions()
         self.pending_changed.emit(len(pending), new)
+
+    def blocked_rows(self):
+        """What the sandboxes shown above (Allowed now's choice) refused without a question of their own - by a rule,
+        the network options, the mode, the policy, the kill switch (sandbox-ai approvals blocked) - as rows of the
+        Refused tab: [(host, run, record, entry)]; a refusal of a question is that question's own row."""
+        found = []
+        for item in getattr(self.blocked, "entries", []) or []:
+            if item.get("kind") in ("unanswered", "denied") and item.get("question"):
+                continue  # (its question's own row says it)
+            host = item.get("host") or LOCAL
+            run = str(item.get("run") or "")
+            ident = "blocked:" + json.dumps([item.get("kind"), item.get("what"), item.get("source")], sort_keys=True)
+            found.append((host, run, self.header.runs.get(run, {}), BlockedRow(item, ident)))
+        return found
+
+    def state_tab_changed(self):
+        """Another tab of the table: its rows; what was refused without a question is read when it is shown."""
+        if self.state_tab() in ("refused", "all"):
+            self.blocked.refresh()
+        self.show_all()
+
+    def state_tab(self):
+        return self.state_tabs.tabData(self.state_tabs.currentIndex()) or "open"
 
     def log_questions(self, new, keys):
         """The questions that came (NEW) and those no longer listed (SEEN before, not in KEYS) into the log at INFO,
@@ -1034,6 +1346,12 @@ class ApprovalsPage(QWidget):
         self.active_entry = dict(entry) if isinstance(entry, dict) else None
         self.update_context()
 
+    def set_remote_starts(self, starts):
+        """The running starts of the other hosts ({host: [(name, record)]}, SandboxesPage.remote_running): Blocked and
+        Allowed now offer each of them (read and changed there)."""
+        if self.header.set_remote(starts):
+            self.context_changed()
+
     def update_context(self):
         runs = dict(getattr(self, "last_runs", {}) or {})
         if self.header.set_runs(runs, run_for_tab(self.active_entry, runs)):
@@ -1076,39 +1394,59 @@ class ApprovalsPage(QWidget):
         return bool(self.project and workspace and os.path.realpath(str(workspace)) == self.project)
 
     def show_open(self, pending, now=None):
-        """PENDING: [(host, run, record, question)], LOCAL questions first."""
+        """PENDING: [(host, run, record, question)] of every state, LOCAL ones first; the table lists those of the
+        host and the tab chosen."""
         keys = [(host, run, q.get("id")) for host, run, _, q in pending]
-        self.project_pending = sum(1 for host, _, record, _ in pending if host == LOCAL and self.of_project(record))
-        elsewhere = sum(1 for host, *_ in pending if host != LOCAL)
-        title = tr("Questions waiting for your answer, on every host")
+        waiting = [entry for entry in pending if entry_state(entry[3]) == "open"]
+        self.project_pending = sum(1 for host, _, record, _ in waiting if host == LOCAL and self.of_project(record))
+        elsewhere = sum(1 for host, *_ in waiting if host != LOCAL)
+        title = tr("Questions of every host")
         if elsewhere:
-            title += "  " + tr("({count} on other hosts)", count=elsewhere)
+            title += "  " + tr("({count} waiting on other hosts)", count=elsewhere)
         if self.project_pending:
             title += "  " + tr("({count} of the current project)", count=self.project_pending)
         self.open_box.setTitle(title)
         if hasattr(self, "none_waiting"):
-            self.none_waiting.setVisible(not pending)
-            self.count_section(self.open_box, len(pending))
+            self.count_section(self.open_box, len(waiting))
         # The questions themselves are taken every time (a host's newer read counts down from its own time left).
         self.questions = {key: (run, q, host) for key, (host, run, _, q) in zip(keys, pending)}
         self.labels = {key: self.label_of(host, run, record, q) for key, (host, run, record, q) in zip(keys, pending)}
         self.records = {key: record for key, (_, _, record, _) in zip(keys, pending)}
-        # The table lists the questions of the host chosen above (all are counted, announced and offered anyway).
+        # The table lists the questions of the host and the tab chosen (all are counted, announced and offered).
         chosen = self.host_filter.currentData()
         pending = [entry for entry in pending if chosen is None or entry[0] == chosen]
+        counts = {key: 0 for key, _ in STATE_TABS}
+        for entry in pending:
+            counts[entry_state(entry[3])] += 1
+            counts["all"] += 1
+        for index, (key, label) in enumerate(STATE_TABS):
+            text = f"{tr(label)} ({counts[key]})"
+            if self.state_tabs.tabText(index) != text:
+                self.state_tabs.setTabText(index, text)
+        tab = self.state_tab()
+        pending = [entry for entry in pending if tab == "all" or entry_state(entry[3]) == tab]
+        if tab != "open":  # the newest first (the open ones keep the order they were asked in)
+            pending.sort(key=lambda entry: str(entry[3].get("time") or ""), reverse=True)
+        if hasattr(self, "none_waiting"):
+            self.none_waiting.setVisible(not pending)
+            self.none_waiting.setText(tr("Nothing is waiting for an answer.") if tab == "open" else
+                                      tr("Nothing here."))
         keys = [(host, run, q.get("id")) for host, run, _, q in pending]
-        if keys != self.entry_keys or self.marked != self.project:
+        states = [state_text(q) for _, _, _, q in pending]
+        if keys != self.entry_keys or self.marked != self.project or states != getattr(self, "entry_states", None):
             self.marked = self.project
             had_selection = selected_rows(self.open) != []
-            self.entry_keys = keys
+            self.entry_keys, self.entry_states = keys, states
             self.entries = [(run, q, host) for host, run, _, q in pending]
             self.contexts = {key: text for key, text in self.contexts.items() if key in self.questions}
-            # fill() selects the highlighted question again where it now is, or nothing when it is gone.
+            # fill() selects the highlighted questions again where they now are, or nothing when they are gone.
             fill(self.open, [[asker(run, record) if host == LOCAL else printable(q.get("sandbox") or run),
-                              kind_name(q.get("kind")), describe(q), "", "",
+                              kind_name(q.get("kind")), describe(q), "", state_text(q),
                               tr("this machine") if host == LOCAL else printable(host)]
-                             for host, run, record, q in pending], keys=keys)
-            if not had_selection and self.current() is None and len(self.entries) == 1:
+                             for host, run, record, q in pending],
+                 colors=[{"allowed": "ok", "refused": "bad", "timeout": "warn"}.get(entry_state(q))
+                         for _, _, _, q in pending], keys=keys)
+            if not had_selection and self.current() is None and len(self.entries) == 1 and tab == "open":
                 # The one open question (e.g. after its notification) is ready to answer; a selection that
                 # just lost its question never moves to another one.
                 self.open.selectRow(0)
@@ -1136,6 +1474,8 @@ class ApprovalsPage(QWidget):
             age, left = self.timing(entry, now)
             asked.setText(ago(age) if age is not None else "?")
             asked.setData(SORT_ROLE, age if age is not None else -1)
+            if entry_state(entry[1]) != "open":
+                continue  # (said once by state_text: answered, refused or timed out)
             if self.key_of(entry) in self.answered_there:
                 cell.setText(tr("answered"))
                 cell.setData(SORT_ROLE, 1 << 30)
@@ -1145,7 +1485,7 @@ class ApprovalsPage(QWidget):
                 cell.setData(SORT_ROLE, 1 << 30)
                 cell.setForeground(self.open.palette().text())
             else:
-                cell.setText(tr("{seconds} s", seconds=left) if left else tr("refused"))
+                cell.setText(tr("{seconds} s", seconds=left) if left else tr("timed out"))
                 cell.setData(SORT_ROLE, left)
                 color = "bad" if left <= 10 else "warn" if left <= 30 else None
                 cell.setForeground(QColor(theme.color(color)) if color else self.open.palette().text())
@@ -1184,6 +1524,59 @@ class ApprovalsPage(QWidget):
         rows = selected_rows(self.open)
         return self.questions.get(row_key(self.open, rows[0])) if rows else None
 
+    def chosen(self):
+        """(run, question, host) of every row selected, in the table's order."""
+        keys = [row_key(self.open, row) for row in selected_rows(self.open)]
+        return [self.questions[key] for key in keys if key in self.questions]
+
+    def past_actions(self, entry):
+        """What may be done about ENTRY, a question answered already (or an older sandbox's refusal of one nobody
+        answered): allow, deny, ask-again - as its host's sandbox-ai says (approvals.entry_actions; another host
+        lists them with the question)."""
+        run, question, host = entry
+        if isinstance(question, BlockedRow):
+            return []
+        if host != LOCAL:
+            return list(question.get("actions") or [])
+        try:
+            module = self.sai.module("approvals")
+            if not hasattr(module, "entry_actions"):
+                return []
+            return list(module.entry_actions({**question, "state": entry_state(question)},
+                                             self.records.get(self.key_of(entry)) or {}, self.max_scope))
+        except Exception as exc:  # noqa: BLE001 - nothing offered for it, said in the log
+            applog.swallowed("pages", "ApprovalsPage.past_actions", exc)
+            return []
+
+    def fits(self, entry, action):
+        """None when ACTION (allow - once -, allow-for-run, allow-always, deny, deny-once, block, ask-again) may be
+        done on ENTRY, else why not."""
+        run, question, host = entry
+        scope = SCOPE_OF.get(action)
+        if isinstance(question, BlockedRow):
+            if scope == "once":
+                return tr("Refused without a question: Always allow allows it for the rest of this run.")
+            wanted = {"allow-for-run": "allow-run", "allow-always": "allow-always", "deny": "deny-run",
+                      "ask-again": "ask-again"}.get(action)
+            return None if wanted and wanted in (question["blocked"].get("actions") or []) else \
+                tr("Not possible for this refusal (its reason, the security mode or the administrator's policy).")
+        if backend.answerable(question):
+            if action == "ask-again":
+                return tr("Still open: its next try waits for your answer.")
+            if scope is not None:
+                return self.answer_rules(entry)["allow"] or self.scope_refused(entry, scope)
+            return self.answer_rules(entry)["deny" if action == "deny-once" else action]
+        if self.key_of(entry) in self.answers:
+            return tr("The answer is on its way.")
+        if scope == "once":
+            return tr("Answered already: Always allow allows it for the rest of this run.")
+        if scope is not None and "allow" in self.past_actions(entry):
+            return self.scope_refused(entry, scope)
+        if action in self.past_actions(entry):
+            return None
+        return tr("Answered already: change it with Allow, Deny or Ask again where they are offered.") \
+            if action in ("deny-once", "block") else tr("Not possible for this answer.")
+
     @property
     def answering(self):
         """An answer on its way (any question's), or None when none is."""
@@ -1205,8 +1598,10 @@ class ApprovalsPage(QWidget):
         return self.max_scope if self.max_scope in backend.SCOPES else "once"
 
     def expired(self, entry, now=None):
-        """True when sandbox-ai refused ENTRY already (its time is up); a question to open a page has no deadline."""
-        if entry[1].get("kind") == "browser":
+        """True when sandbox-ai refused ENTRY already (its time is up and its sandbox-ai, older than 0.1.98, keeps no
+        question open); a question to open a page has no deadline, one that timed out stays answerable."""
+        if entry[1].get("kind") == "browser" or entry_state(entry[1]) != "open" or entry[1].get("state") == "open" \
+                or (entry[2] == LOCAL and self.records.get(self.key_of(entry), {}).get("ask_timeout") is not None):
             return False
         return self.timing(entry, now)[1] == 0
 
@@ -1252,32 +1647,25 @@ class ApprovalsPage(QWidget):
         return None
 
     def update_buttons(self):
-        entry = self.current()
-        rules = self.answer_rules(entry)
-        widest = self.widest(entry)
+        chosen = self.chosen()
+        entry = chosen[0] if chosen else None
         # Another host's page is opened here, where the human is: that host may have no screen at all.
         self.show_allow_text(entry)
-        self.allow_button.setAccessibleName(self.allow_button.text())
-        set_enabled(self.allow_button, rules["allow"] is None, rules["allow"])
-        set_enabled(self.deny_button, rules["deny"] is None, rules["deny"])
-        set_enabled(self.deny_once_button, rules["deny"] is None, rules["deny"])
-        set_enabled(self.block_button, rules["block"] is None, rules["block"])
-        self.scope.setEnabled(rules["allow"] is None and not backend.question_url(entry[1]))
-        # The scopes the selected question may get (another host's policy is that host's; None: no allow at all).
-        limit = backend.SCOPES.index(widest) if widest in backend.SCOPES else 0
-        for index in range(self.scope.count()):
-            self.scope.model().item(index).setEnabled(backend.SCOPES.index(self.scope.itemData(index)) <= limit)
-        if backend.SCOPES.index(self.scope.currentData()) > limit:
-            self.scope.setCurrentIndex(self.scope.findData("once"))
+        # Each button on the rows selected it fits; none fits: disabled, its tooltip says why (the first row's).
+        for button, action in ((self.allow_button, "allow"), (self.allow_run_button, "allow-for-run"),
+                               (self.allow_always_button, "allow-always"), (self.deny_button, "deny"),
+                               (self.deny_once_button, "deny-once"), (self.block_button, "block"),
+                               (self.ask_again_button, "ask-again")):
+            why = [self.fits(one, action) for one in chosen]
+            possible = any(reason is None for reason in why)
+            set_enabled(button, possible, None if possible else (why[0] if why else tr("Select a question first.")))
         if self.questions_window is not None:
             self.questions_window.update_buttons()
 
     def show_allow_text(self, entry=None):
-        """Allow says how long it allows: as the box beside it says (another host's page: Open here and allow)."""
+        """Allow once says what it does (another host's page: Open here and allow - opened here, allowed there)."""
         entry = self.current() if entry is None else entry
-        self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else
-                                  {"once": tr("Allow once"), "run": tr("Allow for this run"),
-                                   "always": tr("Allow always…")}.get(self.scope.currentData(), tr("Allow")))
+        self.allow_button.setText(tr("Open here and allow") if remote_browser(entry) else tr("Allow once"))
         self.allow_button.setAccessibleName(self.allow_button.text())
 
     def watch_keys(self, root):
@@ -1337,12 +1725,16 @@ class ApprovalsPage(QWidget):
 
     def shortcut(self, action):
         if action == "allow-run":
+            # Enter in the list: Always allow (for the rest of this run) where the question may get it, else Allow
+            # once (a canary's alarm, a page to open, a policy or mode that approves only once).
             entry = self.current()
-            if entry is not None and self.allow_button.isEnabled():
-                self.answer("allow", "run" if self.widest(entry) in ("run", "always") else "once")
+            if entry is not None and self.fits(entry, "allow-for-run") is None:
+                self.act("allow-for-run")
+            elif entry is not None and self.allow_button.isEnabled():
+                self.act("allow")
             return
-        button = {"allow": self.allow_button, "deny": self.deny_button, "deny-key": self.deny_button,
-                  "block": self.block_button}[action]
+        button = {"allow": self.allow_button, "always": self.allow_run_button, "always-later": self.allow_always_button,
+                  "deny": self.deny_button, "deny-key": self.deny_button, "block": self.block_button}[action]
         if button.isEnabled():
             button.click()
 
@@ -1366,6 +1758,34 @@ class ApprovalsPage(QWidget):
             self.url.setText(tr("Open in your browser: {url}", url=url) if url else "")
         self.update_buttons()
         self.show_context()
+
+    def details_chosen(self, on):
+        """Details opened or folded by hand: so for every question from now on (one that needs them still opens
+        them by itself), and at the next start."""
+        self.details_wanted = bool(on)
+        if self.details_store is not None:
+            self.details_store.section("checks")["approvals-details"] = bool(on)
+            self.details_store.schedule()
+
+    def keep_details(self, store):
+        """Whether Details is open, kept in STORE (the window's State) as the human leaves it."""
+        self.details_store = store
+        self.details_wanted = store.section("checks").get("approvals-details") is True
+        self.details_key = None
+        self.show_details()
+
+    def show_details(self):
+        """Details for the selected question: there when it has any; open as the human wants it, or by itself for a
+        question that cannot be answered safely from its line (needs_details). The same question again keeps what
+        was done by hand."""
+        entry = self.current()
+        has = entry is not None and bool(self.why.text() or not self.arguments.isHidden() or self.context.text())
+        self.details.setVisible(has)
+        key = (entry[2], entry[0], entry[1].get("id")) if entry is not None else None
+        if key != self.details_key:
+            self.details_key = key
+            self.details.setChecked(self.details_wanted or (has and needs_details(entry[1], self.arguments)))
+        self.details_box.setVisible(has and self.details.isChecked())
 
     def show_context(self):
         """Details of the selected question, looked up once per question in a thread (a name lookup may
@@ -1401,6 +1821,7 @@ class ApprovalsPage(QWidget):
         self.context_log.setPlainText("\n".join(log))
         self.context_log_label.setVisible(bool(log))
         self.context_log.setVisible(bool(log))
+        self.show_details()
 
     # -- the history of another host --
 
@@ -1527,23 +1948,108 @@ class ApprovalsPage(QWidget):
         status, out, err = outcome(result, error)
         self.load_always(note=printable_text((out + err).strip()) if status != 0 else tr("Forgotten."))
 
+    def act(self, action):
+        """A button (or its key): ACTION (allow - once -, allow-for-run, allow-always, deny, deny-once, block,
+        ask-again) on every row selected it fits, at once - an open question (also one that timed out) is answered,
+        an answered one changed (sandbox-ai approvals allow|deny|ask-again ID), what was refused without a question
+        allowed as its entry offers (Allowed now's net allow, an exception rule). Undo takes the answers back for a
+        few seconds."""
+        chosen = [entry for entry in self.chosen() if self.fits(entry, action) is None]
+        if not chosen:
+            entry = self.current()
+            self.message.setText(self.fits(entry, action) if entry else tr("Select a question first."))
+            return
+        self.undoable, self.undo_batch = [], getattr(self, "undo_batch", 0) + 1
+        self.undo_button.hide()
+        scope = SCOPE_OF.get(action)  # an Allow button's scope
+        blocked = []
+        for entry in chosen:
+            question = entry[1]
+            if isinstance(question, BlockedRow):
+                blocked.append(question["blocked"])
+            elif backend.answerable(question):
+                if scope is not None:
+                    self.answer("allow", scope, entry=entry)
+                elif action == "block":
+                    self.answer("deny", "always", entry=entry)
+                else:
+                    self.answer("deny", "once" if action == "deny-once" else "run", entry=entry)
+            else:
+                self.change(entry, "allow" if scope is not None else action, scope)
+        if blocked:
+            wanted = {"allow-for-run": "allow-run", "allow-always": "allow-always", "deny": "deny-run",
+                      "ask-again": "ask-again"}[action]
+            self.blocked.act(wanted, chosen=blocked)
+
+    def change(self, entry, action, scope=None, undoing=False):
+        """Change what the run decided about ENTRY, a question answered already: allow (for the run, or always where
+        that is kept: SCOPE), deny (for the run) or ask-again - through `sandbox-ai approvals` there, in the
+        background."""
+        run, question, host = entry
+        key, ident = self.key_of(entry), question.get("id", "")
+        if key in self.answers or not self.sai.question_id.fullmatch(str(ident)):
+            return
+        scope = None if action != "allow" or scope in (None, "once") else scope
+        applog.log("INFO", "approvals", f"{'undo: ' if undoing else ''}{action}"
+                   f"{f' (scope {scope})' if scope else ''} on the answered question {printable(ident)[:60]} "
+                   f"({question.get('kind', '?')}) of {printable(run)} on {printable(host)}")
+        done = lambda result, error: self.answered(result, error, action, scope, host, None, key, entry=entry,  # noqa
+                                                  undoing=undoing, batch=self.undo_batch)
+        if host == LOCAL:
+            self.answers[key] = background(self.sai.answer, ident, action, scope, timeout=ANSWER_WAIT, work=True,
+                                           done=done)
+        else:
+            argv = ["approvals", action, ident, *(["--scope", scope] if scope else [])]
+            self.answers[key] = background(lambda: self.sai.host_answer(host, argv, timeout=REMOTE_ANSWER_WAIT - 30),
+                                           timeout=REMOTE_ANSWER_WAIT, done=done)
+        self.message.setText(tr("Sending the answer…"))
+        self.update_buttons()
+
+    def undo(self):
+        """Take back the answers just given (Undo): a question answered from open is asked again (the run forgets
+        the answer: a connection allowed for the run is closed again), a changed answer is changed back. An "always"
+        stays remembered for the project (Remembered: Forget lifts it); what was allowed as a refusal's entry is
+        undone on Allowed now."""
+        items, self.undoable = list(self.undoable), []
+        self.undo_timer.stop()
+        self.undo_button.hide()
+        self.undo_batch = getattr(self, "undo_batch", 0) + 1
+        for entry, action, scope, was_open in items:
+            question = entry[1]
+            if was_open:
+                back, back_scope = "ask-again", None
+            elif action == "ask-again":
+                result = question.get("result") if isinstance(question.get("result"), dict) else {}
+                back, back_scope = ("allow" if result.get("decision") == "allow" else "deny"), "run"
+            else:
+                back, back_scope = ("deny" if action == "allow" else "allow"), "run"
+            self.answers.pop(self.key_of(entry), None)
+            self.change(entry, back, back_scope, undoing=True)
+        self.undo_note = tr("Undone for the run; “always” stays remembered for the project until you forget it "
+                            "under Remembered.") if any(scope == "always" for _, _, scope, _ in items) else tr("Undone.")
+        self.message.setText(tr("Undoing…"))
+
     def answer(self, decision, scope=None, entry=None, parent=None, open_here=False, asked=False):
         """Send the answer in the background (`sandbox-ai approvals` may take up to a minute; on another host through
-        `sandbox-ai hosts run HOST --`), one per question: a slow host's answer holds up no other question. Allow asks
-        first, naming the sandbox, its host, the question and the scope (the scope box, capped as sandbox-ai caps it);
-        Deny takes one click and lasts for the run (as the web interface's and the command line's), SCOPE "once" (Deny
-        once) this time only; Block always is a deny with the scope "always", asked first. A question whose time is up
-        is not answered. ENTRY: the (run, question, host) to answer (default: the one highlighted); PARENT: the window
-        asking; OPEN_HERE (a browser question of another host, always so for Allow): allowed there with --no-open,
-        the page opened here once that host took the answer. ASKED: the human gave this very answer to this very
-        question already (a button of its notification): an answer for this run is sent without asking again; one
-        that outlives the run ("always") still asks, once - its buttons there say so (Allow always…)."""
+        `sandbox-ai hosts run HOST --`), one per question: a slow host's answer holds up no other question. It goes
+        at once, as clicked - no question first, also not for "always" (Undo beside the note takes it back): Allow
+        takes the SCOPE of its button (default once; one the caps forbid is not sent: said why); Deny lasts for the
+        run (as the web interface's and the command line's), SCOPE "once" (Deny once) this time only; Block always
+        is a deny with the scope "always".
+        A question that timed out is still answered: its answer counts for the request's next try. ENTRY: the (run,
+        question, host) to answer (default: the one highlighted); PARENT: the window asking; OPEN_HERE (a browser
+        question of another host, always so for Allow): allowed there with --no-open, the page opened here once that
+        host took the answer. ASKED: given from the question's notification."""
         entry = entry or self.current()
         if not entry or self.key_of(entry) in self.answers or self.key_of(entry) in self.answered_there:
             return
         run, question, host = entry
         key = self.key_of(entry)
         if decision == "deny":
+            refused = self.answer_rules(entry)["deny"]  # (its time is up where its sandbox-ai keeps nothing open)
+            if refused:
+                self.message.setText(refused)
+                return
             # A deny is for the run unless "once" was chosen (the Deny once button); "always" is Block always. The
             # policy caps allows only: a deny is never narrowed.
             scope = scope if scope in backend.SCOPES else "run"
@@ -1552,7 +2058,7 @@ class ApprovalsPage(QWidget):
             if refused:
                 self.message.setText(refused)
                 return
-            scope = scope if scope in backend.SCOPES else self.scope.currentData()
+            scope = scope if scope in backend.SCOPES else "once"
             refused = self.scope_refused(entry, scope)
             if refused:
                 self.message.setText(refused)
@@ -1563,34 +2069,26 @@ class ApprovalsPage(QWidget):
         if open_here and url is None:
             self.message.setText(tr("Only http and https pages are opened here."))
             return
-        if self.expired(entry):
-            self.message.setText(tr("Expired: sandbox-ai refused the question already."))
-            return
-        self.confirming += 1
-        try:
-            # A page to open or a push is shown whole before it is allowed: on the notification its text was cut.
-            whole = question.get("kind") in ("browser", "push")
-            if decision == "allow" and not (asked and scope != "always" and not whole) and \
-                    not self.confirm_allow(entry, scope, parent, open_here=url is not None):
-                return
-            if decision == "deny" and scope == "always" and not self.confirm_block(entry, parent):
-                return
-        finally:
-            self.confirming -= 1
-        # Answered meanwhile (in the other window), or its time ran out while the question was open: not sent.
+        # Answered meanwhile (in the other window): not sent.
         if key in self.answers or key in self.answered_there or key not in self.questions:
             return
-        if self.expired(entry):
-            self.message.setText(tr("Expired: sandbox-ai refused the question already."))
-            self.update_buttons()
-            return
-        self.scope.setCurrentIndex(self.scope.findData("once"))  # a wider scope is chosen for one answer only
-        self.message.setText(tr("Sending the answer…"))
+        callback = question.get("callback") if isinstance(question.get("callback"), dict) else None
+        if decision == "allow" and callback and (url is not None or host == LOCAL):
+            # No question first (the answer goes as clicked): the note says what happens to the login's callback.
+            self.message.setText(tr("Its login sends the browser back to {url} in the sandbox: sandbox-ai relays that "
+                                    "one request into the sandbox (port {port} on this computer, 10 minutes at most). "
+                                    "If that port is busy here, use the agent's device-code login instead.",
+                                    url=printable(str(callback.get("url", "")))[:200],
+                                    port=printable(str(callback.get("port", "")))[:8]))
+        else:
+            self.message.setText(tr("Sending the answer…"))
         ident = question.get("id", "")
         applog.log("INFO", "approvals", f"answer {decision} (scope {scope}) to question {printable(ident)[:60]} "
                                         f"({question.get('kind', '?')}) of {printable(run)} on {printable(host)}"
                                         + (" - the page is opened here" if url is not None else ""))
-        done = lambda result, error: self.answered(result, error, decision, scope, host, url, key)  # noqa: E731
+        batch = getattr(self, "undo_batch", 0)
+        done = lambda result, error: self.answered(result, error, decision, scope, host, url, key,  # noqa: E731
+                                                  entry=entry, batch=batch, was_open=True)
         if host == LOCAL:
             # sandbox-ai answers within 60 s; a call that hangs past that (e.g. on a stuck pipe) frees the buttons.
             self.answers[key] = background(self.sai.answer, ident, decision, scope, timeout=ANSWER_WAIT, work=True,
@@ -1600,63 +2098,93 @@ class ApprovalsPage(QWidget):
             return
         else:
             argv = ["approvals", decision, ident, "--scope", scope] + (["--no-open"] if url is not None else [])
-            self.answers[key] = background(lambda: self.sai.host_answer(host, argv, timeout=REMOTE_ANSWER_WAIT - 30),
-                                           timeout=REMOTE_ANSWER_WAIT, done=done)
+            if url is not None and decision == "allow" and isinstance(question.get("callback"), dict):
+                # A login's callback to the sandbox's loopback: this machine's catcher relays it (oauth_relay.py).
+                self.answers[key] = background(
+                    lambda: self.sai.host_answer_relaying(host, argv, ident, question.get("url"),
+                                                          timeout=REMOTE_ANSWER_WAIT - 30),
+                    timeout=REMOTE_ANSWER_WAIT, done=done)
+            else:
+                self.answers[key] = background(lambda: self.sai.host_answer(host, argv,
+                                                                            timeout=REMOTE_ANSWER_WAIT - 30),
+                                               timeout=REMOTE_ANSWER_WAIT, done=done)
         self.update_buttons()
         self.offer_questions()  # the Questions window lists it no more
 
     def scope_refused(self, entry, scope):
-        """Why ENTRY cannot be allowed with SCOPE, or None. Refused here above what the policy allows (another host:
-        what it said); the caps of the run's mode and of the kind narrow the answer in sandbox-ai itself, which says
-        so (the box offers no more anyway)."""
-        widest = self.widest(entry) if entry[2] != LOCAL else \
-            self.max_scope if self.max_scope in backend.SCOPES else "once"
-        if backend.SCOPES.index(scope) > backend.SCOPES.index(widest):
-            return tr("Allowed at most “{scope}” here (the policy, the run's security mode or the kind of question).",
-                      scope=widest)
-        return None
+        """Why ENTRY cannot be allowed with SCOPE (once, run, always), or None - its button's tooltip while disabled,
+        the note when it is asked for all the same (a key, a notification). As sandbox-ai caps it
+        (approvals.widest_answer, past_cap): a canary's alarm and a page to open once; pushes, requests, tool calls
+        and devices at most for the run; the administrator's policy and the run's security mode; another host's
+        question as that host said (its max_scope). Whether it may be allowed at all is answer_rules'."""
+        if scope == "once" or scope not in backend.SCOPES:
+            return None
+        run, question, host = entry
+        kind = question.get("kind")
+        if kind == "canary":
+            return tr("A canary's alarm is answered this once: Allow once lets the sandbox go on, Deny stops it.")
+        if kind in ONCE_ONLY or backend.question_url(question):
+            return tr("A page is opened once: nothing is kept for it.")
+        if malicious_package(question):
+            return tr("A known malicious package version is allowed for this one download at most: never for the run "
+                      "or for later sessions.")
+        widest = self.widest(entry) if backend.answerable(question) else self.past_widest(entry)
+        if widest is not None and backend.SCOPES.index(scope) <= backend.SCOPES.index(widest):
+            return None
+        words = {"once": tr("once"), "run": tr("for this run")}
+        if host != LOCAL:
+            return tr("{host} allows it at most {scope} (its policy, the run's security mode or the kind of "
+                      "question).", host=printable(host), scope=words.get(widest, tr("once")))
+        record = self.records.get(self.key_of(entry)) or {}
+        mode = record.get("mode") if isinstance(record.get("mode"), dict) else {}
+        policy = self.max_scope if self.max_scope in backend.SCOPES else "always"
+        if kind in RUN_AT_MOST and widest == "run" and policy == "always" and \
+                mode.get("approval_scope") in (None, "always"):
+            if package_of(question) and package_of(question).get("allow"):
+                return tr("A download is allowed at most for this run. To allow the package in every run of the "
+                          "project: {command}", command=shown(package_of(question)["allow"], 300))
+            if secret_of(question) and secret_of(question).get("allow"):
+                return tr("A request with a secret is allowed at most for this run (the same kind of value to the "
+                          "same host is then not asked about again). For every run of the project: {command}",
+                          command=shown(secret_of(question)["allow"], 600))
+            return tr("Pushes, requests, tool calls and devices are allowed at most for this run: none of them is "
+                      "kept for later sessions.")
+        if mode.get("approval_scope") in backend.SCOPES and \
+                backend.SCOPES.index(mode["approval_scope"]) <= backend.SCOPES.index(policy):
+            return tr("Allowed at most {scope} here: the run's security mode.",
+                      scope=words.get(mode["approval_scope"], tr("once")))
+        return tr("Allowed at most {scope} here: the administrator's policy (max_approval_scope).",
+                  scope=words.get(widest, tr("once")))
+
+    def past_widest(self, entry):
+        """The widest scope an answered ENTRY may be allowed again with (sandbox-ai's approvals.past_cap: another
+        host's as it said, max_scope), "run" where that is not known (an older sandbox-ai's own default)."""
+        run, question, host = entry
+        if host != LOCAL:
+            scope = question.get("max_scope")
+            return scope if scope in backend.SCOPES else "run"
+        try:
+            module = self.sai.module("approvals")
+            if hasattr(module, "past_cap"):
+                return module.past_cap({**question, "state": entry_state(question)},
+                                       self.records.get(self.key_of(entry)) or {}, self.max_scope)
+        except Exception as exc:  # noqa: BLE001 - the run's own default, said in the log
+            applog.swallowed("pages", "ApprovalsPage.past_widest", exc)
+        return "run"
 
     def settled(self, key):
         """True when the question KEY needs no answer from here any more: it is not open (answered elsewhere, ended,
         refused), or its answer is on its way, or another host took it and lists it until it has read it."""
-        return key not in self.questions or key in self.answers or key in self.answered_there
+        if key not in self.questions or key in self.answers or key in self.answered_there:
+            return True
+        return entry_state(self.questions[key][1]) != "open"
 
     def open_here(self):
         """A browser question of another host: allowed there without opening it (--no-open), opened here."""
         self.answer("allow", "once", open_here=True)
 
-    def confirm_block(self, entry, parent=None):
-        """Block always outlives the run: every later start of the project is refused it without a question."""
-        run, question, host = entry
-        lines = [tr("Sandbox: {sandbox}", sandbox=self.labels.get(self.key_of(entry), printable(run)))]
-        if host != LOCAL:
-            lines.append(tr("Host: {host}", host=printable(host)))
-        lines += [tr("Asks to: {question}", question=describe(question)),
-                  tr("Refused now and at every later start of this project, without a question. Forget… on this "
-                     "page lifts it.")]
-        return ask_first(parent or self, "approval-deny-always", tr("Block always?"), "\n".join(lines),
-                         tr("Block always"))
-
-    def confirm_allow(self, entry, scope, parent=None, open_here=False):
-        run, question, host = entry
-        url = backend.question_url(question)
-        lines = [tr("Sandbox: {sandbox}", sandbox=self.labels.get((host, run, question.get("id")), printable(run)))]
-        if host != LOCAL:
-            lines.append(tr("Host: {host}", host=printable(host)))
-        lines.append(tr("Asks to: {question}", question=describe(question)))
-        if open_here:
-            lines.append(tr("The page opens in this computer's browser, not on {host}.", host=printable(host)))
-        if not url:
-            lines.append(tr("Scope: {scope}", scope=self.scope.itemText(self.scope.findData(scope))))
-        if scope == "always" and not url:
-            lines.append(tr("“Always” is remembered for this project: later runs get this without asking."))
-        # The safe choice is the default when the answer outlives this run (the app's one policy: ask_first).
-        if scope == "always" and not url:
-            return ask_first(parent or self, "approval-allow-always", tr("Allow this request?"), "\n".join(lines),
-                             tr("Allow"))
-        return confirm(parent or self, tr("Allow this request?"), "\n".join(lines), tr("Allow"))
-
-    def answered(self, result, error, decision="deny", scope="once", host=LOCAL, url=None, key=None):
+    def answered(self, result, error, decision="deny", scope="once", host=LOCAL, url=None, key=None, entry=None,
+                 undoing=False, batch=None, was_open=False):
         self.answers.pop(key, None)
         if key is not None and len(self.answered_recently) < 1000:
             self.answered_recently.add(key)
@@ -1665,14 +2193,32 @@ class ApprovalsPage(QWidget):
         applog.log("INFO" if status == 0 else "WARNING", "approvals", f"answer {decision} (scope {scope}) on "
                    f"{printable(host)}: exit status {status}" + (f"\n{applog.tail(out + err)}" if status != 0 else ""))
         if status != 0:
-            self.message.setText(tr("Not answered"))
-            warn(self, tr("Not answered"), text or tr("sandbox-ai refused the answer."), modal=False)
+            # No box with OK to click: a short notice in the error colour that goes by itself, and the same in the
+            # note line below the table (to read it again; the log has it too).
+            why = text or tr("sandbox-ai refused the answer.")
+            self.message.setText(tr("Not answered: {why}", why=why))
+            from .short_notices import short_notice
+            short_notice(self, tr("Not answered"), why, error=True)
+        elif decision == "allow" and not undoing and closed_note(out):
+            # Allowed, but its name does not exist: sandbox-ai closed the question (denied for the run, nothing
+            # opened) - said in one line and a notice that goes by itself, no error and nothing to undo.
+            said = tr("Closed, not allowed: {why}", why=printable_text(closed_note(out))[:600])
+            self.message.setText(said)
+            from .short_notices import short_notice
+            short_notice(self, tr("Question closed"), said)
         else:
-            self.message.setText(text)
+            # (only what was done, in a few words: the table shows the question and its answer - the whole question
+            # once more below it, a login's long address and all, said nothing new; the log keeps sandbox-ai's text)
+            self.message.setText(getattr(self, "undo_note", tr("Undone.")) if undoing else answered_note(decision, scope))
             if url is not None and decision == "allow":
                 QDesktopServices.openUrl(url)
             if host != LOCAL and key is not None:
                 self.answered_there[key] = time.monotonic()  # until a read begun from now on no longer lists it
+            if entry is not None and not undoing and batch == getattr(self, "undo_batch", 0) and \
+                    entry[1].get("kind") != "browser":
+                self.undoable.append((entry, decision, scope, was_open))
+                self.undo_button.show()
+                self.undo_timer.start(UNDO_MS)
         if host == LOCAL:
             self.poll()
             if status == 0 and scope == "always" and self.always_host.currentData() == LOCAL:
@@ -1682,6 +2228,32 @@ class ApprovalsPage(QWidget):
             self.update_buttons()
             if status == 0 and scope == "always" and self.always_host.currentData() == host:
                 self.load_always()
+
+
+# How sandbox-ai's answer begins the line that says it closed a question instead of allowing it (the name does not
+# exist): approvals.CLOSED_NOTE, the same on every host's sandbox-ai (a test keeps them equal).
+CLOSED_NOTE = "denied for the run: "
+
+
+def closed_note(output):
+    """What sandbox-ai's OUTPUT of an allow says after CLOSED_NOTE (approvals.closed_note), or None."""
+    for line in str(output or "").splitlines():
+        if line.strip().startswith(CLOSED_NOTE):
+            return line.strip()[len(CLOSED_NOTE):]
+    return None
+
+
+def answered_note(decision, scope):
+    """The note line after an answer, naming its scope: "Allowed once." / "Always allowed in this run (this session)." /
+    "Always allowed, also for later sessions." / "Blocked always." - the question itself is in the table."""
+    if decision == "allow":
+        return {"once": tr("Allowed once."), "run": tr("Always allowed in this run (this session)."),
+                "always": tr("Always allowed, also for later sessions.")}.get(
+            scope, tr("Allowed ({scope}).", scope=printable(str(scope or ""))))
+    if decision == "deny":
+        return {"once": tr("Refused once."), "run": tr("Refused for this run."), "always": tr("Blocked always.")}.get(
+            scope, tr("Refused ({scope}).", scope=printable(str(scope or ""))))
+    return tr("Done.")
 
 
 class StatisticsPage(QWidget):
@@ -1742,6 +2314,7 @@ class StatisticsPage(QWidget):
             ("refused", tr("Refused connections"), [tr("What"), tr("Times")]),
             ("programs", tr("Programs started"), [tr("Program"), tr("Times"), ""]),
             ("tools", tr("MCP tool calls (all servers)"), [tr("Server"), tr("Tool"), tr("Calls"), tr("Refused")]),
+            ("spend", tr("Model spend (sandbox-ai spend)"), [tr("Model"), tr("Cost"), tr("Requests"), ""]),
         )
         for index, (key, title, headers) in enumerate(sections):
             box = QGroupBox(title)
@@ -1805,12 +2378,11 @@ class StatisticsPage(QWidget):
         self.load()
 
     def browse(self):
-        if self.host() != LOCAL:
-            from PySide6.QtWidgets import QInputDialog
-            path, ok = QInputDialog.getText(self, tr("Log folder"), shown_as_text(tr(
-                "A project folder or a log folder on {host} (absolute path):", host=self.hosts.label())))
-            if ok and path.strip():
-                self.refresh_directories(select=path.strip())
+        if self.host() != LOCAL:  # a folder of that host, chosen from its folders (remote_chooser)
+            from . import remote_chooser as RC
+            path = RC.choose_folder(self, self.host(), tr("Log folder"), "logs", sai=self.sai)
+            if path:
+                self.refresh_directories(select=path)
             return
         path = choose_folder(self, tr("Log folder"), "logs")
         if path:
@@ -1925,6 +2497,14 @@ class StatisticsPage(QWidget):
                 tools.append([printable(server), printable(tool), count, refused.get(tool, 0)])
                 colours.append("bad" if refused.get(tool) else None)
         fill(self.tables["tools"], tools, colours)
+        spend = data.get("spend") if isinstance(data.get("spend"), dict) else {}
+        models = [row for row in spend.get("models") or [] if isinstance(row, dict)]
+        fill(self.tables["spend"], [[printable(row.get("key") or "?"), printable(row.get("cost") or "-"),
+                                     row.get("requests") or 0, ""] for row in models])
+        bars(self.tables["spend"], 3, [float(row.get("usd") or 0) for row in models])
+        if spend.get("total"):
+            self.summary.setText(self.summary.text() + " " + tr("Model spend: {cost}.", cost=printable(
+                spend["total"].get("cost") or "-")))
 
 
 from .credentials_page import CredentialsPage  # noqa: E402,F401 - the Credentials page lives in its own module

@@ -2,7 +2,8 @@
 """Catalog MCP servers under Bubblewrap: the same server as the container image, from a root file system archive
 of that image (published with it, its SHA-256 in the signed catalog), run per connection like the container:
 
-  bwrap --unshare-all (the network too, or slirp4netns without the host's loopback for network "full")
+  bwrap --unshare-all (the network too, or slirp4netns without the host's loopback for a server with network,
+        whose egress rules - mcp_egress.py: the internet, not your network - are loaded before the server runs)
         --uid U --gid U --ro-bind ROOTFS / --proc /proc --dev /dev --tmpfs /tmp --cap-drop ALL --clearenv
         --die-with-parent --new-session [--ro-bind|--bind HOST TARGET] -- ENTRYPOINT
 
@@ -12,10 +13,12 @@ no absolute paths, no "..", no devices, nothing written through a link, no setui
 ~/.local/share/sandbox-ai/mcp-rootfs/SHA256/ and is mounted read-only.
 
   mcp_rootfs.py --internal-bwrap DEFINITION.json   (the bridge's command for each connection: bwrap with its
-                                                   arguments through a pipe, and slirp4netns for network "full")
+                                                   arguments through a pipe, and slirp4netns with the egress rules
+                                                   for a server with network)
 
-Standard library only (bwrap, and slirp4netns for network "full", on the host).
+Standard library only (bwrap, and slirp4netns and nft for a server with network, on the host).
 """
+import contextlib
 import hashlib
 import io
 import os
@@ -246,9 +249,10 @@ def tmp_bytes(size):
     return int(match[1]) << (30 if match[2] == "g" else 20) if match else 64 << 20
 
 
-def bwrap_args(definition, environ=None):
+def bwrap_args(definition, environ=None, hosts_file=None):
     """bwrap's arguments for one instance of a rootfs server, hardened as image_command. They go to bwrap through a
-    pipe (--args FD), never on a command line: a variable's value (a secret) would show in /proc/PID/cmdline."""
+    pipe (--args FD), never on a command line: a variable's value (a secret) would show in /proc/PID/cmdline.
+    HOSTS_FILE: an allowlist server's /etc/hosts (its pinned hosts)."""
     environ = os.environ if environ is None else environ
     rootfs = definition["rootfs"]
     user = str(rootfs.get("user", 65534))
@@ -262,9 +266,11 @@ def bwrap_args(definition, environ=None):
         # the MCP connection's stdin and stdout, which every process of the server could open through /proc/1/fd
         # (mcp.py's PID1_VALUES; the definition was checked there).
         args.insert(args.index("--unshare-pid") + 1, "--as-pid-1")
-    if definition.get("network", "none") == "full":
+    if definition.get("network", "none") != "none":
         # The resolver slirp4netns answers at (10.0.2.3), as pasta gives the image servers theirs.
         args += ["--ro-bind", resolv_conf(), "/etc/resolv.conf"]
+    if hosts_file is not None:
+        args += ["--ro-bind", str(hosts_file), "/etc/hosts"]
     for mount in definition.get("mounts", []):
         host = str(Path(os.path.expanduser(mount["host"])).resolve())
         args += ["--bind" if mount.get("mode") == "rw" else "--ro-bind", host, mount["target"]]
@@ -318,27 +324,67 @@ def bwrap_environment():
     return {"PATH": os.environ.get("PATH") or os.defpath}
 
 
+SLIRP_RESOLVER = "nameserver 10.0.2.3\n"  # (resolv_conf: what the server's lookups go to)
+_egress = None
+
+
+def egress_module():
+    """mcp_egress.py beside this file: the rules and how they are loaded into the sandbox's namespace."""
+    global _egress
+    if _egress is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sandbox_ai_mcp_egress_for_rootfs",
+                                                      Path(__file__).resolve().with_name("mcp_egress.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _egress = module
+    return _egress
+
+
+def refused(why):
+    print(f"sandbox-ai mcp: egress: MCP server refused: {why}", file=sys.stderr, flush=True)
+    return 125
+
+
 def run(definition, environ=None):
-    """One instance: bwrap with the arguments through --args; for network "full" with slirp4netns attached to its
-    network namespace (the outside network, never the host's loopback). Its stdin and stdout stay the MCP
-    connection the bridge gave this process. Returns bwrap's exit status."""
+    """One instance: bwrap with the arguments through --args; for a server with network, slirp4netns attached to its
+    network namespace (the outside network, never the host's loopback) and its egress rules ("egress" of the checked
+    definition: mcp_egress.py) loaded there while bwrap waits on --block-fd - only then does the server start. Its
+    stdin and stdout stay the MCP connection the bridge gave this process. Returns bwrap's exit status (125: refused,
+    nothing of the server ran)."""
     import json
-    args = args_pipe(bwrap_args(definition, environ))
+    network = definition.get("network", "none") != "none"
+    config = definition.get("egress") if network else None
+    if network and not (isinstance(config, dict) and config.get("kind")):
+        return refused("a server with network has no egress rules: it would reach your network (start it again)")
+    pins, hosts_file = [], None
+    if network:
+        egress = egress_module()
+        try:
+            pins, names = egress.pins_of(config)
+            if config["kind"] == "hosts":
+                hosts_file = egress.write_hosts(config["hosts_file"], names)
+        except (OSError, ValueError, KeyError) as exc:
+            return refused(str(exc))
+    args = args_pipe(bwrap_args(definition, environ, hosts_file))
     # bwrap's own process is PID 1 of the server's PID namespace and keeps the environment it was started with (every
     # process of the server reads it at /proc/1/environ; --clearenv empties only the command's): PATH alone, never
     # the launcher's environment with its API keys. What the server needs goes through --setenv in the args pipe.
     bare = bwrap_environment()
-    if definition.get("network", "none") != "full":
+    if not network:
         os.execvpe("bwrap", ["bwrap", "--args", str(args), *entrypoint(definition)], bare)
     info_r, info_w = os.pipe()
     ready_r, ready_w = os.pipe()
-    child = subprocess.Popen(["bwrap", "--info-fd", str(info_w), "--args", str(args), *entrypoint(definition)],
-                             pass_fds=(info_w, args), env=bare)
+    gate_r, gate_w = os.pipe()  # bwrap waits on it (--block-fd) before the server runs: until the rules are in
+    child = subprocess.Popen(["bwrap", "--info-fd", str(info_w), "--block-fd", str(gate_r), "--args", str(args),
+                              *entrypoint(definition)], pass_fds=(info_w, gate_r, args), env=bare)
     os.close(info_w)
     os.close(args)
+    os.close(gate_r)
     slirp = None
     try:
         with os.fdopen(info_r) as stream:
+            info_r = None
             pid = int(json.loads(stream.readline() or "{}")["child-pid"])
         slirp = subprocess.Popen(["slirp4netns", "--configure", "--disable-host-loopback", "--enable-sandbox",
                                   "--enable-seccomp", "--mtu=65520", "--ready-fd", str(ready_w), str(pid), "tap0"],
@@ -346,15 +392,18 @@ def run(definition, environ=None):
         os.close(ready_w)
         ready_w = None
         os.read(ready_r, 1)
+        egress.load_into_sandbox(pid, egress.rules_for(config, SLIRP_RESOLVER, pins=pins), config["kind"])
+        os.write(gate_w, b"1")
         return child.wait()
-    except (OSError, ValueError, KeyError, RecursionError):
+    except (OSError, ValueError, KeyError, RecursionError) as exc:
         child.kill()
         child.wait()
-        return 125
+        return refused(str(exc) or type(exc).__name__)
     finally:
-        for fd in (ready_r, ready_w):
+        for fd in (info_r, ready_r, ready_w, gate_w):
             if fd is not None:
-                os.close(fd)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         if slirp is not None:
             slirp.terminate()
             slirp.wait()

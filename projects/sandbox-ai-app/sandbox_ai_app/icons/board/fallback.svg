@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<!-- sandbox-ai Board: a part of a kind this app does not know: a dashed square (own drawing, MIT; drawn in currentColor) -->
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="4" width="16" height="16" rx="3" stroke-dasharray="3 3"/>
+  <circle cx="12" cy="12" r="1.5"/>
+</g>
+</svg>

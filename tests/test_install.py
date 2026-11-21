@@ -99,6 +99,8 @@ class FakeGitea(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.files, self.auth, self.uploads = dict(files), [], []
         self.tags, self.latest, self.rate_limited = {f"v{VERSION}": self.files}, f"v{VERSION}", False
+        self.hooks = []  # what a notify channel's webhook (/hook) was sent
+        self.made = None  # the release publish_release.py made: {"tag_name", "draft", "names"} (a draft at first)
 
     def publish(self, version, files):
         self.tags[f"v{version}"] = files
@@ -138,6 +140,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/v1/repos/o/r/releases/tags/(.+)", self.path)
         if match and match[1] in self.server.tags:
             return self.reply(200, self.server.release(match[1]))
+        made = self.server.made
+        if self.path == "/api/v1/repos/o/r/releases/1" and made:  # (the release publish_release.py made)
+            return self.reply(200, {"id": 1, "tag_name": made["tag_name"], "draft": made["draft"],
+                                    "assets": [{"id": i, "name": name, "size": 1}
+                                               for i, name in enumerate(made["names"], 1)]})
         match = re.fullmatch(r"/o/r/releases/download/([^/]+)/(.+)", self.path)
         if match and match[2] in self.server.tags.get(match[1], {}):
             return self.reply(200, self.server.tags[match[1]][match[2]], "application/octet-stream")
@@ -146,17 +153,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.server.auth.append((self.path, self.headers.get("Authorization")))
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/hook":
+            self.server.hooks.append(json.loads(body))
+            return self.reply(200, {})
         if self.path == "/api/v1/repos/o/r/releases":
-            return self.reply(201, {"id": 1, "tag_name": json.loads(body)["tag_name"], "assets": []})
+            asked = json.loads(body)
+            self.server.made = {"tag_name": asked["tag_name"], "draft": bool(asked.get("draft")), "names": []}
+            return self.reply(201, {"id": 1, "tag_name": asked["tag_name"], "draft": self.server.made["draft"],
+                                    "assets": []})
         if self.path.startswith("/api/v1/repos/o/r/releases/1/assets"):
             self.server.uploads.append((self.path, self.headers.get("Content-Type"), body))
+            if self.server.made:
+                self.server.made["names"].append(re.search(r"name=([^&]+)", self.path)[1])
             return self.reply(201, {"id": len(self.server.uploads)})
+        self.reply(404)
+
+    def do_PATCH(self):
+        self.server.auth.append((self.path, self.headers.get("Authorization")))
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        if self.path == "/api/v1/repos/o/r/releases/1" and self.server.made:
+            self.server.made.update(body)
+            return self.reply(200, {"id": 1, "tag_name": self.server.made["tag_name"],
+                                    "draft": self.server.made["draft"]})
         self.reply(404)
 
     def do_DELETE(self):
         self.server.auth.append((self.path, self.headers.get("Authorization")))
         self.server.uploads.append((self.path, "DELETE", b""))
         self.reply(204)
+
+
+@pytest.fixture(autouse=True)
+def nothing_left(tmp_path):
+    """Each test's folder goes when it ends: its installations and bundles (some 150 MB a test, up to 1 GB; pytest
+    keeps every test's folder until the session ends, and the folders of three sessions - a full run filled the
+    disk of a machine near full)."""
+    yield
+    home_guard.remove(tmp_path)
 
 
 @pytest.fixture
@@ -411,12 +444,14 @@ def test_publish_release(scenario, tmp_path, gitea, dist):
     source = f"http://127.0.0.1:{gitea.server_address[1]}/o/r"
     files = [str(dist / "SHA256SUMS"), str(dist / "install.sh")]
     env = {**os.environ, "RELEASE_TOKEN": TOKEN}
-    args = [sys.executable, str(ROOT / "scripts/publish_release.py"), "--source", source, "--token-env", "RELEASE_TOKEN"]
+    # (two files of a release, to a Gitea of one's own: --partial; tests/test_release_assets.py has the whole set)
+    args = [sys.executable, str(ROOT / "scripts/publish_release.py"), "--source", source, "--token-env",
+            "RELEASE_TOKEN", "--partial"]
     if scenario == "sad":
         result = subprocess.run([*args, *files], capture_output=True, text=True, env={**env, "RELEASE_TOKEN": ""})
         assert result.returncode != 0 and "RELEASE_TOKEN" in result.stderr
-        result = subprocess.run([*args[:3], "http://git.example.invalid/o/r", "--token-env", "RELEASE_TOKEN", *files],
-                                capture_output=True, text=True, env=env)
+        result = subprocess.run([*args[:3], "http://git.example.invalid/o/r", "--token-env", "RELEASE_TOKEN",
+                                 "--partial", *files], capture_output=True, text=True, env=env)
         assert result.returncode != 0 and "plain http" in result.stderr
         return
     tag = ["--tag", "v9.9.9"] if scenario == "edge" else []
@@ -431,7 +466,9 @@ def test_publish_release(scenario, tmp_path, gitea, dist):
         assert [u for u in gitea.uploads if u[1] == "DELETE"]
         assert "created release" not in result.stderr
     else:
-        assert "created release v9.9.9" in result.stderr
+        # A new release is a draft until its last file is up: releases/latest never names a half-uploaded one.
+        assert "created release v9.9.9 as a draft" in result.stderr and "published release v9.9.9" in result.stderr
+        assert gitea.made == {"tag_name": "v9.9.9", "draft": False, "names": ["SHA256SUMS", "install.sh"]}
 
 
 # --- signed releases --------------------------------------------------------------------------------------
@@ -798,7 +835,7 @@ def test_publish_release_checks_the_signature_before_uploading(scenario, tmp_pat
     for name in ("SHA256SUMS", "install.sh"):
         (files / name).write_bytes((dist / name).read_bytes())
     args = [sys.executable, str(ROOT / "scripts/publish_release.py"), "--source", source, "--token-env",
-            "RELEASE_TOKEN"]
+            "RELEASE_TOKEN", "--partial"]
     env = {**os.environ, "RELEASE_TOKEN": TOKEN}
     if scenario == "happy":
         # With keys listed (as once the maintainer registered one): --sign makes SHA256SUMS.sig, checked.
@@ -930,7 +967,7 @@ def test_on_macos_the_block_goes_into_zshrc_and_the_bash_login_file(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     (home / ".bash_profile").write_text("export EDITOR=vi\n")
-    result = install(tmp_path, "--from", str(ROOT), PATH=f"{fake}:/usr/bin:/bin")
+    result = install(tmp_path, "--from", str(ROOT), PATH=f"{fake}:/usr/bin:/bin", SHELL="/bin/zsh")  # (the default)
     assert result.returncode == 0, result.stderr
     assert "# >>> sandbox-ai >>>" in (home / ".zshrc").read_text(), "made, as a new Mac has none"
     assert (home / ".bash_profile").read_text().startswith("export EDITOR=vi\n# >>> sandbox-ai >>>")
@@ -991,6 +1028,83 @@ def test_tab_completion_in_every_shell(tmp_path):
     assert not any(f.exists() for f in files)
 
 
+def test_the_end_says_how_a_shell_that_runs_gets_it(tmp_path):
+    """A program cannot change a shell that already runs: the end of an install says how a terminal open now gets
+    the PATH and the Tab completion (source the rc file), also when the command directory is on PATH already and only
+    the completion is new; an install that changed nothing says nothing of it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    on_path = f"{home / '.local/bin'}:/usr/bin:/bin"
+    result = install(tmp_path, "--from", str(ROOT), PATH=on_path)
+    assert result.returncode == 0, result.stderr
+    assert "source ~/.bashrc" in result.stderr and "cannot change a shell that already runs" in result.stderr
+    again = install(tmp_path, "--from", str(ROOT), "--force", PATH=on_path)
+    assert again.returncode == 0 and "source ~/.bashrc" not in again.stderr, again.stderr
+    assert "Tab completion" not in again.stderr, "unchanged: not said again"
+    # the completion gone (removed by hand): written again, and said how this shell gets it
+    (home / ".local/share/bash-completion/completions/sandbox-ai").unlink()
+    third = install(tmp_path, "--from", str(ROOT), "--force", PATH=on_path, SHELL="/bin/zsh")
+    assert (home / ".local/share/bash-completion/completions/sandbox-ai").is_file()
+    assert "Tab completion" in third.stderr and "source ~/.bashrc" in third.stderr, third.stderr
+    # --no-modify-rc: the completion file itself is what a running shell sources
+    (tmp_path / "other").mkdir()
+    plain = install(tmp_path / "other", "--from", str(ROOT), "--no-modify-rc", PATH=on_path)
+    assert plain.returncode == 0, plain.stderr
+    assert "source ~/.local/share/bash-completion/completions/sandbox-ai" in plain.stderr, plain.stderr
+    assert not (tmp_path / "other/home/.bashrc").exists()
+
+
+def test_an_up_to_date_update_puts_the_block_and_completion_back(tmp_path, gitea):
+    """sandbox-ai update with nothing newer still refreshes the rc block and the Tab completion (a block removed by
+    hand, a completion of an older version)."""
+    source = f"http://127.0.0.1:{gitea.server_address[1]}/o/r"
+    assert install(tmp_path, "--source", source).returncode == 0
+    home = tmp_path / "home"
+    (home / ".bashrc").write_text("# mine\n")
+    (home / ".local/share/bash-completion/completions/sandbox-ai").write_text("# old\n")
+    again = install(tmp_path, "--source", source)
+    assert again.returncode == 0 and "up to date" in again.stderr, again.stderr
+    assert "# >>> sandbox-ai >>>" in (home / ".bashrc").read_text()
+    assert "sandbox-ai __complete" in (home / ".local/share/bash-completion/completions/sandbox-ai").read_text()
+    assert "source ~/.bashrc" in again.stderr
+
+
+def test_a_system_install_puts_tab_completion_where_the_shells_look(tmp_path):
+    """--system: the scripts under PREFIX/share, where bash-completion, zsh and fish look (no rc file of anyone is
+    changed); --uninstall takes them away."""
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    env = environment(tmp_path)
+    done = subprocess.run(["bash", str(ROOT / "install.sh"), "--system", "--prefix", str(prefix), "--from", str(ROOT),
+                           "--no-app"], capture_output=True, text=True, env=env, timeout=300)
+    assert done.returncode == 0, done.stderr
+    files = [prefix / "share/bash-completion/completions/sandbox-ai", prefix / "share/zsh/site-functions/_sandbox-ai",
+             prefix / "share/fish/vendor_completions.d/sandbox-ai.fish"]
+    assert all("sandbox-ai __complete" in f.read_text() for f in files), done.stderr
+    assert all(oct(f.stat().st_mode & 0o777) == "0o644" for f in files)
+    assert not (tmp_path / "home/.bashrc").exists()
+    assert "source " + str(files[0]) in done.stderr
+    found = subprocess.run(["bash", "-c", f". {files[0]}; complete -p sandbox-ai"], capture_output=True, text=True,
+                           env=env, timeout=60)
+    assert "_sandbox_ai sandbox-ai" in found.stdout, found.stderr
+    gone = subprocess.run(["bash", str(ROOT / "install.sh"), "--system", "--prefix", str(prefix), "--uninstall"],
+                          capture_output=True, text=True, env=env, timeout=120)
+    assert gone.returncode == 0 and not any(f.exists() for f in files), gone.stderr
+
+
+def test_install_sh_colours_on_a_terminal_only(tmp_path):
+    """install.sh says its errors red on a terminal (FORCE_COLOR stands in for one here), never with NO_COLOR or
+    --no-color, never in a pipe."""
+    bad = ("--version", "nonsense")
+    forced = install(tmp_path, *bad, FORCE_COLOR="1")
+    assert forced.returncode == 1 and "\033[31m" in forced.stderr and "--version expects X.Y.Z" in forced.stderr
+    for extra, env in ((("--no-color",), {"FORCE_COLOR": "1"}), ((), {"FORCE_COLOR": "1", "NO_COLOR": "1"}),
+                       ((), {})):
+        plain = install(tmp_path, *extra, *bad, **env)
+        assert plain.returncode == 1 and "\033[" not in plain.stderr, (extra, env)
+        assert "install.sh: --version expects X.Y.Z" in plain.stderr
+
+
 def test_the_files_can_be_left_alone(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -1048,7 +1162,7 @@ def installer_helper():
     import types
     text = (ROOT / "install.sh").read_text()
     code = text.split("python3 -I - \"$@\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    code = "\n".join(line for line in code.splitlines() if not line.startswith('{"') and "[sys.argv[1]](" not in line)
+    code = code.split('\n{"', 1)[0]  # without the command dispatch (the dict and its call, over several lines)
     module = types.ModuleType("install_helper")
     exec(compile(code, "install.sh helper", "exec"), module.__dict__)
     return module
@@ -1153,3 +1267,304 @@ def test_install_from_a_checkout_of_another_user_skips_sockets_and_ignored_files
     assert (target / "sandbox" / "x.py").exists() and not (target / ".tt" / "s.sock").exists()
     assert not (target / "sandbox" / "pipe").exists()
     server.close()
+
+
+# --- the end of an installation: what still keeps the human on another version (2026-11-18: "I ran install.sh --from
+# . several times, but when I start sandbox-ai-app it says 0.1.97": a system installation's 0.1.97 came first in PATH,
+# and its app ran) ---
+
+def fake_system_installation(prefix, version="0.1.97"):
+    """PREFIX/lib/sandbox-ai/versions/VERSION with its command links in PREFIX/bin, as install.sh --system makes it."""
+    data = prefix / "lib" / "sandbox-ai"
+    tree = data / "versions" / version
+    (tree / "sandbox").mkdir(parents=True)
+    (tree / "sandbox" / "agent_sandbox.py").write_text(f'__version__ = "{version}"\n')
+    for name in ("sandbox-ai", "sandbox-ai-app", "install.sh"):
+        (tree / name).write_text("#!/bin/sh\necho old\n")
+        (tree / name).chmod(0o755)
+    (data / "current").symlink_to(f"versions/{version}")
+    (prefix / "bin").mkdir(parents=True)
+    for command, target in (("sandbox-ai", "sandbox-ai"), ("sandbox-ai-app", "sandbox-ai-app"),
+                            ("sandbox-ai-update", "install.sh")):
+        (prefix / "bin" / command).symlink_to(data / "current" / target)
+
+
+def lines_after(stderr, marker):
+    lines = stderr.splitlines()
+    start = next(i for i, line in enumerate(lines) if marker in line)
+    return lines[start:]
+
+
+@needs_app
+def test_a_system_installation_first_in_path_is_named_at_the_end(tmp_path):
+    """User mode: each command a new shell's PATH finds in another installation first is named, with both versions and
+    the two ways out (remove it or update it); the user's own first in PATH: nothing."""
+    prefix = tmp_path / "prefix"
+    fake_system_installation(prefix)
+    home_bin = tmp_path / "home/.local/bin"
+    result = install(tmp_path, "--from", str(ROOT), PATH=f"{prefix / 'bin'}:/usr/bin:/bin:{home_bin}")
+    assert result.returncode == 0, result.stderr
+    end = "\n".join(lines_after(result.stderr, f"installed sandbox-ai {VERSION}"))
+    assert (f"warning: your PATH finds sandbox-ai, sandbox-ai-update, sandbox-ai-app in {prefix / 'bin'} first - "
+            f"sandbox-ai 0.1.97 (a system installation in {prefix})") in end, result.stderr
+    assert f"before the {VERSION} installed now in {home_bin}" in end
+    assert f"sudo {prefix}/lib/sandbox-ai/current/install.sh --uninstall --system --prefix {prefix}" in end
+    assert f"sudo {ROOT}/install.sh --from {ROOT} --system --prefix {prefix}" in end
+    # ~/.local/bin not in PATH yet: the rc block puts it first - a new shell finds this installation.
+    again = install(tmp_path, "--from", str(ROOT), "--force", PATH=f"{prefix / 'bin'}:/usr/bin:/bin")
+    assert again.returncode == 0 and "your PATH finds" not in again.stderr, again.stderr
+    first = install(tmp_path, "--from", str(ROOT), PATH=f"{home_bin}:{prefix / 'bin'}:/usr/bin:/bin")
+    assert first.returncode == 0 and "your PATH finds" not in first.stderr, first.stderr
+
+
+@needs_app
+def test_a_link_left_out_for_a_foreign_file_is_said_again_at_the_end(tmp_path):
+    bin_dir = tmp_path / "home/.local/bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "sandbox-ai-app").write_text("#!/bin/sh\necho mine\n")
+    (bin_dir / "sandbox-ai-app").chmod(0o755)
+    result = install(tmp_path, "--from", str(ROOT), PATH=f"{bin_dir}:/usr/bin:/bin")
+    assert result.returncode == 0, result.stderr
+    end = "\n".join(lines_after(result.stderr, f"installed sandbox-ai {VERSION}"))
+    assert f"warning: not linked: {bin_dir / 'sandbox-ai-app'} exists and does not belong to sandbox-ai" in end
+    assert f"your PATH finds sandbox-ai-app in {bin_dir} first - a file not sandbox-ai's" in end
+    assert (bin_dir / "sandbox-ai-app").read_text() == "#!/bin/sh\necho mine\n"
+
+
+class AppSocket(threading.Thread):
+    """The app's single-instance socket in RUNTIME: an app before 0.1.99 (ANSWER None: it closes the connection on
+    "info") or one that answers "info" with ANSWER."""
+
+    def __init__(self, runtime, answer=None):
+        import socket
+        super().__init__(daemon=True)
+        self.server = socket.socket(socket.AF_UNIX)
+        self.server.bind(str(runtime / "sandbox-ai-app.sock"))
+        self.server.listen(4)
+        self.answer, self.heard = answer, []
+        self.start()
+
+    def run(self):
+        while True:
+            try:
+                client, _ = self.server.accept()
+            except OSError:
+                return
+            word = client.recv(64).strip()
+            self.heard.append(word)
+            if word == b"info" and self.answer is not None:
+                client.sendall(json.dumps(self.answer).encode() + b"\n")
+            client.close()
+
+    def stop(self):
+        self.server.close()
+
+
+@needs_app
+def test_an_app_that_runs_an_older_version_is_named_at_the_end(tmp_path):
+    import tempfile
+    runtime = Path(tempfile.mkdtemp(prefix="ia-"))
+    try:
+        result = install(tmp_path, "--from", str(ROOT), XDG_RUNTIME_DIR=str(runtime))
+        assert result.returncode == 0 and "sandbox-ai-app" not in "\n".join(
+            lines_after(result.stderr, "installed sandbox-ai")[1:]).replace("the app: sandbox-ai-app", ""), \
+            "nothing runs: nothing said"
+        old = AppSocket(runtime)
+        try:
+            result = install(tmp_path, "--from", str(ROOT), "--force", XDG_RUNTIME_DIR=str(runtime))
+        finally:
+            old.stop()
+        assert result.returncode == 0, result.stderr
+        assert f"warning: an older sandbox-ai-app is running (PID {os.getpid()}); it is too old to make way for " \
+               f"{VERSION} by itself: quit it" in result.stderr, result.stderr
+        assert f"kill {os.getpid()}" in result.stderr and old.heard == [b"info"], "asked, never shown or quit"
+        (runtime / "sandbox-ai-app.sock").unlink()
+        new = AppSocket(runtime, {"app": "0.1.98", "path": "/opt/app/sandbox_ai_app", "pid": 4242})
+        try:
+            result = install(tmp_path, "--from", str(ROOT), "--force", XDG_RUNTIME_DIR=str(runtime))
+        finally:
+            new.stop()
+        assert (f"warning: sandbox-ai-app 0.1.98 is running (from /opt/app/sandbox_ai_app, PID 4242), not the "
+                f"{VERSION} installed now: quit it, or start sandbox-ai-app again - it takes over") in result.stderr
+        (runtime / "sandbox-ai-app.sock").unlink()
+        same = AppSocket(runtime, {"app": VERSION, "path": str(installed(tmp_path) / "current/projects/sandbox-ai-app/"
+                                                                "sandbox_ai_app"), "pid": 4242})
+        try:
+            result = install(tmp_path, "--from", str(ROOT), XDG_RUNTIME_DIR=str(runtime))
+        finally:
+            same.stop()
+        assert result.returncode == 0 and "is running" not in result.stderr, result.stderr
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+
+
+def test_as_root_the_invoking_users_own_installation_is_named(tmp_path):
+    """install.sh --system through sudo (or a root login in the user's checkout): the user's own installation in
+    ~/.local/share/sandbox-ai stays at its version - said, with how to update it as that user."""
+    helper = installer_helper()
+    home = tmp_path / "alice"
+    (home / ".local/share/sandbox-ai/current/sandbox").mkdir(parents=True)
+    (home / ".local/share/sandbox-ai/current/sandbox/agent_sandbox.py").write_text('__version__ = "0.1.97"\n')
+    entry = SimpleNamespace(pw_name="alice", pw_dir=str(home), pw_uid=1234)
+    users = {"alice": entry}
+    note = helper.user_note(".", "0.1.99", {"SUDO_USER": "alice"}, users.__getitem__)
+    assert note == (f"warning: alice has an installation of their own, sandbox-ai 0.1.97 in "
+                    f"{home}/.local/share/sandbox-ai: it stays at 0.1.97, and their PATH may find it first (~/.local/bin); update it as alice: "
+                    f"./install.sh --from . (or remove it as alice: {home}/.local/share/sandbox-ai/current/install.sh "
+                    "--uninstall)")
+    assert helper.user_note(".", "0.1.97", {"SUDO_USER": "alice"}, users.__getitem__) is None, "the same version"
+    assert helper.user_note(".", "0.1.99", {"SUDO_USER": "bob"}, users.__getitem__) is None, "no such user"
+    assert helper.user_note(".", "0.1.99", {}, users.__getitem__, lambda path: 0) is None, "root's own checkout"
+    assert helper.invoking_user(".", {"SUDO_USER": "alice"}, users.__getitem__) == ("alice", str(home), 1234)
+    import pwd
+    try:
+        owner = pwd.getpwuid(os.getuid() or 1).pw_name if os.getuid() else None
+    except KeyError:
+        owner = None
+    if owner:  # a root login in a user's checkout: the checkout's owner (a non-root run: its own user)
+        assert helper.invoking_user(".", {}, users.__getitem__, lambda path: os.getuid()) is None or owner
+
+
+def test_a_system_installation_through_sudo_ends_cleanly(tmp_path):
+    """The notes of a system installation run (bash and its helper): a SUDO_USER without an installation of their own,
+    or none at all, says nothing about one."""
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    for extra in ({"SUDO_USER": "nobody-such-user-here"}, {}):
+        done = subprocess.run(["bash", str(ROOT / "install.sh"), "--system", "--prefix", str(prefix), "--from",
+                               str(ROOT), "--no-app", "--force"], capture_output=True, text=True,
+                              env=environment(tmp_path, **extra), timeout=300)
+        assert done.returncode == 0, done.stderr
+        assert "installation of their own" not in done.stderr and "Traceback" not in done.stderr
+
+
+# --- install.sh --fetch and the update mode, end to end (sandbox/updates.py) ----------------------------------------
+
+def fetched(tmp_path):
+    return installed(tmp_path) / "update-pending"
+
+
+@needs_ssh
+def test_fetch_downloads_and_checks_a_release_without_installing_it(scenario, tmp_path, gitea, dist, keys):
+    trusting(tmp_path, gitea, dist, keys["old"])
+    folder = fetched(tmp_path)
+    installer = installed(tmp_path) / "current/install.sh"
+    run = lambda *args: subprocess.run(["bash", str(installer), "--user", "--source", source_of(gitea), *args],
+                                       capture_output=True, text=True, env=environment(tmp_path), timeout=120)
+    if scenario == "happy":
+        gitea.publish("9.2.0", build_release(dist, "9.2.0", [keys["old"]], keys["old"]))
+        result = run("--fetch", str(folder))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["9.2.0", f"good {keys['old'].fingerprint}",
+                                              "sandbox-ai-bundle-9.2.0.tar.gz"]
+        assert sorted(p.name for p in folder.iterdir()) == ["SHA256SUMS", "SHA256SUMS.sig",
+                                                            "sandbox-ai-bundle-9.2.0.tar.gz"]
+        assert current(tmp_path) == "9.1.0", "fetched, not installed"
+        # Installed later from the folder, checked again (and the tree must be the version its name says).
+        result = install(tmp_path, "--from", str(folder / "sandbox-ai-bundle-9.2.0.tar.gz"), "--verify")
+        assert result.returncode == 0 and current(tmp_path) == "9.2.0", result.stderr
+    elif scenario == "sad":
+        # Signed by a key nobody trusts, or not signed: refused whatever --allow-unsigned says; nothing kept.
+        gitea.publish("9.2.0", build_release(dist, "9.2.0", [keys["old"]], keys["evil"]))
+        result = run("--fetch", str(folder), "--allow-unsigned")
+        assert result.returncode != 0 and "not a trusted release key; nothing downloaded" in result.stderr
+        gitea.publish("9.2.1", build_release(dist, "9.2.1", [keys["old"]], None))
+        result = run("--fetch", str(folder))
+        assert result.returncode != 0 and "is not signed" in result.stderr
+        assert not folder.exists() and current(tmp_path) == "9.1.0"
+    else:
+        # Never older than the installed version; a renamed bundle whose tree is another version is refused.
+        gitea.publish("9.0.0", build_release(dist, "9.0.0", [keys["old"]], keys["old"]))
+        result = run("--fetch", str(folder))
+        assert result.returncode != 0 and "older than the installed 9.1.0" in result.stderr
+        assert not folder.exists()
+        release = build_release(dist, "9.3.0", [keys["old"]], keys["old"])
+        renamed = {"sandbox-ai-bundle-9.4.0.tar.gz": release["sandbox-ai-bundle-9.3.0.tar.gz"]}
+        renamed["SHA256SUMS"] = (f"{hashlib.sha256(renamed['sandbox-ai-bundle-9.4.0.tar.gz']).hexdigest()}  "
+                                 "sandbox-ai-bundle-9.4.0.tar.gz\n").encode()
+        renamed["SHA256SUMS.sig"] = ssh_sign(renamed["SHA256SUMS"], keys["old"])
+        folder.mkdir()
+        for name, data in renamed.items():
+            (folder / name).write_bytes(data)
+        result = install(tmp_path, "--from", str(folder / "sandbox-ai-bundle-9.4.0.tar.gz"), "--verify")
+        assert result.returncode != 0 and "the bundle of release 9.4.0 contains sandbox-ai 9.3.0" in result.stderr
+        assert current(tmp_path) == "9.1.0"
+
+
+def fake_timer_tools(tmp_path):
+    """systemctl, launchctl and notify-send that only record their arguments: no real user manager or desktop."""
+    folder = tmp_path / "fakebin"
+    folder.mkdir(exist_ok=True)
+    for name in ("systemctl", "notify-send", "launchctl"):
+        (folder / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{tmp_path}/fake.log"\nexit 0\n')
+        (folder / name).chmod(0o755)
+    return folder
+
+
+@needs_ssh
+def test_update_mode_notify_download_apply_and_rollback_through_sandbox_ai(tmp_path, gitea, dist, keys):
+    """The whole through the installed ./sandbox-ai, against the fake release server: notify (the timer made, the
+    day's check, the event "update" to a notify channel), download (fetched and checked, nothing switched), --apply,
+    --rollback, mode off (the timer gone)."""
+    trusting(tmp_path, gitea, dist, keys["old"])
+    gitea.publish("9.2.0", build_release(dist, "9.2.0", [keys["old"]], keys["old"]))
+    base = environment(tmp_path)
+    base["PATH"] = f"{fake_timer_tools(tmp_path)}:{base['PATH']}"
+    command = tmp_path / "home/.local/bin/sandbox-ai"
+    at = 1800000000  # (a fixed clock: SANDBOX_AI_UPDATE_NOW)
+
+    def sai(*args, when=at):
+        return subprocess.run([str(command), *args], capture_output=True, text=True, timeout=300,
+                              env={**base, "SANDBOX_AI_UPDATE_NOW": str(when)})
+
+    shown = sai("update", "mode")
+    assert shown.returncode == 0 and "mode: notify (the default)" in shown.stdout, shown.stderr
+    config = tmp_path / "home/.config/sandbox-ai"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "defaults.json").write_text(json.dumps({"version": 1, "desktop_notifications": "none"}))
+    hook = f"http://127.0.0.1:{gitea.server_address[1]}/hook"
+    added = sai("notify", "add", "phone", "--webhook", hook, "--events", "update", "--when", "always", "--rate", "0")
+    assert added.returncode == 0, added.stderr
+    made = sai("update", "mode", "notify", "--source", source_of(gitea))
+    assert made.returncode == 0, made.stderr
+    units = tmp_path / "home/.config/systemd/user"
+    service = (units / "sandbox-ai-update.service").read_text()
+    assert f'"{installed(tmp_path)}/current/sandbox/main.py" "update" "--scheduled"' in service
+    assert "systemctl --user enable --now sandbox-ai-update.timer" in (tmp_path / "fake.log").read_text()
+
+    checked = sai("update", "--scheduled")
+    assert checked.returncode == 0, checked.stderr
+    assert "checked: 9.2.0 is available (installed: 9.1.0), signed by" in checked.stdout
+    assert any(event["event"] == "update" and "9.2.0 is available" in event["what"]
+               for body in gitea.hooks for event in body["events"]), gitea.hooks
+    asked = sum(path.endswith("/releases/latest") for path, _ in gitea.auth)
+    again = sai("update", "--scheduled", when=at + 3600)
+    assert again.returncode == 0 and sum(path.endswith("/releases/latest") for path, _ in gitea.auth) == asked, \
+        "once a day"
+    status = json.loads(sai("update", "mode", "--json", when=at + 3600).stdout)
+    assert status["result"]["available"] == "9.2.0" and status["result"]["newer"] is True
+    assert status["timer"]["installed"] is True and status["kind"] == "user"
+    assert status["next_check"] == at + 86400
+
+    switched = sai("update", "mode", "download", when=at + 3600)
+    assert switched.returncode == 0, switched.stderr
+    downloaded = sai("update", "--scheduled", when=at + 3600)
+    assert downloaded.returncode == 0 and "downloaded and checked: 9.2.0" in downloaded.stdout, downloaded.stderr
+    assert (fetched(tmp_path) / "sandbox-ai-bundle-9.2.0.tar.gz").is_file() and current(tmp_path) == "9.1.0"
+    assert "downloaded: 9.2.0" in sai("update", "mode").stdout
+
+    applied = sai("update", "--apply")
+    assert applied.returncode == 0, applied.stderr
+    assert "installed 9.2.0 (was 9.1.0)" in applied.stdout and current(tmp_path) == "9.2.0"
+    assert f"by {keys['old'].fingerprint}" in applied.stderr, "checked again before it was installed"
+    assert not fetched(tmp_path).exists()
+
+    back = sai("update", "--rollback")
+    assert back.returncode == 0, back.stderr
+    assert "back to 9.1.0 (was 9.2.0)" in back.stdout and current(tmp_path) == "9.1.0"
+    nothing = sai("update", "--scheduled", when=at + 2 * 86400)
+    assert "downloaded" not in nothing.stdout and not fetched(tmp_path).exists(), "the version left is not taken again"
+
+    off = sai("update", "mode", "off")
+    assert off.returncode == 0 and not (units / "sandbox-ai-update.timer").exists(), off.stderr
+    assert "systemctl --user disable --now sandbox-ai-update.timer" in (tmp_path / "fake.log").read_text()

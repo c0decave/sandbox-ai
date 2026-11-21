@@ -314,8 +314,9 @@ def test_moves_with_a_remote_side(tree, local):
         assert (tree / "other" / "a.txt").read_text() == "alpha"
         with pytest.raises(files.Refused, match="into itself"):
             files.move_entry(root, "other", root, "other")
-        with pytest.raises(files.Refused, match="not made here"):
-            files.copy_entry(root, "other", root, "docs")
+        # A copy to another folder of the same system: through this machine (remote.relay), no longer refused.
+        files.copy_entry(root, "other", root, "docs")
+        assert (tree / "docs" / "other" / "a.txt").read_text() == "alpha" and (tree / "other" / "a.txt").exists()
     finally:
         root.close()
 

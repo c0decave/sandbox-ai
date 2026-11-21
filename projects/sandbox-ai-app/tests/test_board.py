@@ -119,7 +119,7 @@ def test_problems_mirror_the_launcher(sai):
     assert any("not seen under --no-inspect" in t
                for t in texts(["--allow-http", "api.github.com GET /**", "--no-inspect", "*.github.com"]))
     assert any("'HOST METHODS PATH'" in t for t in texts(["--allow-http", "api.github.com"]))
-    assert any("HTTPS" in t for t in texts(["--token-proxy", "--git-token-env", "http://localhost:3080=T"]))
+    assert any("http" in t for t in texts(["--token-proxy", "--git-token-env", "http://git.example.org=T"]))
     assert any("not\n--git-credentials" in t or "--git-credentials" in t
                for t in texts(["--token-proxy", "--git-credentials", "/tmp/c"]))
     assert any("Podman" in t for t in texts(["--backend", "bwrap", "-P", "3000"]))
@@ -129,6 +129,32 @@ def test_problems_mirror_the_launcher(sai):
     assert texts(["--profile", "development", "--token-proxy", "--git-identity"]) == []
     board = B.from_argv(sai, "claude", ["-m", "/data:/etc:rw"])
     assert any("/work, /mnt or /opt" in p.text for p in B.problems(sai, board))
+
+
+def test_the_token_proxy_takes_a_git_server_on_this_machines_loopback_as_the_launcher_does(sai):
+    """dev-full preset agent 2026-11-19: the Board refused --token-proxy for any plain http:// Git server, also
+    http://localhost:3000 (the local Gitea) the launcher takes: the Board asks the launcher's own rule now."""
+    launcher = sai.launcher
+
+    def board_says(value, option="--git-token-secret"):
+        board = B.from_argv(sai, "claude", ["--token-proxy", option, value])
+        return [p.text for p in B.problems(sai, board) if p.level == "error" and p.node == board.first("git").id]
+
+    def launcher_says(value, option="--git-token-secret"):
+        try:
+            launcher.validate(launcher.parse_args(["claude", "--token-proxy", option, value]))
+        except ValueError as exc:
+            return str(exc)
+        return None
+    for value in ("http://localhost:3000=GITEA", "http://127.0.0.1:3080=GITEA", "http://[::1]:3000=GITEA",
+                  "https://git.example.org=GITEA", "http://alice@localhost:3000=GITEA"):
+        assert board_says(value) == [], value
+    for value in ("http://git.example.org=GITEA", "http://192.168.1.5:3000=GITEA", "http://gitea.lan:3000=GITEA"):
+        said = board_says(value)
+        assert said and any("http" in text for text in said), value
+        assert launcher_says(value) is not None, f"the launcher refuses {value} too"
+    assert board_says("http://localhost:3000=GITEA", "--git-token-env") == []
+    assert board_says("http://git.example.org=GITEA", "--git-token-env")
 
 
 def test_the_administrators_policy(sai):

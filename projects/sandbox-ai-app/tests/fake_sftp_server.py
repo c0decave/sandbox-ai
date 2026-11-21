@@ -14,10 +14,11 @@ a.txt, and a request for it is answered with that a.txt), as a malicious server 
 FAKE_SFTP_READ_FAIL_AT=offset - a READ from that offset on fails (an I/O error); FAKE_SFTP_CASELESS=1 - names are
 looked up ignoring their case (a macOS server: a.txt is A.txt), and RENAME refuses a name that "exists" so (as
 OpenSSH's sftp-server: link(), or a stat() of the new name); FAKE_SFTP_NO_CHOWN=1 - a SETSTAT of the owner fails (no
-root there); FAKE_SFTP_NO_CREATE=1 - an OPEN that would create a file is refused (a folder you may not write); FAKE_SFTP_FOREIGN=name - a file of that name is said to belong to UID 4242, group 4343 (another user's,
+root there); FAKE_SFTP_NO_CREATE=1 - an OPEN that would create a file is refused (a folder you may not write); FAKE_SFTP_NO_MKDIR=1 - a MKDIR is refused (the same); FAKE_SFTP_FOREIGN=name - a file of that name is said to belong to UID 4242, group 4343 (another user's,
 with no chown done), and a SETSTAT of an owner is only logged ("CHOWN uid:gid"); FAKE_SFTP_HOME_ANSWER=text - REALPATH
 of "." (the remote HOME) is answered with that text, as a malicious server may ("/a/../../b"); FAKE_SFTP_ROOT_ANSWER the
-same for REALPATH of "/". Otherwise SETSTAT sets the
+same for REALPATH of "/"; FAKE_SFTP_DENY=name - an OPENDIR or OPEN of anything of that name is refused (permission
+denied: a folder or file you may not read, also where the tests run as root). Otherwise SETSTAT sets the
 owner and group it is given (as OpenSSH's sftp-server does). lsetstat@openssh.com refuses a link (as OpenSSH's on Linux)
 and is logged, hung and stalled as "SETSTAT"."""
 import errno
@@ -47,6 +48,8 @@ caseless = bool(os.environ.get("FAKE_SFTP_CASELESS"))
 no_chown = bool(os.environ.get("FAKE_SFTP_NO_CHOWN"))
 foreign = os.environ.get("FAKE_SFTP_FOREIGN", "")
 no_create = bool(os.environ.get("FAKE_SFTP_NO_CREATE"))
+no_mkdir = bool(os.environ.get("FAKE_SFTP_NO_MKDIR"))
+deny = os.environ.get("FAKE_SFTP_DENY", "")
 
 
 def folded(path):
@@ -170,6 +173,9 @@ def handle(ident, kind, p):
         send(ATTRS, struct.pack(">I", ident) + attrs(info, path))
     elif kind == 11:  # OPENDIR
         path = p.path()
+        if deny and os.path.basename(path) == deny:
+            status(ident, 3, "Permission denied")
+            return
         names = os.listdir(path)
         counter[0] += 1
         key = str(counter[0]).encode()
@@ -201,6 +207,9 @@ def handle(ident, kind, p):
     elif kind == 3:  # OPEN
         path, flags, mode = p.path(), p.u32(), None
         mode = p.attrs()
+        if deny and os.path.basename(path) == deny:
+            status(ident, 3, "Permission denied")
+            return
         if no_create and flags & 8:
             status(ident, 3, "Permission denied")
             return
@@ -229,6 +238,9 @@ def handle(ident, kind, p):
     elif kind == 14:  # MKDIR
         path = p.path()
         mode = p.attrs()
+        if no_mkdir:
+            status(ident, 3, "Permission denied")
+            return
         os.mkdir(path, 0o777 if mode is None else mode)
         status(ident, 0)
     elif kind == 15:  # RMDIR

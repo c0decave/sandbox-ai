@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<!-- sandbox-ai Board: HOME and login: a house with a keyhole (own drawing, MIT; drawn in currentColor) -->
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M3 11.5L12 4l9 7.5"/>
+  <path d="M5.5 9.5V20h13V9.5"/>
+  <circle cx="12" cy="13" r="1.75"/>
+  <path d="M12 14.75V17"/>
+</g>
+</svg>

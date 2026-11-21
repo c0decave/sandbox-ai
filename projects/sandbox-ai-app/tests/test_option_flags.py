@@ -66,8 +66,11 @@ def test_off_by_default_on_shows_them_and_it_applies_at_once(window, qapp, langu
 
         start, inspector = look()
         assert start == [] and inspector == [], "off: the fields' names alone"
-        names = [w.text() for w in board.inspector_holder.findChildren(QtWidgets.QLabel)]
-        assert labels.label("--allow-host") in names, (network, board.inspector.rowCount(), names)
+        # (the network's lists are one field of kinds since 2026-11-19: their names are its drop-down's)
+        def kinds_shown():
+            box = board.option_fields["--allow-host"].kind_box
+            return [box.itemText(i) for i in range(box.count())]
+        assert labels.label("--allow-host") in kinds_shown(), (network, board.inspector.rowCount(), kinds_shown())
         assert "--allow-host" not in form.widgets["--allow-host"].toolTip()
         from sandbox_ai_app.settings import SettingsDialog
         dialog = SettingsDialog(window.sai, window)
@@ -81,13 +84,15 @@ def test_off_by_default_on_shows_them_and_it_applies_at_once(window, qapp, langu
         own = window.launch.form  # the Start page's own form follows the setting at once
         assert not own.labels["--allow-host"].flag.isHidden()
         assert "--allow-host" in own.widgets["--allow-host"].toolTip()
-        assert any(text.startswith("--allow-host") for text in inspector), inspector
+        assert inspector, "the other rows show their options too"
+        assert any(text.startswith("--allow-host") for text in kinds_shown()), kinds_shown()
         assert "--allow-host" in form.widgets["--allow-host"].toolTip()
         dialog.fields["show_flags"].setChecked(False)  # off again, live
         qapp.processEvents()
         form.show_flags()
         start, inspector = look()
         assert start == [] and inspector == []
+        assert labels.label("--allow-host") in kinds_shown()
         assert own.labels["--allow-host"].flag.isHidden()
         dialog.close()
         form.deleteLater()

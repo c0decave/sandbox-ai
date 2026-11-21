@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .backend import SandboxAI
-from .credential_tab import CredentialTab
+from .credential_tab import NOT_WHILE_RUNNING, CredentialTab
 from .files import printable, printable_text
 from .i18n import tr
 from .host_choice import on_host
@@ -52,14 +52,19 @@ class IdentitiesBox(CredentialTab):
         self.check_button.setToolTip(tr("sandbox-ai identities check: whether the secrets each identity names are "
                                         "kept (the selected one, or every identity)"))
         self.add_button.clicked.connect(lambda: self.edit(None))
-        self.edit_button.clicked.connect(lambda: self.edit(selected(self.list)))
+        self.edit_button.clicked.connect(lambda: self.edit_selected())
         self.remove_button.clicked.connect(self.remove)
         self.check_button.clicked.connect(lambda _=False: self.check())
-        self.add_buttons(self.add_button, self.edit_button, self.remove_button, self.check_button)
+        # There, greyed out with the reason: an identity cannot be given to a sandbox that runs.
+        self.give_button = QPushButton(tr("Give to a running sandbox…"))
+        widgets.set_enabled(self.give_button, False, why=tr(NOT_WHILE_RUNNING["identities"]))
+        self.add_buttons(self.add_button, self.edit_button, self.remove_button, self.check_button, self.give_button)
         # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Edit… one
         multi_select(self.list)
         delete_key(self.list, self.remove)
         one_only(self.list, [self.edit_button])
+        # a double click on an identity: Edit…
+        self.list.cellDoubleClicked.connect(lambda _row, _column: self.edit_selected())
 
     def set_host(self, host):
         """HOST's identities from now on (the Credentials page's host chooser)."""
@@ -96,6 +101,14 @@ class IdentitiesBox(CredentialTab):
         fill(self.list, [[name, *summary(identity)] for name, identity in sorted(self.known.items())])
         if self.on_change is not None:
             self.on_change()
+
+    def edit_selected(self):
+        """Edit…: the identity selected; with none, the message says to choose one (never the dialog of Add…)."""
+        name = selected(self.list)
+        if not name:
+            self.message.setText(tr("Choose an identity in the list first."))
+            return
+        self.edit(name)
 
     def edit(self, name):
         # The host and its identities as they were when the dialog opened: the answer is saved there, whatever the
@@ -157,7 +170,10 @@ class IdentitiesBox(CredentialTab):
             self.remove_several(names, host)
             return
         name = selected(self.list)
-        if not name or not ask_first(self, "login-remove", tr("Remove identity"), on_host(host, tr(
+        if not name:
+            self.message.setText(tr("Choose an identity in the list first."))
+            return
+        if not ask_first(self, "login-remove", tr("Remove identity"), on_host(host, tr(
                 "Remove the identity {name}? Its secrets stay in sandbox-ai secrets.", name=printable(name))),
                 tr("Remove")):
             return

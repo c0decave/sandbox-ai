@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import os
 
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QMenu, QPushButton, QVBoxLayout, QWidget
 
 from .files import printable, printable_text
-from .i18n import tr
+from .i18n import N_, tr
 from .state import choose_save, current
 from .widgets import background, plain_label, safe_tooltip, show_text, warn
 
@@ -47,6 +47,22 @@ EXAMPLE_TIP = """{"version": 1, "http": [
   {"id": "releases", "host": "api.github.com", "methods": "POST", "path": "/repos/*/*/releases",
    "decision": "ask"}]}"""
 CONFIG_DIR = "~/.config/sandbox-ai"
+# sandbox-ai's own rulesets (sandbox/rulesets, --rules builtin:NAME): opt-in, every rule asks.
+BUILTIN = (
+    ("github-persistence", N_("GitHub writes that outlive a revoked token: keys, webhooks, workflow files, Actions "
+                              "secrets, collaborators")),
+    ("destructive", N_("Destroying shell commands: rm -rf outside /tmp, force pushes, hard resets, DROP TABLE, "
+                       "terraform destroy")),
+    ("mcp-no-credentials", N_("A credential in any argument of an MCP tool call")),
+    ("secret-files", N_("The agent reading .env files, keys and cloud credentials")),
+)
+# --hide: the globs offered (the launcher's hide.SUGGESTED).
+HIDE_SUGGESTED = (".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519", "id_ecdsa", "credentials*.json", ".npmrc",
+                  ".pypirc", ".netrc", ".git-credentials")
+
+
+def hide_placeholder():
+    return tr(".env, *.pem — one glob per line: an empty read-only file is mounted over each workspace file it matches")
 
 
 def placeholder():
@@ -129,7 +145,16 @@ class RulesetTools(QWidget):
                                        "the administrator's policy, the security mode, yours, these files, the "
                                        "project's (sandbox-ai rules show)"))
         self.show_button.clicked.connect(lambda _=False: self.show_all())
+        self.builtin_button = QPushButton(tr("Ready-made…"))
+        self.builtin_button.setToolTip(tr("Add one of sandbox-ai's own rulesets (--rules builtin:NAME): each of its "
+                                          "rules asks, with its reason"))
+        menu = QMenu(self.builtin_button)
+        for name, what in BUILTIN:
+            action = menu.addAction(f"builtin:{name} — {tr(what)}")
+            action.triggered.connect(lambda _=False, n=name: self.add_builtin(n))
+        self.builtin_button.setMenu(menu)
         row.addWidget(self.new_button)
+        row.addWidget(self.builtin_button)
         row.addWidget(self.check_button)
         row.addWidget(self.show_button)
         row.addStretch(1)
@@ -138,6 +163,15 @@ class RulesetTools(QWidget):
         self.result.setWordWrap(True)
         self.result.hide()
         layout.addWidget(self.result)
+
+    def add_builtin(self, name):
+        """builtin:NAME added to the field (once)."""
+        value = f"builtin:{name}"
+        if value not in [str(path) for path in self.paths()]:
+            self.add(value)
+        self.show_result(tr("Added {value}: every rule of it asks, with its reason (sandbox-ai rules builtin {name} "
+                            "shows it).", value=value, name=name))
+        return value
 
     def show_result(self, text, role="secondary"):
         self.result.setText(text)
@@ -198,7 +232,7 @@ class RulesetTools(QWidget):
         same for every agent)."""
         lines, ok = [], True
         for path in paths:
-            workspace = inside(path, workspaces)
+            workspace = None if str(path).startswith("builtin:") else inside(path, workspaces)
             if workspace is not None:
                 ok = False
                 lines.append(tr("{path}: inside the workspace {workspace}; the start refuses it (the agent could "
@@ -225,7 +259,8 @@ class RulesetTools(QWidget):
                              "notice-warn")
             return None
         paths, workspaces = list(self.paths()), list(self.workspaces() or [])
-        argv = [token for path in paths for token in ("--rules", os.path.abspath(os.path.expanduser(str(path))))]
+        argv = [token for path in paths for token in (
+            "--rules", str(path) if str(path).startswith("builtin:") else os.path.abspath(os.path.expanduser(str(path))))]
         argv += [token for folder in workspaces[:1] for token in ("--workspace", str(folder))]
         self.show_result(tr("The launcher reads the rulesets…"))
         return background(self.sai.rules_show, self.agent() or "claude", argv, workspaces[0] if workspaces else None,

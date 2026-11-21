@@ -195,11 +195,105 @@ def test_the_inspector_lists_the_agents_models_with_their_versions(page):
     page.inspect(agent)
     combo = page.model_combo
     texts = [combo.itemText(i) for i in range(combo.count())]
-    assert "Opus 5.5 — claude-opus-5-5" in texts and any(t.startswith("Opus 5.5 now") for t in texts)
+    assert "Claude Opus 5.5 — claude-opus-5-5" in texts and any(t.startswith("Claude Opus 5.5 now") for t in texts)
+    # grouped by provider: a heading each, not choosable; typing filters (a completer that matches anywhere)
+    assert "— Anthropic —" in texts and "— Anthropic (aliases) —" in texts
+    heading = combo.model().item(texts.index("— Anthropic —"))
+    assert not heading.isEnabled() and combo.completer() is not None
     combo.setCurrentIndex(combo.findData("claude-opus-5-5"))
     combo.activated.emit(combo.currentIndex())
     assert page.board.first("agent").props["model"] == "claude-opus-5-5"
     assert "--model claude-opus-5-5" in page.preview.toPlainText()
+
+
+def choose(page, combo, data):
+    combo.setCurrentIndex(combo.findData(data))
+    combo.activated.emit(combo.currentIndex())
+
+
+def test_the_effort_follows_the_model_and_a_level_it_does_not_take_is_reset_in_one_undo_step(page):
+    agent = page.board.first("agent")
+    page.inspect(agent)
+    choose(page, page.model_combo, "claude-opus-5-5")
+    page.inspect(page.board.first("agent"))
+    levels = [page.effort_combo.itemData(i) for i in range(page.effort_combo.count())]
+    assert levels == ["", "low", "medium", "high", "xhigh", "max"]
+    assert page.effort_combo.itemText(0) == "the agent's default (medium for this model)"
+    page.effort_combo.setCurrentIndex(page.effort_combo.findData("xhigh"))
+    assert page.board.first("agent").props["effort"] == "xhigh" and "--effort xhigh" in page.preview.toPlainText()
+    page.inspect(page.board.first("agent"))
+    choose(page, page.model_combo, "claude-opus-4-6")  # low, medium, high, max: xhigh goes with the change
+    agent = page.board.first("agent")
+    assert agent.props["model"] == "claude-opus-4-6" and not agent.props.get("effort")
+    assert "--effort" not in page.preview.toPlainText()
+    assert "The effort xhigh was reset: claude-opus-4-6 does not take it" in page.notice.text()
+    page.inspect(agent)
+    assert [page.effort_combo.itemData(i) for i in range(page.effort_combo.count())] == ["", "low", "medium", "high",
+                                                                                         "max"]
+    page.undo.undo()  # one step: the model and the effort back together
+    agent = page.board.first("agent")
+    assert agent.props["model"] == "claude-opus-5-5" and agent.props["effort"] == "xhigh"
+    page.inspect(agent)
+    choose(page, page.model_combo, "claude-haiku-4-5")  # no effort levels at all
+    page.inspect(page.board.first("agent"))
+    assert page.effort_combo.count() == 1 and not page.board.first("agent").props.get("effort")
+
+
+def test_a_model_typed_in_is_kept_with_a_soft_finding(page):
+    agent = page.board.first("agent")
+    page.inspect(agent)
+    page.model_combo.setEditText("claude-experimental-9")
+    page.model_combo.lineEdit().editingFinished.emit()
+    agent = page.board.first("agent")
+    assert agent.props["model"] == "claude-experimental-9" and "--model claude-experimental-9" in \
+        page.preview.toPlainText()
+    found = [p for p in B.problems(page.sai, page.board) if "not in the known list" in p.text]
+    assert [p.level for p in found] == ["warning"]
+    assert found[0].text == ("claude-experimental-9 is not in the known list of Claude Code's models (sandbox-ai "
+                             "models --agent claude): it is passed on as it is")
+    page.inspect(agent)  # every level of the agent for a model it does not list
+    assert [page.effort_combo.itemData(i) for i in range(page.effort_combo.count())] == ["", "low", "medium", "high",
+                                                                                         "xhigh", "max"]
+
+
+def test_the_boards_warning_is_the_launchers(page, capsys):
+    """An effort the table says the model does not take (from a command line or a project file): the Board warns in
+    the launcher's words (in English) and the launcher warns too - neither refuses: the table may lag behind the
+    agent, which lowers or refuses a level itself."""
+    board = B.from_argv(page.sai, "claude", ["--model", "claude-opus-4-6", "--effort", "xhigh"])
+    problems = B.problems(page.sai, board)
+    cloud = page.sai.module("cloud_models")
+    said = cloud.effort_problem("claude", "claude-opus-4-6", "xhigh")
+    assert said in [p.text for p in problems if p.level == "warning"]
+    assert said not in [p.text for p in problems if p.level == "error"]
+    a = page.sai.launcher.parse_args(["claude", "--model", "claude-opus-4-6", "--effort", "xhigh"])
+    capsys.readouterr()
+    page.sai.launcher.check_model_effort(a)
+    assert said in capsys.readouterr().err
+    fine = B.from_argv(page.sai, "claude", ["--model", "claude-opus-4-6", "--effort", "max"])
+    assert not [p for p in B.problems(page.sai, fine) if "effort" in p.text]
+def test_switching_the_agent_drops_an_effort_its_model_does_not_take(page):
+    props = {"agent": "codex", "model": "my-gpt", "effort": "ultra"}
+    B.switch_agent(props, "claude")  # ultra: no level of Claude Code's
+    assert props["model"] == "my-gpt" and "effort" not in props
+    props = {"agent": "hermes", "model": "", "effort": "xhigh"}
+    B.switch_agent(props, "claude")
+    assert props["effort"] == "xhigh"
+    assert B.set_model(props, "claude-sonnet-4-6", page.sai) == "xhigh" and "effort" not in props
+
+
+def test_model_and_effort_round_trip_preset_board_project_file(page, tmp_path):
+    """--model and --effort as a command line (a preset's), on the Board, in .sandbox-ai.json and back."""
+    board = B.from_argv(page.sai, "codex", ["--model", "gpt-6-sol", "--effort", "ultra"], workspaces=[str(tmp_path)])
+    agent = board.first("agent")
+    assert agent.props["model"] == "gpt-6-sol" and agent.props["effort"] == "ultra"
+    argv = B.to_argv(page.sai, board)
+    assert argv[argv.index("--model") + 1] == "gpt-6-sol" and argv[argv.index("--effort") + 1] == "ultra"
+    document, _ = B.project_document(page.sai, board)
+    assert document["agent"] == "codex" and {"gpt-6-sol", "ultra"} <= set(document["options"])
+    again = B.from_project(page.sai, json.loads(json.dumps(document)), tmp_path)
+    assert again.first("agent").props["model"] == "gpt-6-sol" and again.first("agent").props["effort"] == "ultra"
+    assert not [p for p in B.problems(page.sai, again) if p.level == "error" and "effort" in p.text]
 
 
 def test_a_start_that_cannot_be_run_is_a_message_not_an_exception(page, tmp_path):

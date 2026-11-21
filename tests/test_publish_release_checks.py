@@ -46,3 +46,26 @@ def test_files_without_sha256sums_need_allow_unsigned_when_keys_are_listed(dist,
     assert publish.check_files([dist / "sandbox-ai.pyz"], None, True) == [dist / "sandbox-ai.pyz"]
     monkeypatch.setattr(keys, "load", lambda *args, **kwargs: [])
     assert publish.check_files([dist / "sandbox-ai.pyz"], None, False) == [dist / "sandbox-ai.pyz"]
+
+
+def test_the_notes_come_from_a_file_and_a_body_github_refuses_is_refused_first(tmp_path, monkeypatch):
+    """--notes-file: the page is no command-line argument (Linux takes at most 128 KiB); over 125,000 characters
+    GitHub refuses the release, so nothing is asked of it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("publish_release_notes", ROOT / "scripts/publish_release.py")
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+    asked = []
+    monkeypatch.setattr(pr, "Client", lambda token: asked.append(token) or (_ for _ in ()).throw(AssertionError))
+    monkeypatch.setenv("SANDBOX_AI_TOKEN", "t0ken-for-a-test")
+    page = tmp_path / "notes.md"
+    page.write_text("x" * 125_001)
+    asset = tmp_path / "install.sh"
+    asset.write_text("#!/bin/sh\n")
+    with pytest.raises(SystemExit) as refused:
+        pr.main(["--source", "https://github.com/c0decave/sandbox-ai", "--notes-file", str(page), str(asset)])
+    assert "125,001 characters, GitHub takes at most 125,000" in str(refused.value.code) and asked == []
+    with pytest.raises(SystemExit) as refused:
+        pr.main(["--source", "https://github.com/c0decave/sandbox-ai", "--notes", "a", "--notes-file", str(page),
+                 str(asset)])
+    assert "not both" in str(refused.value.code) and asked == []

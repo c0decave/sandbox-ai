@@ -15,8 +15,10 @@ import errno
 import ctypes
 import fcntl
 import functools
+import gzip
 import hashlib
 import heapq
+import inspect
 import ipaddress
 import io
 import itertools
@@ -45,18 +47,58 @@ import tempfile
 import termios
 import threading
 import time
+import unicodedata
 import urllib.parse
+import weakref
 import zlib
 
 LOG_DIR = Path("/sandbox/log")
 VNC_DIR = Path("/sandbox/vnc")
 TMUX_DIR = "/sandbox/tmux"
 ATTACH_SOCKET = f"{TMUX_DIR}/attach.sock"
+# `sandbox-ai shell NAME`: one more shell (or a command) in the sandbox, started by the relay on this socket - inside
+# the same confinement as the agent's tmux windows (shell_relay).
+SHELL_SOCKET = f"{TMUX_DIR}/shell.sock"
+# Where the two relays' sockets really lie (security review SAI-14): RELAY_DIR, a folder below the session's tmux
+# folder that the supervisor makes before Firejail starts. It binds both sockets there itself and hands the listening
+# descriptors to the guard (SealedRelays, take_relays); inside Firejail the folder is mounted read-only
+# (firejail_command). TMUX_DIR itself is writable by every process of the sandbox - the agent runs as the same user -
+# and a socket published there could be unlinked and bound again by any of them: the next `sandbox-ai attach` or
+# `shell` then gave its keys and its command to that process and showed what it sent back. A name in RELAY_DIR
+# cannot be replaced from inside (a read-only mount; the folder is a mount point, so it cannot be renamed or removed
+# either), and a relay that was ended leaves a socket nobody listens on: the client fails, it never reaches another
+# process. ATTACH_SOCKET and SHELL_SOCKET are the places of sandboxes started before 0.1.117 (still running ones).
+RELAY_DIR = f"{TMUX_DIR}/relay"
+RELAY_ATTACH = f"{RELAY_DIR}/attach.sock"
+RELAY_SHELL = f"{RELAY_DIR}/shell.sock"
+RELAY_HANDOFF = f"{RELAY_DIR}/guard.sock"
+RELAY_FDS = (3, 4)           # the guard's descriptors of the two listeners (attach, shell), as its script names them
+RELAY_HANDOFF_SECONDS = 120  # the supervisor waits this long for the guard (Firejail's start), the guard for it
+# Connections served at once by a relay (security review SAI-12): each attach is a thread, a pty and a tmux client,
+# each shell a thread and a command's process group - every process of the sandbox may connect, and all of them count
+# against the run's process limit, which the supervisor and the proxy share. More are refused before anything is
+# allocated for them.
+RELAY_AT_ONCE = {"attach": 16, "shell": 32}
 GUI_CONFIG = Path("/sandbox/session/gui.json")
 SESSION_CONFIG = Path("/sandbox/session/config.json")
 # Display helpers run without any capability or privilege gain.
 DROP_ALL = ["setpriv", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", "--"]
 FILE_RECENT_LIMIT = 4096
+# The same action on the same path again within this many seconds is not logged again (files.jsonl): reads and
+# writes of the same files over and over (a transcript, a database, a test suite's modules) filled 8 GB in 4 days.
+FILE_REPEAT_SECONDS = 30
+# Reads (a file closed unwritten) were 99 % of files.jsonl - every module a test run imports, every file grep or git
+# looks at - and no reader shows them one by one (the timeline shows changes; logs and report count them). By default
+# ("folders") they are summed: one record per folder and FILE_REPEAT_SECONDS with the reads, the files and the first
+# FILE_READ_NAMES names; "files" (defaults file_reads) logs each file's read as before, "off" none.
+FILE_READS = ("folders", "files", "off")
+FILE_READ_NAMES = 5
+FILE_READ_FOLDERS = 4096  # folders summed per window at most; the reads in more are summed below their first two
+FILE_READ_OVERFLOW = 64   # folders (/work/node_modules), in at most this many records; beyond, one without a folder
+FILE_READ_KNOWN = 16384   # names told apart per window, of all folders (the supervisor's memory)
+# Records of reads per window at most: a recursive grep reads every folder of a tree at once (231 records every 30 s
+# for sandbox-ai's own repository); beyond this many the deepest folders are merged into their parents.
+FILE_READ_RECORDS = 32
 INOTIFY_EVENTS = {0x8: "write", 0x10: "read", 0x100: "create", 0x200: "delete", 0x40: "move-from", 0x80: "move-to"}
 
 
@@ -85,6 +127,20 @@ def bind_long(server, path):
         server.bind(os.path.join(links, "d", path.name))
     finally:
         shutil.rmtree(links, ignore_errors=True)
+
+
+def connect_long(client, path):
+    """Connect CLIENT to the socket PATH, also where its name is too long for a socket (bind_long's counterpart):
+    through the directory's descriptor under /proc on Linux."""
+    path = Path(path)
+    if len(os.fsencode(str(path))) <= 100 or not os.path.isdir(PROC_FD):
+        client.connect(str(path))
+        return
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        client.connect(f"{PROC_FD}/{directory}/{path.name}")
+    finally:
+        os.close(directory)
 
 
 def listen_unix(socket_path):
@@ -140,7 +196,35 @@ def read_frames(buffer):
 
 def attach_relay(socket_path, command):
     """Inside the sandbox: run COMMAND (tmux attach) on its own pty per connection."""
-    server = listen_unix(socket_path)
+    return serve_relay(socket_path, relay_terminal, command, at_once=RELAY_AT_ONCE["attach"])
+
+
+def relay_listener(socket_path):
+    """The listening socket of a relay: SOCKET_PATH "fd:N" is the descriptor N the guard inherited from the supervisor
+    (take_relays: the socket lies where no process of the sandbox can replace it), else a path it is bound to here."""
+    found = re.fullmatch(r"fd:([0-9]{1,6})", str(socket_path))
+    if not found:
+        return listen_unix(socket_path)
+    fd = int(found.group(1))
+    if not stat.S_ISSOCK(os.fstat(fd).st_mode):
+        raise OSError(errno.ENOTSOCK, f"descriptor {fd} is no socket")
+    os.set_inheritable(fd, False)  # never a command's (a tmux client, a shell): only this relay accepts on it
+    return socket.socket(fileno=fd)
+
+
+def serve_relay(socket_path, handler, *args, at_once=None):
+    """Accept connections on SOCKET_PATH (relay_listener) for ever: HANDLER(connection, *ARGS) in a thread of its own
+    per connection, AT_ONCE of them at most (None: no limit) - one more is closed at once, before a thread, a pty or
+    a process is made for it."""
+    server = relay_listener(socket_path)
+    slots = threading.BoundedSemaphore(at_once) if at_once else None
+
+    def serve(connection):
+        try:
+            handler(connection, *args)
+        finally:
+            if slots is not None:
+                slots.release()
     while True:
         try:
             connection, _ = server.accept()
@@ -148,11 +232,155 @@ def attach_relay(socket_path, command):
             if accept_transient(exc):
                 continue
             raise
+        if slots is not None and not slots.acquire(blocking=False):
+            connection.close()  # too many at once: this one is refused (the client sees the relay close)
+            continue
         try:
-            threading.Thread(target=relay_terminal, args=(connection, command), daemon=True).start()
+            threading.Thread(target=serve, args=(connection,), daemon=True).start()
         except RuntimeError:  # no thread to be had (the sandbox's process limit): this attachment only
+            if slots is not None:
+                slots.release()
             connection.close()
             time.sleep(0.1)
+
+
+class SealedRelays:
+    """The supervisor's side of the terminals' relays (RELAY_DIR above): the two listening sockets, bound here before
+    Firejail starts, and their handing over to the guard - once, to the first process of the sandbox that asks
+    (the guard: nothing of the agent runs before it has them). Published under their names only then, so a client
+    that waits for the socket file (sessions.wait_ready) finds it when the session is about to start, not before."""
+    NAMES = ("attach", "shell")
+
+    def __init__(self, directory=RELAY_DIR, sandboxed=None):
+        self.directory = Path(directory)
+        self.sandboxed = os.getpid() == 1 if sandboxed is None else sandboxed
+        self.listeners, self.handoff, self.handed = {}, None, threading.Event()
+        try:
+            os.mkdir(self.directory, 0o700)
+        except FileExistsError:  # (a start's folder is new: only what a supervisor before left would be here)
+            info = os.lstat(self.directory)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise OSError(errno.EEXIST, f"{self.directory} is there and is no folder of the sandbox's own") from None
+            for entry in os.scandir(self.directory):
+                if entry.is_dir(follow_symlinks=False):
+                    raise OSError(errno.EEXIST, f"{self.directory} holds a folder ({entry.name})") from None
+                os.unlink(entry.path)
+        os.chmod(self.directory, 0o700)
+        try:
+            for name in self.NAMES:
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.listeners[name] = listener
+                if len(str(self.staging(name))) <= 100:
+                    listener.bind(str(self.staging(name)))
+                else:
+                    bind_long(listener, self.staging(name))
+                os.chmod(self.staging(name), 0o600)
+                listener.listen(16)
+            self.handoff = listen_unix(str(self.handoff_path))
+            os.chmod(self.handoff_path, 0o600)
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def handoff_path(self):
+        return self.directory / Path(RELAY_HANDOFF).name
+
+    def staging(self, name):
+        return self.directory / f".{name}.sock.new"
+
+    def path(self, name):
+        return self.directory / f"{name}.sock"
+
+    def refused(self, connection):
+        """Why the peer of CONNECTION does not get the listeners, or None: another user, or (where this supervisor
+        is the first process of the sandbox's PID namespace) a process that does not show in it."""
+        try:
+            pid, uid, _ = Attribution.peer(connection)
+        except (OSError, struct.error):
+            return "its peer cannot be told"
+        if uid != os.getuid():
+            return f"user {uid} is not the sandbox's"
+        if self.sandboxed and pid <= 0:
+            return "its peer is no process of this sandbox"
+        return None
+
+    def hand_over(self, connection):
+        """The two listeners to CONNECTION's peer (SCM_RIGHTS), their names published first; then they are the
+        guard's alone (serve closes this side's copies)."""
+        for name in self.NAMES:
+            os.replace(self.staging(name), self.path(name))
+        socket.send_fds(connection, [b"relays"], [self.listeners[name].fileno() for name in self.NAMES])
+        self.handed.set()
+
+    def serve(self, stop=None, timeout=RELAY_HANDOFF_SECONDS, clock=time.monotonic):
+        """Hand the listeners over once (hand_over), to the first peer not refused, within TIMEOUT seconds or until
+        STOP is set; then everything of this side is closed. True when they were handed over."""
+        deadline = clock() + timeout
+        try:
+            self.handoff.settimeout(0.5)
+            while not self.handed.is_set() and clock() < deadline and not (stop is not None and stop.is_set()):
+                try:
+                    connection, _ = self.handoff.accept()
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    if accept_transient(exc):
+                        continue
+                    break
+                with connection:
+                    refused = self.refused(connection)
+                    if refused:
+                        print(f"agent-sandbox: the terminal relays' sockets were asked for and not given ({refused})",
+                              file=sys.stderr)
+                        continue
+                    try:
+                        connection.settimeout(10)
+                        self.hand_over(connection)
+                    except OSError as exc:
+                        print(f"agent-sandbox: the terminal relays' sockets could not be handed to the guard ({exc})",
+                              file=sys.stderr)
+                        break
+        finally:
+            self.close()
+        return self.handed.is_set()
+
+    def close(self):
+        handoff, self.handoff = self.handoff, None
+        listeners, self.listeners = self.listeners, {}
+        for listener in (*listeners.values(), handoff):
+            if listener is not None:
+                with contextlib.suppress(OSError):
+                    listener.close()
+        with contextlib.suppress(OSError):
+            os.unlink(self.handoff_path)
+        if not self.handed.is_set():  # never published: no name is left that looks like a relay's
+            for name in self.NAMES:
+                with contextlib.suppress(OSError):
+                    os.unlink(self.staging(name))
+
+
+def take_relays(handoff=RELAY_HANDOFF, timeout=RELAY_HANDOFF_SECONDS, targets=RELAY_FDS):
+    """The guard, inside Firejail and before anything of the agent runs: the relays' two listening sockets from the
+    supervisor (SealedRelays.serve), as this process's descriptors TARGETS (attach, shell), inherited by what it
+    executes next (tmux_command's script, which gives each relay its own and closes them for everything else)."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(timeout)
+        connect_long(client, handoff)
+        message, fds, _, _ = socket.recv_fds(client, 64, len(targets) + 1)
+    try:
+        if message != b"relays" or len(fds) != len(targets) or \
+                not all(stat.S_ISSOCK(os.fstat(fd).st_mode) for fd in fds):
+            raise OSError(errno.EPROTO, "the supervisor did not hand over the two relay sockets")
+        high = [fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, max(targets) + 16) for fd in fds]
+    finally:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    for fd, target in zip(high, targets):
+        os.dup2(fd, target, inheritable=True)
+        os.close(fd)
+    return tuple(targets)
 
 
 # --- the terminal's output: whole frames ---------------------------------------------------------------------------
@@ -307,7 +535,7 @@ def relay_terminal(connection, command):
             os.write(master, payload)
         while True:
             # Output waits for the end of its burst; keys and resizes never wait.
-            ready, _, _ = select.select([connection, master], [], [], bursts.due())
+            ready = wait_ready([connection, master], (), bursts.due())[0]  # (descriptors of any number)
             if master in ready:
                 try:
                     data = os.read(master, 65536)
@@ -341,6 +569,309 @@ def relay_terminal(connection, command):
         if child.poll() is None:
             child.send_signal(signal.SIGHUP)
         child.wait()
+
+
+# --- the sandbox's output on the human's terminal (security review SAI-08) -------------------------------------------
+#
+# `sandbox-ai attach` and `sandbox-ai shell` write what the sandbox sends to the terminal of the human, whose parser
+# then acts on it: the namespaces do not isolate that parser. A terminal answers some sequences with text of its
+# own, sent back as if typed (to the sandbox, while attached): its clipboard (OSC 52 "?"), its window's title (CSI 21
+# t), its font and settings (OSC 50, DECRQSS, XTGETTCAP). Others reach beyond the screen: a string to the printer, a
+# notification, a file "download" (OSC 1337), the working directory a new tab opens in (OSC 7), a hyperlink whose
+# target is not what it shows (OSC 8), a moved or resized window. And DCS, APC, PM and SOS strings are parsers of
+# their own (Sixel, Kitty graphics, tmux passthrough) with a history of faults. TerminalFilter stands between the
+# two, on the side of the human: it parses the stream as a terminal would and passes on
+#
+# - text (valid UTF-8; never a C1 control character, raw or encoded), the usual C0 controls;
+# - the cursor, colour, erase, scroll, mode and charset sequences an interface draws with (CSI and ESC sequences,
+#   bounded, of a known shape);
+# - colours set or reset (OSC 4, 10-12, 104, 110-112) and, unless "strict", a clipboard text SET (OSC 52: your
+#   terminal - or the desktop app, which asks - decides whether a program may; read never);
+# - unless "strict": the queries whose answer is numbers or the terminal's own name and version (the cursor's
+#   position, device attributes, a mode's state, the window's size, a colour) - interfaces wait for them (crossterm
+#   ends when the cursor's position does not come), and nothing of the human's is in them;
+#
+# and drops everything else: every other OSC, every DCS, APC, PM and SOS string to its end, the clipboard's and the
+# title's query, the answerback (ENQ), printer and window operations, sequences too long, malformed or cut off.
+# What is dropped never reaches the terminal, so it is in no state the stream left it in.
+#
+# SANDBOX_AI_TERMINAL_FILTER on the host chooses: unset or "on" (above), "strict" (no query at all, no clipboard), or
+# "off" (the bytes as they come: only for a terminal you trust with them). Output that goes to a file or a pipe is
+# never changed (sandbox-ai shell NAME -- cat FILE > COPY): only a terminal is a parser.
+
+TERMINAL_FILTER_ENV = "SANDBOX_AI_TERMINAL_FILTER"
+TERMINAL_FILTERS = ("on", "strict", "off")
+FILTER_CSI_LIMIT = 256       # bytes of one CSI sequence (parameters and all)
+FILTER_OSC_LIMIT = 1 << 20   # bytes of one OSC string that may pass (a clipboard text as base64)
+# Text: runs of the C0 controls a screen needs (BEL BS HT LF VT FF CR SO SI), printable ASCII, DEL and well-formed
+# UTF-8 - but never U+0080-U+009F (C2 80-9F: the C1 controls, which some terminals take as CSI, OSC, DCS ... too).
+FILTER_TEXT = re.compile(rb"(?:[\x07-\x0f\x20-\x7f]|\xc2[\xa0-\xbf]|[\xc3-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]"
+                         rb"|[\xe1-\xec\xee\xef][\x80-\xbf]{2}|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf]{2}"
+                         rb"|[\xf1-\xf3][\x80-\xbf]{3}|\xf4[\x80-\x8f][\x80-\xbf]{2})+")
+FILTER_CSI = re.compile(rb"\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])")
+FILTER_CSI_OPEN = re.compile(rb"\x1b\[[\x30-\x3f]*[\x20-\x2f]*")
+FILTER_CSI_SKIP = re.compile(rb"[\x20-\x3f]*")
+FILTER_CSI_PARAMS = re.compile(rb"([<=>?]?)([0-9;:]*)")
+FILTER_ESC = re.compile(rb"\x1b([\x20-\x2f]+)([\x30-\x7e])")
+FILTER_ESC_OPEN = re.compile(rb"\x1b[\x20-\x2f]+")
+FILTER_STRING_END = re.compile(rb"[\x07\x18\x1a\x1b]")
+FILTER_OSC_TEXT = re.compile(rb"[\x20-\x7e]*")
+FILTER_CLIPBOARD = re.compile(rb"[a-z0-7]{0,16};[A-Za-z0-9+/=]*")
+# ESC with one intermediate: a character set's designation (ESC ( B ...) and the DEC line and screen tests (ESC # 8).
+# Never ESC SP (8-bit controls on: S8C1T) nor ESC % (leave UTF-8: raw C1 bytes would be controls again).
+FILTER_ESC_INTERMEDIATES = b"()*+-./#"
+# ESC and one byte, what an interface draws with: save and restore the cursor (7, 8), the keypad's modes (=, >), index,
+# next line, tab set, reverse index (D, E, H, M), single shifts (N, O) and the full reset (c: `tput reset`).
+FILTER_ESC_FINALS = b"78=>DEHMNOc"
+# CSI with intermediates, as (intermediates + final): cursor style, soft reset, conformance level, the rectangle
+# operations, the SGR and colour stacks, columns and shifts. Everything else of that shape is a report or unknown.
+FILTER_CSI_INTERMEDIATE = frozenset({b" q", b'"q', b"!p", b'"p', b"$r", b"$t", b"$v", b"$x", b"$z", b"${", b"$}",
+                                     b"$~", b"$|", b"*x", b"*|", b" @", b" A", b"'}", b"'~", b"#{", b"#}", b"#p",
+                                     b"#q", b"#P", b"#Q"})
+FILTER_WINDOW_STACK = (22, 23)                      # CSI Ps t: the title's stack (nothing is reported)
+FILTER_WINDOW_SIZES = (11, 13, 14, 15, 16, 18, 19)  # ... reports of numbers only: state, position, sizes
+FILTER_OSC_COLOURS = (4, 10, 11, 12)                # set (a query: "?" where the colour goes)
+FILTER_OSC_RESETS = (104, 110, 111, 112)
+
+
+class TerminalFilter:
+    """What of the sandbox's output reaches the human's terminal (above): feed(DATA) is what to write for it. STRICT:
+    no query passes and no clipboard text. `dropped` counts what was held back, by kind (for a note and the tests)."""
+
+    def __init__(self, strict=False):
+        self.strict = strict
+        self.pending = b""           # the start of a sequence or character whose end has not come
+        self.string = None           # "osc" (kept in `held`) or "drop" (DCS, APC, PM, SOS) while a string is open
+        self.held = bytearray()
+        self.escape = False          # the last byte of a string so far was ESC (ESC \ ends it)
+        self.skipping = False        # inside a CSI sequence too long to keep
+        self.dropped = collections.Counter()
+
+    def csi(self, params, intermediates, final):
+        """"pass", "query" (a report of numbers or the terminal's own name: passes unless strict) or a reason it is
+        dropped, for a CSI sequence of this shape."""
+        shape = FILTER_CSI_PARAMS.fullmatch(params)
+        if shape is None:
+            return "malformed"
+        prefix, numbers = shape.groups()
+        if intermediates:
+            if intermediates == b"$" and final == b"p" and prefix in (b"", b"?"):
+                return "query"  # DECRQM: a mode's state
+            return "pass" if not prefix and intermediates + final in FILTER_CSI_INTERMEDIATE else "report"
+        if prefix == b"?":
+            return "pass" if final in b"hlJKrs" else "query" if final in b"nu" else "report"
+        if prefix == b">":
+            return "pass" if final in b"mu" else "query" if final in b"cq" else "report"
+        if prefix:
+            return "pass" if final == b"u" else "report"
+        if final in b"cn":
+            return "query"  # device attributes, the device's status, the cursor's position
+        if final in b"xiy":
+            return "report"  # DECREQTPARM, the printer (media copy), DECTST
+        if final == b"t":
+            first = numbers.split(b";", 1)[0].split(b":", 1)[0]
+            operation = int(first) if first.isdigit() and len(first) <= 3 else 0
+            return "pass" if operation in FILTER_WINDOW_STACK else "query" if operation in FILTER_WINDOW_SIZES \
+                else "window"
+        return "pass"
+
+    def osc(self, text):
+        """"pass", "query" or a reason it is dropped, for the OSC string TEXT (without its introducer and end)."""
+        if FILTER_OSC_TEXT.fullmatch(text) is None:
+            return "osc"
+        code, _, rest = text.partition(b";")
+        number = int(code) if code.isdigit() and len(code) <= 5 else -1
+        if number == 52:
+            if rest.endswith(b";?") or rest == b"?":
+                return "clipboard read"
+            return "clipboard" if self.strict or FILTER_CLIPBOARD.fullmatch(rest) is None else "pass"
+        if number in FILTER_OSC_COLOURS:
+            return "osc" if not rest else "query" if b"?" in rest else "pass"
+        if number in FILTER_OSC_RESETS:
+            return "pass" if b"?" not in rest else "osc"
+        return "osc"
+
+    def verdict(self, verdict):
+        """Whether a sequence with this VERDICT passes; counted when not."""
+        if verdict == "pass" or verdict == "query" and not self.strict:
+            return True
+        self.dropped[verdict] += 1
+        return False
+
+    def feed(self, data):
+        data = self.pending + bytes(data)
+        self.pending = b""
+        out, position, end = [], 0, len(data)
+        while position < end:
+            if self.string is not None:
+                position = self.in_string(data, position, out)
+                continue
+            if self.skipping:  # the rest of a CSI sequence too long: to its final byte
+                position = FILTER_CSI_SKIP.match(data, position).end()
+                if position < end:
+                    self.skipping = False
+                    position += 0x40 <= data[position] <= 0x7e
+                continue
+            text = FILTER_TEXT.match(data, position)
+            if text is not None:
+                out.append(text.group())
+                position = text.end()
+                continue
+            byte = data[position]
+            if byte == 0x1b:
+                position = self.escape_at(data, position, out)
+                if position is None:
+                    break  # (its end has not come: kept in pending)
+            elif byte >= 0xc2 and self.cut_character(data, position):
+                self.pending = data[position:]
+                break
+            else:
+                # A control that is not passed on (ENQ: the answerback; NUL), a C1 control (encoded: both its bytes),
+                # a byte that is no UTF-8.
+                encoded_c1 = byte == 0xc2 and position + 1 < end and 0x80 <= data[position + 1] <= 0x9f
+                self.dropped["control" if byte < 0x20 or encoded_c1 else "bytes"] += 1
+                position += 2 if encoded_c1 else 1
+        return b"".join(out)
+
+    @staticmethod
+    def cut_character(data, position):
+        """The bytes from POSITION to DATA's end are the start of one UTF-8 character whose rest has not come."""
+        lead = data[position]
+        need = 2 if lead < 0xe0 else 3 if lead < 0xf0 else 4 if lead < 0xf5 else 0
+        return len(data) - position < need and all(0x80 <= byte <= 0xbf for byte in data[position + 1:])
+
+    def escape_at(self, data, position, out):
+        """The escape sequence at POSITION: passed on (to OUT) or dropped; where the stream goes on, or None when the
+        sequence is not complete yet (kept in pending)."""
+        end = len(data)
+        if position + 1 >= end:
+            self.pending = data[position:]
+            return None
+        kind = data[position + 1]
+        if kind == 0x5b:  # CSI
+            found = FILTER_CSI.match(data, position)
+            if found is not None:
+                if found.end() - position > FILTER_CSI_LIMIT:
+                    self.dropped["too long"] += 1
+                elif self.verdict(self.csi(*found.groups())):
+                    out.append(found.group())
+                return found.end()
+            reached = FILTER_CSI_OPEN.match(data, position).end()
+            if reached < end:  # a byte no CSI sequence holds: the sequence is dropped, the byte is read on its own
+                self.dropped["malformed"] += 1
+                return reached
+            if end - position > FILTER_CSI_LIMIT:
+                self.dropped["too long"] += 1
+                self.skipping = True
+                return end
+            self.pending = data[position:]
+            return None
+        if kind == 0x5d:  # OSC: kept to its end, then judged
+            self.string, self.held, self.escape = "osc", bytearray(), False
+            return position + 2
+        if kind in b"PX^_k":  # DCS, SOS, PM, APC and screen's and tmux's title (ESC k): dropped to their end
+            self.string, self.escape = "drop", False
+            self.dropped["string"] += 1
+            return position + 2
+        if 0x20 <= kind <= 0x2f:
+            found = FILTER_ESC.match(data, position)
+            if found is not None:
+                if len(found.group(1)) == 1 and found.group(1) in FILTER_ESC_INTERMEDIATES:
+                    out.append(found.group())
+                else:
+                    self.dropped["escape"] += 1
+                return found.end()
+            reached = FILTER_ESC_OPEN.match(data, position).end()
+            if reached < end or end - position > 8:
+                self.dropped["malformed"] += 1
+                return reached
+            self.pending = data[position:]
+            return None
+        if 0x30 <= kind <= 0x7e:
+            if kind in FILTER_ESC_FINALS:
+                out.append(data[position:position + 2])
+            else:  # DECID (a report), a string's end without a string, locking shifts, whatever else there is
+                self.dropped["escape"] += 1
+            return position + 2
+        self.dropped["malformed"] += 1  # ESC and a control, or a byte that is none of a sequence: the ESC is dropped
+        return position + 1
+
+    def in_string(self, data, position, out):
+        """Inside an OSC, DCS, APC, PM or SOS string: on to its end (BEL for an OSC, ESC \\ for all) or to what ends
+        it without one (CAN, SUB, another escape sequence). An OSC complete and allowed is passed on then."""
+        end = len(data)
+        if self.escape:
+            self.escape = False
+            if data[position] == 0x5c:
+                self.string_ended(out, True)
+                return position + 1
+            self.string_ended(out, False)
+            self.pending = b""
+            return self.resume_escape(data, position, out)
+        found = FILTER_STRING_END.search(data, position)
+        stop = found.start() if found is not None else end
+        if self.string == "osc" and self.held is not None:
+            if len(self.held) + stop - position > FILTER_OSC_LIMIT:
+                self.held = None  # too long to pass: dropped to its end
+                self.dropped["too long"] += 1
+            else:
+                self.held += data[position:stop]
+        if found is None:
+            return end
+        byte = data[stop]
+        if byte == 0x1b:
+            self.escape = True
+        elif byte == 0x07 and self.string == "drop":
+            pass  # (BEL ends an OSC only)
+        else:
+            self.string_ended(out, byte == 0x07)
+        return stop + 1
+
+    def resume_escape(self, data, position, out):
+        """An ESC inside a string was followed by something else than a backslash: the string is over, and that ESC
+        with what follows (DATA from POSITION) is a sequence of its own."""
+        rest = b"\x1b" + data[position:]
+        reached = self.escape_at(rest, 0, out)
+        if reached is None:
+            return len(data)  # (pending holds the ESC and what came of the sequence)
+        return position + reached - 1
+
+    def string_ended(self, out, terminated):
+        kind, held = self.string, self.held
+        self.string, self.held = None, bytearray()
+        if kind != "osc":
+            return
+        if held is None:
+            return
+        if not terminated:
+            self.dropped["malformed"] += 1
+        elif self.verdict(self.osc(bytes(held))):
+            out.append(b"\x1b]" + bytes(held) + b"\x1b\\")
+
+
+def terminal_filter(fd, environ=None):
+    """The filter of what the sandbox writes to the descriptor FD of the human's side (TerminalFilter), or None: FD is
+    no terminal (a file or a pipe takes the bytes as they are), or SANDBOX_AI_TERMINAL_FILTER is off. A value that is
+    none of TERMINAL_FILTERS counts as "strict": a mistyped choice never opens more than was meant."""
+    choice = ((os.environ if environ is None else environ).get(TERMINAL_FILTER_ENV) or "on").strip().lower()
+    if choice == "off":
+        return None
+    try:
+        if not os.isatty(fd):
+            return None
+    except (OSError, ValueError, TypeError):
+        return None
+    return TerminalFilter(strict=choice != "on")
+
+
+def filter_note(filters):
+    """One line (or None) for the human after an attach or a shell: the sandbox asked their terminal for its
+    clipboard, and how often - never answered, but worth knowing."""
+    asked = sum(screen.dropped.get("clipboard read", 0) for screen in filters if screen is not None)
+    if not asked:
+        return None
+    return (f"agent-sandbox: the sandbox asked your terminal for the clipboard's text {asked} time"
+            f"{'s' if asked != 1 else ''} (OSC 52); the request was not passed on")
 
 
 def attach_frame(kind, payload):
@@ -380,7 +911,8 @@ def attach_client(socket_path, stdin=0, stdout=1, said=None):
     """The client of an attach: a dumb byte pipe. Nothing from the sandbox is executed. It runs on the host (Linux),
     or, on macOS, in the container (--internal-attach-client through `podman exec`: the socket is in podman
     machine's VM, and a Unix socket does not cross its shared folders). SAID (a bytearray): gets the last
-    ATTACH_SAID bytes received (tmux's last words: "no sessions" when the session it attaches to is gone)."""
+    ATTACH_SAID bytes received (tmux's last words: "no sessions" when the session it attaches to is gone). What is
+    written to a terminal passes TerminalFilter first (terminal_filter)."""
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         connect_relay(client, socket_path)
@@ -391,7 +923,13 @@ def attach_client(socket_path, stdin=0, stdout=1, said=None):
     def send_size():
         size = os.get_terminal_size(stdin) if interactive else os.terminal_size((80, 24))
         client.sendall(attach_frame(b"r", struct.pack("!HH", size.lines, size.columns)))
-    send_size()
+    try:
+        send_size()
+        gone = False
+    except (ConnectionResetError, BrokenPipeError):
+        # The relay said its last words and went (the agent ended at once) before the window size: what it said is
+        # still shown and kept (SAID: tmux's "no sessions"), nothing is sent.
+        gone = True
     # The SIGWINCH handler only wakes the loop: a frame sent from the handler could land
     # inside a partially sent input frame and corrupt the stream.
     wake_read, wake_write = os.pipe()
@@ -406,7 +944,8 @@ def attach_client(socket_path, stdin=0, stdout=1, said=None):
     if interactive:
         import tty
         tty.setraw(stdin)
-    sources = [stdin, client, wake_read]
+    sources = [client] if gone else [stdin, client, wake_read]
+    screen = terminal_filter(stdout)
     try:
         while True:
             ready, _, _ = select.select(sources, [], [])
@@ -426,7 +965,7 @@ def attach_client(socket_path, stdin=0, stdout=1, said=None):
                 if said is not None:
                     said += data
                     del said[:-ATTACH_SAID]
-                view = memoryview(data)
+                view = memoryview(screen.feed(data) if screen is not None else data)
                 while view:
                     view = view[os.write(stdout, view):]
     except (ConnectionResetError, BrokenPipeError):
@@ -440,8 +979,369 @@ def attach_client(socket_path, stdin=0, stdout=1, said=None):
             termios.tcflush(stdin, termios.TCIFLUSH)
         os.close(wake_read)
         os.close(wake_write)
+        note = filter_note([screen])
+        if note:
+            print(note, file=sys.stderr)
         client.close()
     return 0
+
+
+# --- sandbox-ai shell --------------------------------------------------------------------------------------------
+#
+# One more shell of the human (or one command) in a running sandbox. Its relay is started beside the attach relay, by
+# the guard, inside Firejail (tmux_command), so what it starts has exactly what the agent's own "shell" window has:
+# the same user, firewall, connection proxy and CA, environment, capabilities (none), seccomp filter and mounts -
+# nothing of the host, no secret the agent does not have. The host's side is a client of frames, as attach_client:
+# only bytes and one exit status cross; nothing from the sandbox is executed there.
+#
+# Frames (attach_frame's form), client to relay: b"c" the request (JSON {"argv", "tty", "term"}) first, b"r" the
+# window size, b"d" input, b"e" the end of the input. Relay to client: b"o" output, b"E" error output (without a
+# tty), b"x" the exit status (!i), last.
+
+SHELL_FRAME_LIMIT = 1 << 20  # bytes of one frame either way; a larger one ends the connection
+SHELL_REQUEST_LIMIT = 256 << 10  # bytes of the request (the command line)
+SHELL_TERM = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}")
+SHELL_KILL_GRACE = 5  # seconds the shell's processes have after a SIGHUP (the client went) before SIGKILL
+SHELL_CWD = "/work"
+SHELL_NO_STATUS = 255  # the client's exit status when the relay ended without one (as ssh's for a lost connection)
+# Bytes of input the relay holds for a command that does not read it yet (and the client for a relay that does not
+# take it yet): beyond that the relay reads no more from the client, whose input then waits on its side. Without the
+# bound, `yes | sandbox-ai shell NAME -n -- sleep 60` grew the relay inside the sandbox until its memory limit.
+SHELL_PENDING_LIMIT = 1 << 20
+
+
+def hung_up(connection):
+    """The other end of CONNECTION (a socket this side does not read now) has closed it."""
+    poller = select.poll()
+    poller.register(connection, getattr(select, "POLLRDHUP", 0x2000) | select.POLLHUP | select.POLLERR)
+    try:
+        return any(events & (getattr(select, "POLLRDHUP", 0x2000) | select.POLLHUP | select.POLLERR)
+                   for _, events in poller.poll(0))
+    except OSError:
+        return True
+
+
+def frames_within(buffer, limit=SHELL_FRAME_LIMIT):
+    """The complete frames of BUFFER and its remainder (read_frames); a ValueError when the next frame says it is
+    larger than LIMIT: nothing is buffered without bound for a peer that announces gigabytes."""
+    frames, rest = read_frames(buffer)
+    if len(rest) >= 5 and struct.unpack("!I", rest[1:5])[0] > limit:
+        raise ValueError(f"a frame larger than {limit} bytes")
+    return frames, rest
+
+
+def shell_request(payload):
+    """(argv, tty, term) of a shell request's JSON PAYLOAD, checked (a ValueError otherwise). ARGV: [] for a shell;
+    TERM: the client's terminal type when it is a plain name, else None."""
+    if len(payload) > SHELL_REQUEST_LIMIT:
+        raise ValueError("the request is too large")
+    data = json.loads(payload.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("the request is no JSON object")
+    argv = data.get("argv") if data.get("argv") is not None else []
+    if not isinstance(argv, list) or not all(isinstance(word, str) and "\0" not in word for word in argv):
+        raise ValueError("argv is a list of strings without NUL")
+    if not isinstance(data.get("tty"), bool):
+        raise ValueError("tty is true or false")
+    term = data.get("term")
+    return argv, data["tty"], term if isinstance(term, str) and SHELL_TERM.fullmatch(term) else None
+
+
+def read_available(fd):
+    """Bytes read from FD; b"" when none are there now; None at its end (EIO: a pty whose other side closed)."""
+    try:
+        data = os.read(fd, 65536)
+    except BlockingIOError:
+        return b""
+    except OSError:
+        return None
+    return data or None
+
+
+def end_process_group(child, grace=SHELL_KILL_GRACE):
+    """CHILD (a session leader) and what it started in its process group: SIGHUP, then SIGKILL after GRACE seconds."""
+    for sent in (signal.SIGHUP, signal.SIGKILL):
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, sent)
+        try:
+            child.wait(grace if sent == signal.SIGHUP else None)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def relay_shell(connection, cwd=SHELL_CWD):
+    """Inside the sandbox: the one shell request of CONNECTION - its command (bash without one) on a pty of its own,
+    or on pipes without a tty - in CWD with this relay's environment (the agent's: the relay runs where the agent's
+    tmux windows do) until it ends; then its exit status. The client gone, the command's process group ends."""
+    connection.settimeout(10)
+    frames, buffer = [], b""
+    try:
+        while not frames:
+            chunk = connection.recv(65536)
+            if not chunk:
+                raise ValueError("no request")
+            frames, buffer = frames_within(buffer + chunk)
+        if frames[0][0] != b"c":
+            raise ValueError("the first frame is not the request")
+        argv, tty, term = shell_request(frames[0][1])
+    except (OSError, ValueError, UnicodeDecodeError):
+        connection.close()
+        return
+    connection.settimeout(None)
+    frames = frames[1:]
+
+    def send(kind, payload):
+        connection.sendall(attach_frame(kind, payload))
+
+    env = dict(os.environ)
+    if tty and term:
+        env["TERM"] = term
+    command = argv or ["bash"]
+    master = slave = None
+    try:
+        if tty:
+            master, slave = os.openpty()
+            # Session leader with the pty as controlling terminal, so SIGWINCH and Ctrl-C arrive.
+            child = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                                     cwd=cwd if os.path.isdir(cwd) else None, env=env,
+                                     preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
+        else:
+            child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     start_new_session=True, cwd=cwd if os.path.isdir(cwd) else None, env=env)
+    except OSError as exc:
+        if master is not None:
+            os.close(master)
+        with contextlib.suppress(OSError):
+            said = f"sandbox-ai shell: {command[0]}: {exc.strerror or exc}" + ("\r\n" if tty else "\n")
+            send(b"o" if tty else b"E", said.encode("utf-8", "replace"))
+            send(b"x", struct.pack("!i", 127 if isinstance(exc, FileNotFoundError) else 126))
+        connection.close()
+        return
+    finally:
+        if slave is not None:
+            os.close(slave)
+    if tty:
+        outputs, stdin_fd = {master: b"o"}, master
+    else:
+        outputs = {child.stdout.fileno(): b"o", child.stderr.fileno(): b"E"}
+        stdin_fd = child.stdin.fileno()
+    for fd in {*outputs, stdin_fd}:
+        os.set_blocking(fd, False)
+    pending, state = bytearray(), {"input ended": False}
+
+    def take(frames_):
+        for kind, payload in frames_:
+            if kind == b"r" and tty and len(payload) == 4:
+                rows, columns = struct.unpack("!HH", payload)
+                with contextlib.suppress(OSError):
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+            elif kind == b"d" and not state["input ended"]:
+                pending.extend(payload)
+            elif kind == b"e":
+                state["input ended"] = True
+
+    def pump(fds):
+        for fd in fds:
+            data = read_available(fd)
+            if data is None:
+                del outputs[fd]
+            elif data:
+                send(outputs[fd], data)
+
+    client_gone = False
+    try:
+        take(frames)
+        while True:
+            if not tty and stdin_fd is not None and state["input ended"] and not pending:
+                child.stdin.close()  # the command reads to its end
+                stdin_fd = None
+            writers = [stdin_fd] if pending and stdin_fd is not None else []
+            # Input the command has not read yet is held up to SHELL_PENDING_LIMIT; beyond it the client's waits on
+            # its side (the connection is not read meanwhile, but its end is still seen).
+            taking = len(pending) < SHELL_PENDING_LIMIT or stdin_fd is None
+            if not taking and hung_up(connection):
+                client_gone = True
+                break
+            readable, writable = wait_ready([connection, *outputs] if taking else list(outputs), writers, 0.2)
+            if writable:
+                try:
+                    del pending[:os.write(stdin_fd, pending)]
+                except BlockingIOError:
+                    pass
+                except OSError:  # the command does not read any more (EPIPE)
+                    pending.clear()
+            pump([fd for fd in readable if fd in outputs])
+            if connection in readable:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    client_gone = True
+                    break
+                frames, buffer = frames_within(buffer + chunk)
+                take(frames)
+            if child.poll() is not None:
+                # What it wrote just before it ended; a process it left behind with the same output is not waited for.
+                deadline = time.monotonic() + 2
+                while outputs and time.monotonic() < deadline:
+                    readable = wait_ready(list(outputs), (), 0.05)[0]
+                    if not readable:
+                        break
+                    pump(readable)
+                status = child.returncode
+                send(b"x", struct.pack("!i", status if status >= 0 else 128 - status))
+                break
+    except (OSError, ValueError):
+        client_gone = True
+    finally:
+        if child.poll() is None:
+            if client_gone:
+                end_process_group(child)
+            else:
+                child.wait()
+        for stream in (child.stdin, child.stdout, child.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
+        if master is not None:
+            os.close(master)
+        connection.close()
+
+
+def shell_relay(socket_path, cwd=SHELL_CWD):
+    """--internal-shell-relay: inside the sandbox, beside the attach relay: one shell (relay_shell) per connection."""
+    return serve_relay(socket_path, relay_shell, cwd, at_once=RELAY_AT_ONCE["shell"])
+
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def shell_client(socket_path, argv=(), tty=False, stdin=0, stdout=1, stderr=2, watch=None):
+    """The client of `sandbox-ai shell`: ARGV (a shell without) run by the shell relay at SOCKET_PATH, on a pty there
+    when TTY, else on pipes (output and error output apart, input to its end). A pipe of frames: nothing from the
+    sandbox is executed. Runs on the host (Linux) or in the container (macOS: --internal-shell-client through podman
+    exec). The command's exit status (0-255); SHELL_NO_STATUS when the relay ended without one. WATCH: called every
+    second while it waits, what it returns (a line, or None) said once on STDERR when it changes (a session paused
+    under the shell: its relay is frozen, and the terminal would wait without a word). What the command writes passes
+    TerminalFilter where STDOUT or STDERR is a terminal (terminal_filter); a file or a pipe gets its bytes unchanged."""
+    request = json.dumps({"argv": [str(word) for word in argv], "tty": bool(tty),
+                          "term": os.environ.get("TERM", "")}).encode()
+    if len(request) > SHELL_REQUEST_LIMIT:  # (the relay would close the connection without a word)
+        raise RuntimeError(f"the command line is {len(request)} bytes as the shell's request; a shell takes at most "
+                           f"{SHELL_REQUEST_LIMIT} bytes: give long input on its standard input (sandbox-ai shell "
+                           "NAME -n -- COMMAND < FILE), or put it into a file in the workspace")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connect_relay(client, socket_path)
+    except OSError as exc:
+        client.close()
+        raise RuntimeError(f"Sandbox shell relay not reachable: {socket_path}: {exc}") from None
+    interactive = bool(tty) and os.isatty(stdin)
+    wake_read, wake_write = os.pipe()
+    os.set_blocking(wake_write, False)
+
+    # Frames for the relay wait here and leave as the relay takes them (never a blocking send: a relay that holds
+    # back the input of a command that does not read it must still be read from, or both would wait on each other);
+    # input is read only while less than SHELL_PENDING_LIMIT waits.
+    outgoing = bytearray()
+
+    def send_size():
+        size = os.get_terminal_size(stdin) if interactive else os.terminal_size((80, 24))
+        outgoing.extend(attach_frame(b"r", struct.pack("!HH", size.lines, size.columns)))
+
+    def resized(*_):  # only wakes the loop (attach_client: a frame sent from here could split another)
+        try:
+            os.write(wake_write, b"r")
+        except BlockingIOError:
+            pass
+    saved = previous = None
+    status, buffer = None, b""
+    sources, sending = [stdin, client, wake_read], True
+    screens = {b"o": terminal_filter(stdout), b"E": terminal_filter(stderr)}
+    watched = [None]
+    try:
+        client.sendall(attach_frame(b"c", request))
+        if tty:
+            send_size()
+        if interactive:
+            import tty as tty_module
+            saved = termios.tcgetattr(stdin)
+            previous = signal.signal(signal.SIGWINCH, resized)
+            tty_module.setraw(stdin)
+        while status is None:
+            readers = [fd for fd in sources if fd != stdin or len(outgoing) < SHELL_PENDING_LIMIT]
+            ready, writable, _ = select.select(readers, [client] if outgoing and sending else [], [],
+                                               1.0 if watch is not None else None)
+            if watch is not None:
+                said = watch()
+                if said != watched[0]:
+                    if said:
+                        with contextlib.suppress(OSError):
+                            write_all(stderr, (said + ("\r\n" if interactive else "\n")).encode("utf-8", "replace"))
+                    watched[0] = said
+            try:
+                if writable:
+                    try:
+                        del outgoing[:client.send(outgoing, socket.MSG_DONTWAIT)]
+                    except (BlockingIOError, InterruptedError):
+                        pass
+                if wake_read in ready:
+                    os.read(wake_read, 4096)
+                    if tty:
+                        send_size()
+                if stdin in ready:
+                    data = os.read(stdin, 65536)
+                    if data:
+                        outgoing.extend(attach_frame(b"d", data))
+                    else:
+                        outgoing.extend(attach_frame(b"e", b""))
+                        sources = [client, wake_read]
+            except (BrokenPipeError, ConnectionResetError):
+                # The relay has stopped reading (the command ended): what it sent before is still read, with the
+                # exit status; nothing more is sent.
+                sources, sending = [client], False
+                outgoing.clear()
+                ready = [client]
+            if client in ready:
+                data = client.recv(65536)
+                if not data:
+                    break
+                frames, buffer = frames_within(buffer + data)
+                for kind, payload in frames:
+                    if screens.get(kind) is not None:
+                        payload = screens[kind].feed(payload)
+                    try:
+                        if kind == b"o":
+                            write_all(stdout, payload)
+                        elif kind == b"E":
+                            write_all(stderr, payload)
+                    except BrokenPipeError:
+                        # Our output was closed (| head): the command ends with the connection, as with SIGPIPE.
+                        status = 128 + signal.SIGPIPE
+                        break
+                    if kind == b"x" and len(payload) == 4:
+                        status = struct.unpack("!i", payload)[0]
+    except (ConnectionResetError, BrokenPipeError, ValueError):
+        pass  # the relay went, or sent what is no frame: the end, without a status
+    except KeyboardInterrupt:  # Ctrl-C without a tty: the command ends with the connection
+        status = 128 + signal.SIGINT
+    finally:
+        if saved is not None:
+            termios.tcsetattr(stdin, termios.TCSADRAIN, saved)
+            # Drop terminal answers to queries the sandbox sent just before it closed (attach_client).
+            termios.tcflush(stdin, termios.TCIFLUSH)
+        if previous is not None:
+            signal.signal(signal.SIGWINCH, previous)
+        os.close(wake_read)
+        os.close(wake_write)
+        client.close()
+        note = filter_note(screens.values())
+        if note:
+            with contextlib.suppress(OSError):
+                write_all(stderr, (note + "\n").encode())
+    return SHELL_NO_STATUS if status is None else max(0, min(255, status))
 
 
 def shortened(value, budget=None):
@@ -527,6 +1427,7 @@ MCP_INSTANCE_LIMIT = 16  # server instances (connections) at once
 MCP_EOF_GRACE = 10  # seconds an instance has to exit once its input ended, before it is terminated
 MCP_PENDING_LIMIT = 1000  # requests of one connection the server has not answered yet
 MCP_CONNECT_SECONDS = 5  # how long a relay waits for a running server to take a connection (its backlog full)
+MCP_PROBE_SECONDS = 5  # how long a relay waits for a server's lists (its capabilities: McpConnection.handshake)
 
 
 def relay_server_stderr(stream, out=None):
@@ -557,6 +1458,216 @@ def mounts_changed(mounts):
     return None
 
 
+class McpToolPins:
+    """What a server's tools/list says, pinned: each tool's definition (name, title, description, its input and output
+    schemas, annotations) as canonical JSON (keys sorted, every non-ASCII character escaped: an invisible one shows) and
+    its SHA-256. The run's relay compares a list against the definitions pinned for the project (mcp_pins.py on the
+    host) and asks about a changed or new tool - a "rug pull" of a server that changes what its tools tell the model
+    after it was trusted - and about descriptions the hidden-text checker (lint.py) finds something in."""
+    KEYS = ("name", "title", "description", "inputSchema", "outputSchema", "annotations")
+    SHOWN = 4 << 10  # characters of one definition a question shows (and the pin keeps)
+    LIST_LIMIT = 500  # tools of one list that are compared; beyond: all of them asked about
+    RECORDS = 4 << 20  # bytes of CONTROL_DIR/mcp-tools.jsonl (what the host pins after the run)
+
+    @classmethod
+    def definition(cls, tool):
+        """TOOL's canonical definition (a dict: the keys that tell the model something)."""
+        return json.dumps({key: tool[key] for key in cls.KEYS if key in tool}, sort_keys=True, ensure_ascii=True,
+                          separators=(",", ":"), default=repr)
+
+    @staticmethod
+    def digest(definition):
+        return hashlib.sha256(definition.encode()).hexdigest()
+
+    @staticmethod
+    def strings(value, found=None, depth=0):
+        """Every string in VALUE (keys too): what the model reads of a tool, for the hidden-text checker."""
+        found = [] if found is None else found
+        if depth > 32 or len(found) > 5000:
+            return found
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                found.append(str(key))
+                McpToolPins.strings(item, found, depth + 1)
+        elif isinstance(value, list):
+            for item in value:
+                McpToolPins.strings(item, found, depth + 1)
+        return found
+
+    @staticmethod
+    def lint(config):
+        """The hidden-text checker for the relay (HiddenText), from the launcher's CONFIG ("tools_pin" "lint": the
+        phrasing patterns of lint.py as data), or None."""
+        if not isinstance(config, dict):
+            return None
+        try:
+            return HiddenText(config.get("patterns") or [], config.get("reasons") or {})
+        except (TypeError, ValueError, re.error):
+            return None
+
+    @classmethod
+    def findings(cls, lint, tool):
+        """The checker's findings in TOOL ([] without a checker)."""
+        if lint is None:
+            return []
+        name = tool.get("name") if isinstance(tool.get("name"), str) else "?"
+        found = []
+        for text in cls.strings({key: tool[key] for key in cls.KEYS if key in tool}):
+            found += lint.check_text(text, f"tool {name[:100]}")
+        return found
+
+    @staticmethod
+    def note(server, state, tools, directory=None):
+        """A line of CONTROL_DIR/mcp-tools.jsonl (hidden from the agent): the definitions of SERVER's tools (TOOLS:
+        {name: {"digest", "definition"}}) the host pins after the run (STATE "first": none were pinned for the
+        project) or keeps as what the server listed last (STATE "seen": every list that differs from the one before;
+        sandbox-ai mcp tools NAME --repin pins it). Bounded; never raises."""
+        directory = Path(directory) if directory is not None else CONTROL_DIR
+        with contextlib.suppress(Exception):
+            if not directory.is_dir():
+                return
+            path = directory / "mcp-tools.jsonl"
+            with contextlib.suppress(FileNotFoundError):
+                if path.stat().st_size >= McpToolPins.RECORDS:
+                    return
+            line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "server": server,
+                               "state": state, "tools": tools}) + "\n"
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            with open(fd, "a") as stream:
+                stream.write(line)
+
+
+class HiddenText:
+    """The hidden-text checker of lint.py (the launcher's), as the relay runs it: runtime.py loads no sibling, so the
+    character rules are this copy of lint.kind (tests/test_hidden_text.py holds both to the same findings) and the
+    phrasing patterns come as data from the launcher (lint.pattern_data)."""
+    ZERO_WIDTH = set("\u200b\u2060\u2061\u2062\u2063\u2064\u180e\u115f\u1160\u3164\uffa0\u034f\u17b4\u17b5"
+                     "\u2028\u2029")
+    BIDI_CONTROLS = set("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+    BIDI_MARKS = set("\u200e\u200f\u061c")
+    JOINERS = set("\u200c\u200d")
+    KEYCAP_BASES = set("0123456789#*")
+    HIDDEN_RULES = ("hidden-text", "invisible", "bidi", "control")
+
+    def __init__(self, patterns, reasons):
+        self.patterns = [(str(rule), re.compile(str(regex), re.IGNORECASE if ignore_case else 0))
+                         for rule, regex, ignore_case in patterns]
+        self.reasons = {str(k): str(v) for k, v in reasons.items()} if isinstance(reasons, dict) else {}
+
+    @staticmethod
+    def is_ideograph(char):
+        point = ord(char)
+        return 0x3400 <= point <= 0x4DBF or 0x4E00 <= point <= 0x9FFF or 0xF900 <= point <= 0xFAFF \
+            or 0x20000 <= point <= 0x3134F
+
+    def kind(self, line, index, first_line=False):
+        """lint.kind: the rule the character at INDEX of LINE breaks, or None."""
+        char = line[index]
+        point = ord(char)
+        if point < 0x20 or 0x7F <= point <= 0x9F:
+            if char == "\t" or (char in "\r\f\v" and index == len(line) - 1):
+                return None
+            return "control"
+        if point < 0x80:
+            return None
+        before = line[index - 1] if index else ""
+        after = line[index + 1] if index + 1 < len(line) else ""
+        if 0xE0000 <= point <= 0xE007F:
+            back = index - 1
+            while back >= 0 and 0xE0000 <= ord(line[back]) <= 0xE007F:
+                back -= 1
+            return None if back >= 0 and line[back] == "\U0001F3F4" else "hidden-text"
+        if char in self.BIDI_CONTROLS:
+            return "bidi"
+        if char in self.BIDI_MARKS or 0x600 <= point <= 0x605 or point in (0x6DD, 0x70F, 0x8E2):
+            return None if any(unicodedata.bidirectional(c) in ("R", "AL") for c in line) else "bidi"
+        if char in self.ZERO_WIDTH:
+            return "invisible"
+        if char == "\ufeff":
+            return None if index == 0 and first_line else "invisible"
+        if char in self.JOINERS:
+            return "invisible" if (not before or ord(before) < 0x80) and (not after or ord(after) < 0x80) else None
+        if 0xFE00 <= point <= 0xFE0F:
+            if before and 0xFE00 <= ord(before) <= 0xFE0F or after and 0xFE00 <= ord(after) <= 0xFE0F:
+                return "invisible"
+            return "invisible" if not before or (ord(before) < 0x80 and before not in self.KEYCAP_BASES) else None
+        if 0xE0100 <= point <= 0xE01EF:
+            return None if before and self.is_ideograph(before) and not (after and 0xE0100 <= ord(after) <= 0xE01EF) \
+                else "invisible"
+        if unicodedata.category(char) == "Cf" and char != "\u00ad":
+            return "invisible"
+        return None
+
+    @staticmethod
+    def code(char):
+        point = ord(char)
+        return f"\\u{point:04x}" if point <= 0xFFFF else f"\\U{point:08x}"
+
+    def escaped(self, text, limit=160):
+        line = "".join(self.code(c) if self.kind(text, i) is not None or not c.isprintable() and c != " " else c
+                       for i, c in enumerate(text)).strip()
+        return line if len(line) <= limit else line[:limit - 1] + "…"
+
+    def check_text(self, text, path=""):
+        """lint.check_text: [{"file", "line", "rule", "reason", "text", "chars"|"match", "hidden"?}]."""
+        found = []
+        for number, line in enumerate(text.split("\n"), 1):
+            seen, index = set(), 0
+            while index < len(line):
+                rule = self.kind(line, index, number == 1)
+                if rule is None:
+                    index += 1
+                    continue
+                if rule == "hidden-text":
+                    end, hidden = index, []
+                    while end < len(line) and 0xE0000 <= ord(line[end]) <= 0xE007F:
+                        point = ord(line[end]) - 0xE0000
+                        hidden.append(chr(point) if 0x20 <= point < 0x7F else "")
+                        end += 1
+                    decoded = "".join(hidden)
+                    found.append({"file": path, "line": number, "rule": rule, "reason": self.reasons.get(rule, rule),
+                                  "chars": f"U+{ord(line[index]):04X}..U+{ord(line[end - 1]):04X} ({end - index})",
+                                  "hidden": decoded[:500], "text": self.escaped(line)})
+                    found += [dict(item, hidden=decoded[:500]) for item in self.phrasing(decoded, path, number)]
+                    index = end
+                    continue
+                if rule not in seen:
+                    seen.add(rule)
+                    found.append({"file": path, "line": number, "rule": rule, "reason": self.reasons.get(rule, rule),
+                                  "chars": f"U+{ord(line[index]):04X}", "text": self.escaped(line)})
+                index += 1
+            found += self.phrasing(line, path, number)
+        return found
+
+    def phrasing(self, line, path, number):
+        found, seen = [], set()
+        for rule, pattern in self.patterns:
+            if rule in seen:
+                continue
+            match = pattern.search(line)
+            if match:
+                seen.add(rule)
+                found.append({"file": path, "line": number, "rule": rule, "reason": self.reasons.get(rule, rule),
+                              "match": self.escaped(match.group(0), 80), "text": self.escaped(line)})
+        return found
+
+    def lines(self, findings, limit=20):
+        """lint.lines: one line per finding (FILE:LINE [rule] reason (evidence): the line, or the hidden text)."""
+        shown = []
+        for item in findings[:limit]:
+            text = f"{item['file']}:{item['line']} [{item['rule']}] {item['reason']}"
+            evidence = item.get("chars") or item.get("match")
+            if evidence:
+                text += f" ({evidence})"
+            text += f"; hidden text: {self.escaped(item['hidden'], 120)!r}" if item.get("hidden") else \
+                f": {item.get('text', '')}"
+            shown.append(text)
+        if len(findings) > limit:
+            shown.append(f"... and {len(findings) - limit} more")
+        return shown
+
 class McpGateway:
     """The checks of one MCP server's tool calls, shared by its connections: the rules of the gateway
     configuration ({"server", "rules", "approvals"}), the questions to the human and the records. Records
@@ -573,19 +1684,51 @@ class McpGateway:
         self.server = str(config.get("server") or "")
         self.rules = Ruleset(config.get("rules", []))
         self.approvals = Path(config["approvals"]) if config.get("approvals") else None
-        self.timeout = int(config.get("timeout", APPROVAL_SECONDS))
+        timeout = config.get("timeout", APPROVAL_SECONDS)
+        self.timeout = timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0 \
+            else APPROVAL_SECONDS
         self.out = out or sys.stderr
         self.lock = threading.Lock()
-        # Answers for "run" (or "always", which is capped to it): until the server stops. Questions nobody answered:
-        # refused at once until then (time.monotonic(), UNANSWERED_PAUSE), then asked again.
+        # Answers for "run" (or "always", which is capped to it): until the server stops. Questions nobody answered
+        # in time ({call: question ID}): still open - a later answer counts for the next call, which waits for the
+        # same question again (asked under its own ID once more) instead of a new one.
         self.decided, self.asked, self.token = {}, 0, secrets.randbelow(10 ** 9)
-        self.cooling = {}
+        self.late = {}
         # The key of call_digest: a question's file names its call by a digest nobody can test guesses against.
         self.salt = secrets.token_bytes(32)
         self.who = Attribution()
         # The run's kill switch (sandbox-ai net cut), for a server that reaches the network outside any sandbox of
         # its own (McpRelays.open): CUT() is the cut that holds now, or None.
         self.cut = None
+        # Whether the server publishes MCP resources, as its handshake showed (note_resources: True, False; None not
+        # known yet), and ON_RESOURCES(server, value), told each time (McpRelays: the proxy's mirror).
+        self.resources, self.on_resources = None, None
+        # The tool definitions pinned for the project (the run's relay: config "tools_pin" {"pins": {tool: digest} or
+        # None when none are pinned yet, "definitions": {tool: canonical definition}, "lint": the checker's path};
+        # McpToolPins): APPROVED, the digests this run accepted ({tool: {digest}}: pinned, first seen, or allowed by
+        # the human), SEEN the first list of a server with no pin, REFUSED_TOOLS what a "deny" took out of the lists
+        # (their calls are refused too). TOOLS_CONTROL: where McpToolPins.note writes (CONTROL_DIR; tests give another).
+        pin = config.get("tools_pin")
+        self.tools_pin = pin if isinstance(pin, dict) else None
+        self.tools_control = None
+        self.approved, self.seen, self.refused_tools = {}, None, set()
+        self.last_noted = None  # the digests of the list McpToolPins.note wrote last as "seen"
+        # The agent's connections that have had the handshake's answer (McpConnection.handshake): a late "allow" of
+        # an mcp-tools question tells those whose handshake said the list may change (late_tools).
+        self.connections = weakref.WeakSet()
+        # Whether ASKER takes a callback for an answer that comes after its question timed out (the run's broker).
+        try:
+            self.asker_late = asker is not None and "late" in inspect.signature(asker).parameters
+        except (TypeError, ValueError):
+            self.asker_late = False
+
+    def note_resources(self, value):
+        """The server publishes MCP resources (VALUE True: a list with something, more pages, an error, a list that
+        may change) or none (False: no such capability, empty lists): kept and told to ON_RESOURCES."""
+        self.resources = bool(value)
+        if callable(self.on_resources):
+            with contextlib.suppress(Exception):
+                self.on_resources(self.server, self.resources)
 
     # Requests that reach nothing beyond the server: its handshake and its lists.
     CUT_PASSES = ("initialize", "ping")
@@ -635,7 +1778,7 @@ class McpGateway:
         """ARGUMENTS as the log and questions show them: shortened values (not JSON text: a multi-MB write_file
         must not stall the call, and a cut inside a string would leave "client_secret": "... without its
         closing quote, unmatched by the redaction), redacted, at most 2000 characters."""
-        text = redact_text(json.dumps(shortened(arguments), ensure_ascii=False, default=repr))
+        text = redacted_json(shortened(arguments), ensure_ascii=False)
         return text[:2000] + ("..." if len(text) > 2000 else "")
 
     def hidden(self, text):
@@ -649,10 +1792,14 @@ class McpGateway:
         with CLIENT, the calling process (see client)."""
         state = self.taint.shown() if self.taint is not None else None
         verdict = self.rules.mcp(self.server, tool, arguments, state)
+        if tool in self.refused_tools:  # its changed definition was denied: out of the list, its calls refused
+            verdict = {"decision": "deny", "rule": "(tool definition)", "ruleset": "sandbox-ai",
+                       "reason": f"the definition of the tool {tool[:200]} changed (or is new) and was not approved"}
         record = {"event": "call", "id": ident, "tool": tool[:200], "arguments": self.hidden(self.arguments(arguments)),
                   **(client or {}), **({"tainted": state.get("since")} if state and state.get("tainted") else {})}
         if self.rules.mcp_active:
-            record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"])
+            record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"],
+                          **Ruleset.audited(verdict))
         allowed, reason = verdict["decision"] == "allow", verdict["reason"]
         if verdict["decision"] == "ask":
             answer = self.ask(tool, record["arguments"], verdict, client, full=arguments)
@@ -678,7 +1825,7 @@ class McpGateway:
         timeout. CLIENT: the calling process, shown in the question. ARGUMENTS: the short form the question's line
         shows; FULL: the call's arguments themselves, which its details show in full (full_arguments) - a call too
         large for that is refused, never asked (too_large_refusal) - and whose exact digest binds its question and
-        the refusal while nobody answers it (cooling)."""
+        a later answer to it while nobody waits for it (late)."""
         details, more = {}, 0
         if full is not None:
             kept, more = window_cut(*arguments_window(full), values=self.values)
@@ -699,9 +1846,13 @@ class McpGateway:
         with self.lock:
             if key in self.decided:
                 return self.decided[key]
-            if self.cooling.get(cools, (0, None))[0] > time.monotonic():
-                return {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s to question "
-                        f"{self.cooling[cools][1]}; refused without asking for now, then asked again"}
+            ident = self.late.pop(cools, None)  # asked before, not answered in time: its answer, or wait for it again
+        if ident is not None:
+            answer = self.answer(ident)
+            if answer is None:
+                return self.wait_answer(ident, key, cools, tool, arguments, details, verdict, client)
+            return self.answered(ident, key, answer)
+        with self.lock:
             if more:  # its question could not show all of it: refused, never asked
                 return {"decision": "deny", "scope": "once", "reason": too_large_refusal(more)}
             if self.approvals is None:
@@ -710,7 +1861,13 @@ class McpGateway:
                 return {"decision": "deny", "scope": "once", "reason": "too many questions"}
             self.asked += 1
             ident = f"{int(time.time())}-{self.token}-{self.asked}"
-        self.emit("sandbox-ai-mcp-ask", {"id": ident, "kind": "mcp", "timeout": self.timeout, "tool": tool,
+        return self.wait_answer(ident, key, cools, tool, arguments, details, verdict, client)
+
+    def wait_answer(self, ident, key, cools, tool, arguments, details, verdict, client):
+        """Put question IDENT (again: the same ID, so the host shows it open once more) and wait for its answer; none
+        in time: this call is refused (NOT_ANSWERED), the question stays open for the next call (late)."""
+        self.emit("sandbox-ai-mcp-ask", {"id": ident, "kind": "mcp", "time": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": self.timeout, "tool": tool,
                                          "arguments": arguments, **details,
                                          "rule": verdict["rule"], "ruleset": verdict["ruleset"],
                                          "reason": printable_text(verdict["reason"], 1000), **(client or {})})
@@ -719,12 +1876,17 @@ class McpGateway:
             answer = self.answer(ident)
             if answer:
                 break
-            time.sleep(0.2)
-        if answer is None:  # no decision: refused at once for a while, then asked again
+            time.sleep(min(0.2, self.timeout / 10))
+        if answer is None:  # no decision: this call fails, the question stays answerable for the next one
             with self.lock:
-                self.cooling[cools] = (time.monotonic() + UNANSWERED_PAUSE, ident)
-        answer = {**(answer or {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s"}),
-                  "question": ident}
+                self.late[cools] = ident
+            return {"decision": "deny", "scope": "once", "reason": NOT_ANSWERED, "question": ident,
+                    "why": f"question {ident} was not answered within {self.timeout} s; it stays open: once the "
+                           "human allows it, the next call goes through. Retry later, or say what you need"}
+        return self.answered(ident, key, answer)
+
+    def answered(self, ident, key, answer):
+        answer = {**answer, "question": ident}
         if answer["scope"] in ("run", "always"):
             with self.lock:  # later calls are not asked: their records name no question
                 self.decided[key] = {**{k: v for k, v in answer.items() if k != "question"}, "scope": "run"}
@@ -736,6 +1898,156 @@ class McpGateway:
             source = self.rules.untrusted_tool(self.server, tool)
             if source:
                 self.taint.mark(source)
+
+    def vet_tools(self, tools):
+        """(tools to pass on, names taken out) of a tools/list answer's TOOLS against the pinned definitions: a new or
+        changed tool, or one whose description or schema the hidden-text checker finds something in, is asked about
+        (kind "mcp-tools", with the definitions before and after); denied (or not answered), those tools are taken
+        out of the list and their calls refused. The first list of a server without a pin passes (the host pins it
+        after the run) unless the checker finds something. Without "tools_pin" (not the run's relay): as it came."""
+        pin = self.tools_pin
+        named = {}
+        for tool in tools:
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str) and tool["name"] not in named:
+                named[tool["name"]] = tool
+        if pin is None or not named:
+            return tools, []
+        definitions = {name: McpToolPins.definition(tool)
+                       for name, tool in list(named.items())[:McpToolPins.LIST_LIMIT]}
+        digests = {name: McpToolPins.digest(text) for name, text in definitions.items()}
+        with self.lock:
+            pinned = pin.get("pins") if isinstance(pin.get("pins"), dict) else self.seen
+            first = pinned is None
+            if first:
+                self.seen = dict(digests)
+            approved = {name: set(values) for name, values in self.approved.items()}
+        baseline = pinned or {}
+        suspects = [name for name in named if digests.get(name) is None
+                    or (baseline.get(name) != digests[name] and digests[name] not in approved.get(name, ()))]
+        changed = [] if first else suspects
+        removed = [] if first else sorted(name for name in baseline if name not in named)[:100]
+        lint = McpToolPins.lint(pin.get("lint"))
+        findings = {}
+        for name in suspects:
+            found = McpToolPins.findings(lint, named[name])
+            if found:
+                findings[name] = found
+        if digests != self.last_noted:  # what the server listed (sandbox-ai mcp tools: last seen, --repin)
+            self.last_noted = dict(digests)
+            McpToolPins.note(self.server, "seen", {name: {"digest": digests[name],
+                                                          "definition": definitions[name][:McpToolPins.SHOWN]}
+                                                   for name in definitions}, self.tools_control)
+        record = {"event": "tools", "tools": len(named)}
+        if first:
+            record["first"] = True
+        if changed:
+            record["changed"] = [name[:200] for name in changed[:100]]
+        if removed:
+            record["removed"] = removed
+        if findings:
+            record["findings"] = {name[:200]: len(items) for name, items in list(findings.items())[:100]}
+        if lint is None:
+            record["unchecked"] = "no hidden-text checker (the launcher gave none)"
+        asked = bool(changed or findings)
+        allowed = True
+        if asked:
+            answer = self.ask_tools(changed, removed, findings, definitions, digests, pin)
+            record["approval"] = approval_record(answer)
+            allowed = answer.get("decision") == "allow"
+            if not allowed:
+                record["reason"] = not_approved(answer, "the changed tool definitions were not approved")
+        out = sorted(set(changed) | set(findings))
+        if allowed:
+            with self.lock:
+                for name, digest in digests.items():
+                    self.approved.setdefault(name, set()).add(digest)
+                self.refused_tools.difference_update(named)
+            if first and not findings:
+                McpToolPins.note(self.server, "first", {name: {"digest": digests[name],
+                                                               "definition": definitions[name][:McpToolPins.SHOWN]}
+                                                        for name in definitions}, self.tools_control)
+        if first or asked:
+            self.emit("sandbox-ai-mcp-call", record)
+        if allowed:
+            return tools, []
+        with self.lock:
+            self.refused_tools.update(out)
+        return [tool for tool in tools if not (isinstance(tool, dict) and tool.get("name") in out)], out
+
+    def ask_tools(self, changed, removed, findings, definitions, digests, pin):
+        """The human's answer about a list with CHANGED tools or FINDINGS (kind "mcp-tools", through the run's
+        broker); refused when nobody can ask. "Allow always" pins the new list for the project (approvals.py)."""
+        if self.asker is None:
+            return {"decision": "deny", "scope": "once", "reason": "this server cannot ask (no broker)"}
+        before = pin.get("definitions") if isinstance(pin.get("definitions"), dict) else {}
+        known = pin.get("pins") if isinstance(pin.get("pins"), dict) else (self.seen or {})
+        shown = sorted(set(changed) | set(findings))[:50]
+        lint = McpToolPins.lint(pin.get("lint"))
+        lines = [line for name in shown if lint is not None and name in findings
+                 for line in lint.lines(findings[name], limit=5)][:40]
+        news = [name for name in changed if name not in known]
+        parts = []
+        if news:
+            parts.append(f"{len(news)} new: {', '.join(name[:60] for name in news[:8])}")
+        if len(news) < len(changed):
+            parts.append(f"{len(changed) - len(news)} changed: "
+                         f"{', '.join(name[:60] for name in changed if name not in news)[:300]}")
+        if removed:
+            parts.append(f"{len(removed)} gone: {', '.join(name[:60] for name in removed[:8])}")
+        if findings:
+            parts.append(f"hidden-text findings in {len(findings)}: {', '.join(n[:60] for n in list(findings)[:8])}")
+        why = "changed since they were pinned" if changed else "hold text that may hide instructions"
+        details = {"server": self.server,
+                   "list_digest": hashlib.sha256(json.dumps(digests, sort_keys=True).encode()).hexdigest()[:16],
+                   "reason": printable_text(f"MCP server {self.server}: its tool definitions {why}: "
+                                            + "; ".join(parts), 1000),
+                   "tools": [{"tool": name[:200],
+                              "change": "new" if name in news else "changed" if name in changed else "findings",
+                              **({"before": printable_text(before[name], McpToolPins.SHOWN)}
+                                 if isinstance(before.get(name), str) and name in changed else {}),
+                              "after": definitions.get(name, "")[:McpToolPins.SHOWN]} for name in shown],
+                   "removed": removed, "findings": lines,
+                   "pin": dict(digests), "definitions": {name: definitions[name][:McpToolPins.SHOWN] for name in shown}}
+        # What the question's details show (the app's, the web's, sandbox-ai approvals show ID): every definition
+        # before and after, the checker's findings, what is gone. Canonical JSON: every non-ASCII character escaped.
+        text = []
+        for entry in details["tools"]:
+            text += [f"{entry['change']}: {entry['tool']}"]
+            if entry.get("before"):
+                text += [f"  before: {entry['before']}"]
+            text += [f"  after:  {entry['after']}", ""]
+        if lines:
+            text += ["hidden-text findings:", *(f"  {line}" for line in lines), ""]
+        if removed:
+            text += [f"gone: {', '.join(removed)}"]
+        details["arguments_full"] = "\n".join(text).strip()
+        answer = self.asker("mcp-tools", details, late=self.late_tools) if self.asker_late else \
+            self.asker("mcp-tools", details)
+        answer = answer if isinstance(answer, dict) else {}
+        return {"decision": answer.get("decision", "deny"), "scope": answer.get("scope", "once"),
+                "reason": answer.get("reason", "no answer"),
+                **{k: answer[k] for k in ("question", "why") if isinstance(answer.get(k), str)}}
+
+    def late_tools(self, details, answer):
+        """The human's ANSWER to an mcp-tools question (DETAILS: the list it showed) after it had timed out (the
+        broker's late answers): allowed, the list's tools are back - a connection whose handshake said its list may
+        change is told at once (notifications/tools/list_changed), the others see them in their next list."""
+        digests = details.get("pin") if isinstance(details, dict) and isinstance(details.get("pin"), dict) else {}
+        allowed = isinstance(answer, dict) and answer.get("decision") == "allow"
+        restored = []
+        if allowed:
+            with self.lock:
+                for name, digest in digests.items():
+                    if isinstance(name, str) and isinstance(digest, str):
+                        self.approved.setdefault(name, set()).add(digest)
+                restored = sorted(name for name in digests if name in self.refused_tools)
+                self.refused_tools.difference_update(digests)
+        self.emit("sandbox-ai-mcp-call", {"event": "tools", "late": True, "approval": approval_record(answer or {}),
+                                          **({"restored": [name[:200] for name in restored[:100]]} if allowed else {})})
+        if allowed:
+            for connection in list(self.connections):
+                with contextlib.suppress(Exception):
+                    connection.tools_changed()
 
     def answer(self, ident):
         try:
@@ -750,19 +2062,53 @@ class McpGateway:
 
 class McpConnection:
     """One agent connection through the relay. The agent's lines are checked and passed on re-encoded, so that
-    the server parses exactly what was checked; the server's lines go back with tools/list filtered and the
-    results of tool calls recorded."""
+    the server parses exactly what was checked; the server's lines go back with tools/list filtered, the
+    results of tool calls recorded and the handshake's answer without a capability the server has nothing for.
+
+    The capabilities: every server made with the MCP SDK's FastMCP advertises "resources" and "prompts", whether
+    it publishes any or not (sandbox-ai's catalog servers publish none). Agents act on the capability - OpenCode,
+    Claude Code and Pi offer the model tools for MCP resources (list_mcp_resources, read_mcp_resource ...), Hermes
+    four more tools per server (mcp__NAME__read_resource ...) - and local models take those for the way to the
+    server's tools: ten minutes of "resource" reads and searches without one call of the tool asked for (the
+    local-model research's round 1, runs/smoke__hermes__laguna__r1; evidence/capabilities.txt). So the relay asks a
+    server that advertises them what it lists (LISTS), once, when the server has answered initialize: it tells the
+    server that the client is ready (notifications/initialized: a server answers no request before; the agent's
+    own is then left out), sends its questions under ids of its own, and answers the agent's initialize when the
+    lists are there - without the capabilities whose lists are empty. A capability that may change (listChanged,
+    subscribe), a list that is not empty, has more pages or came as an error: the capability stays. No answers
+    within MCP_PROBE_SECONDS: the server's answer as it came."""
     GATED = ("tools/call", "tools/list")
+    # Requests that reach nothing beyond the server's own description: its handshake and its log level (and its lists,
+    # */list). Every other request is an act of the server for the client - a resource read or subscribed to, a prompt
+    # fetched, a completion, whatever a later protocol adds - and is judged by the server's rules under its method's
+    # name, as a tool call is under its tool's (acts, act). Until 0.1.116 only tools/call was: a ruleset that allowed
+    # two tools of a server still let every resource of it be read (security review SAI-23).
+    PASSED = ("initialize", "ping", "logging/setLevel")
+    # What a server lists for a capability: {capability: ((method, the list's key in the answer), ...)}
+    LISTS = {"resources": (("resources/list", "resources"), ("resources/templates/list", "resourceTemplates")),
+             "prompts": (("prompts/list", "prompts"),)}
+    ASKED = "sandbox-ai: capabilities"  # in pending: one of the relay's own questions (no method of the protocol)
 
     def __init__(self, gateway, connection, process):
         self.gateway, self.connection, self.process = gateway, connection, process
-        self.write_lock, self.lock = threading.Lock(), threading.Lock()
+        self.write_lock, self.lock, self.forward_lock = threading.Lock(), threading.Lock(), threading.Lock()
         self.pending = {}  # JSON of a request's id: {"method", "tool", "started"}
         self.client = gateway.client(connection)
+        # HELD: the server's answer to initialize while the relay's questions are open ({"message", "line", "open":
+        # ids, "families", "kept", "timer"}); ANNOUNCED: the relay sent notifications/initialized in the agent's place.
+        self.held, self.announced = None, False
+
+    list_changed = False  # the handshake's answer said the tool list may change (tools.listChanged)
 
     def send(self, data):
         with self.write_lock:
             self.connection.sendall(data)
+
+    def tools_changed(self):
+        """Tell the agent its tool list changed (a late "allow" put tools back), if the handshake said it may."""
+        if self.list_changed:
+            with contextlib.suppress(OSError):
+                self.send(b'{"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}\n')
 
     def reply(self, ident, error=None, result=None):
         message = {"jsonrpc": "2.0", "id": ident,
@@ -776,8 +2122,9 @@ class McpConnection:
         self.reply(ident, error=(code, f"sandbox-ai: {reason}"))
 
     def forward(self, message):
-        self.process.stdin.write((json.dumps(message) + "\n").encode())
-        self.process.stdin.flush()
+        with self.forward_lock:  # the agent's lines and the relay's own questions (asked from the server's side)
+            self.process.stdin.write((json.dumps(message) + "\n").encode())
+            self.process.stdin.flush()
 
     def client_line(self, line):
         """Check one line from the agent: pass it on, or answer it here."""
@@ -809,6 +2156,11 @@ class McpConnection:
         cut = self.gateway.cut_refusal(method) if ident is not MISSING else None
         if cut:  # the run's kill switch holds and this server would reach the network beyond it
             return self.refuse(shown, -32000, cut, method=str(method)[:100])
+        if method == "notifications/initialized" and ident is MISSING:
+            with self.lock:
+                announced, self.announced = self.announced, False
+            if announced:
+                return  # the relay told the server already, to ask it for its lists (handshake)
         if method == "notifications/cancelled" and isinstance(message.get("params"), dict):
             with self.lock, contextlib.suppress(TypeError, ValueError):
                 self.pending.pop(json.dumps(message["params"].get("requestId")), None)
@@ -822,7 +2174,42 @@ class McpConnection:
                 self.pending[key] = {"method": method, "started": time.monotonic()}
         if method == "tools/call":
             return self.call(message, ident)
+        if isinstance(method, str) and self.acts(method):
+            if ident is MISSING:
+                # A request sent as a notification gets no answer - and is not run (as a tool call without an id).
+                return self.refuse(None, -32600, "a request without an id is not passed on", method=method[:100])
+            return self.act(message, ident, method)
         self.forward(message)
+
+    @classmethod
+    def acts(cls, method):
+        """METHOD (a request's, other than tools/call) makes the server act for the client: judged by its rules."""
+        return method not in cls.GATED and method not in cls.PASSED and not method.endswith("/list") \
+            and not method.startswith("notifications/")
+
+    def act(self, message, ident, method):
+        """A request other than a tool call (resources/read, prompts/get, completion/complete ...): judged by the
+        server's rules as the tool METHOD with its params as arguments, recorded, and its result counted as that
+        tool's (an untrusted one taints the run)."""
+        key, params = json.dumps(ident), message.get("params", {})
+
+        def refused(code, reason):
+            with self.lock:
+                self.pending.pop(key, None)
+            self.refuse(ident, code, reason, method=method[:100])
+        if not isinstance(params, dict):
+            return refused(-32602, "params must be an object")
+        if self.gateway.rules.mcp_active and not TOOL_NAME.fullmatch(method):
+            return refused(-32601, "method names have 1 to 128 of A-Z a-z 0-9 _ - . : /")
+        with self.lock:
+            if key in self.pending:
+                self.pending[key]["tool"] = method[:200]
+        allowed, reason = self.gateway.decide(method, params, ident, self.client)
+        if allowed:
+            return self.forward(message)
+        with self.lock:
+            self.pending.pop(key, None)
+        self.reply(ident, error=(-32000, f"sandbox-ai: {reason}"))
 
     def call(self, message, ident):
         params = message.get("params")
@@ -867,10 +2254,17 @@ class McpConnection:
         ended the connection.)"""
         with self.lock:
             open_requests, self.pending = self.pending, {}
+            held, self.held = self.held, None
+        if held is not None:  # its answer to initialize was there (the relay's questions were open): the agent's
+            held["timer"].cancel()
+            with contextlib.suppress(OSError):
+                self.send(held["line"])
         for key, request in open_requests.items():
+            if request["method"] == self.ASKED:
+                continue  # the relay's own question: no answer the agent waits for
             with contextlib.suppress(ValueError, OSError):
                 ident = json.loads(key)
-                if request["method"] == "tools/call":
+                if request["method"] == "tools/call" or request.get("tool"):
                     self.gateway.emit("sandbox-ai-mcp-call", {
                         "event": "result", "id": ident, "tool": request.get("tool"), "bytes": 0, "is_error": True,
                         "server_ended": True, "ms": int((time.monotonic() - request["started"]) * 1000)})
@@ -889,7 +2283,7 @@ class McpConnection:
             # Not readable (too long, too deep, not JSON): it may be any pending call's result, so each pending
             # call counts as answered by its tool before the agent reads it (an untrusted one taints: fail closed).
             with self.lock:
-                calls = [request.get("tool") for request in self.pending.values() if request["method"] == "tools/call"]
+                calls = [request["tool"] for request in self.pending.values() if request.get("tool")]
             for tool in calls:
                 self.gateway.observe(tool)
             return line
@@ -897,14 +2291,18 @@ class McpConnection:
             return line
         with self.lock:
             request = self.pending.pop(json.dumps(message["id"]), None)
-            calls = [r.get("tool") for r in self.pending.values() if r["method"] == "tools/call"] if request is None else []
+            calls = [r["tool"] for r in self.pending.values() if r.get("tool")] if request is None else []
         if request is None:
             for tool in calls:  # a reply that matches no call may be any pending call's: fail closed, as above
                 self.gateway.observe(tool)
             return line
         if request["method"] == "tools/list":
             return self.filtered(message, line)
-        if request["method"] == "tools/call":
+        if request["method"] == "initialize":
+            return self.handshake(message, line)
+        if request["method"] == self.ASKED:
+            return self.listed(request, message)
+        if request["method"] == "tools/call" or request.get("tool"):  # a tool call, or another act (act)
             self.gateway.observe(request.get("tool"))  # before the agent reads the result
             result = message.get("result") if isinstance(message.get("result"), dict) else {}
             self.gateway.emit("sandbox-ai-mcp-call", {
@@ -913,12 +2311,104 @@ class McpConnection:
                 "ms": int((time.monotonic() - request["started"]) * 1000)})
         return line
 
+    def handshake(self, message, line):
+        """The server's answer to initialize (MESSAGE, its LINE): passed on as it came, or - when it advertises
+        resources or prompts that cannot change - held (nothing goes to the agent yet) while the relay asks the
+        server for its lists; listed() or, after MCP_PROBE_SECONDS, unanswered() sends it on."""
+        result = message.get("result")
+        capabilities = result.get("capabilities") if isinstance(result, dict) else None
+        tools = capabilities.get("tools") if isinstance(capabilities, dict) else None
+        self.list_changed = isinstance(tools, dict) and tools.get("listChanged") is True
+        self.gateway.connections.add(self)
+        families = [family for family in self.LISTS if isinstance(capabilities, dict)
+                    and isinstance(capabilities.get(family), dict)
+                    and not capabilities[family].get("listChanged") and not capabilities[family].get("subscribe")]
+        if isinstance(capabilities, dict) and "resources" not in families:
+            # no resources capability: none published; one that may change: it may publish some
+            self.gateway.note_resources(isinstance(capabilities.get("resources"), dict))
+        if not families:
+            return line
+        token = secrets.token_hex(8)  # ids of the relay's own: the agent cannot have used or guess them
+        asked = [(f"sandbox-ai-{token}-{number}", family, method, key) for number, (family, method, key) in enumerate(
+            (family, method, key) for family in families for method, key in self.LISTS[family])]
+        held = {"message": message, "line": line, "open": {ident for ident, *_ in asked}, "families": families,
+                "kept": set()}
+        held["timer"] = threading.Timer(MCP_PROBE_SECONDS, self.unanswered, args=(held,))
+        held["timer"].daemon = True
+        with self.lock:
+            self.held = held
+            for ident, family, _, key in asked:
+                self.pending[json.dumps(ident)] = {"method": self.ASKED, "family": family, "key": key,
+                                                   "started": time.monotonic()}
+        try:
+            # A server answers no request before the client said it is ready; the agent says so only once it has
+            # this very answer. The relay says it in its place (client_line leaves the agent's own out - only
+            # when this one was written: a server never hears it twice, and never not at all).
+            self.forward({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            with self.lock:
+                self.announced = True
+            for ident, _, method, _ in asked:
+                self.forward({"jsonrpc": "2.0", "id": ident, "method": method})
+            held["timer"].start()
+        except (OSError, ValueError, RuntimeError):  # the server's input is gone, no thread for the timer
+            with self.lock:
+                self.held = None
+            return line
+        return b""
+
+    def listed(self, request, message):
+        """The server's answer MESSAGE to one of the relay's questions (REQUEST: its pending entry): never the
+        agent's. With the last one the held answer to initialize goes on, without the capabilities that list
+        nothing; an answer after the wait is dropped."""
+        result = message.get("result")
+        items = result.get(request["key"]) if isinstance(result, dict) else None
+        nothing = isinstance(items, list) and not items and not result.get("nextCursor")
+        with self.lock:
+            held = self.held
+            if held is None or message["id"] not in held["open"]:
+                return b""
+            held["open"].discard(message["id"])
+            if not nothing:
+                held["kept"].add(request["family"])  # something listed, more pages, an error: the relay does not know
+            if held["open"]:
+                return b""
+            self.held = None
+        held["timer"].cancel()
+        hidden = [family for family in held["families"] if family not in held["kept"]]
+        if "resources" in held["families"]:
+            self.gateway.note_resources("resources" in held["kept"])
+        if not hidden:
+            return held["line"]
+        answer = held["message"]
+        capabilities = {key: value for key, value in answer["result"]["capabilities"].items() if key not in hidden}
+        self.gateway.emit("sandbox-ai-mcp-call", {"event": "capabilities", "hidden": hidden,
+                                                  "why": "the server advertises them and lists nothing"})
+        return (json.dumps({**answer, "result": {**answer["result"], "capabilities": capabilities}}) + "\n").encode()
+
+    def unanswered(self, held):
+        """The wait for the server's lists is over (the timer of HELD): its answer to initialize goes to the agent
+        as it came."""
+        with self.lock:
+            if self.held is not held:
+                return
+            self.held = None
+        self.gateway.emit("sandbox-ai-mcp-call", {"event": "capabilities", "unanswered": True,
+                                                  "why": f"no lists from the server within {MCP_PROBE_SECONDS} s"})
+        with contextlib.suppress(OSError):
+            self.send(held["line"])
+
     def filtered(self, message, line):
-        """A tools/list answer without the tools every call of which is denied."""
+        """A tools/list answer without the tools every call of which is denied, and - in the run's relay - checked
+        against the definitions pinned for the project (McpGateway.vet_tools: a changed or new tool is asked about)."""
         result = message.get("result")
         tools = result.get("tools") if isinstance(result, dict) else None
         if not isinstance(tools, list):
             return line
+        tools, vetted = self.gateway.vet_tools(tools)
+        if vetted:
+            result = {**result, "tools": tools}
+            message = {**message, "result": result}
+            line = (json.dumps(message) + "\n").encode()
         hidden = [tool["name"] for tool in tools if isinstance(tool, dict) and isinstance(tool.get("name"), str)
                   and self.gateway.rules.hidden(self.gateway.server, tool["name"])]
         if not hidden:
@@ -1081,8 +2571,10 @@ class McpRelays:
     McpGateway.cut_refusal)."""
 
     def __init__(self, broker=None, taint=None, run_dir=None, upstream_dir=None, log=None, live=False, cut=None,
-                 secret_values=()):
+                 secret_values=(), resources_mirror=None):
         self.broker, self.taint, self.live, self.cut = broker, taint, live, cut
+        # RESOURCES_MIRROR: where the proxy reads which servers publish MCP resources (record_resources).
+        self.resources_mirror, self.published = Path(resources_mirror) if resources_mirror else None, {}
         # The run's secret values: [redacted] in every gateway's records and questions (McpGateway VALUES).
         self.values = sorted({v for v in secret_values if isinstance(v, str) and len(v) >= 6}, key=len, reverse=True)
         self.run_dir, self.upstream_dir = Path(run_dir or MCP_RUN_DIR), Path(upstream_dir or MCP_UPSTREAM_DIR)
@@ -1091,8 +2583,8 @@ class McpRelays:
         self.lock = threading.Lock()
 
     def stream(self):
-        if self.out is None:
-            self.out = open(self.log, "a", buffering=1) if self.log else open(os.devnull, "w")  # noqa: SIM115
+        if self.out is None:  # (opened for each record: rotated during the run, ROTATED_LOGS)
+            self.out = RecordFile(self.log) if self.log else open(os.devnull, "w")  # noqa: SIM115
         return self.out
 
     def names(self):
@@ -1110,6 +2602,7 @@ class McpRelays:
             # A server that reaches the network from a container of its own (the launcher says so): the run's kill
             # switch holds for it here, in the relay every request of the agent passes.
             gate.cut = self.cut
+        gate.on_resources = lambda server, value, name=name: self.record_resources(name, value)
         relay = McpRelay(gate, dir_fd)
         upstream = self.upstream_dir / name / "server.sock"
         spawn = relay.connect if dir_fd is not None else (lambda path=upstream: McpSocket(path))
@@ -1121,6 +2614,29 @@ class McpRelays:
         self.threads.append(thread)
         relay.ready.wait(wait)  # attach() checks that it listens (relay.listener), a start's relay goes on as before
         return relay
+
+    def record_resources(self, name, value):
+        """The server NAME publishes MCP resources (VALUE True) or none (False): written to the proxy's mirror
+        ({"servers": {NAME: value}}, readable by the proxy user), where the proxy leaves Codex's resource tools out of
+        a local model's requests when no server of the request publishes any (runtime.llm_resource_tools_out)."""
+        with self.lock:
+            self.published[str(name)] = value if isinstance(value, bool) else None
+            text = json.dumps({"servers": self.published})
+        self.write_mirror(text)
+
+    def forget_resources(self, name):
+        """NAME's relay is closed: its record goes from the mirror."""
+        with self.lock:
+            if self.published.pop(str(name), "gone") == "gone":
+                return
+            text = json.dumps({"servers": self.published})
+        self.write_mirror(text)
+
+    def write_mirror(self, text):
+        if self.resources_mirror is None:
+            return
+        with contextlib.suppress(OSError):
+            write_new(self.resources_mirror, text, 0o644)
 
     def attach(self, name, config, dir_fd):
         """`sandbox-ai mcp attach --live`: open the relay of NAME to the server's socket directory DIR_FD (taken
@@ -1158,6 +2674,7 @@ class McpRelays:
         if relay is None:
             return False
         relay.close()
+        self.forget_resources(name)
         directory = self.run_dir / name
         with contextlib.suppress(OSError):
             (directory / "server.sock").unlink()
@@ -1292,7 +2809,7 @@ def mcp_bridge(socket_path):
     """Agent sandbox: connect the agent's stdio to an MCP server socket."""
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        client.connect(socket_path)
+        connect_long(client, socket_path)  # (a host's long HOME: the name may be too long for a socket)
     except OSError as exc:
         raise RuntimeError(f"MCP server socket unavailable: {socket_path}: {exc}") from None
     def upstream():
@@ -1311,6 +2828,739 @@ def mcp_bridge(socket_path):
     except ConnectionResetError:
         pass  # the server instance ended without reading everything
     return 0
+
+
+# --- the sandbox's own system call filters (seccomp) --------------------------------------------------------------
+#
+# Firejail's --seccomp is a list of the calls its release knows to refuse: what a newer kernel adds is allowed by
+# itself (io_uring and clone3 were), new namespaces are allowed, no socket family is refused, and the container
+# around it has no filter at all (the launcher starts it with seccomp=unconfined: the supervisor and Firejail mount,
+# make namespaces and load the firewall). So the sandbox has filters of its own, made here from the calls' names:
+#
+#   "container": the supervisor installs it on itself before anything else runs; it holds for the firewall's tools,
+#       the connection proxy, the display, Firejail and all they start, for good.
+#       - what nothing in a sandbox needs, and a flaw in which would be the host's: io_uring, kernel modules, kexec,
+#         bpf, perf, the keyring, userfaultfd, files by handle, swap, reboot, process accounting, I/O ports;
+#       - a socket only of the families a sandbox uses (unix, inet, inet6, netlink, packet).
+#   "sandbox": the guard installs it before the agent runs, the connection proxy on itself once it has its own user.
+#       - every call Firejail 0.9.72's default list refuses (FIREJAIL_REFUSED), whatever the image's Firejail does;
+#       - io_uring, and the calls about other processes, quotas and mounts that are newer than that list;
+#       - no new namespace: unshare, setns, a clone with a namespace flag. clone3, whose flags no filter can read, is
+#         answered "no such call" (ENOSYS): the C libraries then use clone. Not so with --nested-containers;
+#       - a socket only of the families unix, inet and inet6, and netlink for routes, socket lists and device events
+#         (AF_VSOCK, which no firewall rule sees, AF_ALG, TIPC, RDS, CAN, Bluetooth, raw packets: no such family);
+#       - a call number the table does not know (a newer kernel's) is answered "no such call", as a kernel without
+#         it answers.
+#
+# For the architectures the images exist for, x86-64 and arm64, each with its 32-bit sibling (a 64-bit process can
+# make the 32-bit calls: int 0x80). There socketcall, which carries the family behind a pointer, is answered "no such
+# call" where families are filtered. The x32 calls of x86-64 are answered so in both filters.
+# A filter narrows only and cannot be taken off; several add up (Firejail's stays, with its own --restrict-namespaces
+# and --protocol where it has them: firejail_narrowing).
+SECCOMP_ARCH = {"x86_64": 0xC000003E, "i386": 0x40000003, "aarch64": 0xC00000B7, "arm": 0x40000028}
+# os.uname().machine -> the architectures of the calls its processes can make
+SECCOMP_MACHINES = {"x86_64": ("x86_64", "i386"), "aarch64": ("aarch64", "arm"), "arm64": ("aarch64", "arm")}
+# The numbers of the calls the filters name (libseccomp's tables; tests/test_security_review_seccomp.py compares
+# where that library is installed). A name an architecture does not have is not in its table.
+SYSCALL_NUMBERS = {
+    "x86_64": {
+        "socket": 41, "socketpair": 53, "clone": 56, "ptrace": 101, "syslog": 103, "uselib": 134, "personality":
+        135, "ustat": 136, "sysfs": 139, "vhangup": 153, "modify_ldt": 154, "pivot_root": 155, "_sysctl": 156,
+        "adjtimex": 159, "chroot": 161, "acct": 163, "settimeofday": 164, "mount": 165, "umount2": 166, "swapon":
+        167, "swapoff": 168, "reboot": 169, "sethostname": 170, "setdomainname": 171, "iopl": 172, "ioperm": 173,
+        "create_module": 174, "init_module": 175, "delete_module": 176, "get_kernel_syms": 177, "query_module": 178,
+        "quotactl": 179, "nfsservctl": 180, "getpmsg": 181, "putpmsg": 182, "afs_syscall": 183, "tuxcall": 184,
+        "security": 185, "io_setup": 206, "io_destroy": 207, "io_getevents": 208, "io_submit": 209, "io_cancel":
+        210, "lookup_dcookie": 212, "remap_file_pages": 216, "clock_settime": 227, "vserver": 236, "mbind": 237,
+        "set_mempolicy": 238, "kexec_load": 246, "add_key": 248, "request_key": 249, "keyctl": 250, "ioprio_set":
+        251, "migrate_pages": 256, "unshare": 272, "vmsplice": 278, "move_pages": 279, "perf_event_open": 298,
+        "fanotify_init": 300, "name_to_handle_at": 303, "open_by_handle_at": 304, "clock_adjtime": 305, "setns":
+        308, "process_vm_readv": 310, "process_vm_writev": 311, "finit_module": 313, "kexec_file_load": 320, "bpf":
+        321, "userfaultfd": 323, "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+        "open_tree": 428, "move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433,
+        "clone3": 435, "pidfd_getfd": 438, "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443},
+    "i386": {
+        "mount": 21, "umount": 22, "stime": 25, "ptrace": 26, "acct": 51, "umount2": 52, "chroot": 61, "ustat": 62,
+        "sethostname": 74, "settimeofday": 79, "uselib": 86, "swapon": 87, "reboot": 88, "ioperm": 101,
+        "socketcall": 102, "syslog": 103, "iopl": 110, "vhangup": 111, "vm86old": 113, "swapoff": 115, "clone": 120,
+        "setdomainname": 121, "modify_ldt": 123, "adjtimex": 124, "create_module": 127, "init_module": 128,
+        "delete_module": 129, "get_kernel_syms": 130, "quotactl": 131, "sysfs": 135, "personality": 136,
+        "afs_syscall": 137, "_sysctl": 149, "vm86": 166, "query_module": 167, "nfsservctl": 169, "getpmsg": 188,
+        "putpmsg": 189, "pivot_root": 217, "io_setup": 245, "io_destroy": 246, "io_getevents": 247, "io_submit":
+        248, "io_cancel": 249, "lookup_dcookie": 253, "remap_file_pages": 257, "clock_settime": 264, "vserver": 273,
+        "mbind": 274, "set_mempolicy": 276, "kexec_load": 283, "add_key": 286, "request_key": 287, "keyctl": 288,
+        "ioprio_set": 289, "migrate_pages": 294, "unshare": 310, "vmsplice": 316, "move_pages": 317,
+        "perf_event_open": 336, "fanotify_init": 338, "name_to_handle_at": 341, "open_by_handle_at": 342,
+        "clock_adjtime": 343, "setns": 346, "process_vm_readv": 347, "process_vm_writev": 348, "finit_module": 350,
+        "bpf": 357, "socket": 359, "socketpair": 360, "userfaultfd": 374, "clock_settime64": 404, "clock_adjtime64":
+        405, "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427, "open_tree": 428, "move_mount":
+        429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433, "clone3": 435, "pidfd_getfd": 438,
+        "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443},
+    "aarch64": {
+        "io_setup": 0, "io_destroy": 1, "io_submit": 2, "io_cancel": 3, "io_getevents": 4, "lookup_dcookie": 18,
+        "ioprio_set": 30, "umount2": 39, "mount": 40, "pivot_root": 41, "nfsservctl": 42, "chroot": 51, "vhangup":
+        58, "quotactl": 60, "vmsplice": 75, "acct": 89, "personality": 92, "unshare": 97, "kexec_load": 104,
+        "init_module": 105, "delete_module": 106, "clock_settime": 112, "syslog": 116, "ptrace": 117, "reboot": 142,
+        "sethostname": 161, "setdomainname": 162, "settimeofday": 170, "adjtimex": 171, "socket": 198, "socketpair":
+        199, "add_key": 217, "request_key": 218, "keyctl": 219, "clone": 220, "swapon": 224, "swapoff": 225,
+        "remap_file_pages": 234, "mbind": 235, "set_mempolicy": 237, "migrate_pages": 238, "move_pages": 239,
+        "perf_event_open": 241, "fanotify_init": 262, "name_to_handle_at": 264, "open_by_handle_at": 265,
+        "clock_adjtime": 266, "setns": 268, "process_vm_readv": 270, "process_vm_writev": 271, "finit_module": 273,
+        "bpf": 280, "userfaultfd": 282, "kexec_file_load": 294, "io_uring_setup": 425, "io_uring_enter": 426,
+        "io_uring_register": 427, "open_tree": 428, "move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount":
+        432, "fspick": 433, "clone3": 435, "pidfd_getfd": 438, "process_madvise": 440, "mount_setattr": 442,
+        "quotactl_fd": 443},
+    "arm": {
+        "mount": 21, "ptrace": 26, "acct": 51, "umount2": 52, "chroot": 61, "ustat": 62, "sethostname": 74,
+        "settimeofday": 79, "uselib": 86, "swapon": 87, "reboot": 88, "syslog": 103, "vhangup": 111, "swapoff": 115,
+        "clone": 120, "setdomainname": 121, "adjtimex": 124, "init_module": 128, "delete_module": 129, "quotactl":
+        131, "sysfs": 135, "personality": 136, "_sysctl": 149, "nfsservctl": 169, "pivot_root": 218, "io_setup":
+        243, "io_destroy": 244, "io_getevents": 245, "io_submit": 246, "io_cancel": 247, "lookup_dcookie": 249,
+        "remap_file_pages": 253, "clock_settime": 262, "socket": 281, "socketpair": 288, "add_key": 309,
+        "request_key": 310, "keyctl": 311, "vserver": 313, "ioprio_set": 314, "mbind": 319, "set_mempolicy": 321,
+        "unshare": 337, "vmsplice": 343, "move_pages": 344, "kexec_load": 347, "perf_event_open": 364,
+        "fanotify_init": 367, "name_to_handle_at": 370, "open_by_handle_at": 371, "clock_adjtime": 372, "setns":
+        375, "process_vm_readv": 376, "process_vm_writev": 377, "finit_module": 379, "bpf": 386, "userfaultfd": 388,
+        "migrate_pages": 400, "kexec_file_load": 401, "clock_settime64": 404, "clock_adjtime64": 405,
+        "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427, "open_tree": 428, "move_mount": 429,
+        "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433, "clone3": 435, "pidfd_getfd": 438,
+        "process_madvise": 440, "mount_setattr": 442, "quotactl_fd": 443},
+}
+SYSCALL_COMMON = {"open_tree_attr": 467}  # the same number on every architecture (as every call since Linux 5.1)
+# The last call the table's kernel has (Linux 6.17: file_setattr). A number above it is a newer kernel's call that
+# nobody looked at: "no such call". The kernel's own gaps below it are answered the same way.
+SYSCALL_TOP = 469
+SYSCALL_UNUSED = {"x86_64": ((337, 423),), "aarch64": ((244, 259), (295, 423))}  # (335, 336: uretprobe, uprobe)
+SYSCALL_PRIVATE = {"arm": (0x0F0001, 0x0F0006)}  # ARM's own calls (cacheflush, set_tls): every process needs them
+X32_CALLS = 0x40000000
+# Firejail 0.9.72's default list (its --seccomp, decoded from the filter it installs), with the 32-bit names of the
+# same calls (umount, stime, the time64 clocks, vm86).
+FIREJAIL_REFUSED = (
+    "adjtimex", "clock_adjtime", "clock_adjtime64", "clock_settime", "clock_settime64", "settimeofday", "stime",
+    "modify_ldt", "vm86", "vm86old", "lookup_dcookie", "perf_event_open", "pidfd_getfd", "process_vm_readv",
+    "process_vm_writev", "delete_module", "finit_module", "init_module", "chroot", "fsconfig", "fsmount", "fsopen",
+    "fspick", "mount", "move_mount", "open_tree", "pivot_root", "umount", "umount2", "_sysctl", "afs_syscall",
+    "create_module", "get_kernel_syms", "getpmsg", "putpmsg", "query_module", "security", "sysfs", "tuxcall", "uselib",
+    "ustat", "vserver", "ioperm", "iopl", "kexec_load", "kexec_file_load", "reboot", "swapon", "swapoff",
+    "open_by_handle_at", "name_to_handle_at", "ioprio_set", "syslog", "fanotify_init", "add_key", "request_key",
+    "mbind", "migrate_pages", "move_pages", "keyctl", "io_setup", "io_destroy", "io_getevents", "io_submit",
+    "io_cancel", "remap_file_pages", "set_mempolicy", "vmsplice", "userfaultfd", "acct", "bpf", "nfsservctl",
+    "setdomainname", "sethostname", "vhangup", "ptrace", "personality")
+# What that list does not know (the kernel had none of them, or Firejail no name for them).
+SECCOMP_NEWER = ("io_uring_setup", "io_uring_enter", "io_uring_register", "process_madvise", "quotactl", "quotactl_fd",
+                 "mount_setattr", "open_tree_attr")
+# --nested-containers: what a container engine needs in namespaces of its own (NESTED_SECCOMP, for Firejail's list).
+SECCOMP_NESTED = ("mount", "umount", "umount2", "pivot_root", "chroot", "sethostname", "setdomainname", "fsopen",
+                  "fsconfig", "fsmount", "fspick", "move_mount", "open_tree", "mount_setattr", "open_tree_attr")
+SECCOMP_CONTAINER = ("io_uring_setup", "io_uring_enter", "io_uring_register", "init_module", "finit_module",
+                     "delete_module", "kexec_load", "kexec_file_load", "bpf", "perf_event_open", "userfaultfd",
+                     "open_by_handle_at", "add_key", "request_key", "keyctl", "swapon", "swapoff", "reboot", "acct",
+                     "iopl", "ioperm", "lookup_dcookie")
+SOCKET_FAMILIES = {"unix": 1, "inet": 2, "inet6": 10, "netlink": 16, "packet": 17}
+NETLINK_PROTOCOLS = {"route": 0, "sock_diag": 4, "kobject_uevent": 15}
+CLONE_NAMESPACES = 0x7E020000   # CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET
+CLONE_NEWTIME = 0x80            # (for clone that bit is part of the exit signal)
+SECCOMP_ALLOW, SECCOMP_ERRNO = 0x7FFF0000, 0x00050000
+BPF_LOAD, BPF_JUMP, BPF_EQUAL, BPF_ABOVE, BPF_FROM, BPF_BITS, BPF_RETURN = 0x20, 0x05, 0x15, 0x25, 0x35, 0x45, 0x06
+SYSCALL_FILTERS = ("on", "off")  # the launcher's SANDBOX_AI_SYSCALL_FILTER (never off in the modes high and paranoid)
+
+
+def seccomp_policy(profile, nested=False):
+    """What the filter PROFILE ("container", "sandbox": see above; NESTED: the sandbox of --nested-containers)
+    refuses, by names: {"profile", "nested", "refuse": {call: errno name}, "namespaces": refused?, "families",
+    "netlink": the protocols (None: every one), "unknown": numbers the table does not know refused?}."""
+    if profile == "container":
+        return {"profile": profile, "nested": False, "refuse": {name: "EPERM" for name in SECCOMP_CONTAINER},
+                "namespaces": False, "families": ["unix", "inet", "inet6", "netlink", "packet"], "netlink": None,
+                "unknown": False}
+    if profile != "sandbox":
+        raise ValueError(f"no system call filter of the name {profile!r}")
+    refuse = {name: "EPERM" for name in (*FIREJAIL_REFUSED, *SECCOMP_NEWER)
+              if not (nested and name in SECCOMP_NESTED)}
+    if not nested:
+        refuse.update({"setns": "EPERM", "clone3": "ENOSYS"})
+    return {"profile": profile, "nested": bool(nested), "refuse": refuse, "namespaces": not nested,
+            "families": ["unix", "inet", "inet6", "netlink"] + (["packet"] if nested else []),
+            "netlink": None if nested else sorted(NETLINK_PROTOCOLS, key=NETLINK_PROTOCOLS.get), "unknown": True}
+
+
+def bpf_assemble(lines):
+    """The classic BPF program (bytes: struct sock_filter[]) of LINES: ("label", NAME), ("load", OFFSET in struct
+    seccomp_data), ("jump", LABEL), ("if", TEST, VALUE, LABEL if so, LABEL if not; None: the next line),
+    ("return", VALUE). Jumps go forwards only; a conditional one at most 255 lines (the format's limit)."""
+    at, count = {}, 0
+    for line in lines:
+        if line[0] == "label":
+            if line[1] in at:
+                raise ValueError(f"the label {line[1]} twice")
+            at[line[1]] = count
+        else:
+            count += 1
+    if not 0 < count <= 4096:
+        raise ValueError(f"a filter of {count} instructions (the kernel takes 1 to 4096)")
+    program, index = bytearray(), 0
+
+    def distance(label, most):
+        if label is None:
+            return 0
+        found = at[label] - index - 1
+        if not 0 <= found <= most:
+            raise ValueError(f"a jump of {found} instructions to {label}")
+        return found
+    for line in lines:
+        kind = line[0]
+        if kind == "label":
+            continue
+        if kind == "load":
+            program += struct.pack("=HBBI", BPF_LOAD, 0, 0, line[1])
+        elif kind == "jump":
+            program += struct.pack("=HBBI", BPF_JUMP, 0, 0, distance(line[1], 0xFFFFFFFF))
+        elif kind == "if":
+            program += struct.pack("=HBBI", line[1], distance(line[3], 255), distance(line[4], 255), line[2])
+        elif kind == "return":
+            program += struct.pack("=HBBI", BPF_RETURN, 0, 0, line[1])
+        else:
+            raise ValueError(f"no instruction {kind!r}")
+        index += 1
+    return bytes(program)
+
+
+def seccomp_lines(policy, arch):
+    """The lines (bpf_assemble) that judge one call of the architecture ARCH by POLICY, the call's number loaded
+    first. Each rule ends by itself (a return on every way through it), so no jump leaves it."""
+    numbers = {**SYSCALL_NUMBERS[arch], **SYSCALL_COMMON}
+    no_call, allow = SECCOMP_ERRNO | errno.ENOSYS, ("return", SECCOMP_ALLOW)
+    names = itertools.count()
+
+    def label(what):
+        return f"{arch}.{what}.{next(names)}"
+    lines = [("label", arch), ("load", 0)]
+    if arch == "x86_64":  # the x32 calls: the same numbers with this bit, which no name below would match
+        after = label("x32")
+        lines += [("if", BPF_FROM, X32_CALLS, None, after), ("return", no_call), ("label", after)]
+    if policy["unknown"]:
+        for low, high in SYSCALL_UNUSED.get(arch, ()):
+            after = label("unused")
+            lines += [("if", BPF_FROM, low, None, after), ("if", BPF_ABOVE, high, after, None), ("return", no_call),
+                      ("label", after)]
+        after, refused = label("known"), label("above")
+        lines.append(("if", BPF_ABOVE, SYSCALL_TOP, None, after))
+        if arch in SYSCALL_PRIVATE:
+            low, high = SYSCALL_PRIVATE[arch]
+            lines += [("if", BPF_FROM, low, None, refused), ("if", BPF_ABOVE, high, refused, None), allow]
+        lines += [("label", refused), ("return", no_call), ("label", after)]
+    refuse = dict(policy["refuse"])
+    if "socketcall" in numbers:
+        refuse["socketcall"] = "ENOSYS"  # (the family lies behind a pointer there: no filter reads it)
+    for name, error in sorted(refuse.items(), key=lambda item: (numbers.get(item[0], -1), item[0])):
+        if name in numbers:
+            after = label(name)
+            lines += [("if", BPF_EQUAL, numbers[name], None, after),
+                      ("return", SECCOMP_ERRNO | getattr(errno, error)), ("label", after)]
+    if policy["namespaces"]:
+        for name, bits in (("clone", CLONE_NAMESPACES), ("unshare", CLONE_NAMESPACES | CLONE_NEWTIME)):
+            after, plain = label(name), label(name)
+            lines += [("if", BPF_EQUAL, numbers[name], None, after), ("load", 16),
+                      ("if", BPF_BITS, bits, None, plain), ("return", SECCOMP_ERRNO | errno.EPERM),
+                      ("label", plain), allow, ("label", after)]
+    for name in ("socket", "socketpair"):
+        after, known, netlink = label(name), label(name), label(name)
+        lines += [("if", BPF_EQUAL, numbers[name], None, after), ("load", 16)]
+        for family in policy["families"]:
+            lines.append(("if", BPF_EQUAL, SOCKET_FAMILIES[family],
+                          netlink if family == "netlink" and policy["netlink"] is not None else known, None))
+        lines.append(("return", SECCOMP_ERRNO | errno.EAFNOSUPPORT))
+        if policy["netlink"] is not None and "netlink" in policy["families"]:
+            lines += [("label", netlink), ("load", 32)]
+            lines += [("if", BPF_EQUAL, NETLINK_PROTOCOLS[protocol], known, None) for protocol in policy["netlink"]]
+            lines.append(("return", SECCOMP_ERRNO | errno.EPROTONOSUPPORT))
+        lines += [("label", known), allow, ("label", after)]
+    return lines + [allow]
+
+
+def seccomp_program(policy, machine=None):
+    """The filter of POLICY for MACHINE (os.uname().machine; this one): the program's bytes. ValueError for a machine
+    without a table of its calls (the filters are made for x86-64 and arm64)."""
+    machine = machine or os.uname().machine
+    if machine not in SECCOMP_MACHINES:
+        raise ValueError(f"no table of the system calls of {machine} (the filters are made for x86-64 and arm64)")
+    lines = [("load", 4)]
+    for arch in SECCOMP_MACHINES[machine]:
+        lines += [("if", BPF_EQUAL, SECCOMP_ARCH[arch], None, f"not.{arch}"), ("jump", arch),
+                  ("label", f"not.{arch}")]
+    lines.append(("return", SECCOMP_ERRNO | errno.ENOSYS))  # (this kernel runs no other architecture's calls)
+    for arch in SECCOMP_MACHINES[machine]:
+        lines += seccomp_lines(policy, arch)
+    return bpf_assemble(lines)
+
+
+def seccomp_account(policy, machine=None):
+    """POLICY as the run's manifest says it (isolation.json), with its program for MACHINE: how long it is and its
+    SHA-256, by which two runs can be seen to have the same filter."""
+    machine = machine or os.uname().machine
+    program = seccomp_program(policy, machine)
+    native = {**SYSCALL_NUMBERS[SECCOMP_MACHINES[machine][0]], **SYSCALL_COMMON}
+    refused = dict(policy["refuse"])
+    return {"profile": policy["profile"], "nested": policy["nested"], "machine": machine,
+            "architectures": list(SECCOMP_MACHINES[machine]), "instructions": len(program) // 8,
+            "sha256": hashlib.sha256(program).hexdigest(),
+            "refused": {error: sorted(name for name, value in refused.items() if value == error and name in native)
+                        for error in sorted(set(refused.values()))},
+            "new_namespaces": "refused" if policy["namespaces"] else "allowed",
+            "socket_families": list(policy["families"]),
+            "netlink_protocols": policy["netlink"] if policy["netlink"] is not None else "all",
+            "unknown_calls": f"ENOSYS above {SYSCALL_TOP} and in the kernel's gaps" if policy["unknown"]
+            else "allowed"}
+
+
+def seccomp_install(program, libc=None):
+    """Install the filter PROGRAM (seccomp_program) on this process, for good and for everything it starts. The
+    kernel takes it from a process that can gain no privilege any more (no_new_privs) or that has CAP_SYS_ADMIN (the
+    supervisor); other threads of this process would stay without it: call it before any is started."""
+    libc = libc or ctypes.CDLL(None, use_errno=True)
+
+    class Program(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
+    held = ctypes.create_string_buffer(program, len(program))
+    wanted = Program(len(program) // 8, ctypes.addressof(held))
+    if libc.prctl(22, ctypes.c_ulong(2), ctypes.byref(wanted), ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+        error = ctypes.get_errno()  # PR_SET_SECCOMP, SECCOMP_MODE_FILTER
+        raise OSError(error, f"the kernel did not take the filter ({os.strerror(error)})")
+
+
+def seccomp_probe(policy, machine=None, libc=None, fork=os.fork):
+    """Ask the kernel, in a child of this process (it ends at once), whether what POLICY refuses is refused with the
+    filter's own answer: io_uring, a socket of a family outside it (AF_VSOCK), a new user namespace. [what is not];
+    empty when the filter holds. Nothing is made by it: each call fails, in the filter or - without one - in the
+    child alone."""
+    machine = machine or os.uname().machine
+    numbers = SYSCALL_NUMBERS[SECCOMP_MACHINES[machine][0]]
+    checks = [("io_uring", lambda c: c.syscall(ctypes.c_long(numbers["io_uring_setup"]), ctypes.c_long(0),
+                                               ctypes.c_long(0)), errno.EPERM)]
+    checks.append(("a socket of the family 40 (AF_VSOCK)", lambda c: c.socket(40, 1, 0), errno.EAFNOSUPPORT))
+    if policy["namespaces"]:
+        checks.append(("a new user namespace (unshare)", lambda c: c.unshare(0x10000000), errno.EPERM))
+    read_end, write_end = os.pipe()
+    pid = fork()
+    if pid == 0:
+        status = 1
+        try:
+            os.close(read_end)
+            child = libc or ctypes.CDLL(None, use_errno=True)
+            found = []
+            for index, (_, call, expected) in enumerate(checks):
+                ctypes.set_errno(0)
+                if call(child) != -1 or ctypes.get_errno() != expected:
+                    found.append(index)
+            os.write(write_end, bytes(found) or b"\xff")
+            status = 0
+        finally:
+            os._exit(status)
+    os.close(write_end)
+    try:
+        answer = os.read(read_end, 16)
+    finally:
+        os.close(read_end)
+        os.waitpid(pid, 0)
+    if not answer:
+        return ["the check itself did not run"]
+    return [] if answer == b"\xff" else [checks[index][0] for index in answer if index < len(checks)]
+
+
+def isolation_settings(cfg=None):
+    """The run's "isolation" (the launcher's isolation_config) from the session's configuration CFG (read here when
+    None; {} when there is none), with what holds without a key: sandbox-ai's own filters on, no strict mode. In a
+    strict mode they are never off."""
+    if cfg is None:
+        try:
+            cfg = json.loads(SESSION_CONFIG.read_text())
+        except (OSError, ValueError, RecursionError):  # (the supervisor and the guard read it again, and end on it)
+            cfg = {}
+    found = cfg.get("isolation") if isinstance(cfg, dict) and isinstance(cfg.get("isolation"), dict) else {}
+    strict = found.get("strict") is True
+    return {**found, "strict": strict,
+            "syscall_filter": "on" if strict or found.get("syscall_filter") != "off" else "off"}
+
+
+def own_filter(profile, settings, nested=False, install=None, probe=None, machine=None, say=None):
+    """Install the filter PROFILE of this run (SETTINGS: isolation_settings) on this process and ask the kernel
+    whether it holds. Its account (seccomp_account) for the manifest; None when the run has none: switched off by
+    the human (SANDBOX_AI_SYSCALL_FILTER=off, never in a strict mode), or - "container" only, and never in a strict
+    mode - not taken by this kernel, which is said (SAY) and the run goes on with Firejail's filter and the
+    sandbox's; or, outside the strict modes, on a machine there is no table of calls for (said too: Firejail's
+    filter alone). RuntimeError when it must hold and does not: nothing starts then."""
+    say = say or (lambda text: print(f"agent-sandbox: {text}", file=sys.stderr))
+    if not SANDBOX_PROCESS or settings["syscall_filter"] == "off":
+        return None
+    if (machine or os.uname().machine) not in SECCOMP_MACHINES and not settings["strict"]:
+        if profile == "sandbox":  # (once per run: the agent's)
+            say(f"note: sandbox-ai has no table of the system calls of {machine or os.uname().machine} (its own "
+                "filters are made for x86-64 and arm64): the agent runs with Firejail's filter alone")
+        return None
+    policy = seccomp_policy(profile, nested=nested)
+    try:
+        (install or seccomp_install)(seccomp_program(policy, machine))
+        missing = (probe or seccomp_probe)(policy, machine)
+        if missing:
+            raise RuntimeError("installed, but not refused: " + ", ".join(missing))
+    except (OSError, ValueError, RuntimeError) as exc:
+        text = f"sandbox-ai's own system call filter ({profile}) does not hold: {exc}"
+        if profile == "container" and not settings["strict"]:
+            say(f"note: {text}; the run goes on with Firejail's filter and the one the agent gets")
+            return None
+        raise RuntimeError(text + ("" if settings["strict"] else
+                                   "; SANDBOX_AI_SYSCALL_FILTER=off starts without it (Firejail's filter alone)")) \
+            from None
+    return seccomp_account(policy, machine)
+
+
+def firejail_narrowing(help_text, nested=False, settings=None):
+    """Firejail's own options for what the sandbox's filter refuses too - a second filter, of another maker: no new
+    namespaces (--restrict-namespaces, Firejail 0.9.72) and sockets of the sandbox's families only (--protocol).
+    None with --nested-containers (its engines need both), none the installed Firejail does not have (HELP_TEXT)
+    and none when the human switched the filters off."""
+    if nested or (settings or {}).get("syscall_filter") == "off":
+        return []
+    return [option for option, marker in (("--restrict-namespaces", "--restrict-namespaces"),
+                                          ("--protocol=unix,inet,inet6,netlink", "--protocol="))
+            if marker in help_text]
+
+
+# --- what else a run's isolation is made of: Firejail's own folder, the mounts' flags, the disk, the manifest -----
+
+# True in the sandbox's own processes only (this file run as a program: the supervisor, the guard, the proxy). A
+# program that loads the file - the launcher, a test - never gets a filter on itself, nor is its /proc judged.
+SANDBOX_PROCESS = False
+RUN_ISOLATION = None  # the supervisor's: this run's isolation_settings, for firejail_command
+FIREJAIL_CONFIG = Path("/root/.config/firejail")
+ISOLATION_FILE = "isolation.json"  # the run's manifest, in its control directory and its log directory
+MOUNT_FLAGS = ("nosuid", "nodev")  # on every folder of the host a sandbox is given
+DISK_SECONDS = 2.0                 # between two looks at the disks; a tenth of it once one is near its reserve
+DISK_REPEAT = 600.0                # seconds before the same disk is reported again
+
+
+def seal_firejail_config(home=Path("/root")):
+    """HOME/.config/firejail as a folder of the sandbox's root alone (0700), made here before Firejail starts and
+    blacklisted in it (firejail_command): Firejail reads its user's profiles there, a kept HOME is written by the
+    agent, and Firejail 0.9.72 hides the folder only if it exists (upstream makes it itself since 0.9.80). sandbox-ai
+    starts Firejail with --noprofile, so nothing is read there today: this holds whatever a Firejail reads. No link
+    is followed: a file or link under the name is removed (a run left it), a .config that is no folder is left alone
+    and said. None when it is sealed, else the reason."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    held = []
+    try:
+        held.append(os.open(home, flags))
+        for name, mode in ((".config", 0o755), ("firejail", 0o700)):
+            try:
+                found = os.lstat(name, dir_fd=held[-1])
+            except FileNotFoundError:
+                found = None
+            if found is not None and not stat.S_ISDIR(found.st_mode):
+                if name == ".config":
+                    return f"{home}/.config is no folder (a link or a file): the folder it leads to is not sealed"
+                os.unlink(name, dir_fd=held[-1])
+                found = None
+            if found is None:
+                os.mkdir(name, mode, dir_fd=held[-1])
+            held.append(os.open(name, flags, dir_fd=held[-1]))
+        os.fchown(held[-1], os.geteuid(), os.getegid())
+        os.fchmod(held[-1], 0o700)
+    except OSError as exc:
+        if exc.errno == errno.EROFS:  # a HOME nothing writes: the agent puts nothing there either
+            return None
+        return f"{home}/.config/firejail: {exc.strerror or exc}"
+    finally:
+        for fd in held:
+            os.close(fd)
+    return None
+
+
+def firejail_version(run=subprocess.run):
+    """The installed Firejail's version ("0.9.72"), or None."""
+    try:
+        text = run(["firejail", "--version"], text=True, capture_output=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.search(r"firejail version ([0-9][0-9.]*)", text or "")
+    return found[1].rstrip(".") if found else None
+
+
+def mount_table(text):
+    """[{"point", "type", "options"}] of a /proc/PID/mountinfo TEXT, in its order: the mount point as the sandbox
+    names it, the file system's type and the mount's own options - never its source or the path inside the source,
+    which are the host's (they name your folders and user)."""
+    found = []
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 7 or "-" not in fields[6:]:
+            continue
+        kind = fields[fields.index("-", 6) + 1] if fields.index("-", 6) + 1 < len(fields) else ""
+        found.append({"point": re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4]),
+                      "type": kind, "options": sorted(fields[5].split(","))})
+    return found
+
+
+def mounts_lacking(expected, text):
+    """[(mount point, [flags it lacks])] of EXPECTED ({mount point: [flags]}: the launcher's account of the host
+    folders it gave, isolation_config) against a mountinfo TEXT - what is mounted there last counts. A point that is
+    no mount here (Firejail hides some) is not judged."""
+    last = {entry["point"]: entry["options"] for entry in mount_table(text)}
+    lacking = []
+    for point, flags in sorted((expected or {}).items()):
+        if point in last:
+            missing = [flag for flag in flags if flag not in last[point]]
+            if missing:
+                lacking.append((point, missing))
+    return lacking
+
+
+def check_mounts(settings, text=None, say=None):
+    """The guard, inside Firejail: every host folder the launcher gave has the flags it asked for (nosuid, nodev)
+    after all of Podman's and Firejail's mounts. Said when not; in a strict mode nothing starts (RuntimeError)."""
+    if text is None:
+        try:
+            text = Path("/proc/self/mountinfo").read_text()
+        except OSError:
+            text = ""
+    lacking = mounts_lacking(settings.get("mounts"), text)
+    if not lacking:
+        return []
+    what = "; ".join(f"{point} lacks {', '.join(flags)}" for point, flags in lacking)
+    if settings["strict"]:
+        raise RuntimeError(f"a host folder is mounted without a flag the security mode needs: {what}")
+    (say or (lambda text: print(f"agent-sandbox: {text}", file=sys.stderr)))(
+        f"note: a host folder is mounted without a flag sandbox-ai asked for: {what} (no_new_privs and the empty "
+        "capability set still keep a setuid file there from giving anything)")
+    return lacking
+
+
+def process_account(pid="self", proc=Path("/proc")):
+    """What the kernel says of the process PID, for the manifest: its capability sets, no_new_privs, seccomp mode
+    and filters, its LSM label (None without an LSM that labels processes) and its user."""
+    account = {}
+    with contextlib.suppress(OSError):
+        for line in (proc / str(pid) / "status").read_text().splitlines():
+            key, _, value = line.partition(":")
+            if key in ("CapEff", "CapPrm", "CapBnd", "CapInh", "CapAmb", "NoNewPrivs", "Seccomp", "Seccomp_filters",
+                       "Uid", "Gid"):
+                account[key] = " ".join(value.split())
+    try:
+        account["label"] = (proc / str(pid) / "attr" / "current").read_text().strip("\x00\n ") or None
+    except OSError:
+        account["label"] = None
+    return account
+
+
+def unconfined_label(label):
+    """True if the LSM label LABEL confines nothing: none, AppArmor's "unconfined", SELinux's unconfined types."""
+    text = (label or "").strip()
+    return not text or text.split(" (")[0] == "unconfined" or ":unconfined_t:" in text or ":spc_t:" in text
+
+
+def lsm_problem(wanted, label):
+    """Why the process label LABEL is not what the administrator's policy asks for (WANTED: {"apparmor": PROFILE}
+    or {"selinux": TYPE}; None: nothing asked), or None."""
+    if not wanted:
+        return None
+    kind, name = next(iter(wanted.items()))
+    if unconfined_label(label):
+        return (f"the administrator's policy asks for the {kind} confinement {name}, and the sandbox runs "
+                f"{'without a label' if not label else 'as ' + label}")
+    held = label.split(" (")[0] == name if kind == "apparmor" else f":{name}:" in f":{label}:"
+    return None if held else f"the administrator's policy asks for the {kind} confinement {name}, and the sandbox " \
+                             f"runs as {label}"
+
+
+def kernel_account(proc=Path("/proc"), security=Path("/sys/kernel/security")):
+    """The settings of this kernel a sandbox's isolation leans on, each None where it cannot be read."""
+    def read(path):
+        try:
+            return path.read_text().strip()
+        except OSError:
+            return None
+    uname = os.uname()
+    return {"release": uname.release, "machine": uname.machine,
+            "io_uring_disabled": read(proc / "sys/kernel/io_uring_disabled"),
+            "unprivileged_userns_clone": read(proc / "sys/kernel/unprivileged_userns_clone"),
+            "max_user_namespaces": read(proc / "sys/user/max_user_namespaces"),
+            "lsm": read(security / "lsm")}
+
+
+def disk_state(paths, statvfs=os.statvfs, stat_of=os.stat):
+    """[{"paths", "free", "files_free"}], one entry per file system behind PATHS (those that exist): the bytes an
+    ordinary user can still write there and the files that can still be made (None where the file system counts
+    none, as btrfs). A file system that says nothing of its size (some FUSE and network ones answer zeros) is left
+    out: there is nothing to hold it to."""
+    found = {}
+    for path in paths:
+        try:
+            device, info = stat_of(path).st_dev, statvfs(path)
+        except OSError:
+            continue
+        if not getattr(info, "f_blocks", 1):
+            continue
+        entry = found.setdefault(device, {"paths": [], "free": info.f_bavail * info.f_frsize,
+                                          "files_free": info.f_favail if info.f_files else None})
+        entry["paths"].append(str(path))
+    return list(found.values())
+
+
+def disk_low(state, reserve, files):
+    """[(paths, text)] of the file systems in STATE (disk_state) with less than RESERVE bytes or FILES files left."""
+    low = []
+    for entry in state:
+        short = []
+        if reserve and entry["free"] < reserve:
+            short.append(f"{entry['free'] >> 20} MiB free (the reserve is {reserve >> 20} MiB)")
+        if files and entry["files_free"] is not None and entry["files_free"] < files:
+            short.append(f"{entry['files_free']} files can still be made (the reserve is {files})")
+        if short:
+            low.append((entry["paths"], " and ".join(short)))
+    return low
+
+
+def watch_disk(disk, child, stop, state=disk_state, event=None, say=None, clock=time.monotonic):
+    """The supervisor's watch of the disks behind the folders a run writes and behind its own records (DISK: the
+    launcher's {"paths", "reserve", "files", "act"}): a sandbox has no quota of its own there (that is the host's to
+    set: a project quota, a file system of its own), and a disk the agent filled takes the run's log, its approvals
+    and every other program's files with it. Below the reserve it is reported as a safeguard; with "act": "stop"
+    (the strict modes) the run is ended first, while the reserve is still there. Returns when STOP is set."""
+    event = event or safeguard_event
+    say = say or (lambda text: print(f"agent-sandbox: {text}", file=sys.stderr))
+    reserve, files = int(disk.get("reserve") or 0), int(disk.get("files") or 0)
+    told, pause = {}, DISK_SECONDS
+    while not stop.wait(pause):
+        found = state(disk.get("paths") or [])
+        near = disk_low(found, reserve * 4, files * 4)
+        pause = DISK_SECONDS / 10 if near else DISK_SECONDS
+        for paths, text in disk_low(found, reserve, files):
+            key = tuple(paths)
+            if disk.get("act") == "stop":
+                why = (f"{text}: the run is ended while the reserve is there (security mode: a disk the agent fills "
+                       "takes the run's records and your other programs' files with it); free space, or give the "
+                       "run a file system of its own")
+                say(f"the disk behind {', '.join(paths)} is nearly full: {why}")
+                event("guard", f"the disk behind {', '.join(paths)}", why)
+                with contextlib.suppress(OSError):
+                    child.terminate()
+                return "stopped"
+            if key not in told or clock() - told[key] >= DISK_REPEAT:
+                told[key] = clock()
+                event("guard", f"the disk behind {', '.join(paths)}",
+                      f"{text}: nothing limits what a sandbox writes there but the disk itself; free space (a "
+                      "full disk ends the run's records too)")
+    return "ended"
+
+
+def isolation_manifest(cfg, settings, container, firejail, proxy_pid=None, proc=Path("/proc")):
+    """The run's manifest (ISOLATION_FILE): what its isolation is made of, as the supervisor finds it before the
+    agent starts - for a human, a review or a test to hold against what was meant. Nothing of the host's but its
+    kernel's settings: mounts by their place in the sandbox, no source paths, no environment, no rule's content."""
+    def text_of(path):
+        try:
+            return path.read_text()
+        except OSError:
+            return ""
+    nested = isinstance(cfg.get("nested"), dict)
+    filters = {"container": container,
+               "sandbox": None if settings["syscall_filter"] == "off" else
+               {**seccomp_account(seccomp_policy("sandbox", nested=nested)),
+                "installed_by": "the guard, inside Firejail: the agent does not start without it"}
+               if os.uname().machine in SECCOMP_MACHINES else None,
+               "firejail": [option for option in firejail
+                            if option.startswith(("--seccomp", "--restrict-namespaces", "--protocol", "--caps",
+                                                  "--nonewprivs"))]}
+    try:
+        firewall = hashlib.sha256((SESSION_CONFIG.parent / "firewall.nft").read_bytes()).hexdigest()
+    except OSError:
+        firewall = None
+    try:
+        devices = sorted(os.listdir("/dev"))
+    except OSError:
+        devices = None
+    return {"version": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "mode": (cfg.get("mode") or {}).get("name") if isinstance(cfg.get("mode"), dict) else None,
+            "strict": settings["strict"], "nested_containers": nested,
+            "kernel": kernel_account(proc),
+            "supervisor": {**process_account("self", proc),
+                           "namespaces": {name: os.readlink(proc / "self" / "ns" / name)
+                                          for name in ("user", "mnt", "pid", "net", "ipc", "uts", "cgroup")
+                                          if os.path.lexists(proc / "self" / "ns" / name)},
+                           "uid_map": parse_id_map(text_of(proc / "self" / "uid_map")),
+                           "gid_map": parse_id_map(text_of(proc / "self" / "gid_map"))},
+            "proxy": process_account(proxy_pid, proc) if proxy_pid else None,
+            "agent": "no capability in any set, no_new_privs, seccomp and mount and PID namespaces of its own: "
+                     "checked by the guard inside Firejail (verify_inner), which starts nothing otherwise",
+            "firejail": {"version": firejail_version(), "config_sealed": settings.get("sealed"),
+                         "options": [option for option in firejail if option.startswith("--")]},
+            "filters": filters,
+            "lsm": {"wanted": settings.get("lsm"), "label": process_account("self", proc).get("label")},
+            "mounts": mount_table(text_of(proc / "self" / "mountinfo")),
+            "host_folders": settings.get("mounts") or {},
+            "devices": devices, "firewall_sha256": firewall, "disk": settings.get("disk"),
+            "limits": {name: text_of(Path("/sys/fs/cgroup") / name).strip() or None
+                       for name in ("memory.max", "pids.max", "cpu.max")}}
+
+
+def write_manifest(manifest, directories=None):
+    """MANIFEST as ISOLATION_FILE in the run's control directory and its log directory (those that exist; neither is
+    in the agent's reach). The paths written."""
+    written = []
+    for directory in directories if directories is not None else (CONTROL_DIR, LOG_DIR):
+        if not Path(directory).is_dir():
+            continue
+        path = Path(directory) / ISOLATION_FILE
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                         0o600)
+            with open(fd, "w") as stream:
+                json.dump(manifest, stream, indent=1, sort_keys=True)
+                stream.write("\n")
+        except OSError:
+            continue
+        written.append(path)
+    return written
+
+
+def proxy_confined(settings, account=None):
+    """The connection proxy, after it took its own user: no capability in any set (the bounding set too), no
+    privilege to gain, and sandbox-ai's filter for a sandbox's processes on itself (it reads what the agent and
+    the servers send). RuntimeError otherwise: the proxy, and with it the run, does not start."""
+    account = account or process_account()
+    # (the bounding set is dropped with CAP_SETPCAP, which a backend may not give: without a privilege to gain it
+    # gives nothing; a strict mode wants it empty all the same)
+    held = [f"{name}={account[name]}"
+            for name in ("CapEff", "CapPrm", "CapInh", "CapAmb", *(["CapBnd"] if settings["strict"] else []))
+            if int(account.get(name, "0") or "0", 16)]
+    if held or account.get("NoNewPrivs") != "1":
+        raise RuntimeError("the connection proxy kept capabilities or can gain privileges: "
+                           + ", ".join(held or [f"NoNewPrivs={account.get('NoNewPrivs')}"]))
+    return own_filter("sandbox", settings)
+
+
+def isolation_ready(cfg, settings, container, firejail, proxy=None):
+    """The supervisor, before Firejail starts: the run's manifest is written (isolation_manifest), and what its
+    isolation needs beyond the filters is there - the confinement the administrator's policy asks for (lsm), a
+    connection proxy without capabilities, and in a strict mode Firejail's sealed folder. Why not, or None; the run
+    does not start with a reason."""
+    if not SANDBOX_PROCESS:
+        return None
+    manifest = isolation_manifest(cfg, settings, container, firejail, proxy.pid if proxy else None)
+    write_manifest(manifest)
+    problem = lsm_problem(settings.get("lsm"), manifest["lsm"]["label"])
+    if problem:
+        return f"{problem}; the run does not start"
+    held = [f"{name}={value}" for name, value in (manifest["proxy"] or {}).items()
+            if name in ("CapEff", "CapPrm", "CapInh", "CapAmb") and int(value or "0", 16)]
+    if held:
+        return f"the connection proxy runs with capabilities ({', '.join(held)}); the run does not start"
+    if isinstance(settings.get("sealed"), str):
+        if settings["strict"]:
+            return (f"Firejail's own folder in the agent's HOME is not sealed ({settings['sealed']}), which the "
+                    "security mode needs; remove what is there, or start with a fresh HOME (--no-keep)")
+        print(f"agent-sandbox: note: Firejail's own folder in the agent's HOME is not sealed ({settings['sealed']}); "
+              "sandbox-ai starts Firejail with --noprofile, so nothing is read from it", file=sys.stderr)
+    return None
 
 
 def namespace_state():
@@ -1674,6 +3924,15 @@ def inner_bootstrap():
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(15, ctypes.c_char_p(b"kthreadd"), 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "Cannot name namespace supervisor")
+    # The container's own system call filter, before anything else runs: every process of the run descends from
+    # this one. In a strict mode nothing starts without it; elsewhere a kernel that refuses it is said.
+    global RUN_ISOLATION
+    isolation = RUN_ISOLATION = isolation_settings()
+    try:
+        container_filter = own_filter("container", isolation)
+    except RuntimeError as exc:
+        print(f"agent-sandbox: {exc}", file=sys.stderr)
+        return 1
     try:
         subprocess.run(["nft", "-f", "/sandbox/session/firewall.nft"], check=True)
     except subprocess.CalledProcessError:
@@ -1687,6 +3946,9 @@ def inner_bootstrap():
     subprocess.run(["nft", "list", "table", "inet", "agent_sandbox"], check=True, stdout=subprocess.DEVNULL)
     cfg = json.loads(SESSION_CONFIG.read_text()) if SESSION_CONFIG.exists() else {}
     nested = cfg.get("nested") if isinstance(cfg.get("nested"), dict) else None
+    if SANDBOX_PROCESS:
+        # Firejail's folder in the HOME the agent writes: the sandbox's root's alone, before Firejail starts.
+        isolation["sealed"] = seal_firejail_config() or True
     began = time.time() - 2  # what the run changed has a later ctime (a little slack for coarse clocks)
     if nested:  # first: no thread runs yet (a child is forked)
         nested_setup(nested.get("reserved", []))
@@ -1699,8 +3961,11 @@ def inner_bootstrap():
     # A strict security mode (the launcher's modes.py): it caps answers and refuses what `sandbox-ai net` would open.
     mode = cfg.get("mode") if isinstance(cfg.get("mode"), dict) else None
     scope = narrowest_scope(cfg.get("ask_max_scope", "always"), (mode or {}).get("approval_scope", "always"))
-    broker = ApprovalBroker(CONTROL_DIR / "approvals", network, max_scope=scope, blocked=cfg.get("ask_blocked"),
-                            no_inspect=proxy_config.get("no_inspect", [])) \
+    timeout = cfg.get("ask_timeout")
+    timeout = timeout if isinstance(timeout, int) and not isinstance(timeout, bool) and \
+        ASK_TIMEOUT_RANGE[0] <= timeout <= ASK_TIMEOUT_RANGE[1] else APPROVAL_SECONDS
+    broker = ApprovalBroker(CONTROL_DIR / "approvals", network, timeout=timeout, max_scope=scope,
+                            blocked=cfg.get("ask_blocked"), no_inspect=proxy_config.get("no_inspect", [])) \
         if cfg.get("ask") and CONTROL_DIR.is_dir() else None
     if broker is not None:  # who caps an answer's scope, for the safeguard record of a capped answer
         broker.capped_by = ("policy" if narrowest_scope(cfg.get("ask_max_scope", "always")) == scope else "mode",
@@ -1752,7 +4017,8 @@ def inner_bootstrap():
         live_mcp = False
     # CUT: the kill switch holds in the relays of the image servers that reach the network (McpGateway.cut_refusal).
     relays = McpRelays(broker, taint, live=live_mcp, cut=network.cut_view,
-                       secret_values=[env[name] for name in cfg.get("secret_names", []) if name in env])
+                       secret_values=[env[name] for name in cfg.get("secret_names", []) if name in env],
+                       resources_mirror=PROXY_RUN / LLM_RESOURCES_MIRROR if cfg.get("proxy") else None)
     guard = threading.Event()
     MemoryGuard(CONTROL_DIR if CONTROL_DIR.is_dir() else None).start(guard)
     try:
@@ -1771,6 +4037,9 @@ def inner_bootstrap():
                                      "broker": broker, "listening": listening, "cuts_ready": cuts_ready}).start()
         if machine and machine.get("browser") and CONTROL_DIR.is_dir():
             threading.Thread(target=browser_relay, kwargs={"stop": control}, daemon=True).start()
+        if cfg.get("launcher_lock") and CONTROL_DIR.is_dir():
+            # Never without the supervisor on the host: its end (or its run directory's) cuts the network here.
+            threading.Thread(target=watch_launcher, args=(network, guard), daemon=True).start()
         start_mcp_relays(cfg.get("mcp_relay") or {}, broker, taint, who, registry=relays)
         problem = hook_problem(cfg)
         if problem:
@@ -1800,10 +4069,28 @@ def inner_bootstrap():
         if problem:
             print(f"agent-sandbox: {problem}", file=sys.stderr)
             return 1
+        # A session's terminal relays: their sockets bound here, where the sandbox cannot replace them, and handed
+        # to the guard once Firejail runs (SealedRelays). Failing, the session does not start.
+        if cfg.get("tmux") == "detached" and not cfg.get("probe") and os.path.isdir(TMUX_DIR):
+            try:
+                sealed = SealedRelays()
+            except OSError as exc:
+                print(f"agent-sandbox: the terminal relays' sockets could not be made in {RELAY_DIR} ({exc}); the "
+                      "session does not start", file=sys.stderr)
+                return 1
+            threading.Thread(target=sealed.serve, args=(guard,), name="relay-handoff", daemon=True).start()
         # Built only now: the blacklist names the proxy's directories, which exist from here on.
         cmd = firejail_command(before, nested=bool(nested), shutdown=ends_with_its_agent(cfg))
+        problem = isolation_ready(cfg, isolation, container_filter, cmd, proxy)
+        if problem:
+            print(f"agent-sandbox: {problem}", file=sys.stderr)
+            safeguard_event("guard", "the run's isolation", problem)
+            return 1
         child = subprocess.Popen(cmd, env=base_env(), close_fds=True)
         oom_first(child.pid)  # an out-of-memory kill takes the agent's processes before PID 1 (the whole run)
+        if isinstance(isolation.get("disk"), dict) and SANDBOX_PROCESS:
+            threading.Thread(target=watch_disk, args=(isolation["disk"], child, guard), name="disk-watch",
+                             daemon=True).start()
         return wait_child(child)
     finally:
         guard.set()
@@ -1966,10 +4253,80 @@ def wait_for_unix_listener(path, process, errors, name, timeout=15.0):
         time.sleep(0.1)
 
 
+LOG_WRITE_FAILED = {}  # log name: the error of its last failed write (said once, until a write works again)
+
+
 def log_event(name, record):
+    """RECORD as a line of the log NAME in LOG_DIR; True if written. A write that fails - a full disk (ENOSPC, EDQUOT),
+    EIO - loses that record and is said once (log_write_failed), never raised: the monitor that writes (the file log,
+    DNS, the firewall's refusals) goes on, and the run with its kill switch and approvals. Before, the file log's
+    thread ended at the first ENOSPC, unseen, for the rest of the run."""
     record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}
-    with open(LOG_DIR / name, "a") as stream:
-        stream.write(json.dumps(record) + "\n")
+    try:
+        append_record(LOG_DIR / name, (json.dumps(record) + "\n").encode())
+    except OSError as exc:
+        log_write_failed(name, exc)
+        return False
+    if LOG_WRITE_FAILED.pop(name, None) is not None:
+        with contextlib.suppress(Exception):
+            print(f"agent-sandbox: the log {name} is written again (records in between are lost)", file=sys.stderr,
+                  flush=True)
+    return True
+
+
+def mount_of(path, mountinfo="/proc/self/mountinfo"):
+    """(mount point, file system type) of the file system PATH lies on, as this process sees it (the longest mount
+    point of mountinfo that holds it), else (None, None)."""
+    try:
+        with open(mountinfo, encoding="utf-8", errors="surrogateescape") as stream:
+            lines = stream.read().splitlines()
+        real = os.path.realpath(path)
+    except OSError:
+        return None, None
+    best = (None, None)
+    for line in lines:
+        fields = line.split(" ")
+        if len(fields) < 10 or "-" not in fields[6:]:
+            continue
+        point = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+        if (real == point or real.startswith(point.rstrip("/") + "/")) and len(point) >= len(best[0] or ""):
+            best = (point, fields[fields.index("-", 6) + 1])
+    return best
+
+
+def filesystem_text(path):
+    """The file system PATH lies on in words - where it is mounted, its type (a tmpfs is said as one), its free bytes
+    and free inodes: "the file system of /sandbox/log (ext4 at /sandbox/log): 0 MiB of 931 GiB free, 0 of 61 million
+    inodes free". A full disk is not assumed: "No space left on device" comes as well from a tmpfs, a quota or the
+    inodes running out (user report 2026-11-20: "the disk is not full"). "" when it cannot be read."""
+    try:
+        info = os.statvfs(path)
+    except OSError:
+        return ""
+    point, kind = mount_of(path)
+    free, total = info.f_bavail * info.f_frsize, info.f_blocks * info.f_frsize
+    where = f"{kind} at {point}" if kind and point else kind or "its file system"
+    inodes = f"{info.f_favail} of {info.f_files} inodes free" if info.f_files else "inodes not counted there"
+    return (f"the file system of {path} ({where}): {free >> 20} MiB of {total >> 20} MiB free, {inodes}"
+            + ("; a tmpfs holds it in memory: its size is set where it is mounted" if kind == "tmpfs" else "")
+            + ("; no inodes left: many small files fill it" if info.f_files and info.f_favail == 0 else ""))
+
+
+def log_write_failed(name, exc):
+    """The log NAME could not be written (EXC): said once on standard error and as a safeguard (the human gets the
+    warning: the file system that refused is named, with its free bytes and inodes) until a write of it works again;
+    never raises."""
+    if name in LOG_WRITE_FAILED:
+        return
+    LOG_WRITE_FAILED[name] = getattr(exc, "errno", None)
+    reason = exc.strerror or str(exc) or type(exc).__name__
+    full = getattr(exc, "errno", None) in (errno.ENOSPC, errno.EDQUOT)
+    where = filesystem_text(LOG_DIR) if full else ""
+    text = (f"the log {name} cannot be written ({reason}" + (f"; {where}" if where else "")
+            + "): its records are lost until it can be written again; the run, its kill switch and approvals go on")
+    with contextlib.suppress(Exception):
+        print(f"agent-sandbox: warning: {text}", file=sys.stderr, flush=True)
+    safeguard_event("guard", f"the log {name}", text)
 
 
 SAFEGUARD_FILE = "safeguard-events.jsonl"
@@ -2006,7 +4363,9 @@ def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
     def denied_loop():
         while not stop.wait(1):
             poll_denied(stop.seen, who)
-    starting = {wildcard_suffix(v) for v in cfg.get("wildcards", [])}
+    # (config.json "shared_wildcards": those below a shared service whose risk the human confirmed at the start)
+    confirmed = {str(v).lower() for v in cfg.get("shared_wildcards", []) or [] if isinstance(v, str)}
+    starting = {wildcard_suffix(v, shared_ok=str(v).lower() in confirmed) for v in cfg.get("wildcards", [])}
 
     def wildcards():
         with WILDCARDS_LOCK:
@@ -2017,7 +4376,10 @@ def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
                                                                      [cfg.get("env", {})[k] for k in cfg.get("secret_names", [])
                                                                       if k in cfg.get("env", {})]))]
     if cfg["watch"]:  # file access only with an explicit --log-dir
-        loggers.append((file_logger, (cfg["watch"], stop)))
+        loggers.append((file_logger, (cfg["watch"], stop, FILE_PRUNE_SECONDS, cfg.get("file_reads") or "folders")))
+    # The logs that grow during a long run, rotated while it runs (the connection log too: the proxy holds it open).
+    held = cfg["proxy"].get("log") if isinstance(cfg.get("proxy"), dict) else None
+    loggers.append((log_rotator, (stop, held if isinstance(held, str) and "/" not in held else None)))
     for target, args in loggers:
         thread = threading.Thread(target=target, args=args, name=target.__name__, daemon=True)
         thread.start()
@@ -2025,7 +4387,374 @@ def start_loggers(broker=None, quiet=(), who=None, canaries=None, network=None):
     return stop
 
 
-PROCESS_LOG_LIMIT = 256 << 20  # processes.jsonl per log directory
+PROCESS_LOG_LIMIT = 256 << 20  # processes.jsonl per log directory (rotate_logs keeps it below: a stop, then)
+# The logs of the log directory that grow while a run runs - one run lives for days: its file watch wrote 8 GB, its
+# connection log 6 GB - are rotated during the run (log_rotator, every LOG_ROTATE_EVERY seconds): one larger than
+# LOG_PART goes compressed into older parts, at most LOG_ARCHIVE_LIMIT of them per log (the oldest dropped). What
+# every reader reads of a log is its newest part (sandbox-ai logs, report: the newest 32 MiB), which stays in place.
+LOG_PART = 128 << 20
+LOG_ARCHIVE_LIMIT = 1 << 30
+LOG_ROTATE_EVERY = 60
+# (each opened for every record; tools.jsonl: the agent's tool calls, HookServer.write; mcp-calls.jsonl: the MCP relays'
+# calls, McpRelays.stream - a RecordFile)
+ROTATED_LOGS = ("files.jsonl", "processes.jsonl", "dns.jsonl", "egress-denied.jsonl", "tools.jsonl", "mcp-calls.jsonl")
+# A writer may have opened a shared log just before rotate_shared_log renamed it away and write its record after the
+# part was compressed: what the renamed file holds after this many seconds is added to the compressed part.
+SHARED_ROTATE_GRACE = 0.2
+LOG_LEVEL = 3  # gzip's level: JSON lines shrink to a quarter or less, at about 100 MB/s
+
+
+def compress_into(source, target, end=None):
+    """The bytes of the open file SOURCE (a descriptor) from its start up to END (None: to its end, also what is
+    appended meanwhile) compressed into the new file TARGET (0600, never through a link), made under a temporary name
+    and fsynced; the bytes read."""
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    offset = 0
+    try:
+        with open(out, "wb", closefd=False) as raw, \
+                gzip.GzipFile(filename=target.name[:-3], mode="wb", compresslevel=LOG_LEVEL, fileobj=raw) as packed:
+            while end is None or offset < end:
+                data = os.pread(source, 1 << 20 if end is None else min(1 << 20, end - offset), offset)
+                if not data:
+                    break
+                packed.write(data)
+                offset += len(data)
+        os.fsync(out)
+        os.replace(temporary, target)
+        return offset
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    finally:
+        os.close(out)
+
+
+def drop_older_parts(directory, pattern, limit):
+    """The oldest files of DIRECTORY whose names PATTERN matches (the oldest sort first) go while they hold more than
+    LIMIT bytes; the names removed."""
+    found = []
+    with contextlib.suppress(OSError), os.scandir(directory) as listing:
+        for entry in listing:
+            if pattern.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
+                found.append((entry.name, entry.stat(follow_symlinks=False).st_size))
+    found.sort()
+    total, removed = sum(size for _, size in found), []
+    for name, size in found:
+        if total <= limit:
+            break
+        with contextlib.suppress(OSError):
+            os.unlink(Path(directory) / name)
+            total -= size
+            removed.append(name)
+    return removed
+
+
+def rotate_shared_log(path, limit=LOG_ARCHIVE_LIMIT, when=None):
+    """PATH (a log written one record at a time, opened for each: files.jsonl, processes.jsonl ...) renamed away - the
+    next record starts a new one - and compressed into PATH.TIME.gz; the oldest such parts go beyond LIMIT bytes. Left
+    uncompressed as PATH.TIME when the disk takes no compressed copy (sandbox-ai gc compresses it later). The name of
+    the older part, or None (nothing to rotate, or another run did it first)."""
+    path = Path(path)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(time.time() if when is None else when))
+    kept = path.with_name(f"{path.name}.{stamp}")
+    if kept.exists() or kept.with_name(kept.name + ".gz").exists():
+        return None
+    # Never over a part that is there: another run of the project rotates the same log, and a rename replaces - the
+    # look above and the rename are two steps. A second name for the file (which fails when the name is taken), then
+    # the first one removed; a file system without links: renamed as before.
+    try:
+        os.link(path, kept, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except FileExistsError:
+        return None
+    except (OSError, NotImplementedError):
+        try:
+            os.rename(path, kept)  # (a link is renamed as itself, never followed)
+        except FileNotFoundError:
+            return None
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+    try:
+        fd = os.open(kept, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return kept.name
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return kept.name
+        packed = kept.with_name(kept.name + ".gz")
+        done = compress_into(fd, packed)
+        # A record written after the last read (its writer opened PATH before the rename): another gzip member.
+        time.sleep(SHARED_ROTATE_GRACE)
+        size = os.fstat(fd).st_size
+        if size > done:
+            with open(packed, "ab") as stream:
+                stream.write(gzip.compress(os.pread(fd, size - done, done), LOG_LEVEL))
+                stream.flush()
+                os.fsync(stream.fileno())
+    except OSError:
+        return kept.name
+    finally:
+        os.close(fd)
+    with contextlib.suppress(OSError):
+        os.unlink(kept)
+    drop_older_parts(path.parent, re.compile(re.escape(path.name) + r"\.\d{8}-\d{6}\.gz"), limit)
+    return kept.name + ".gz"
+
+
+def compress_held(source, target, before_placing=None):
+    """The log SOURCE (a descriptor of a file a writer holds open, writing with append_locked) compressed into the new
+    file TARGET and then emptied: copied to its end while the writer goes on and synced; then, holding the writer's
+    lock, what it appended meanwhile copied, TARGET made durable and in place (BEFORE_PLACING() called just before:
+    the compressed copy is complete - what makes room for TARGET happens only then, never for a copy that failed),
+    and SOURCE emptied. The bytes moved."""
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    offset, locked = 0, False
+    try:
+        with open(out, "wb", closefd=False) as raw:
+            packed = gzip.GzipFile(filename=target.name[:-3], mode="wb", compresslevel=LOG_LEVEL, fileobj=raw)
+            try:
+                for final in (False, True):
+                    if final:  # the bulk is on disk: what is left is short, the writer waits only for that
+                        packed.flush()
+                        raw.flush()
+                        os.fsync(out)
+                        try:
+                            fcntl.flock(source, fcntl.LOCK_EX)
+                            locked = True
+                        except OSError:
+                            pass
+                    while True:
+                        data = os.pread(source, 1 << 20, offset)
+                        if not data:
+                            break
+                        packed.write(data)
+                        offset += len(data)
+            finally:
+                packed.close()
+        os.fsync(out)
+        if before_placing is not None:
+            before_placing()
+        os.replace(temporary, target)
+        os.ftruncate(source, 0)
+        return offset
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+    finally:
+        if locked:
+            with contextlib.suppress(OSError):
+                fcntl.flock(source, fcntl.LOCK_UN)
+        os.close(out)
+
+
+def append_locked(fd, data):
+    """DATA appended to the log FD (opened with O_APPEND) whole, under an exclusive lock on the file: the rotation of
+    a log held open (rotate_held_log) takes the same lock for its last copy and the emptying, so no record is written
+    in between and lost. DATA may be a function of the file's size, called under the lock (a size smaller than the
+    last one: the log was rotated meanwhile). A file that cannot be locked (a device) is written all the same. The
+    file's size after the write."""
+    locked = False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        locked = True
+    except OSError:
+        pass
+    try:
+        size = os.fstat(fd).st_size
+        if callable(data):
+            data = data(size)
+        data = line_start(fd, size) + data
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        return size + len(data)
+    finally:
+        if locked:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def line_start(fd, size):
+    """b"\\n" when the log FD (SIZE bytes long) ends in a cut line - its writer was killed in the middle of a record -,
+    so that the next record starts a line of its own instead of being lost with the cut one; else b"" (also for a
+    descriptor that cannot be read: opened for writing only)."""
+    if size <= 0:
+        return b""
+    try:
+        return b"" if os.pread(fd, 1, size - 1) in (b"\n", b"") else b"\n"
+    except OSError:
+        return b""
+
+
+def append_record(path, data, mode=0o666):
+    """DATA (whole records, each with its newline) appended to the log PATH, opened for it (made with MODE, the umask
+    applied): whole, under the file's lock (append_locked), after a cut line ended. OSError when it cannot be written."""
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, mode)
+    try:
+        return append_locked(fd, data)
+    finally:
+        os.close(fd)
+
+
+class RecordFile:
+    """A log written as a stream (print(..., file=...), McpGateway's records) that is opened for each record: its
+    rotation during the run (rotate_shared_log renames it) never leaves the writer in the renamed file. What a thread
+    writes is kept until its line ends, then appended whole (append_record): two threads never mix their lines."""
+
+    def __init__(self, path):
+        self.path, self.pending = path, threading.local()
+
+    def write(self, text):
+        held = getattr(self.pending, "text", "") + text
+        if "\n" in held:
+            done, _, held = held.rpartition("\n")
+            with contextlib.suppress(OSError):
+                append_record(self.path, (done + "\n").encode("utf-8", "replace"))
+        self.pending.text = held
+        return len(text)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+# A body of the connection log (its text or base64) at least LOG_BODY_REPEAT characters long that this part of the log
+# holds already is written as a reference to it (logged_once): a model API's requests begin with the same system
+# prompt and tools - their first 64 KiB, all the log keeps of them, were the same in request after request, two thirds
+# of the log, and beyond gzip's 32 KiB window. The digests of the last LOG_BODY_SEEN bodies are remembered.
+LOG_BODY_REPEAT = 4096
+LOG_BODY_SEEN = 512
+
+
+def logged_once(record, seen, limit=None):
+    """RECORD (a connection log record) as it is written: each body ("request"/"response" "body") whose "text" or
+    "base64" of LOG_BODY_REPEAT characters or more is in SEEN ({digest: {"connection", "time", "digest"}}, the bodies
+    this part of the log holds, oldest first) without it and with "same_as" (that entry); a new one with its "digest",
+    added to SEEN (at most LIMIT, LOG_BODY_SEEN: the oldest forgotten). A new dict; RECORD stays as it was."""
+    limit = LOG_BODY_SEEN if limit is None else limit
+    written = record
+    for side in ("request", "response"):
+        part = record.get(side)
+        body = part.get("body") if isinstance(part, dict) else None
+        if not isinstance(body, dict):
+            continue
+        key = "text" if isinstance(body.get("text"), str) else "base64" if isinstance(body.get("base64"), str) else None
+        if key is None or len(body[key]) < LOG_BODY_REPEAT:
+            continue
+        digest = hashlib.blake2b(body[key].encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
+        if digest in seen:
+            body = {name: value for name, value in body.items() if name != key}
+            body["same_as"] = seen[digest]
+        else:
+            seen[digest] = {"connection": record.get("connection"), "time": record.get("time"), "digest": digest}
+            while len(seen) > limit:
+                seen.pop(next(iter(seen)))
+            body = {**body, "digest": digest}
+        if written is record:
+            written = dict(record)
+        written[side] = {**part, "body": body}
+    return written
+
+
+# A binary answer (a download: a wheel, a tarball, a Git pack) is logged by its size, the SHA-256 of what the log
+# would have held of it (its first 64 KiB) and its first BINARY_HEAD bytes (what kind of file it is): as base64 its
+# first 64 KiB were 87 KB of every download that no compression shrinks - most of the log once the repeated bodies are
+# references. "connection_bodies": "all" (defaults) logs them as before; what was sent (a binary upload) stays whole.
+BINARY_HEAD = 64
+CONNECTION_BODIES = ("text", "all")
+
+
+def binary_answer(record):
+    """RECORD (a connection log record) with its answer's binary body ("response" "body" "base64") as {"binary":
+    {"logged" (bytes it held), "sha256" of them, "head" (the first BINARY_HEAD, base64)}} beside its size; a new dict.
+    RECORD itself when its answer has no such body (or one that is not base64)."""
+    part = record.get("response")
+    body = part.get("body") if isinstance(part, dict) else None
+    if not isinstance(body, dict) or not isinstance(body.get("base64"), str):
+        return record
+    try:
+        data = base64.b64decode(body["base64"], validate=True)
+    except ValueError:
+        return record
+    kept = {key: value for key, value in body.items() if key != "base64"}
+    kept["binary"] = {"logged": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                      "head": base64.b64encode(data[:BINARY_HEAD]).decode()}
+    return {**record, "response": {**part, "body": kept}}
+
+
+def rotate_held_log(path, parts=None, limit=LOG_ARCHIVE_LIMIT):
+    """A run's connection log, which the proxy holds open (appending): its content compressed into PATH.1.gz (the older
+    parts moved up: PATH.2.gz ...; the oldest beyond LIMIT bytes dropped), then the file emptied in place - the proxy
+    writes on at its start. Most of it is copied while the proxy writes on; the rest is copied, the part made durable
+    and the file emptied under the lock the proxy writes each record under (append_locked): nothing written meanwhile
+    is lost. The bytes moved, or 0."""
+    path = Path(path)
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return 0
+        numbered = re.compile(re.escape(path.name) + r"\.(\d{1,3})\.gz")
+
+        def move_up():
+            # Only once the new part is complete: a compression that failed (a full disk) moved every older part up
+            # all the same, at each try - a minute apart, until they reached 999 and were deleted.
+            older = sorted(((int(numbered.fullmatch(entry.name).group(1)), entry.name)
+                            for entry in os.scandir(path.parent) if numbered.fullmatch(entry.name)), reverse=True)
+            for number, name in older:  # the oldest first: each one up by one
+                if number >= 999:
+                    with contextlib.suppress(OSError):
+                        os.unlink(path.parent / name)
+                    continue
+                os.replace(path.parent / name, path.parent / f"{path.name}.{number + 1}.gz")
+        moved = compress_held(fd, path.with_name(f"{path.name}.1.gz"), move_up)
+    finally:
+        os.close(fd)
+    parts = sorted(((int(numbered.fullmatch(entry.name).group(1)), entry.name, entry.stat().st_size)
+                    for entry in os.scandir(path.parent) if numbered.fullmatch(entry.name)))
+    total = sum(size for _, _, size in parts)
+    for _, name, size in reversed(parts):  # the highest number is the oldest
+        if total <= limit:
+            break
+        with contextlib.suppress(OSError):
+            os.unlink(path.parent / name)
+            total -= size
+    return moved
+
+
+def rotate_logs(directory=None, held=None, part=None):
+    """The logs of DIRECTORY (LOG_DIR) larger than PART (LOG_PART) rotated: those of ROTATED_LOGS (rotate_shared_log)
+    and HELD, the run's connection log (rotate_held_log). [name] of those rotated; never raises."""
+    directory = Path(directory) if directory is not None else LOG_DIR
+    part = LOG_PART if part is None else part
+    done = []
+    for name in (*ROTATED_LOGS, *([held] if held else [])):
+        with contextlib.suppress(Exception):
+            info = os.stat(directory / name, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_size <= part:
+                continue
+            if name == held:
+                if rotate_held_log(directory / name):
+                    done.append(name)
+            elif rotate_shared_log(directory / name):
+                done.append(name)
+    return done
+
+
+def log_rotator(stop, held=None, every=None):
+    """The run's rotation of its log directory (rotate_logs) every EVERY (LOG_ROTATE_EVERY) seconds, until STOP."""
+    while not stop.wait(LOG_ROTATE_EVERY if every is None else every):
+        for name in rotate_logs(LOG_DIR, held):
+            with contextlib.suppress(Exception):
+                print(f"agent-sandbox: {name} grew past {LOG_PART >> 20} MiB: its older part is compressed beside it",
+                      file=sys.stderr, flush=True)
 
 
 def proc_bytes(path, limit=None):
@@ -2059,6 +4788,11 @@ def process_logger(stop, interval=0.5, proc=Path("/proc"), secret_values=(), lim
     # decoding and buffered files took two thirds of each look).
     where = str(proc)
     while not stop.wait(interval):
+        if written >= limit:
+            try:  # rotated meanwhile (rotate_logs): what the file holds now counts
+                written = (LOG_DIR / "processes.jsonl").stat().st_size
+            except OSError:
+                written = 0
         if written >= limit:
             log_event("processes.jsonl", {"error": f"processes.jsonl reached {limit >> 20} MiB; no more entries"})
             return
@@ -2198,7 +4932,10 @@ WILDCARDS = set()
 WILDCARDS_LOCK = threading.Lock()
 # Suffixes under which anyone can have a name of their own (a public suffix, a hosting or cloud service): a wildcard
 # at or above one would let the agent open any server it rents there, unasked (*.X matches names at every depth
-# below X). Three sources, all refused:
+# below X). Three sources. A registry's (the list's ICANN section, a country's two-label domain such as co.uk, a
+# top-level domain) are refused always; a shared service's (the PRIVATE section, SHARED_SUFFIXES, the fallback list)
+# only without the human's explicit confirmation of that risk (--allow-shared-wildcard, a question on a terminal, the
+# app's and the web interface's question; user 2026-11-20: the human decides, warned - SharedWildcardError):
 # - the Public Suffix List (ICANN and PRIVATE sections), a pinned copy beside this file (public_suffix_list.dat; the
 #   launcher binds it into the sandbox next to /sandbox/runtime.py): *.X is refused when X is a public suffix, or
 #   when a public suffix lies below X (*.amazonaws.com covers s3.amazonaws.com, where anyone has a bucket);
@@ -2229,6 +4966,11 @@ cloudfront.net azurewebsites.net azurestaticapps.net web.app firebaseapp.com run
 ngrok.dev ngrok-free.dev trycloudflare.com onrender.com glitch.me repl.co readthedocs.io surge.sh myshopify.com
 deno.dev r2.dev
 """.split())
+# Subtrees of a shared service that the service runs itself, where nobody can have a name of their own: a wildcard
+# at or below one is let through although it lies below a SHARED_SUFFIXES entry or a public suffix. Each is named
+# exactly, with who runs it. actions.githubusercontent.com: GitHub Actions' own hosts (pipelines., results-receiver.,
+# vstoken., pkg. ...; user 2026-11-19, `gh run` and artifact downloads).
+OPERATED_SUBTREES = frozenset({"actions.githubusercontent.com"})
 COUNTRY_SECOND_LEVEL = re.compile(r"(?:co|com|net|org|gov|edu|ac|or|ne|go|gob|nic|mil|ltd|plc|sch|info|biz)\.[a-z]{2}")
 WILDCARD_SUFFIX = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}")
 PUBLIC_SUFFIX_FILE = Path(__file__).resolve().parent / "public_suffix_list.dat"
@@ -2247,9 +4989,12 @@ class PublicSuffixList:
         if -1 in marks or marks != sorted(marks):
             raise ValueError("not the Public Suffix List: its ICANN and PRIVATE sections are missing or out of order")
         self.rules, self.wildcards, self.exceptions = set(), set(), set()
+        # The registries' part (the ICANN section; a rule outside both sections counts as one): refused always.
+        icann_rules, icann_wildcards = set(), set()
         for number, line in enumerate(lines, 1):
             if not line or line.startswith("//"):
                 continue
+            registry = not marks[2] < number - 1 < marks[3]
             rule = line.split()[0].lower()  # a rule ends at the first white space
             exception = rule.startswith("!")
             labels = rule[1:].split(".") if exception else rule.split(".")
@@ -2267,15 +5012,26 @@ class PublicSuffixList:
             except (ValueError, UnicodeError) as exc:
                 raise ValueError(f"public suffix list line {number}: {printable_text(line, 100)!r}: {exc}") from None
             (self.exceptions if exception else self.wildcards if wildcard else self.rules).add(".".join(labels))
+            if registry and not exception:
+                (icann_wildcards if wildcard else icann_rules).add(".".join(labels))
         if len(self.rules) < 1000:
             raise ValueError(f"the public suffix list has only {len(self.rules)} rules: cut short")
-        self.above = set()  # every name a public suffix lies below
-        for name in self.rules:
+        self.above = self.names_above(self.rules, self.wildcards)  # every name a public suffix lies below
+        self.icann_rules, self.icann_wildcards = icann_rules, icann_wildcards
+        self.icann_above = self.names_above(icann_rules, icann_wildcards)
+
+    @staticmethod
+    def names_above(rules, wildcards):
+        """Every name one of RULES lies below, and every name one of WILDCARDS (*.P: each LABEL.P is public) lies at or
+        below."""
+        above = set()
+        for name in rules:
             parts = name.split(".")
-            self.above.update(".".join(parts[i:]) for i in range(1, len(parts)))
-        for name in self.wildcards:  # *.P: every LABEL.P is public, so P and what it lies below
+            above.update(".".join(parts[i:]) for i in range(1, len(parts)))
+        for name in wildcards:
             parts = name.split(".")
-            self.above.update(".".join(parts[i:]) for i in range(len(parts)))
+            above.update(".".join(parts[i:]) for i in range(len(parts)))
+        return above
 
     @staticmethod
     def label(label):
@@ -2294,6 +5050,13 @@ class PublicSuffixList:
     def refuses(self, suffix):
         """*.SUFFIX would reach names anyone can register: SUFFIX is a public suffix, or one lies below it."""
         return self.public(suffix) or suffix in self.above
+
+    def registry(self, suffix):
+        """*.SUFFIX would reach a registry's names (the ICANN section: a country's co.uk, kyoto.jp, a top-level
+        domain's): SUFFIX is such a public suffix, or one lies below it. Refused always, confirmed or not."""
+        parent = suffix.split(".", 1)[1] if "." in suffix else ""
+        own = suffix not in self.exceptions and (suffix in self.icann_rules or parent in self.icann_wildcards)
+        return own or suffix in self.icann_above
 
     @classmethod
     def load(cls, path=None):
@@ -2316,31 +5079,85 @@ class PublicSuffixList:
         return loaded
 
 
-def wildcard_suffix(value, path=None):
-    """"example.com" of "*.example.com" (lower case); ValueError for anything else: a wildcard needs at least two
-    labels below it (*.com would open a whole top-level domain), and none at or above a public suffix or a shared
-    service (SHARED_SUFFIXES, PublicSuffixList; PATH: another public suffix list, for tests)."""
+class SharedWildcardError(ValueError):
+    """A host wildcard below a shared service (WILDCARD; SHARED: the suffix it reaches), refused unless the human
+    confirmed that risk (--allow-shared-wildcard, a question on a terminal, the app's or the web interface's)."""
+
+    def __init__(self, message, wildcard, shared):
+        super().__init__(message)
+        self.wildcard, self.shared = wildcard, shared
+
+
+def wildcard_reach(value, path=None):
+    """(suffix, shared) of the host wildcard VALUE: "example.com" of "*.example.com" (lower case), and the shared
+    service it reaches (None: nobody but its owner has names below it). ValueError for what is refused always: no
+    wildcard *.DOMAIN.TLD (*.com would open a whole top-level domain), a registry's public suffix at or below it (the
+    list's ICANN section, a country's co.uk), and every wildcard while the list cannot be read (PATH: another public
+    suffix list, for tests)."""
     if not isinstance(value, str) or not value.startswith("*.") or not WILDCARD_SUFFIX.fullmatch(value[2:].lower()) \
             or "." not in value[2:]:
         raise ValueError(f"not a host wildcard *.DOMAIN.TLD: {printable_text(str(value), 100)!r}")
     suffix = value[2:].lower()
-    shared = next((s for s in SHARED_SUFFIXES if suffix == s or suffix.endswith("." + s)), None)
-    if not shared and COUNTRY_SECOND_LEVEL.fullmatch(suffix):
+    if any(suffix == s or suffix.endswith("." + s) for s in OPERATED_SUBTREES):
+        return suffix, None  # (run by the service itself: OPERATED_SUBTREES)
+    registry = suffix if COUNTRY_SECOND_LEVEL.fullmatch(suffix) else None
+    try:
+        listed = PublicSuffixList.load(path)
+    except ValueError as exc:
+        raise ValueError(f"not a host wildcard here: {exc}; every wildcard is refused until it is restored") \
+            from None
+    if listed is not None and listed.registry(suffix):
+        registry = suffix
+    if registry:
+        raise ValueError(f"not a host wildcard here: it reaches {printable_text(registry, 100)}, where anyone can have "
+                         "a name of their own (a public suffix of a registry), so the agent could open any server it "
+                         "registers there; give the hosts by name instead")
+    def nearest(suffixes):  # the most specific one it lies at or below (blob.core.windows.net, not windows.net)
+        return max((s for s in suffixes if suffix == s or suffix.endswith("." + s)), key=len, default=None)
+    shared = nearest(SHARED_SUFFIXES)
+    if not shared and listed is None:
+        shared = nearest(FALLBACK_PUBLIC_SUFFIXES)
+    elif not shared and listed.refuses(suffix):
         shared = suffix
+    return suffix, shared
+
+
+def shared_wildcard(value, path=None):
+    """The shared service (a hosting, cloud or tunnel service's suffix, the list's PRIVATE section) the host wildcard
+    VALUE reaches, or None for a wildcard of someone's own domain; ValueError for what is refused always
+    (wildcard_reach)."""
+    return wildcard_reach(value, path)[1]
+
+
+def shared_wildcard_risk(value, path=None):
+    """The risk of the host wildcard VALUE in words, naming the shared suffix, or None when it is no shared one (or
+    is refused always)."""
+    try:
+        shared = shared_wildcard(value, path)
+    except ValueError:
+        return None
     if not shared:
-        try:
-            listed = PublicSuffixList.load(path)
-        except ValueError as exc:
-            raise ValueError(f"not a host wildcard here: {exc}; every wildcard is refused until it is restored") \
-                from None
-        if listed is None:
-            shared = next((s for s in FALLBACK_PUBLIC_SUFFIXES if suffix == s or suffix.endswith("." + s)), None)
-        elif listed.refuses(suffix):
-            shared = suffix
-    if shared:
-        raise ValueError(f"not a host wildcard here: it reaches {printable_text(shared, 100)}, where anyone can have "
-                         "a name of their own (a public suffix or hosting service), so the agent could open any server "
-                         "it rents there; give the hosts by name instead")
+        return None
+    shown = printable_text(shared, 100)
+    return (f"{printable_text(str(value).lower(), 100)} lies below {shown}, a shared service where anyone can rent "
+            f"a name: the agent could open any server anyone rents below {shown}, and send data there")
+
+
+def wildcard_suffix(value, path=None, shared_ok=False):
+    """"example.com" of "*.example.com" (lower case); ValueError for anything else: a wildcard needs at least two
+    labels below it (*.com would open a whole top-level domain), and none at or above a registry's public suffix
+    (wildcard_reach). One at or above a shared service (SHARED_SUFFIXES, the list's PRIVATE section) only with
+    SHARED_OK - the human confirmed that risk - else a SharedWildcardError (PATH: another public suffix list, for
+    tests)."""
+    suffix, shared = wildcard_reach(value, path)
+    if shared and not shared_ok:
+        shown = printable_text(shared, 100)
+        given = printable_text(str(value).lower(), 100)
+        raise SharedWildcardError(
+            f"not a host wildcard here without your confirmation: it reaches {shown}, where anyone can have a name of "
+            f"their own (a hosting or cloud service): the agent could open any server anyone rents below {shown}, and "
+            f"send data there; give the hosts by name instead, or accept that risk with --allow-shared-wildcard "
+            f"'{given}'", given, shared)
     return suffix
 
 
@@ -2351,16 +5168,49 @@ def under_wildcard(name, suffixes):
 
 
 def change_wildcards(request, forbid=(), mode=None):
-    """Control op "wildcards": {"add": [...], "remove": [...]} of *.DOMAIN; the wildcards now. The administrator's
-    policy and a strict security mode refuse --allow-host here as at the start."""
-    add = [wildcard_suffix(v) for v in request.get("add", []) or []]
-    remove = [wildcard_suffix(v) for v in request.get("remove", []) or []]
-    if add and ("--allow-host" in forbid or "--allow-host" in ((mode or {}).get("refuses") or [])):
+    """Control op "wildcards": {"add": [...], "remove": [...], "shared": [...]} of *.DOMAIN; the wildcards now.
+    SHARED: the wildcards below a shared service among ADD whose risk the human confirmed (`sandbox-ai net allow
+    --allow-shared-wildcard`, or its question); one not named there is refused (SharedWildcardError). The
+    administrator's policy and a strict security mode refuse --allow-host here as at the start, and a confirmed shared
+    wildcard as --allow-shared-wildcard (a strict mode's record of an older start: as --allow-host). A removal needs
+    no confirmation."""
+    shared = {str(v).lower() for v in request.get("shared", []) or [] if isinstance(v, str)}
+    add = [wildcard_suffix(v, shared_ok=isinstance(v, str) and v.lower() in shared) for v in request.get("add", []) or []]
+    remove = [wildcard_suffix(v, shared_ok=True) for v in request.get("remove", []) or []]
+    confirmed = [v for v in request.get("add", []) or [] if shared_wildcard(v)]
+    refuses = (mode or {}).get("refuses") or []
+    if confirmed and "--allow-shared-wildcard" in forbid:
+        safeguard_event("policy", f"sandbox-ai net allow --allow-shared-wildcard {confirmed[0]}",
+                        "--allow-shared-wildcard is not allowed by the administrator's policy",
+                        option="--allow-shared-wildcard")
+        raise ValueError("--allow-shared-wildcard is not allowed by the administrator's policy: no wildcard below a "
+                         "shared service, confirmed or not")
+    if confirmed and ("--allow-shared-wildcard" in refuses or "--allow-host" in refuses):
+        safeguard_event("mode", f"sandbox-ai net allow --allow-shared-wildcard {confirmed[0]}",
+                        f"--allow-shared-wildcard widens the security mode {(mode or {}).get('name')}",
+                        option="--allow-shared-wildcard")
+        raise ValueError(f"--allow-shared-wildcard widens the security mode {(mode or {}).get('name')} of this run: "
+                         "a wildcard below a shared service stays refused there, confirmed or not")
+    if add and ("--allow-host" in forbid or "--allow-host" in refuses):
         raise ValueError("--allow-host is refused for this run (the administrator's policy or its security mode)")
     with WILDCARDS_LOCK:
         WILDCARDS.update(add)
         WILDCARDS.difference_update(remove)
         return sorted(WILDCARDS)
+
+
+# Names that never exist (RFC 2606, RFC 6761: special-use top-level domains): a lookup of one is refused at once,
+# never asked about - allowing it could only find that it does not exist, and the question would wait for nothing (the
+# host's side, approvals.RESERVED_NAMES, is the same list). Not example.com, .net or .org: those resolve. A name of
+# them the human allowed (--allow-host, net allow: pinned) is answered from the pins as any other.
+RESERVED_NAMES = ("example", "invalid", "localhost", "test")
+RESERVED_REASON = "a reserved name: it never exists (RFC 2606/6761)"
+
+
+def reserved_name(name):
+    """NAME is one of RESERVED_NAMES or below one (case and a final dot do not count)."""
+    name = str(name).lower().rstrip(".")
+    return any(name == suffix or name.endswith("." + suffix) for suffix in RESERVED_NAMES)
 
 
 DNS_WORKERS = 8      # lookups the DNS stub forwards at once
@@ -2443,7 +5293,8 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
             if name not in pinned and broker is not None and wildcards is not None and \
                     re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}",
                                  name) and \
-                    under_wildcard(name, wildcards()) and not (canaries is not None and canaries.names.name(name)):
+                    under_wildcard(name, wildcards()) and not (canaries is not None and canaries.names.name(name)) \
+                    and not reserved_name(name):  # (refused below: the host would look it up by itself)
                 if workers.acquire(blocking=False):
                     found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
                     try:
@@ -2467,11 +5318,15 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
             found = who.lookup("udp", peer[0], peer[1]) if who is not None and name not in pinned else {}
             sock.sendto(reply, peer)
             if name not in pinned:
-                log_event("egress-denied.jsonl", {"host": name, "reason": "not in allowed hosts", **found})
+                reserved = reserved_name(name)  # never exists: refused with why, never asked about
+                log_event("egress-denied.jsonl", {"host": name, **({"reason": RESERVED_REASON, "reserved": True}
+                                                                   if reserved else {"reason": "not in allowed hosts"}),
+                                                  **found})
                 # A name with a canary token is reported and never asked about: the question would go to the host,
                 # which looks the name up (below a wildcard by itself), and the token would leave through its DNS.
+                # Looked for first: a token in a reserved name (exfil.r5.test) raises its alarm all the same.
                 hit = canaries.lookup(name, found) if canaries is not None else None
-                if not hit and broker is not None and \
+                if not hit and not reserved and broker is not None and \
                         re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}",
                                      name) and \
                         not any(name == q or name.endswith("." + q) for q in quiet):
@@ -2528,8 +5383,68 @@ def live_watches(fd, proc=Path("/proc")):
     return {int(match, 16) for match in re.findall(r"^inotify wd:([0-9a-f]+)", text, re.MULTILINE)}
 
 
-def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
-    """files.jsonl: what happens to the files below ROOTS (inotify). A directory's watch goes when the directory
+class FileReads:
+    """The reads of one window of the file log, summed per folder (FILE_READS "folders"): flush() writes one record per
+    folder - {"action": "read", "folder", "reads" (closes unwritten), "files" (different files), "names" (the first
+    FILE_READ_NAMES)} - and starts the next window. Bounded: FILE_READ_FOLDERS folders, and FILE_READ_KNOWN names
+    of all of them told apart (beyond, a read of a name not told apart counts as another file)."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock, self.started, self.folders, self.other, self.known = clock, clock(), {}, {}, 0
+
+    def add(self, path):
+        folder, _, name = path.rpartition("/")
+        entry = self.folders.get(folder)
+        if entry is None:
+            if len(self.folders) >= FILE_READ_FOLDERS:
+                top = "/".join(folder.split("/")[:3]) or "/"
+                if top not in self.other and len(self.other) >= FILE_READ_OVERFLOW:
+                    top = None
+                self.other[top] = self.other.get(top, 0) + 1
+                return
+            entry = self.folders[folder] = {"reads": 0, "names": set(), "more": 0}
+        entry["reads"] += 1
+        if name not in entry["names"]:
+            if self.known < FILE_READ_KNOWN:
+                entry["names"].add(name)
+                self.known += 1
+            else:
+                entry["more"] += 1
+
+    def due(self, now=None):
+        return (self.clock() if now is None else now) - self.started >= FILE_REPEAT_SECONDS
+
+    def flush(self, write):
+        """WRITE(record) for each folder of this window (and the reads beyond FILE_READ_FOLDERS); the next begins.
+        More than FILE_READ_RECORDS folders: the deepest are merged into their parents ("folders": how many a record
+        sums) until they fit."""
+        groups = {folder: {"reads": entry["reads"], "files": len(entry["names"]) + entry["more"],
+                           "names": sorted(entry["names"])[:FILE_READ_NAMES], "folders": 1}
+                  for folder, entry in self.folders.items()}
+        while len(groups) > FILE_READ_RECORDS:
+            depth = max(folder.count("/") for folder in groups)
+            if depth <= 1:
+                break
+            for folder in [folder for folder in groups if folder.count("/") == depth]:
+                merged, parent = groups.pop(folder), folder.rpartition("/")[0] or "/"
+                into = groups.setdefault(parent, {"reads": 0, "files": 0, "names": [], "folders": 0})
+                into["reads"] += merged["reads"]
+                into["files"] += merged["files"]
+                into["folders"] += merged["folders"]
+                into["names"] = sorted(into["names"] + [f"{folder[len(parent):].lstrip('/')}/{name}"
+                                                        for name in merged["names"]])[:FILE_READ_NAMES]
+        for folder, entry in groups.items():
+            write({"action": "read", "folder": folder or "/", "reads": entry["reads"], "files": entry["files"],
+                   "names": entry["names"], **({"folders": entry["folders"]} if entry["folders"] != 1 else {})})
+        for top, count in self.other.items():
+            write({"action": "read", **({"folder": top} if top is not None else {}), "reads": count,
+                   "note": f"in more than {FILE_READ_FOLDERS} folders"})
+        self.started, self.folders, self.other, self.known = self.clock(), {}, {}, 0
+
+
+def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS, reads="folders"):
+    """files.jsonl: what happens to the files below ROOTS (inotify); READS (FILE_READS): reads summed per folder and
+    window (FileReads), each file's read, or none. A directory's watch goes when the directory
     does (IN_IGNORED); when the event queue overflows those events are lost, and since the kernel never reuses a
     watch number their entries would stay for the whole run: test suites that make and remove tens of thousands of
     directories a run grew the supervisor by gigabytes that way until the OOM killer ended the run. So after an
@@ -2584,8 +5499,15 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
         watch_safely(root)
     FILE_LOGGING.set()
     recent = {}
+    reads = reads if reads in FILE_READS else "folders"
+    summed = FileReads() if reads == "folders" else None
+
+    def write(record):
+        log_event("files.jsonl", record)
     memory_part("file watches", lambda: len(paths))
     memory_part("file recent", lambda: len(recent))
+    if summed is not None:
+        memory_part("file reads", lambda: len(summed.folders))
     shed = threading.Event()
     memory_shedder("file log", shed.set)
     pruned, overflowed = time.monotonic(), False
@@ -2601,8 +5523,12 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
                                                "the run goes on without it"})
             paths.clear()
             recent.clear()
+            if summed is not None:
+                summed.flush(write)
             FILE_LOGGING.clear()  # workspace add must not say "watched" any more
             break
+        if summed is not None and summed.due():
+            summed.flush(write)
         if overflowed or time.monotonic() - pruned >= prune_every:
             prune()
             pruned, overflowed = time.monotonic(), False
@@ -2613,8 +5539,10 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
                 watch_safely(root)
                 log_event("files.jsonl", {"action": "watch", "path": root, "note": "workspace added during the run"})
         # After stop, queued events are still drained before returning.
-        if stop is not None and not select.select([fd], [], [], 0.2)[0]:
+        if stop is not None and not wait_ready([fd], (), 0.2)[0]:
             if stop.is_set():
+                if summed is not None:
+                    summed.flush(write)
                 break
             continue
         data = os.read(fd, 65536)
@@ -2637,10 +5565,14 @@ def file_logger(roots, stop=None, prune_every=FILE_PRUNE_SECONDS):
                 if event & 0x18:
                     continue
             action = next((label for bit, label in INOTIFY_EVENTS.items() if event & bit), None)
+            if action == "read" and reads != "files":
+                if summed is not None:
+                    summed.add(path)
+                continue
             now = time.monotonic()
-            if action and now - recent.get((action, path), -2) >= 2:
-                if len(recent) >= FILE_RECENT_LIMIT:  # only the last 2 s matter; a long run touches millions of paths
-                    recent = {key: seen for key, seen in recent.items() if now - seen < 2}
+            if action and now - recent.get((action, path), -FILE_REPEAT_SECONDS) >= FILE_REPEAT_SECONDS:
+                if len(recent) >= FILE_RECENT_LIMIT:  # only the last seconds matter; a long run touches millions of paths
+                    recent = {key: seen for key, seen in recent.items() if now - seen < FILE_REPEAT_SECONDS}
                     while len(recent) >= FILE_RECENT_LIMIT:
                         recent.pop(next(iter(recent)))
                 recent[(action, path)] = now
@@ -2844,17 +5776,25 @@ def firejail_command(before, nested=False, shutdown=False):
     help_text = subprocess.run(["firejail", "--help"], check=True, text=True, capture_output=True).stdout
     command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs",
                NESTED_SECCOMP if nested else "--seccomp"]
+    # Firejail's own filters for new namespaces and socket families, beside sandbox-ai's (own_filter).
+    command += firejail_narrowing(help_text, nested, RUN_ISOLATION or isolation_settings({}))
+    if FIREJAIL_CONFIG.is_dir() and not FIREJAIL_CONFIG.is_symlink():
+        # Firejail's folder in the agent's HOME (seal_firejail_config): nothing in the sandbox reads or writes it.
+        command.append(f"--blacklist={FIREJAIL_CONFIG}")
     if "--deterministic-exit-code" in help_text:
         command.append("--deterministic-exit-code")
     if shutdown and "--deterministic-shutdown" in help_text:
         command.append("--deterministic-shutdown")
-    for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR, VM_CONTROL_DIR):
+    for private in (LOG_DIR, VNC_DIR, PROXY_DIR, PROXY_RUN, CONTROL_DIR, MCP_UPSTREAM_DIR, VM_CONTROL_DIR,
+                    PACKAGES_DIR):
         if private.is_dir():
             command.append(f"--blacklist={private}")
     # The supervisor's sockets for the agent: reachable, not replaceable (the agent runs as the same user).
     # macOS (VM_CONTROL_DIR made): the browser socket is the supervisor's too (browser_relay), on a tmpfs.
     machine = (Path(BROWSER_SOCKET).parent,) if VM_CONTROL_DIR.is_dir() else ()
-    for shared in (MCP_RUN_DIR, HOOK_DIR, *machine):
+    # RELAY_DIR: the terminal relays' sockets, bound by the supervisor (SealedRelays): no process of the sandbox puts
+    # another socket under their names.
+    for shared in (MCP_RUN_DIR, HOOK_DIR, Path(RELAY_DIR), *machine):
         if shared.is_dir():
             command.append(f"--read-only={shared}")
     # New releases always exec directly and reject the former shell option.
@@ -2899,14 +5839,20 @@ AGENT_EXIT = f"{TMUX_DIR}/agent-exit"
 TMUX_ENDED = f"{TMUX_DIR}/ended"
 
 
-def tmux_command(command, detached=False):
+def tmux_command(command, detached=False, sealed=None):
     """tmux session: the agent in window 0, a sandboxed bash in window 1.
 
     Detached (named sessions): the guard keeps the sandbox alive for as long as the tmux session exists, so clients
     can attach and detach - and no longer: once it is gone (the agent and the shell window ended) the guard ends the
     terminal's relay, records the end (TMUX_ENDED: the agent's exit status, how long it ran), says it in the log and
     ends, and with it the sandbox (Firejail's --deterministic-shutdown: firejail_command). The relay was left running
-    before, and kept the sandbox - shown as running, its attach answering tmux's "no sessions" - alive for good."""
+    before, and kept the sandbox - shown as running, its attach answering tmux's "no sessions" - alive for good.
+
+    SEALED (take_relays: the descriptors of the relays' listening sockets, attach and shell, which the supervisor
+    bound where the sandbox cannot replace them): each relay serves its descriptor, and no other process this script
+    starts has either - tmux (its server, and so the agent and every command of it), its has-session, sleep and date,
+    which are found on the agent's PATH. Without it (a run that is no session's) the relays bind their sockets in
+    TMUX_DIR themselves, as before 0.1.117."""
     agent = shlex.join(command)
     if detached:  # the agent's exit status and when, for the guard's account of the end
         agent += f'; printf "%s %s" "$?" "$(date +%s)" > {AGENT_EXIT}'
@@ -2914,15 +5860,27 @@ def tmux_command(command, detached=False):
             "-c", "/work", agent, ";", "new-window", "-d", "-n", "shell", "-c", "/work", "bash"]
     if not detached:
         return tmux
+    attach_at, shell_at = (f"fd:{sealed[0]}", f"fd:{sealed[1]}") if sealed else (ATTACH_SOCKET, SHELL_SOCKET)
+    # What closes the relays' listeners for a command ("3<&- 4<&-"), for the attach relay the shell's, for the shell
+    # relay the attach's, and for the rest of the script both.
+    closed = " ".join(f"{fd}<&-" for fd in sealed) if sealed else ""
+    no_shell, no_attach = (f" {sealed[1]}<&-", f" {sealed[0]}<&-") if sealed else ("", "")
     # Terminals attach through a byte relay started here, inside Firejail: a
     # host-side tmux client could be told by the agent's server to run commands.
-    relay = shlex.join([*SUPERVISOR_PYTHON, "/sandbox/runtime.py", "--internal-attach-relay", ATTACH_SOCKET])
-    return ["sh", "-c", f"""{shlex.join(tmux)} || exit $?
-begun=$(date +%s)
-{relay} &
+    relay = shlex.join([*SUPERVISOR_PYTHON, "/sandbox/runtime.py", "--internal-attach-relay", attach_at])
+    # `sandbox-ai shell`: a shell of the human is started here too, under the same rules as the window "shell".
+    shells = shlex.join([*SUPERVISOR_PYTHON, "/sandbox/runtime.py", "--internal-shell-relay", shell_at])
+    # Sealed: the listeners are closed for the script itself before it runs anything more (date, tmux, sleep).
+    start = f"""{relay}{no_shell} &
 relay=$!
+{shells}{no_attach} &
+shells=$!"""
+    start = f"{start}\nexec {closed}\nbegun=$(date +%s)" if sealed else f"begun=$(date +%s)\n{start}"
+    return ["sh", "-c", f"""{shlex.join(tmux)}{' ' + closed if closed else ''} || exit $?
+{start}
 while tmux has-session -t sandbox 2>/dev/null; do sleep 1; done
 kill "$relay" 2>/dev/null
+kill "$shells" 2>/dev/null
 status=null seconds=null exited=
 read -r exited at 2>/dev/null < {AGENT_EXIT}
 case "$exited$at" in ''|*[!0-9]*) ;; *) status=$exited seconds=$((at - begun)) ;; esac
@@ -2935,6 +5893,7 @@ terminal's tmux session has ended; the sandbox ends" >&2
 fi
 printf '{{"status": %s, "seconds": %s}}\n' "$status" "$seconds" > {TMUX_ENDED}
 wait "$relay" 2>/dev/null
+wait "$shells" 2>/dev/null
 exit 0"""]
 
 
@@ -2947,12 +5906,43 @@ def inner_guard(before):
         return 0
     env = base_env()
     env.update(cfg["env"])
+    sealed = None
+    if cfg.get("tmux") == "detached" and os.path.isdir(RELAY_DIR):
+        # A session: the relays' listening sockets from the supervisor, first of all - nothing of the agent runs yet,
+        # so the one process that can ask for them is this guard. Without them the session does not start (its
+        # terminal could not be reached, or only under a name the sandbox can write).
+        try:
+            sealed = take_relays()
+        except (OSError, ValueError) as exc:
+            print(f"agent-sandbox: the terminal relays' sockets could not be taken over from the supervisor ({exc}); "
+                  "the session does not start", file=sys.stderr)
+            return 1
     # Both tmux windows start here, after verification and inside Firejail.
-    cmd = tmux_command(cfg["command"], detached=cfg["tmux"] == "detached") if cfg.get("tmux") else cfg["command"]
+    cmd = tmux_command(cfg["command"], detached=cfg["tmux"] == "detached", sealed=sealed) if cfg.get("tmux") \
+        else cfg["command"]
     if isinstance(cfg.get("nested"), dict):  # after the check: capabilities in its own user namespace only
         enter_nested_userns(cfg["nested"].get("reserved", []))
     os.chdir("/work")
+    # Last before the agent: the host folders' flags as they are in here, and sandbox-ai's own system call filter
+    # on this process - the agent, its tmux and everything they start keep it. Without it nothing starts.
+    isolation = isolation_settings(cfg)
+    check_mounts(isolation)
+    own_filter("sandbox", isolation, nested=isinstance(cfg.get("nested"), dict))
+    if isinstance(cfg.get("cairn"), dict):
+        start_cairn_relay(cfg["cairn"], env)
     os.execvpe(cmd[0], cmd, env)
+
+
+CAIRN_RELAY = "/sandbox/cairn_relay.py"  # --cairn (cairn.agent_mounts)
+
+
+def start_cairn_relay(config, env, popen=subprocess.Popen):
+    """--cairn: the relay of Cairn's workers (cairn_relay.serve, under cairn_relay.supervise, which starts it again
+    when it ends during the session), started here - after the checks, inside Firejail, with the agent's environment
+    - so that the CLIs it runs for Cairn have exactly what the agent's own have."""
+    return popen([*SUPERVISOR_PYTHON, CAIRN_RELAY, "supervise", json.dumps(config)], env=env, cwd="/work",
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                 start_new_session=True)
 
 
 # --- connection proxy ------------------------------------------------------------------------------
@@ -3004,8 +5994,12 @@ subjectKeyIdentifier = none
 """
 SECRET_HEADER = re.compile(r"auth|cookie|token|secret|key|passw|session|signature|credential", re.I)
 SECRET_TEXT = [
-    (re.compile(r'("[A-Za-z0-9_-]*(?:token|secret|passw|api_?key|apikey|authorization|credential|session'
-                r'|cookie|code_verifier|private|signature)[A-Za-z0-9_-]*"\s*:\s*)"(?:[^"\\]|\\.)*"', re.I),
+    # (?=[A-Za-z0-9_-]*"\s*:): what follows the quote is a key - word characters up to the closing quote and a colon -
+    # before any name is tried (what the rest of the pattern asks for anyway: every match is the same). Without it a
+    # long run of word characters after a quote (base64url, a hash: no key at all) was walked once for every name it
+    # could end with: 10 ms for a request with 64 KB of Codex's encrypted reasoning, 0.7 ms now.
+    (re.compile(r'("(?=[A-Za-z0-9_-]*"\s*:)[A-Za-z0-9_-]*(?:token|secret|passw|api_?key|apikey|authorization|credential'
+                r'|session|cookie|code_verifier|private|signature)[A-Za-z0-9_-]*"\s*:\s*)"(?:[^"\\]|\\.)*"', re.I),
      r'\1"[redacted]"'),
     # (?=[a-z_]*=): only a word followed by "=" is tried against the names (each of them is made of [a-z_]); without
     # it every word of a body was, 1.7 ms of a 37 KB model request.
@@ -3013,14 +6007,28 @@ SECRET_TEXT = [
                 r"|sig)=)[^&\s\"']+", re.I), r"\1[redacted]"),
     (re.compile(r"\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}", re.I), r"\1 [redacted]"),
     (re.compile(r"(\b[a-z][a-z0-9+.-]{0,20}://[^/\s:@]{0,200}:)[^@\s/]{1,500}@", re.I), r"\1[redacted]@"),
+    # (the value never takes the backslash of an escaped quote or line break after it: the text may be JSON)
     (re.compile(r"(--?[a-z0-9_-]*(?:token|secret|password|passwd|api-?key|apikey|credential)[a-z0-9_-]*(?:=|\s+))"
-                r"[^\s\"'-][^\s\"']*", re.I), r"\1[redacted]"),
+                r"[^\s\"'\\-](?:[^\s\"'\\]|\\[^nrt\"'\s])*", re.I), r"\1[redacted]"),
     (re.compile(r"((?:^|\s)(?:-u|--user)\s+[^\s:]{1,200}:)\S+"), r"\1[redacted]"),
     # (the token forms the privacy check of pushes blocks: privacy.BUILTIN)
     (re.compile(r"\b(?:hf_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{35}|npm_[A-Za-z0-9]{36}|pypi-AgE[A-Za-z0-9_-]{50,}|[rs]k_live_[0-9A-Za-z]{20,}|"
                 r"sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
                 r"|glpat-[A-Za-z0-9_-]{16,}|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}"
                 r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+)"), "[redacted]"),
+    # A variable assigned a secret (an .env file the agent read, a command's environment): DB_PASSWORD=...,
+    # AWS_SECRET_ACCESS_KEY=..., export API_KEY="..." - the names pattern above takes password= only as a whole word
+    # (a form's field), and in a request's body, which is JSON, a line starts after "\n": no word boundary there
+    # (nPASSWORD is a name here). The value: quoted (in JSON text: \"...\"; one whose end the text does not hold - a
+    # body cut at its limit - to the text's end), or up to white space or a quote - also across `;`, `&`, `|` and `)`
+    # (DB_PASSWORD=p@ss;word123 kept ";word123" before: a command line loses a little more, a secret nothing), but not
+    # past `&NAME=`: a query string's next field; an escaped line break or quote of JSON text ends it, its backslash
+    # stays.
+    (re.compile(r"(\b(?=[A-Za-z0-9_]*=)[A-Za-z0-9_]*(?:token|secret|password|passwd|api_?key|apikey|access_?key"
+                r"|private_?key|credentials?)[A-Za-z0-9_]*=)"
+                r"""(?:"[^"]*(?:"|\Z)|'[^']*(?:'|\Z)|\\"(?:[^"\\]|\\[^"])*(?:\\"|\Z)"""
+                r"""|(?:[^\s"'\\&]|&(?![A-Za-z0-9_.-]+=)|\\[^nrt"'\s])+)""", re.I),
+     r"\1[redacted]"),
 ]
 # What each of SECRET_TEXT cannot match without, as a test of a text: a text that fails it is not searched by that
 # pattern (redact_text runs over the bodies of every request and answer the proxy logs, up to body_limit each, and over
@@ -3038,6 +6046,7 @@ SECRET_TEXT_NEEDS = (
     lambda text: "sk-" in text or "gh" in text or "github_pat_" in text or "glpat-" in text or "xox" in text
     or "AKIA" in text or "eyJ" in text or "hf_" in text or "AIza" in text or "npm_" in text or "pypi-AgE" in text
     or "k_live_" in text,
+    lambda text: "=" in text,
 )
 
 
@@ -3209,7 +6218,8 @@ def hold_unserved_loopback(ports):
 
 def allowed_destination(allow, address, port):
     """True if the firewall lets the proxy reach ADDRESS:PORT (ALLOW from the launcher's proxy.json), and the kill
-    switch (its "cut", see cut_allows) does too."""
+    switch (its "cut", see cut_allows) does too. A destination the human allowed "once" is not in this list
+    (once_allowed)."""
     if not cut_allows(allow.get("cut"), address, port):
         return False
     ip = ipaddress.ip_address(address)
@@ -3224,10 +6234,32 @@ def allowed_destination(allow, address, port):
     return any(ip == ipaddress.ip_address(a) and port == p for a, p in allow.get("tcp", []))
 
 
+def once_allowed(answer, allow, address, port):
+    """True for the connection whose own question got ANSWER "allow", scope "once", while the supervisor holds
+    ADDRESS:PORT open for it (ALLOW's "once": RuntimeNetwork.allow_once) and the kill switch lets it pass.
+
+    Security review SAI-15: "once" used to put the address and port into the proxy's allow-list for ONCE_SECONDS, and
+    every other connection of the sandbox to it passed in that time without a question - another process's, another
+    TLS name on the same address. Now only a connection that waited for the question passes on its answer; any other
+    finds the destination not allowed and asks for itself. (Without the proxy, --no-proxy, the firewall's rule is
+    all there is: the address and port are open to the sandbox for those seconds, as the question's help says.)"""
+    if not isinstance(answer, dict) or answer.get("decision") != "allow" or answer.get("scope") != "once":
+        return False
+    if not cut_allows(allow.get("cut"), address, port):
+        return False
+    try:
+        ip = ipaddress.ip_address(address)
+        return any(ip == ipaddress.ip_address(a) and port == p for a, p in allow.get("once", []))
+    except (ValueError, TypeError):
+        return False
+
+
+# (responses/compact: the Responses API's compaction - Codex's remote compaction -, a model call that says its usage)
 MODEL_PATHS = re.compile(r"/(?:v1/messages|v1/responses|v1/chat/completions|v1/completions|backend-api/codex/responses|"
-                         r"responses|chat/completions)(?:\?|$)")
+                         r"responses/compact|responses|chat/completions)(?:\?|$)")
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
-              "prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "cached_tokens")
+              "prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "cached_tokens",
+              "ephemeral_1h_input_tokens")
 
 
 def is_model_request(path):
@@ -3258,7 +6290,8 @@ class UsageScanner:
                     number = usage.get(key)
                     if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
                         self.usage[key] = max(self.usage.get(key, 0), number)
-                for detail in ("input_tokens_details", "output_tokens_details", "prompt_tokens_details"):
+                for detail in ("input_tokens_details", "output_tokens_details", "prompt_tokens_details",
+                               "completion_tokens_details", "cache_creation"):
                     if isinstance(usage.get(detail), dict):
                         self._take({"usage": usage[detail]})
             for nested in value.values():
@@ -3267,12 +6300,15 @@ class UsageScanner:
 
     def feed(self, data):
         self.seen += len(data)
-        if self.seen > self.LIMIT:
-            return
+        late = self.seen > self.LIMIT  # past it only the lines with "usage" (the stream's last counts) are read
         self.pending += data
         *lines, self.pending = self.pending.split(b"\n")
+        if late and len(self.pending) > self.LIMIT:
+            self.pending = b""  # one line that long holds no usage worth reading
         for line in lines:
             line = line.strip()
+            if late and (b'"usage"' not in line or len(line) > self.LIMIT):
+                continue
             if line.startswith(b"data:"):
                 line = line[5:].strip()
             if line.startswith(b"{") and (b'"usage"' in line or b'"model"' in line[:200]):
@@ -3287,6 +6323,609 @@ class UsageScanner:
         if not self.usage:
             return None
         return {"model": self.model, "usage": dict(self.usage)}
+
+
+class WebSocketUsage:
+    """The model requests of a WebSocket the proxy relays - the Responses API over a WebSocket, Codex's default (one
+    connection for many turns: each a response.create of the client answered by the server's events up to
+    response.completed, which says its usage): the server's frames (RFC 6455) read as they pass, each message that
+    says a response's usage counted once (METER.record, as an HTTP request's answer is; the response's id keeps a
+    repeated one from counting twice). feed() gets the server's bytes and returns True once a turn paid per token used
+    up a budget: the relay ends the connection then, between two turns - the next handshake is refused before it goes
+    out. Never raises; a frame it cannot read (compressed: the proxy takes the offer off a metered handshake) is
+    passed over."""
+    LIMIT = 8 << 20   # bytes of one message kept whole; of a longer one its start and its end (where the usage is)
+    START, TAIL = 4096, 1 << 20
+    SEEN = 256        # the response ids kept against counting one twice
+    KEPT = re.compile(rb'"(id|model)"\s*:\s*"([^"\\]{1,200})"')
+
+    def __init__(self, meter, origin, billing, api, llm_target=None):
+        self.meter, self.origin, self.billing, self.api, self.llm_target = meter, origin, billing, api, llm_target
+        self.head, self.left, self.mask, self.offset = b"", None, None, 0
+        self.control = self.fin = self.skip = False
+        self.message, self.start, self.tail = None, b"", None
+        self.seen, self.count, self.broken = collections.OrderedDict(), 0, False
+
+    def feed(self, data):
+        if self.broken or not data:
+            return False
+        try:
+            return self.frames(bytes(data))
+        except Exception:  # noqa: BLE001 - the count never fails the connection: past a fault it reads no more
+            self.broken = True
+            return False
+
+    def frames(self, data):
+        stop = False
+        while data:
+            if self.left is None:  # a frame's head: 2 bytes, the length's 2 or 8, the mask's 4
+                self.head += data
+                data = b""
+                if len(self.head) < 2:
+                    break
+                first, second = self.head[0], self.head[1]
+                size = second & 0x7F
+                need = 2 + (2 if size == 126 else 8 if size == 127 else 0) + (4 if second & 0x80 else 0)
+                if len(self.head) < need:
+                    break
+                if size >= 126:
+                    size = int.from_bytes(self.head[2:4] if size == 126 else self.head[2:10], "big")
+                self.mask = self.head[need - 4:need] if second & 0x80 else None
+                data, self.head = self.head[need:], b""
+                self.begin(first, size)
+                if size:
+                    continue
+            else:
+                piece, data = data[:self.left], data[self.left:]
+                self.take(piece)
+                self.left -= len(piece)
+                if self.left:
+                    continue
+            self.left = None
+            if not self.control and self.fin and self.message is not None:
+                stop = self.finish() or stop
+        return stop
+
+    def begin(self, first, size):
+        self.fin, opcode, self.left, self.offset = bool(first & 0x80), first & 0x0F, size, 0
+        self.control = opcode >= 8
+        if opcode in (1, 2):  # a text or binary message begins (a continuation, 0, goes on with it)
+            self.message, self.start, self.tail, self.skip = bytearray(), b"", None, bool(first & 0x70)
+        elif opcode and not self.control:
+            self.message = None  # (an opcode RFC 6455 does not know: nothing read of it)
+
+    def take(self, piece):
+        if self.control or self.message is None or self.skip:
+            return
+        if self.mask:  # (a server's frames are never masked; a client's are)
+            turn = self.offset % 4
+            key = (self.mask[turn:] + self.mask[:turn]) * (len(piece) // 4 + 1)
+            piece = (int.from_bytes(piece, "big") ^ int.from_bytes(key[:len(piece)], "big")).to_bytes(len(piece), "big")
+            self.offset += len(piece)
+        if self.tail is not None:
+            self.tail += piece
+            if len(self.tail) > 2 * self.TAIL:
+                del self.tail[:-self.TAIL]
+            return
+        self.message += piece
+        if len(self.message) > self.LIMIT:  # (from here on only its start and its end are kept)
+            self.start, self.tail = bytes(self.message[:self.START]), bytearray(self.message[-self.TAIL:])
+            self.message = bytearray()
+
+    def document(self):
+        """The message as JSON: whole, or - one longer than LIMIT - its response's id and model from its start and
+        the last usage from its end."""
+        if self.tail is None:
+            return json.loads(bytes(self.message))
+        tail = bytes(self.tail).decode("utf-8", "replace")
+        at = tail.rfind('"usage"')
+        if at < 0:
+            return None
+        colon = tail.index(":", at) + 1
+        while colon < len(tail) and tail[colon] in " \t\r\n":
+            colon += 1
+        usage, _ = json.JSONDecoder().raw_decode(tail, colon)
+        found = {}
+        for name, value in self.KEPT.findall(self.start):
+            found.setdefault(name.decode(), value.decode("utf-8", "replace"))
+        return {"response": {**found, "usage": usage}}
+
+    def finish(self):
+        try:
+            document = None if self.skip else self.document()
+        except (ValueError, RecursionError):
+            document = None
+        finally:
+            self.message, self.start, self.tail = None, b"", None
+        if not isinstance(document, dict):
+            return False
+        scanner = UsageScanner()
+        scanner._take(document)
+        found = scanner.result()
+        if not found:
+            return False
+        response = document.get("response") if isinstance(document.get("response"), dict) else document
+        ident = response.get("id") if isinstance(response.get("id"), str) else None
+        if ident is not None:
+            if ident in self.seen:
+                return False
+            self.seen[ident] = True
+            while len(self.seen) > self.SEEN:
+                self.seen.popitem(last=False)
+        model = found.get("model")
+        target = self.llm_target
+        self.meter.record(spend_provider(self.origin, model, getattr(self.meter, "prices", None), target), model,
+                          self.billing, self.api, found.get("usage"), target.get("name") if target else None)
+        self.count += 1
+        return self.billing == "api" and self.meter.refusal(self.billing) is not None
+
+
+# --- spend: what the model requests cost, and the budgets that stop a run -----------------------------------------
+#
+# The proxy counts each model request's tokens from its answer (UsageScanner: streamed or not), prices them with the
+# table the launcher gave it (proxy.json "spend": sandbox/prices.json with your own prices over it) and appends one
+# line per request to spend-TIME-RUN.jsonl in the run's log directory (a descriptor the supervisor opened for it).
+# Before a request to a provider billed per token it checks the run's budgets (--budget, `sandbox-ai spend limit`):
+# one used up refuses it with a sandbox-ai: error in the API's own shape - a request under way is never cut. The human
+# raises a budget during the run (`sandbox-ai spend raise`: control op "spend", SPEND_CONTROL in the proxy's run
+# directory, read again when it changes); the launcher tells what other runs spent meanwhile the same way.
+
+SPEND_ENV = "SANDBOX_AI_SPEND_FD"     # the descriptor of the spend log the proxy appends to
+SPEND_CONTROL = "spend-control.json"  # in PROXY_RUN: {"raised": USD, "others": {budget id: USD}}
+SPEND_WARN = 0.8                      # a budget's share at which the human is told (and again at 1.0)
+SPEND_HOSTS = {"api.anthropic.com": "anthropic", "api.openai.com": "openai", "chatgpt.com": "openai",
+               "generativelanguage.googleapis.com": "google", "openrouter.ai": "openrouter",
+               "api.deepseek.com": "deepseek", "api.x.ai": "xai", "api.mistral.ai": "mistral",
+               "api.groq.com": "groq", "api.nousresearch.com": "nous", "api.letta.com": "letta"}
+SPEND_LOCAL_KINDS = ("ollama", "lmstudio", "llamacpp", "vllm")
+SPEND_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+SPEND_TOKENS = ("in", "cached", "write", "write_1h", "out", "reasoning")
+SPEND_MODEL = re.compile(r"[\w.:/@+-]{1,200}", re.ASCII)
+SPEND_REQUEST_MODEL = re.compile(rb'\s*\{[^{}\[\]]{0,2000}?"model"\s*:\s*"([\w.:/@+-]{1,200})"', re.ASCII)
+SPEND_PRICE_KEYS = ("in", "out", "cached", "write", "write_1h")
+# What may follow a model's name in the table: a date, a version (Bedrock's -v1:0), -latest
+# Bedrock's model ids: anthropic.MODEL, with a cross-region inference profile's region before it (us., eu., apac.,
+# jp., au., global., us-gov. ...)
+SPEND_BEDROCK = re.compile(r"^(?:[a-z]{2,6}(?:-[a-z]{2,6})?\.)?anthropic\.")
+SPEND_SUFFIX = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2})?(?:-v\d+)?(?::[\w.-]*)?(?:-latest)?")
+
+
+SPEND_QUERY_KEY = re.compile(rb"[?&](?:api[_-]?key|key|access[_-]?token|token)=", re.I)
+SPEND_KEY_HEADER = re.compile(rb"(?:key|token)$|^proxy-authorization$", re.I)  # (not authorization: looked at itself)
+
+
+def spend_billing(host, path, head, llm_target=None):
+    """How a model request is paid: "local" (an --llm server of your own: no cost), "subscription" (a login to a
+    plan - Claude Pro/Max, ChatGPT - with no price per token) or "api" (per token). HEAD: the request as it goes
+    upstream (after the proxy added its keys); only the names of its credential headers and the form of an
+    Authorization value are looked at, never kept."""
+    if llm_target is not None:
+        if llm_target.get("kind") in SPEND_LOCAL_KINDS or llm_target.get("scheme") == "http":
+            return "local"
+        addresses = [a for a in llm_target.get("addresses") or [] if isinstance(a, str)]
+        with contextlib.suppress(ValueError):
+            # your own networks: private, loopback, link-local, CGNAT (Tailscale's 100.64.0.0/10)
+            if addresses and all(any((ip.is_private, ip.is_loopback, ip.is_link_local,
+                                      ip.version == 4 and ip in SPEND_CGNAT))
+                                 for ip in map(ipaddress.ip_address, addresses)):
+                return "local"
+        return "api"
+    host = (host or "").lower().rsplit(":", 1)[0] if (host or "").count(":") == 1 else (host or "").lower()
+    if host == "chatgpt.com" or host.endswith(".chatgpt.com"):
+        return "subscription"  # (only a ChatGPT login reaches its backend: an API key does not)
+    request, *lines = (head or b"").split(b"\r\n")
+    names = [line.split(b":", 1)[0].strip().lower() for line in lines if b":" in line]
+    if b"x-api-key" in names or b"api-key" in names or b"x-goog-api-key" in names:
+        return "api"
+    # A plan's token says "subscription" only as the one credential of the request: beside a key in the query
+    # (Google's ?key=), a second Authorization or another header that carries a key or token (a gateway's), the
+    # other one pays - a made-up plan token beside it is no way around a budget.
+    if SPEND_QUERY_KEY.search(request) or SPEND_QUERY_KEY.search((path or "").encode("utf-8", "replace")) or \
+            names.count(b"authorization") > 1 or any(SPEND_KEY_HEADER.search(name) for name in names):
+        return "api"
+    for line in lines:
+        # Only the credential itself says so (Claude Code's OAuth access token of a Claude plan; a key of the API is
+        # never one), never a header the agent may add to any request (anthropic-beta: oauth-...): a budget is not
+        # got around that way - a made-up token gets no answer that costs anything.
+        name, _, value = line.partition(b":")
+        name, value = name.strip().lower(), value.strip()
+        if name == b"authorization" and value[:7].lower() == b"bearer " and value[7:].strip().startswith(b"sk-ant-oat"):
+            return "subscription"
+    return "api"
+
+
+def spend_host(origin):
+    """The provider of ORIGIN when it is a known model API billed per token (SPEND_HOSTS), else None."""
+    bare = (origin or "").lower()
+    bare = bare.rsplit(":", 1)[0] if bare.count(":") == 1 else bare.strip("[]")
+    for name, provider in SPEND_HOSTS.items():
+        if bare == name or bare.endswith("." + name):
+            return provider
+    return None
+
+
+def spend_provider(host, model=None, prices=None, llm_target=None):
+    """The provider a request went to: an --llm endpoint by its name, a known host (SPEND_HOSTS), else the provider
+    of the price table that knows MODEL, else the host itself."""
+    if llm_target is not None:
+        return f"llm:{llm_target.get('name')}"
+    known = spend_host(host)
+    if known:
+        return known
+    bare = (host or "").lower()
+    bare = bare.rsplit(":", 1)[0] if bare.count(":") == 1 else bare.strip("[]")
+    found = spend_price(prices, None, model)
+    return found[0] if found else (bare or "unknown")
+
+
+def spend_model_key(model):
+    """MODEL as the price table names it: lower case, without a vendor prefix (anthropic/..., models/...,
+    anthropic. of Bedrock) or a Vertex @version."""
+    model = str(model or "").strip().lower()
+    model = model.removeprefix("models/")
+    model = SPEND_BEDROCK.sub("", model, count=1)  # anthropic., and a cross-region profile's us., apac., jp. ...
+    if "/" in model:
+        model = model.rsplit("/", 1)[1]
+    model = model.split("@", 1)[0]
+    return model.replace(".", "-") if model.startswith("claude-") else model  # OpenRouter's claude-sonnet-4.5
+
+
+def spend_price(prices, provider, model):
+    """(provider, the table's model name, its price entry) of MODEL, or None: PROVIDER's table first, then every
+    table. An entry names a model, also with a date or version after it (claude-sonnet-4-5 is
+    claude-sonnet-4-5-20250929 too, gpt-5 gpt-5-2025-08-07 - never claude-sonnet-4-6 or gpt-5-mini: a model the table
+    does not name has no price, never a guessed one)."""
+    tables = (prices or {}).get("providers") if isinstance(prices, dict) else None
+    if not isinstance(tables, dict) or not model:
+        return None
+    key = spend_model_key(model)
+    order = ([provider] if provider in tables else []) + [name for name in tables if name != provider]
+    for name in order:
+        table = tables.get(name)
+        if not isinstance(table, dict):
+            continue
+        best = None
+        for entry, price in table.items():
+            entry_key = str(entry).lower()
+            if not isinstance(price, dict):
+                continue
+            if key == entry_key or (key.startswith(entry_key) and SPEND_SUFFIX.fullmatch(key[len(entry_key):])):
+                if best is None or len(entry_key) > len(best[1]):
+                    best = (name, entry_key, price)
+        if best is not None:
+            return best
+    return None
+
+
+def spend_next_end(until, period, now):
+    """The end of the period (a day's, a month's) after the one that ended at UNTIL (the launcher's local midnight),
+    the first one after NOW: a day 24 hours on, a month the days of that month on (a clock change moves it by an hour
+    at most). None for another period."""
+    if period not in ("day", "month"):
+        return None
+    while until <= now:
+        if period == "day":
+            until += 86400
+        else:  # the local date at UNTIL lies within 12 hours of UTC's at noon of that day
+            day = time.gmtime(until + 43200)
+            leap = day.tm_year % 4 == 0 and (day.tm_year % 100 != 0 or day.tm_year % 400 == 0)
+            until += (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[day.tm_mon - 1] * 86400
+    return until
+
+
+def spend_tokens(api, usage):
+    """The tokens of a request's USAGE (UsageScanner's, any API) the same way for every API: {"in": input not read
+    from or written to a cache, "cached": read from the cache, "write": written to it (Anthropic's; "write_1h" of them
+    for an hour), "out": output (reasoning included), "reasoning": of the output, where the API says}."""
+    usage = usage if isinstance(usage, dict) else {}
+
+    def number(*keys):
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+        return 0
+    if api == "messages" or "cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage:
+        # Anthropic's Messages API: input_tokens without the cache's
+        write = number("cache_creation_input_tokens")
+        return {"in": number("input_tokens"), "cached": number("cache_read_input_tokens"), "write": write,
+                "write_1h": min(write, number("ephemeral_1h_input_tokens")), "out": number("output_tokens"),
+                "reasoning": number("reasoning_tokens")}
+    total = number("input_tokens", "prompt_tokens")
+    cached = min(total, number("cached_tokens"))
+    return {"in": total - cached, "cached": cached, "write": 0, "write_1h": 0,
+            "out": number("output_tokens", "completion_tokens"), "reasoning": number("reasoning_tokens")}
+
+
+def spend_cost(tokens, price):
+    """USD of TOKENS (spend_tokens) at PRICE (USD per million tokens: "in", "out", "cached" - reading the cache,
+    default "in" -, "write" - writing it for 5 minutes, default 1.25 "in" -, "write_1h" - default 2 "in"; "long":
+    {"above": N, and the same keys} for a prompt of more than N tokens), or None without a price."""
+    if not isinstance(price, dict):
+        return None
+    prompt = tokens.get("in", 0) + tokens.get("cached", 0) + tokens.get("write", 0)
+    long = price.get("long")
+    if isinstance(long, dict) and isinstance(long.get("above"), (int, float)) and prompt > long["above"]:
+        price = {**price, **{k: v for k, v in long.items() if k in SPEND_PRICE_KEYS}}
+
+    def rate(key, default=None):
+        value = price.get(key)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 \
+            else default
+    base, out = rate("in"), rate("out")
+    if base is None or out is None:
+        return None
+    write_1h = min(tokens.get("write_1h", 0), tokens.get("write", 0))
+    total = (tokens.get("in", 0) * base + tokens.get("cached", 0) * rate("cached", base)
+             + (tokens.get("write", 0) - write_1h) * rate("write", base * 1.25)
+             + write_1h * rate("write_1h", base * 2) + tokens.get("out", 0) * out)
+    return round(total / 1e6, 8)
+
+
+def spend_refusal_reply(api, text):
+    """The answer that refuses a model request (a budget used up): the API's own error shape, which the agents show
+    (Anthropic's error.message, OpenAI's error.message with type insufficient_quota, which they do not retry)."""
+    if api == "messages":
+        document = {"type": "error", "error": {"type": "invalid_request_error", "message": text}}
+    else:
+        document = {"error": {"message": text, "type": "insufficient_quota", "code": "sandbox_ai_budget",
+                              "param": None}}
+    body = json.dumps(document).encode()
+    return (b"HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nConnection: close\r\n"
+            + b"Content-Length: %d\r\n\r\n" % len(body) + body)
+
+
+# A model the table has no price for, on a run with a budget: counted at the table's highest input and output prices
+# (never below these), said once per model in the spend log - an unknown model is no way around a budget.
+SPEND_FALLBACK = {"in": 20.0, "out": 120.0}
+
+
+def spend_fallback_price(prices):
+    """{"in", "out"} (USD per million tokens) a model without a price is counted at under a budget: the highest input
+    and output prices of PRICES (the proxy's table: the built-in one with yours over it, long prompts' too), at least
+    SPEND_FALLBACK."""
+    highest = dict(SPEND_FALLBACK)
+    tables = prices.get("providers") if isinstance(prices, dict) else None
+    for table in tables.values() if isinstance(tables, dict) else ():
+        for entry in table.values() if isinstance(table, dict) else ():
+            for price in (entry, entry.get("long")) if isinstance(entry, dict) else ():
+                for key in ("in", "out") if isinstance(price, dict) else ():
+                    value = price.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1e6:
+                        highest[key] = max(highest[key], float(value))
+    return highest
+
+
+def spend_include_usage(head, parts, headers):
+    """(HEAD, PARTS, added) of a Chat Completions request on a run with a budget: a streamed one ("stream": true)
+    whose stream_options do not ask for the usage gets stream_options.include_usage true - its answer said no usage
+    otherwise, and the meter could not count it (nor a budget hold it back). Nothing else of the body changes: without
+    stream_options the field goes in front of the agent's bytes, unchanged; with them (another option, include_usage
+    false) the body is written again from its JSON. The framing becomes a Content-Length. A body that is not plain
+    JSON, not an object or larger than LLM_BODY_LIMIT passes as it came (added False)."""
+    encoding = (header(headers, "content-encoding") or "identity").strip().lower()
+    content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
+    if encoding != "identity":
+        return head, parts, False
+    raw, data, total = [], [], 0
+    parts = iter(parts)
+    for piece, payload in parts:
+        raw.append((piece, payload))
+        data.append(payload)
+        total += len(payload)
+        if total > LLM_BODY_LIMIT:
+            return head, itertools.chain(raw, parts), False
+    body = b"".join(data)
+    start = len(body) - len(body.lstrip())
+    if not (content_type == "application/json" or content_type.endswith("+json") or body[start:start + 1] == b"{"):
+        return head, iter(raw), False
+    try:
+        document = json.loads(body)
+    except (ValueError, RecursionError):
+        return head, iter(raw), False
+    if not isinstance(document, dict) or document.get("stream") is not True:
+        return head, iter(raw), False
+    options = document.get("stream_options")
+    if isinstance(options, dict) and options.get("include_usage") is True:
+        return head, iter(raw), False
+    if "stream_options" not in document and body[start:start + 1] == b"{":
+        body = body[:start + 1] + b'"stream_options":{"include_usage":true},' + body[start + 1:]
+    else:
+        document["stream_options"] = {**(options if isinstance(options, dict) else {}), "include_usage": True}
+        body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    lines = [line for line in head[:-4].split(b"\r\n")
+             if line.split(b":", 1)[0].strip().lower() not in (b"content-length", b"transfer-encoding")]
+    head = b"\r\n".join(lines + [b"Content-Length: %d" % len(body)]) + b"\r\n\r\n"
+    return head, iter([(body, body)]), True
+
+
+class SpendMeter:
+    """The run's spending, in the proxy: CONFIG is proxy.json's "spend" ({"run", "project", "agent", "session",
+    "prices", "budgets": [{"id", "scope", "period", "usd", "used" (USD of the period before this run), "until" (epoch
+    seconds the period ends; None: never)}]}), FD the spend log (appended to; None: not written), CONTROL the file
+    `sandbox-ai spend raise` and the launcher write (SPEND_CONTROL). Thread-safe."""
+
+    def __init__(self, config, fd=None, control=None, clock=time.time):
+        self.config, self.fd, self.clock = config if isinstance(config, dict) else {}, fd, clock
+        self.control_path = os.fspath(control) if control else None
+        self.lock = threading.Lock()
+        self.prices = self.config.get("prices") if isinstance(self.config.get("prices"), dict) else {}
+        self.budgets = []
+        for entry in self.config.get("budgets") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("usd"), (int, float)) and entry["usd"] >= 0 and \
+                    isinstance(entry.get("id"), str):
+                used = entry.get("used") if isinstance(entry.get("used"), (int, float)) else 0.0
+                until = entry.get("until") if isinstance(entry.get("until"), (int, float)) else None
+                self.budgets.append({**entry, "used": float(used), "until": until, "own": 0.0})
+        self.spent, self.requests, self.unknown = 0.0, 0, 0
+        self.told, self.refused = set(), 0
+        self.fallback, self.fallen = spend_fallback_price(self.prices), set()  # (the models said to be at it)
+        self.stamp, self.raised, self.others = None, 0.0, {}
+        self.write({"event": "run", "run": self.config.get("run"), "project": self.config.get("project"),
+                    "project_key": self.config.get("project_key"), "agent": self.config.get("agent"),
+                    "session": self.config.get("session"), "name": self.config.get("name"),
+                    "budgets": [{k: b.get(k) for k in ("id", "scope", "period", "usd", "used", "label")}
+                                for b in self.budgets]})
+
+    def write(self, record):
+        if self.fd is None:
+            return
+        line = json.dumps({"v": 1, "time": round(self.clock(), 3), **record}, separators=(",", ":")) + "\n"
+        with contextlib.suppress(OSError):
+            os.write(self.fd, line.encode())
+
+    def read_control(self):
+        """The raises and the other runs' spending (SPEND_CONTROL), read again when the file changed."""
+        if not self.control_path:
+            return
+        try:
+            info = os.stat(self.control_path)
+        except OSError:
+            self.stamp, self.raised, self.others = None, 0.0, {}
+            return
+        stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
+        if stamp == self.stamp:
+            return
+        try:
+            document = json.loads(Path(self.control_path).read_text()[:1 << 20])
+        except (OSError, ValueError, RecursionError):
+            document = {}
+        document = document if isinstance(document, dict) else {}
+        raised = document.get("raised")
+        others = document.get("others") if isinstance(document.get("others"), dict) else {}
+        before = self.raised
+        self.stamp = stamp
+        self.raised = float(raised) if isinstance(raised, (int, float)) and not isinstance(raised, bool) and \
+            raised >= 0 else 0.0
+        self.others = {str(k): float(v) for k, v in others.items()
+                       if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0}
+        if self.raised > before:
+            self.refused = 0
+            self.told = {(name, level) for name, level in self.told if self.share_of(name) >= level}
+            self.write({"event": "raised", "raised": round(self.raised, 6)})
+
+    def roll(self, budget):
+        """A budget whose period ended (a day's, a month's) starts again: nothing used before, nothing of its own."""
+        until = budget.get("until")
+        if until is None or self.clock() < until:
+            return
+        budget["used"], budget["own"] = 0.0, 0.0
+        self.others.pop(budget["id"], None)
+        self.told = {(name, level) for name, level in self.told if name != budget["id"]}
+        budget["until"] = spend_next_end(until, budget.get("period"), self.clock())
+
+    def state(self, budget):
+        """(USD used, USD allowed) of BUDGET for this run: before it, by other runs meanwhile, by this one; the raise
+        added to what it allows."""
+        self.roll(budget)
+        own = self.spent if budget.get("scope") == "run" else budget["own"]
+        return (budget["used"] + self.others.get(budget["id"], 0.0) + own, budget["usd"] + self.raised)
+
+    def share_of(self, name):
+        for budget in self.budgets:
+            if budget["id"] == name:
+                used, allowed = self.state(budget)
+                return used / allowed if allowed > 0 else (1.0 if used > 0 else 0.0)
+        return 0.0
+
+    def refusal(self, billing):
+        """None, or the text that refuses a request billed BILLING: one of the run's budgets is used up. Only a
+        request paid per token is held back (a local model costs nothing, a subscription has no price per token)."""
+        if billing != "api" or not self.budgets:
+            return None
+        with self.lock:
+            self.read_control()
+            for budget in self.budgets:
+                used, allowed = self.state(budget)
+                if used >= allowed:
+                    self.refused += 1
+                    if self.refused == 1:
+                        self.write({"event": "refused", "budget": budget["id"], "used": round(used, 6),
+                                    "usd": round(allowed, 6)})
+                    run = self.config.get("name") or self.config.get("run") or "RUN"
+                    return (f"sandbox-ai: the {budget.get('label') or budget['id']} of USD {allowed:.2f} is used up "
+                            f"(USD {used:.2f}): no more model requests of this run. The human can raise it: "
+                            f"sandbox-ai spend raise {run} USD (or in the app or the web interface).")
+        return None
+
+    def record(self, provider, model, billing, api, usage, endpoint=None):
+        """One model request's USAGE (UsageScanner): its tokens and cost into the log and the budgets; returns the
+        line written."""
+        tokens = spend_tokens(api, usage)
+        found = spend_price(self.prices, provider, model) if billing == "api" else None
+        cost = 0.0 if billing == "local" else None if billing == "subscription" else \
+            (spend_cost(tokens, found[2]) if found else None)
+        fallback = None
+        if billing == "api" and cost is None and self.budgets:
+            # No price for it: under a budget counted at the table's highest (spend_fallback_price), never at none.
+            fallback = self.fallback
+            cost = spend_cost(tokens, fallback)
+        record = {"provider": provider, "model": str(model)[:200] if model else None, "billing": billing,
+                  "api": api, **{key: tokens[key] for key in SPEND_TOKENS if tokens[key]}, "usd": cost,
+                  **({"fallback": dict(fallback)} if fallback else {}),
+                  **({"priced_as": found[1]} if found and found[1] != spend_model_key(model) else {}),
+                  **({"endpoint": endpoint} if endpoint else {})}
+        with self.lock:
+            if fallback and record["model"] not in self.fallen and len(self.fallen) < 64:
+                self.fallen.add(record["model"])
+                self.write({"event": "fallback", "provider": provider, "model": record["model"],
+                            "price": dict(fallback)})
+            self.requests += 1
+            if billing == "api" and cost is None:
+                self.unknown += 1
+            if cost:
+                self.spent += cost
+                for budget in self.budgets:
+                    self.roll(budget)
+                    budget["own"] += cost
+            self.write(record)
+            self.read_control()
+            for budget in self.budgets:
+                used, allowed = self.state(budget)
+                share = used / allowed if allowed > 0 else 1.0
+                for level in (1.0, SPEND_WARN):
+                    if share >= level and (budget["id"], level) not in self.told:
+                        self.told.update({(budget["id"], level), (budget["id"], SPEND_WARN)})
+                        self.write({"event": "budget", "budget": budget["id"], "label": budget.get("label"),
+                                    "level": int(level * 100), "used": round(used, 6), "usd": round(allowed, 6)})
+                        break
+        return record
+
+
+def give_spend(request, path=None, owner=None):
+    """Control op "spend": {"raise": USD} adds to what this run may spend over its budgets (`sandbox-ai spend raise`),
+    {"others": {budget id: USD}} is what other runs spent of a shared budget since this one started (the launcher).
+    Written for the proxy (SPEND_CONTROL in its run directory, 0600, the proxy user's), which reads it before its next
+    request. Returns {"raised": USD in all}."""
+    path = Path(path) if path else PROXY_RUN / SPEND_CONTROL
+    if not path.parent.is_dir():
+        raise ValueError("this sandbox runs without the connection proxy: it counts no spending")
+    try:
+        document = json.loads(path.read_text()[:1 << 20])
+    except FileNotFoundError:
+        document = {}
+    except (OSError, ValueError, RecursionError):
+        document = {}
+    document = document if isinstance(document, dict) else {}
+    raised = document.get("raised") if isinstance(document.get("raised"), (int, float)) else 0.0
+    others = document.get("others") if isinstance(document.get("others"), dict) else {}
+    if "raise" in request:
+        amount = request.get("raise")
+        if not isinstance(amount, (int, float)) or isinstance(amount, bool) or not 0 < amount <= 1e6:
+            raise ValueError("spend: raise by a number of USD above 0 (at most 1000000)")
+        raised += float(amount)
+    if "others" in request:
+        given = request.get("others")
+        if not isinstance(given, dict) or len(given) > 64 or not all(
+                isinstance(k, str) and len(k) <= 200 and isinstance(v, (int, float)) and not isinstance(v, bool)
+                and 0 <= v <= 1e9 for k, v in given.items()):
+            raise ValueError("spend: others is {budget id: USD} (at most 64)")
+        others = dict(given)
+    if owner is None:
+        info = path.parent.stat()
+        owner = (info.st_uid, info.st_gid)
+    write_new(path, json.dumps({"version": 1, "raised": raised, "others": others}), 0o600, owner=owner)
+    return {"raised": raised}
 
 
 def redact_headers(headers):
@@ -3355,6 +6994,20 @@ def names_starts(text):
             yield start
 
 
+ASSIGNED_CHARACTERS = NAME_CHARACTERS | frozenset("0123456789")
+
+
+def assigned_starts(text):
+    """Where SECRET_TEXT[7] can begin: at \\b, then [A-Za-z0-9_]* up to a "=" - where the run of ASSIGNED_CHARACTERS
+    before a "=" begins (as names_starts)."""
+    for equals in found_at(text, "="):
+        start = equals
+        while start and text[start - 1] in ASSIGNED_CHARACTERS:
+            start -= 1
+        if start < equals:
+            yield start
+
+
 def lowered_starts(*words):
     """Where a re.I pattern beginning with one of WORDS (lower case ASCII) can begin: where str.lower() of the text has
     one; None (search everything) for a text with a letter lower() does not fold as re.I does."""
@@ -3387,6 +7040,7 @@ SECRET_TEXT_STARTS = (
     window_starts("-u", 2),  # (?:^|\s) and the first "-" of --user before it
     lambda text: found_at(text, "sk-", "gh", "github_pat_", "glpat-", "xox", "AKIA", "eyJ", "hf_", "AIza", "npm_",
                           "pypi-AgE", "sk_live_", "rk_live_"),
+    assigned_starts,
 )
 
 
@@ -3612,9 +7266,10 @@ def send_all(sock, data):
             raise socket.timeout(f"the peer took nothing for {IDLE_TIMEOUT} s")
 
 
-def relay(left, right, counts, idle=IDLE_TIMEOUT, grace=30):
+def relay(left, right, counts, idle=IDLE_TIMEOUT, grace=30, watch=None):
     """Copy bytes both ways until both sides closed (or one did and the other stays quiet for GRACE
-    seconds); COUNTS[0] gets left->right, COUNTS[1] the rest."""
+    seconds); COUNTS[0] gets left->right, COUNTS[1] the rest. WATCH(data), when given, sees each piece from RIGHT
+    once it went on to LEFT; a true answer ends the relay (the caller closes both)."""
     import ssl
     peers = {left: (right, 0), right: (left, 1)}
     open_ = {left, right}
@@ -3643,6 +7298,8 @@ def relay(left, right, counts, idle=IDLE_TIMEOUT, grace=30):
                     continue
                 send_all(other, data)
                 counts[index] += len(data)
+                if watch is not None and index == 1 and watch(data):
+                    return
     except OSError:
         return
 
@@ -3939,9 +7596,11 @@ def host_header_problem(headers, scheme, port, names, shown=None):
 LLM_KEY_HEADERS = ("authorization", "x-api-key", "api-key")
 
 
-def llm_endpoint(entries, scheme, origin, port, path, target=None):
+def llm_endpoint(entries, scheme, origin, port, path, target=None, anywhere=False):
     """The --llm endpoint (its entry) a request to ORIGIN:PORT PATH goes to, or None: its scheme and port, its
-    verified name (HTTPS) or one of its pinned addresses (plain http), below its path prefix - as llm_head finds it."""
+    verified name (HTTPS) or one of its pinned addresses (plain http), below its path prefix - as llm_head finds it.
+    ANYWHERE: on any path of that server (its native APIs beside the prefix: the models a start offers hold there
+    too)."""
     for entry in entries or []:
         if scheme != entry["scheme"] or port != entry["port"]:
             continue
@@ -3950,7 +7609,8 @@ def llm_endpoint(entries, scheme, origin, port, path, target=None):
         if scheme == "http" and origin.rsplit(":", 1)[0].strip("[]") not in entry["addresses"]:
             continue
         prefix = entry.get("prefix", "")
-        if prefix and (path != prefix and not path.startswith(prefix + "/") or ambiguous_path(target or path)):
+        if prefix and not anywhere and (path != prefix and not path.startswith(prefix + "/") or
+                                        ambiguous_path(target or path)):
             continue
         return entry
     return None
@@ -4027,13 +7687,16 @@ LLM_NOTE = "[sandbox-ai loop guard]"
 # durations, UUIDs and long hex ids, epoch timestamps (all digits: the hex pattern), Codex's "Chunk ID: 8818fc" (6
 # hex digits, random per exec_command call: without it the guard never saw a loop of Codex) and "session ID 3" of a
 # process still running, the ids harnesses put into results (call_..., toolu_..., OpenCode's tool_... output files;
-# with a digit in them: tool_output is a word), process ids, temporary paths.
+# with a digit in them: tool_output is a word), OpenCode's ids of every kind (a prefix, 12 hex digits of time and 14
+# random base62 characters: OpenCode 2's background shells "sh_...", subagent sessions "ses_...", tool-output files
+# "tool_..."), process ids, temporary paths (Pi's full outputs: /tmp/pi-bash-HEX.log).
 LLM_VOLATILE = re.compile(
     r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d(?:\.\d+)?)?(?:Z|[+-]\d\d:?\d\d)?|\b\d\d:\d\d:\d\d(?:\.\d+)?\b|"
     r"\b\d+(?:\.\d+)?\s?(?:ms|µs|us|ns|s|sec|secs|seconds?|minutes?|m)\b|"
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\b[0-9a-f]{8,}\b|"
     r"\bchunk id:\s*[0-9a-z]+|\bsession id:?\s*\d+|"
     r"\b(?:call|toolu|tool|fc|item|msg|resp|chatcmpl|proc)_(?=[0-9a-z]*\d)[0-9a-z]{6,}|"
+    r"\b[a-z]{2,6}_[0-9a-f]{12}[0-9a-z]{14}\b|"
     r"\bpid[ =:]*\d+\b|/tmp/[\w.-]+", re.I)
 LLM_POLLING = re.compile(r"\bsleep\s+([0-9]{1,5})|--watch\b|\bwatch\s|\bwait(?:ing)?\b|\buntil\b", re.I)
 
@@ -4068,17 +7731,101 @@ def llm_preset(entry, model):
     return {}
 
 
+# The fields of a request body that name a model of the server: every API's "model", Ollama's older "name" (pull,
+# delete, show, copy's "source" and "destination").
+LLM_MODEL_FIELDS = ("model", "name", "source", "destination")
+# LM Studio's POST /api/v1/models/unload names an instance, not a model: {"instance_id": ...} (llm_instance_model).
+LLM_INSTANCE_FIELD = "instance_id"
+LLM_INSTANCE_NUMBER = re.compile(r"[1-9][0-9]{0,3}")
+
+
+def llm_instance_model(instance, allowed):
+    """The model of ALLOWED that LM Studio's instance id INSTANCE belongs to, or None. LM Studio names a model's
+    first instance by the model's key and a further one KEY:N (N from 2; a second load is a second instance); an
+    identifier of its own (lms load --identifier, on the server's machine) names no model the relay could know without
+    asking the server, nor does anything but a string: None - refused as another model's (fail closed)."""
+    if not isinstance(instance, str) or not isinstance(allowed, list):
+        return None
+    if instance in allowed:
+        return instance
+    base, colon, number = instance.rpartition(":")
+    if colon and base in allowed and LLM_INSTANCE_NUMBER.fullmatch(number) and int(number) >= 2:
+        return base
+    return None
+
+
 def llm_model_refusal(entry, document):
     """Why the request DOCUMENT may not go to the --llm endpoint ENTRY, or None: with a list of models ("models":
-    --llm-models, --llm NAME:MODEL,...) a request for another model of that server; any model of it without one. A
+    --llm-models, --llm NAME:MODEL,...) a request - on any path of the server: its native APIs too - that names
+    another model of that server (LLM_MODEL_FIELDS), or one given as anything but a name, or an instance
+    (LLM_INSTANCE_FIELD: LM Studio's unload) of no model offered (llm_instance_model); any model of it without one. A
     request that names no model goes as it came (a server of one model)."""
     allowed = entry.get("models")
-    model = document.get("model")
-    if not isinstance(allowed, list) or not isinstance(model, str) or model in allowed:
+    if not isinstance(allowed, list) or not isinstance(document, dict):
         return None
-    shown = ", ".join(allowed[:10]) + (f" and {len(allowed) - 10} more" if len(allowed) > 10 else "")
-    return (f"the model {printable_text(model, 200)} is not among the models this start offers of --llm "
-            f"{entry.get('name')} ({shown}); start with --llm-models all (or name it in --llm-models) to use it")
+    for field in LLM_MODEL_FIELDS:
+        if field not in document or (isinstance(document[field], str) and document[field] in allowed):
+            continue
+        model = document[field]
+        named = printable_text(model, 200) if isinstance(model, str) else \
+            f"given as {type(model).__name__} ({printable_text(json.dumps(model, default=str)[:200], 200)})"
+        return (f"the model {named} is not among the models this start offers of --llm {entry.get('name')} "
+                f"({llm_offered_text(allowed)}); start with --llm-models all (or name it in --llm-models) to use it")
+    if LLM_INSTANCE_FIELD in document and llm_instance_model(document[LLM_INSTANCE_FIELD], allowed) is None:
+        instance = document[LLM_INSTANCE_FIELD]
+        named = printable_text(instance, 200) if isinstance(instance, str) else \
+            f"given as {type(instance).__name__} ({printable_text(json.dumps(instance, default=str)[:200], 200)})"
+        return (f"the instance {named} is no instance of the models this start offers of --llm {entry.get('name')} "
+                f"({llm_offered_text(allowed)}: LM Studio names an instance MODEL or MODEL:2, ...); unload it on the "
+                f"host (sandbox-ai llm unload {entry.get('name')} INSTANCE), or start with --llm-models all")
+    return None
+
+
+def llm_offered_text(allowed):
+    return ", ".join(allowed[:10]) + (f" and {len(allowed) - 10} more" if len(allowed) > 10 else "")
+
+
+def llm_unread_refusal(entry, why):
+    """Why a request with a body the relay could not read (WHY) may not go to the --llm endpoint ENTRY, or None: with
+    a list of models it could name any other (a compressed or larger body: unread, never passed)."""
+    allowed = entry.get("models")
+    if not isinstance(allowed, list):
+        return None
+    return (f"a request whose body sandbox-ai cannot read ({why}) could name any model of --llm {entry.get('name')}, "
+            f"and this start offers {llm_offered_text(allowed)} only; send it as plain JSON")
+
+
+def llm_limited_body(head, parts, headers, entry):
+    """(HEAD, PARTS, record) of a request with a body on another path of the --llm endpoint ENTRY than its model APIs
+    (llm_body's): with a list of models (llm_model_refusal) its JSON body read - at most LLM_BODY_LIMIT, plain only -
+    and checked, record {"refused": why} for one that names another model or cannot be read; it passes unchanged
+    otherwise. Without a list nothing is read."""
+    if not isinstance(entry.get("models"), list):
+        return head, parts, {}
+    encoding = (header(headers, "content-encoding") or "identity").strip().lower()
+    content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
+    raw, data, total = [], [], 0
+    parts = iter(parts)
+    for piece, payload in parts:
+        raw.append((piece, payload))
+        data.append(payload)
+        total += len(payload)
+        if total > LLM_BODY_LIMIT:
+            return head, itertools.chain(raw, parts), {
+                "refused": llm_unread_refusal(entry, f"larger than {LLM_BODY_LIMIT >> 20} MiB")}
+    body = b"".join(data)
+    if not body.strip():
+        return head, iter(raw), {}
+    if encoding != "identity" or not (content_type == "application/json" or content_type.endswith("+json")
+                                      or body.lstrip()[:1] in (b"{", b"[")):
+        return head, iter(raw), {"refused": llm_unread_refusal(entry, f"{encoding}, {content_type or 'no type'}")}
+    try:
+        document = json.loads(body)
+    except (ValueError, RecursionError):
+        return head, iter(raw), {"refused": llm_unread_refusal(entry, "not valid JSON")}
+    refusal = llm_model_refusal(entry, document) if isinstance(document, dict) else \
+        llm_unread_refusal(entry, "not a JSON object")
+    return head, iter(raw), ({"refused": refusal} if refusal else {})
 
 
 def llm_values(entry, model):
@@ -4124,6 +7871,8 @@ def llm_apply_params(document, entry, api, extra=None):
             continue
         field = key
         if key == "max_tokens":
+            if not value:
+                continue  # 0: no ceiling (llm.NO_CEILING) - the agent's own value, over a profile's ceiling
             if api == "responses":
                 field = "max_output_tokens"
             elif api == "chat" and "max_completion_tokens" in document:
@@ -4162,25 +7911,101 @@ def llm_signature(name, arguments):
     return f"{name}\0{str(arguments)[:65536]}"
 
 
+# Free text a harness has the model write beside a call's real arguments - what the call is for, shown to the human -
+# is no part of what the call does: Claude Code's Bash, DSH's bash and Qwen Code's run_shell_command take a
+# `description`, Codex's exec_command (and DSH's bash, edit, write) a `justification`, the agents' subagent tools a
+# `description` beside the prompt. The local-model research's round 1 (g5_repeat__claude/dsh/qwen__qcn__r2):
+# Qwen3-Coder-Next ran `python3 -m pytest -q` five times, described as "Run pytest first time" ... "fifth time" - five
+# different calls for the guard, no note. LLM_ANNOTATIONS: the harnesses' tools, known by name (left out even where the
+# tool requires them: DSH's bash); LLM_ANNOTATION_NAMES: such an argument of any other tool (an MCP server's, a tool the
+# request does not define), left out where the request's own schema of the tool does not require it.
+LLM_ANNOTATIONS = {"Bash": ("description",), "bash": ("description", "justification"),
+                   "run_shell_command": ("description",), "exec_command": ("justification",),
+                   "Task": ("description",), "Agent": ("description",), "task": ("description",),
+                   "subagent": ("description",), "subagent_fork": ("description",)}
+LLM_ANNOTATION_NAMES = ("description", "reason", "explanation", "justification", "rationale", "thought", "thoughts",
+                        "comment", "title")
+
+
+def llm_tool_schemas(document):
+    """{tool name: frozenset of its required arguments} of the tools a request DOCUMENT defines (any of the three
+    APIs: a chat completion's function, a Responses API function, a Messages API tool's input_schema)."""
+    found = {}
+    tools = document.get("tools") if isinstance(document, dict) else None
+    for tool in tools if isinstance(tools, list) else []:
+        inner = tool.get("function") if isinstance(tool, dict) else None
+        holder = inner if isinstance(inner, dict) else tool
+        if not isinstance(holder, dict) or not isinstance(holder.get("name"), str):
+            continue
+        schema = holder.get("parameters", holder.get("input_schema"))
+        required = schema.get("required") if isinstance(schema, dict) else None
+        found[holder["name"]] = frozenset(key for key in required if isinstance(key, str)) \
+            if isinstance(required, list) else frozenset()
+    return found
+
+
+def llm_meaningful_arguments(name, arguments, schemas=None):
+    """The ARGUMENTS of a call of the tool NAME as the loop guard compares them: without the free text a harness has
+    the model add (LLM_ANNOTATIONS by the tool's name; LLM_ANNOTATION_NAMES where SCHEMAS - llm_tool_schemas - does
+    not require it), each only where it is text and other arguments remain (an argument of its own is the call's
+    content). Arguments that are not a JSON object come back as they were."""
+    parsed = arguments
+    if isinstance(parsed, str):
+        with contextlib.suppress(ValueError, RecursionError):
+            parsed = json.loads(parsed)
+    if not isinstance(parsed, dict):
+        return arguments
+    known = LLM_ANNOTATIONS.get(name, ()) if isinstance(name, str) else ()
+    required = (schemas or {}).get(name, frozenset()) if isinstance(name, str) else frozenset()
+    left = [key for key, value in parsed.items() if not (isinstance(value, str) and (
+        key in known or (key in LLM_ANNOTATION_NAMES and key not in required)))]
+    if not left or len(left) == len(parsed):
+        return arguments
+    return {key: parsed[key] for key in left}
+
+
+# Notes a harness appends to a tool result itself, each a line of its own (Hermes, agent/tool_guardrails.py): "[hermes
+# note: this is the 3rd consecutive identical call to terminal ...]" from the third identical call on, with the count
+# in it, and "[Tool loop warning: ...; count=N; ...]" / "[Tool loop hard stop: ...]". Each made the result a new one
+# for the guard: Hermes' five identical terminal calls got no note (g5_repeat__hermes__qcn__r2). Hermes also replaces
+# a result of 512 characters or more that is the same as before by a stub that names the first call's id
+# (LLM_SAME_RESULT): that call's result counts for it.
+LLM_RESULT_NOTE = re.compile(r"\n*^\[(?:hermes note|Tool loop (?:warning|hard stop)): [^\n]*", re.M)
+LLM_SAME_RESULT = re.compile(r"\A\s*\[hermes note: this result is byte-identical to the [^\n]{1,200}? result earlier "
+                             r"this turn \(tool_call_id ([^)\s]{1,200})\)")
+
+
 def llm_result_key(text):
-    """A tool result as compared: its volatile parts (dates, times, durations, ids, PIDs, temporary paths) taken out."""
+    """A tool result as compared: its volatile parts (dates, times, durations, ids, PIDs, temporary paths) and a
+    harness's notes in it (LLM_RESULT_NOTE) taken out."""
+    text = LLM_RESULT_NOTE.sub("", text)
     return hashlib.sha256(LLM_VOLATILE.sub("~", text).strip().encode("utf-8", "replace")).hexdigest()[:24]
 
 
 # Notes a harness puts into the conversation as a user message of its own, right after a tool result: DSH's ("You are
-# repeating the exact same tool call ...", "Repeated tool call detected ...", "Current runtime context ..."), and this
-# guard's own (appended where a request had no tool result to carry it).
+# repeating the exact same tool call ...", "Repeated tool call detected ...", "Current runtime context ..."), OpenCode
+# 2's (2.2.5, session/runner/to-llm-message.ts: synthetic - a background shell's, subagent's or image's completion,
+# <shell id="sh_..." ...>, <subagent sessionID="ses_..." ...>, <image id="..." ...>, and the AGENTS.md a read found,
+# "Instructions from: PATH"; 2.2.x: "<system-update>", its notice of the MCP servers' instructions once they are
+# connected - llm_mcp_notice), Pi's (1.4.0, pi-ai's openai-completions: a tool result's images, "Attached image(s) from
+# tool result:"), and this guard's own (appended where a request had no tool result to carry it).
 LLM_HARNESS_NOTE = re.compile(
     r"\s*(?:<[^<>\n]{1,40}>\s*)?(?:You are repeating the exact same tool call|Repeated tool call detected|"
-    r"Current runtime context|" + re.escape(LLM_NOTE) + ")", re.I)
+    r"Current runtime context|Attached image\(s\) from tool result:|Instructions from: |<(?:shell|image) id=\"|"
+    r"<subagent sessionID=\"|<system-update>|" + re.escape(LLM_NOTE) + ")", re.I)
+# What a harness puts between a tool result and its note without ending the turn: Pi's filler answer where a provider
+# wants an assistant message after tool results (pi-ai: requiresAssistantAfterToolResult), and a system message in the
+# middle of the conversation (Pi's changed prompt sections).
+LLM_HARNESS_FILLER = "I have processed the tool results."
 
 
 def llm_human_turns(items, api):
     """The indexes of the human's messages in ITEMS (a request's messages, or the Responses API's input), oldest
     first. Not the human's: a user message carrying a tool result (Claude Code puts reminders beside its results), and
     a harness's own note - a user message right after a tool result (or after another such note) whose text starts as
-    LLM_HARNESS_NOTE does (DSH's "Repeated tool call detected ..."). Any other user message is the human's, one right
-    after a tool result too (typed while the agent worked), and so is a note-like text anywhere else."""
+    LLM_HARNESS_NOTE does (DSH's "Repeated tool call detected ..."); a filler answer (LLM_HARNESS_FILLER) or a system
+    message between them changes nothing. Any other user message is the human's, one right after a tool result too
+    (typed while the agent worked), and so is a note-like text anywhere else."""
     found, after_result = [], False
     for index, item in enumerate(items if isinstance(items, list) else []):
         if not isinstance(item, dict):
@@ -4198,6 +8023,10 @@ def llm_human_turns(items, api):
             result, user = item.get("role") == "tool", item.get("role") == "user"
         if result:
             after_result = True
+        elif after_result and api == "chat" and (item.get("role") in ("system", "developer") or (
+                item.get("role") == "assistant" and not item.get("tool_calls")
+                and llm_text(content, 512).strip() == LLM_HARNESS_FILLER)):
+            continue  # between a tool result and what follows it (Pi): no turn of its own
         elif user and after_result and LLM_HARNESS_NOTE.match(llm_text(content, 512)):
             continue  # a harness's note: the turn goes on
         elif user:
@@ -4208,24 +8037,38 @@ def llm_human_turns(items, api):
     return found
 
 
-def llm_tool_history(document, api):
-    """[(signature, result key, name, polling, holder)] of the tool calls since the human's last message
-    (llm_human_turns), oldest first; HOLDER is (container, key) where the call's result text sits (for a note), or
-    None."""
+def llm_turns(document, api):
+    """[(start, end)] the turns of a request DOCUMENT as ranges of its messages (the Responses API's input items),
+    oldest first: each from behind a message of the human's (llm_human_turns; the first from the beginning) to the
+    next one, the last to the end. No list of messages: none."""
+    items = document.get("input" if api == "responses" else "messages") if isinstance(document, dict) else None
+    if not isinstance(items, list):
+        return []
+    humans = llm_human_turns(items, api)
+    return list(zip([0] + [index + 1 for index in humans], humans + [len(items)]))
+
+
+def llm_tool_history(document, api, span=None):
+    """[(signature, result key, name, polling, holder, failed)] of the tool calls since the human's last message
+    (llm_human_turns), oldest first - or of the turn SPAN ((start, end) of llm_turns); HOLDER is (container, key)
+    where the call's result text sits (for a note), or None; FAILED: the result is an error (llm_tool_failed). All of
+    the turn's calls: a call's place in this list never changes while the conversation grows (llm_note_places and
+    llm_failure_places count on it)."""
     calls, pending = [], {}
 
     def add_call(ident, name, arguments):
         pending[ident] = len(calls)  # a result goes with the latest call of its id (ids may repeat across answers)
-        calls.append([name, arguments, None])
+        calls.append([name, arguments, None, ident])
 
     def add_result(ident, holder):
         index = pending.pop(ident, None)
         if index is not None:
             calls[index][2] = holder
+    items = document.get("input" if api == "responses" else "messages")
+    items = items if isinstance(items, list) else []
+    start, end = span if span is not None else (([-1] + llm_human_turns(items, api))[-1] + 1, len(items))
     if api == "chat":
-        messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-        start = ([-1] + llm_human_turns(messages, api))[-1] + 1
-        for message in messages[start:]:
+        for message in items[start:end]:
             if not isinstance(message, dict):
                 continue
             if message.get("role") == "assistant" and isinstance(message.get("tool_calls"), list):
@@ -4236,9 +8079,7 @@ def llm_tool_history(document, api):
             elif message.get("role") == "tool":
                 add_result(str(message.get("tool_call_id")), (message, "content"))
     elif api == "responses":
-        items = document.get("input") if isinstance(document.get("input"), list) else []
-        start = ([-1] + llm_human_turns(items, api))[-1] + 1
-        for item in items[start:]:
+        for item in items[start:end]:
             if not isinstance(item, dict):
                 continue
             if item.get("type") in ("function_call", "custom_tool_call"):
@@ -4247,9 +8088,7 @@ def llm_tool_history(document, api):
             elif item.get("type") in ("function_call_output", "custom_tool_call_output"):
                 add_result(str(item.get("call_id")), (item, "output"))
     elif api == "messages":
-        messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-        start = ([-1] + llm_human_turns(messages, api))[-1] + 1
-        for message in messages[start:]:
+        for message in items[start:end]:
             content = message.get("content") if isinstance(message, dict) else None
             for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict):
@@ -4258,13 +8097,20 @@ def llm_tool_history(document, api):
                     add_call(str(block.get("id") or len(calls)), block.get("name"), block.get("input"))
                 elif block.get("type") == "tool_result":
                     add_result(str(block.get("tool_use_id")), (block, "content"))
-    found = []
-    for name, arguments, holder in calls[-500:]:
+    found, schemas, keys = [], llm_tool_schemas(document), {}
+    for name, arguments, holder, ident in calls:
         text = llm_text(holder[0].get(holder[1])) if holder else ""
-        signature = llm_signature(name, arguments)
+        signature = llm_signature(name, llm_meaningful_arguments(name, arguments, schemas))
         wait = LLM_POLLING.search(signature)
         polling = bool(wait) and (wait.group(1) is None or int(wait.group(1)) >= 5)
-        found.append((signature, llm_result_key(text) if holder else None, str(name)[:100], polling, holder))
+        key = None
+        if holder:
+            same = LLM_SAME_RESULT.match(text)  # Hermes' stub: the result of the call it names
+            key = keys.get(same.group(1)) if same else None
+            key = key or llm_result_key(text)
+            keys.setdefault(ident, key)
+        failed = bool(holder) and llm_tool_failed(text, holder[0].get("is_error") is True)
+        found.append((signature, key, str(name)[:100], polling, holder, failed))
     return found
 
 
@@ -4276,12 +8122,12 @@ def llm_loop_check(history, loop):
     warn, block = loop.get("warn") or 0, loop.get("block") or 0
     if not (warn or block) or not history:
         return None, None, 0, None
-    counts = collections.Counter((sig, key) for sig, key, _, _, _ in history if key is not None)
+    counts = collections.Counter((sig, key) for sig, key, *_ in history if key is not None)
     level, found = None, (None, 0, None)
     for (sig, key), count in counts.most_common(8):
-        polling = next(p for s, k, _, p, _ in history if s == sig and k == key)
+        polling = next(p for s, k, _, p, *_ in history if s == sig and k == key)
         factor = 3 if polling else 1
-        name = next(n for s, k, n, _, _ in history if s == sig and k == key)
+        name = next(n for s, k, n, *_ in history if s == sig and k == key)
         if block and count >= block * factor:
             return "block", name, count, "repeat"
         if warn and count >= warn * factor and level is None:
@@ -4291,22 +8137,338 @@ def llm_loop_check(history, loop):
     return None, None, 0, None
 
 
-def llm_note_target(history, name):
-    """Where a note goes: the result of the latest call of NAME (else the latest result)."""
-    for sig, key, called, _, holder in reversed(history):
-        if holder and called == name:
-            return holder
-    return next((holder for *_, holder in reversed(history) if holder), None)
+def llm_note_places(history, loop):
+    """[(count, name, stop, holder)] where the loop guard's notes sit in the tool-call HISTORY of one turn
+    (llm_tool_history), in the conversation's order: the result of the COUNT-th call of a pair (the same call with the
+    same result) carries the note for COUNT, from the warn-th call to the block-th (a call that waits: three times
+    both; STOP: the block-th's, which tells the model to stop calling tools; no block count: every one from the
+    warn-th on). A place and its text depend only on what came before it, so every later request of the conversation
+    carries the same notes at the same places and its prompt extends the previous request's: the server's prompt
+    cache holds. (A single note in the result of the latest call moved with every step, and LM Studio read the whole
+    conversation again each time: 7 to 30 s per step instead of 0.4 s.)"""
+    warn, block = loop.get("warn") or 0, loop.get("block") or 0
+    if not (warn or block):
+        return []
+    seen, found = {}, []
+    for signature, key, name, polling, holder, _ in history:
+        if key is None:
+            continue
+        count = seen[signature, key] = seen.get((signature, key), 0) + 1
+        factor = 3 if polling else 1
+        if count >= (warn or block) * factor and not (block and count > block * factor):
+            found.append((count, name, bool(block) and count >= block * factor, holder))
+    return found
+
+
+def llm_note_text(name, count, stop=False):
+    """The loop guard's note in the result of the COUNT-th identical call of the tool NAME; STOP: the one that tells
+    the model to stop calling tools (the block-th call's). The same text for the same place in every request."""
+    if stop:
+        return (f"{LLM_NOTE} You have called {name} with the same arguments {count} times since the user's last "
+                "message and got the same result each time. Stop calling tools now: summarize the confirmed facts, "
+                "what you tried, the current blocker and one different next step, then wait for the user.")
+    return (f"{LLM_NOTE} You have called {name} with the same arguments {count} times and got the same result each "
+            "time; it will not change. Do not call it again with these arguments: summarize what you know and take "
+            "a different next step.")
+
+
+# A tool result that is an error, where the API has no mark for it (the Messages API's is_error): how the harnesses'
+# tools and the MCP servers they relay start one (the local-model research's round 1: Codex's "resources/read failed:
+# ...", "failed to parse function arguments", DSH's and Goose's "Error: ...", OpenCode's "Failed to read MCP resource",
+# "Error executing tool", Pi's "Could not edit file", Qwen Code's "File not found", Claude Code's <tool_use_error>), or
+# a command that exited with another code than 0 (Codex's and Pi's "Process/Command exited with code N", the exec MCP
+# server's "exit N (failed)", Claude Code's "Exit code N"); a JSON result with an error, success or ok false, or a
+# non-zero exit_code (OpenCode 2's {"error": {...}}, Hermes' {"exit_code": 1, "error": ...}). Only the start of a
+# result says so: a log or a file that mentions an error somewhere is no failed call.
+LLM_TOOL_FAILURE = re.compile(
+    r"\A\s*(?:<tool_use_error>|error(?::|\s+(?:executing|calling|running|reading|while|in tool)\b)|"
+    r"(?:failed (?:to|with)|unable to|could not|cannot)\b|[\w./-]{1,60} failed:|"
+    r"(?:invalid|unknown|missing) (?:request|argument|parameter|input|tool|resource|function|field)|"
+    r"no (?:tool|function|resource) named|no such (?:file|tool|resource)|file not found|extension operation failed|"
+    r"exit code [1-9])|"
+    r"^(?:Process|Command) exited with code [1-9]|^exit [1-9][0-9]* \(failed\)", re.I | re.M)
+
+
+# Codex's header before an MCP server's answer ("Wall time: 0.0057 seconds\nOutput:", then the answer as a part of its
+# own): the answer is what tells a failure (research round 3: 120 failed mcp__files__read_file calls, no failures
+# note). A command's output (exec_command: Chunk ID, Process exited with code N, Output) has other lines before it.
+LLM_CODEX_MCP_HEADER = re.compile(r"\AWall time: [0-9.]+ seconds?\s*\nOutput:\s*")
+
+
+def llm_tool_failed(result, flagged=False):
+    """Whether a tool RESULT (its text, or the API's list of parts) is an error: FLAGGED (the API marks it: the
+    Messages API's is_error), its start as the harnesses write one (LLM_TOOL_FAILURE), or a JSON object that says
+    so (error, success false, ok false, isError, a non-zero exit_code); a harness's notes (LLM_RESULT_NOTE) and Codex's
+    header before an MCP answer (LLM_CODEX_MCP_HEADER) left out."""
+    if flagged:
+        return True
+    text = LLM_CODEX_MCP_HEADER.sub("", LLM_RESULT_NOTE.sub("", llm_text(result)).strip(), count=1).strip()
+    if text.startswith("{"):
+        with contextlib.suppress(ValueError, RecursionError):
+            found = json.JSONDecoder().raw_decode(text)[0]
+            if isinstance(found, dict):
+                code = found.get("exit_code")
+                return bool(found.get("error") or found.get("success") is False or found.get("ok") is False or
+                            found.get("isError") is True or found.get("is_error") is True or
+                            (isinstance(code, int) and not isinstance(code, bool) and code != 0))
+    return bool(LLM_TOOL_FAILURE.search(text))
+
+
+def llm_failure_places(history, loop):
+    """([(count, name, holder)], (name, count)) of a turn's tool-call HISTORY (llm_tool_history): where the notes of
+    the failing streak sit - the result of the failures-th call of one tool that failed in a row (another argument
+    each time: guessing), and of every failures-th after it - and the streak the turn ends with ((None, 0): none).
+    A call of the tool that worked, or a call of another tool, ends a streak; a failed call of another tool starts
+    its own. As llm_note_places: a place depends only on what came before it."""
+    limit = loop.get("failures") or 0
+    found, name, count = [], None, 0
+    for _, key, called, _, holder, failed in history:
+        if key is None:
+            continue
+        if not failed:
+            name, count = None, 0
+            continue
+        count = count + 1 if called == name else 1
+        name = called
+        if limit and count % limit == 0:
+            found.append((count, called, holder))
+    return found, (name, count)
+
+
+def llm_failure_note_text(name, count, hint=""):
+    """The loop guard's note in the result of the COUNT-th call of the tool NAME that failed in a row, with HINT after
+    it (a tool for MCP resources: what it is not and the request's own MCP function - llm_failure_hint)."""
+    return (f"{LLM_NOTE} {name} has failed {count} times in a row. Do not guess further arguments: read the errors, "
+            "check what the tool expects (its description and parameters) or whether another tool does what you "
+            "need, and change your approach; if you cannot find out how, say what blocks you.") + \
+        (f" {hint}" if hint else "")
+
+
+def llm_failure_hint(document, name, servers=None, names=None):
+    """The hint of the failures note for the tool NAME of a request DOCUMENT: for a tool for MCP resources
+    (LLM_RESOURCE_TOOL) its name and llm_resource_sentence - which function of the request is the server's tool
+    (research round 3: Laguna-S in Codex guessed six URIs for read_mcp_resource, got the note and gave up, with
+    mcp__files__read_file in the same request); "" for every other tool. The same text in every request (the request's
+    tools)."""
+    if not isinstance(name, str) or not LLM_RESOURCE_TOOL.search(name):
+        return ""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    others = []
+    for tool in tools if isinstance(tools, list) else []:
+        inner = tool.get("function") if isinstance(tool, dict) else None
+        holder = inner if isinstance(inner, dict) else tool
+        if isinstance(holder, dict) and isinstance(holder.get("name"), str) and holder["name"] and \
+                not LLM_RESOURCE_TOOL.search(holder["name"]):
+            others.append(holder["name"])
+    return f"{name} {llm_resource_sentence(others, servers, names).strip()}"
 
 
 def llm_add_note(holder, text):
-    """Append TEXT to a tool result in place (a string, or a list of parts: a text part added)."""
+    """Append TEXT to a tool result in place: a string, or a list of parts - a text part of the list's own kind added
+    (its last text part's type; none: "input_text" in the Responses API's "output", else "text"). The parts of a
+    function_call_output are "input_text" (Codex sends MCP results that way): a "text" part among them made LM Studio
+    refuse the whole request with HTTP 400 "Invalid type for 'input'"."""
     container, key = holder
     value = container.get(key)
     if isinstance(value, list):
-        value.append({"type": "text", "text": text} if all(isinstance(p, dict) for p in value) else text)
+        if all(isinstance(part, dict) for part in value):
+            kinds = [part["type"] for part in value
+                     if isinstance(part.get("text"), str) and isinstance(part.get("type"), str)]
+            value.append({"type": kinds[-1] if kinds else "input_text" if key == "output" else "text", "text": text})
+        else:
+            value.append(text)
     else:
         container[key] = (value if isinstance(value, str) else llm_text(value)) + "\n\n" + text
+
+
+# Qwen3's chat template (Qwen3.6 on LM Studio, round 2 of the local-model research) keeps the reasoning of the
+# assistant's turns only after the last user message that is not a tool result. A text the agent puts between two
+# tool steps as a user message - Claude Code's reminders ("the file changed on disk"), beside a tool result or in a
+# message of their own; any agent's user message right after a tool message - makes the template drop the reasoning of
+# every step before it: the prompt changes near its beginning and the server reads it all again (round 1:
+# t2_debug__claude__q36__r2, requests 68 and 76 - 16,384 of 86,413 and 95,385 tokens from the cache, 93 s and 109 s).
+# And LM Studio moves a system message from the middle of the conversation into the system prompt at the top
+# (Claude Code 2.1.325 sends its "changed on disk" note so): the prompt changes right after the tools, every time.
+# Such a text of the harness's goes into the tool result it follows (llm_fold_notes): the model reads the same words,
+# the prompt extends the one before. The human's own texts stay where they are.
+
+
+LLM_FOLD_NOTE = re.compile(r"\s*<system-reminder>")  # Claude Code's own texts beside its results
+
+
+def llm_fold_text(holder, key, text):
+    """Append TEXT to the tool result HOLDER[KEY] in place: to a string, or as a text part of a list of parts."""
+    value = holder.get(key)
+    if isinstance(value, list):
+        value.append({"type": "text", "text": text})
+    else:
+        value = value if isinstance(value, str) else ""
+        holder[key] = value + ("\n\n" if value else "") + text
+
+
+def llm_harness_text(content, system=False):
+    """The text of a message CONTENT (a string, a text block's text, or a list of text parts) when it is nothing but a
+    harness's own notes - Claude Code's <system-reminder>, or a note as llm_human_turns knows them
+    (LLM_HARNESS_NOTE); any text of a SYSTEM message (the harness's by definition) - else None: a text of the
+    human's (typed while the agent worked) stays a message of its own, inside a tool result it would read as the
+    tool's output."""
+    texts = [content] if isinstance(content, str) else [part.get("text") for part in content] if \
+        isinstance(content, list) and content and all(isinstance(part, dict) and part.get("type") == "text"
+                                                      for part in content) else []
+    if texts and all(isinstance(text, str) and text and (system or LLM_FOLD_NOTE.match(text) or
+                                                         LLM_HARNESS_NOTE.match(text)) for text in texts):
+        return "\n\n".join(texts)
+    return None
+
+
+# Claude Code 2.1.325 sends its environment ("# Environment\nYou have been invoked in the following environment ...") as
+# a message of role system after the first user message. A chat template that allows a system message only at the
+# beginning makes LM Studio refuse every such request: KAT-Coder-V2.5-Dev (GGUF) answered each of Claude Code's with
+# HTTP 500 "System message must be at the beginning" (the local-model research's round 4). LM Studio puts such a text
+# into the system prompt for the templates that render it at all; the proxy does so itself (llm_lift_system).
+def llm_lift_system(document, api):
+    """The system messages of text only before the assistant's first answer (the start of the conversation, the same
+    in every request of it) that are not its first message, put into the system prompt of a request DOCUMENT, in
+    place: Messages - appended to "system" (a text block to a list of them, a paragraph to a string); chat - to the
+    first message's text when it is a system message, else as a new first message; Responses - llm_lift_developer.
+    Returns how many were moved. A system message after an answer (llm_fold_notes' business), one with anything but
+    text, the human's messages, odd documents: as they came."""
+    if api == "responses":
+        return llm_lift_developer(document)
+    items = document.get("messages") if isinstance(document, dict) and api in ("chat", "messages") else None
+    if not isinstance(items, list):
+        return 0
+    lifted, texts = [], []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") == "assistant":
+            break
+        if index and item.get("role") in (("system", "developer") if api == "chat" else ("system",)):
+            text = llm_harness_text(item.get("content"), True)
+            if text is not None:
+                lifted.append(index)
+                texts.append(text)
+    if not lifted:
+        return 0
+    items[:] = [item for index, item in enumerate(items) if index not in lifted]
+    text = "\n\n".join(texts)
+    if api == "messages":
+        system = document.get("system")
+        if isinstance(system, list):
+            system.append({"type": "text", "text": text})
+        elif isinstance(system, str) and system:
+            document["system"] = system + "\n\n" + text
+        else:
+            document["system"] = [{"type": "text", "text": text}]
+    else:
+        first = items[0] if items and isinstance(items[0], dict) else None
+        if first is not None and first.get("role") in ("system", "developer") and isinstance(first.get("content"), str):
+            first["content"] = first["content"] + ("\n\n" if first["content"] else "") + text
+        elif first is not None and first.get("role") in ("system", "developer") and \
+                llm_harness_text(first.get("content"), True) is not None and isinstance(first.get("content"), list):
+            first["content"].append({"type": "text", "text": text})
+        else:
+            items.insert(0, {"role": "system", "content": text})
+    return len(lifted)
+
+
+def llm_lift_developer(document):
+    """llm_lift_system for a Responses API request DOCUMENT: its developer and system messages of text only before the
+    model's first output (an assistant message, a call, reasoning) that are not the first item - Codex sends two
+    developer messages, which LM Studio renders as two system messages - put into the system prompt, in place: onto
+    "instructions" when it is a text, else into the first item when that is a developer or system message (its parts
+    then the others'), else into "instructions". Returns how many moved."""
+    items = document.get("input") if isinstance(document, dict) else None
+    if not isinstance(items, list) or not items:
+        return 0
+    instructions = document.get("instructions")
+    has = isinstance(instructions, str) and bool(instructions.strip())
+    head = items[0] if isinstance(items[0], dict) else None
+    keep_first = not has and head is not None and head.get("type", "message") == "message" and \
+        head.get("role") in ("developer", "system") and isinstance(head.get("content"), list)
+
+    def parts_of(item):
+        content = item.get("content")
+        if isinstance(content, str):
+            return [content] if content else None
+        if isinstance(content, list) and content and all(
+                isinstance(part, dict) and part.get("type") in ("input_text", "text") and
+                isinstance(part.get("text"), str) for part in content):
+            return [part["text"] for part in content]
+        return None
+    lifted, texts = [], []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type", "message") != "message" or item.get("role") == "assistant":
+            break  # the model's first output: the conversation's start is over
+        if item.get("role") not in ("developer", "system") or (index == 0 and keep_first):
+            continue
+        parts = parts_of(item)
+        if parts is not None:
+            lifted.append(index)
+            texts += parts
+    if not lifted:
+        return 0
+    items[:] = [item for index, item in enumerate(items) if index not in lifted]
+    if keep_first:
+        head["content"] += [{"type": "input_text", "text": text} for text in texts]
+    else:
+        document["instructions"] = ((instructions + "\n\n") if has else "") + "\n\n".join(texts)
+    return len(lifted)
+
+
+def llm_fold_notes(document, api):
+    """The harness's notes (llm_harness_text) a request DOCUMENT has between two tool steps, put into the tool result
+    before them, in place - chat: a user, system or developer message of text only right after a tool message;
+    Messages: the text blocks beside tool_result blocks, and a user or system message of text only right after one
+    with tool results. Returns how many texts were folded. The human's texts, a message after an answer of the
+    assistant's, one with an image, the Responses and completions APIs: as they came."""
+    items = document.get("messages") if isinstance(document, dict) and api in ("chat", "messages") else None
+    if not isinstance(items, list):
+        return 0
+    folded, kept, last = 0, [], None   # LAST: (holder, key) of the latest tool result while the step goes on
+    for item in items:
+        if not isinstance(item, dict):
+            kept.append(item)
+            last = None
+            continue
+        role, content = item.get("role"), item.get("content")
+        if api == "chat":
+            if role == "tool":
+                last = (item, "content")
+            elif role in ("user", "system", "developer") and last is not None and \
+                    llm_harness_text(content, role != "user") is not None:
+                llm_fold_text(*last, llm_harness_text(content, role != "user"))
+                folded += 1
+                continue
+            else:
+                last = None
+            kept.append(item)
+            continue
+        results = [block for block in content if isinstance(block, dict) and block.get("type") == "tool_result"] \
+            if role == "user" and isinstance(content, list) else []
+        if results:
+            texts = [block for block in content if isinstance(block, dict) and block.get("type") == "text"
+                     and llm_harness_text(block.get("text")) is not None]
+            for block in texts:
+                llm_fold_text(results[-1], "content", block["text"])
+                content.remove(block)
+                folded += 1
+            last = (results[-1], "content")
+        elif role in ("user", "system") and last is not None and \
+                llm_harness_text(content, role == "system") is not None:
+            # (Claude Code 2.1.325 sends its "changed on disk" note as a message of role system)
+            llm_fold_text(*last, llm_harness_text(content, role == "system"))
+            folded += 1
+            continue
+        else:
+            last = None
+        kept.append(item)
+    if folded:
+        items[:] = kept
+    return folded
 
 
 def llm_stop_answer(api, model, text, stream):
@@ -4393,18 +8555,27 @@ def llm_held_answer(api, data, encoding, stream, model, text):
 
 class LlmTurns:
     """The watchdog's view of the agent's turns at one endpoint: requests and time since the human's last message
-    (a turn is told apart by that message), and when an answer was cut (the next request gets the boost)."""
+    (a turn is told apart by that message), where the watchdog's note of a turn sits (it keeps its place and its text
+    in every later request, like the notes of llm_note_places), and when an answer was cut (the next request gets the
+    boost)."""
     LIMIT = 256
 
     def __init__(self):
-        self.lock, self.turns, self.cut = threading.Lock(), {}, {}
+        self.lock, self.turns, self.cut, self.notes = threading.Lock(), {}, {}, {}
+
+    @staticmethod
+    def keys(document, api):
+        """[key] of the turns of DOCUMENT, oldest first (as llm_turns: the first is what came before the human's
+        first message), each told apart by its number and the human's message that began it."""
+        items = document.get("input" if api == "responses" else "messages") if isinstance(document, dict) else None
+        human = [items[index] for index in llm_human_turns(items, api)]
+        return [hashlib.sha256(
+            f"{count}\0{json.dumps(human[count - 1], sort_keys=True, default=str)[:65536] if count else ''}".encode(
+                "utf-8", "replace")).hexdigest()[:24] for count in range(len(human) + 1)]
 
     @staticmethod
     def key(document, api):
-        items = document.get("input" if api == "responses" else "messages")
-        human = [items[index] for index in llm_human_turns(items, api)]
-        last = json.dumps(human[-1], sort_keys=True, default=str)[:65536] if human else ""
-        return hashlib.sha256(f"{len(human)}\0{last}".encode("utf-8", "replace")).hexdigest()[:24]
+        return LlmTurns.keys(document, api)[-1]
 
     def count(self, key, now=None):
         """(requests, seconds) of the turn KEY, this request counted."""
@@ -4416,6 +8587,16 @@ class LlmTurns:
                 self.turns.pop(next(iter(self.turns)))
             return seen + 1, now - started
 
+    def note(self, key, place=None):
+        """The watchdog's note of the turn KEY, (index of the tool call whose result carries it, text): PLACE where
+        the turn has none yet (kept from then on), None without either."""
+        with self.lock:
+            if place is not None and key not in self.notes:
+                self.notes[key] = place
+                while len(self.notes) > self.LIMIT:
+                    self.notes.pop(next(iter(self.notes)))
+            return self.notes.get(key)
+
     def mark_cut(self, endpoint):
         with self.lock:
             self.cut[endpoint] = True
@@ -4425,17 +8606,842 @@ class LlmTurns:
             return self.cut.pop(endpoint, False)
 
 
+# An agent's tools as a local model server takes them (the Responses API; Codex). Codex 0.166 offers each MCP server -
+# and its own multi_agent_v1 - as ONE tool {"type": "namespace", "name": NS, "tools": [functions]}. LM Studio's
+# /v1/responses ignores such a tool, so the model never saw an MCP tool ("I don't have access to a write_file tool
+# from the MCP server named files ...": the local-model research's probes/qcn/codex_ns.json). The relay offers them
+# as plain functions NS__TOOL (llm_flat_tools) and names the model's calls back in the answer (LlmToolAnswer): the
+# agent sees its own names, the server only functions.
+# Codex's shell tools (exec_command) also offer `justification`, `prefix_rule` and `sandbox_permissions`: how the
+# model asks Codex for an approval. A local model fills `justification` at nearly every call (24 of 24 in the
+# research's run), and Codex refuses each such call ("`justification` requires an explicit `sandbox_permissions`"):
+# the model repeats it until the loop guard ends the turn. Codex's own sandbox and approvals are not what holds here
+# (sandbox-ai is the boundary: sandbox_mode danger-full-access), so the three are not offered (llm_plain_tools) and
+# are taken out of a call that has them all the same (llm_plain_arguments).
+LLM_NAMESPACE_JOIN = "__"
+LLM_APPROVAL_PARAMETERS = ("justification", "prefix_rule", "sandbox_permissions")
+
+
+def llm_flat_tools(document):
+    """The namespace tools of a Responses API request DOCUMENT as plain functions, in place: each {"type":
+    "namespace", "name": NS, "tools": [...]} replaced by its tools named NS__TOOL (where it stood, in their order),
+    and the function_call items of the conversation that carry a "namespace" named the same way. Returns {"names":
+    {NS__TOOL: [NS, TOOL]}, "namespaces": how many were replaced, "calls": items renamed}, or {} when nothing changed
+    (no namespace tool; or a name that would then stand twice: the tools stay as they came)."""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    names, flat, namespaces = {}, [], 0
+    for tool in tools if isinstance(tools, list) else []:
+        inner = tool.get("tools") if isinstance(tool, dict) and tool.get("type") == "namespace" else None
+        if not isinstance(inner, list) or not isinstance(tool.get("name"), str) or not tool["name"]:
+            flat.append(tool)
+            continue
+        namespaces += 1
+        for function in inner:
+            if isinstance(function, dict) and isinstance(function.get("name"), str) and function["name"]:
+                name = tool["name"] + LLM_NAMESPACE_JOIN + function["name"]
+                names[name] = [tool["name"], function["name"]]
+                flat.append({**function, "name": name})
+    taken = [tool.get("name") for tool in flat if isinstance(tool, dict) and isinstance(tool.get("name"), str)]
+    if len(set(taken)) != len(taken):
+        return {}
+    calls = 0
+    items = document.get("input") if isinstance(document, dict) else None
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("namespace") and \
+                isinstance(item["namespace"], str) and isinstance(item.get("name"), str):
+            item["name"] = item.pop("namespace") + LLM_NAMESPACE_JOIN + item["name"]
+            calls += 1
+    if namespaces:
+        document["tools"] = flat
+    return {"names": names, "namespaces": namespaces, "calls": calls} if namespaces or calls else {}
+
+
+# A chat template that asks `name in parameters.required` or iterates `parameters.properties.items()` fails on a tool
+# whose object schema has no "required" or "properties", and the server refuses the whole request (research round 3:
+# Seed-OSS-36B on LM Studio, HTTP 500 "Error rendering prompt with jinja template: \"Cannot perform operation in on
+# undefined values\"" for every OpenCode and Claude Code request with tools; OpenCode's exec_lint, files_list_dir,
+# list_mcp_resources have no required parameter).
+def llm_schema_keys(document):
+    """The tools of a request DOCUMENT (chat: function.parameters; Responses: parameters, a namespace's functions too;
+    Messages: input_schema) with an empty "properties" and "required" where an object schema has none, in place - the
+    same schema. Returns the names of the tools changed."""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    changed = []
+    for tool in tools if isinstance(tools, list) else []:
+        inner = tool.get("tools") if isinstance(tool, dict) and tool.get("type") == "namespace" else None
+        for holder in [tool] + (inner if isinstance(inner, list) else []):
+            function = holder.get("function") if isinstance(holder, dict) and \
+                isinstance(holder.get("function"), dict) else holder
+            if not isinstance(function, dict):
+                continue
+            schema = function.get("parameters", function.get("input_schema"))
+            if not isinstance(schema, dict) or schema.get("type") != "object":
+                continue
+            added = False
+            if "properties" not in schema:
+                schema["properties"], added = {}, True
+            if "required" not in schema:
+                schema["required"], added = [], True
+            if added:
+                changed.append(str(function.get("name")))
+    return changed
+
+
+def llm_plain_tools(document):
+    """Codex's approval parameters (LLM_APPROVAL_PARAMETERS) taken out of the tools of a Responses API request
+    DOCUMENT, in place: of every function - a namespace's too - whose parameters have `sandbox_permissions` (a tool
+    with a `justification` of its own, an MCP server's, keeps it). Returns the names of the tools changed."""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    changed = []
+    for tool in tools if isinstance(tools, list) else []:
+        inner = tool.get("tools") if isinstance(tool, dict) and tool.get("type") == "namespace" else None
+        for function in [tool] + (inner if isinstance(inner, list) else []):
+            parameters = function.get("parameters") if isinstance(function, dict) else None
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            if not isinstance(properties, dict) or "sandbox_permissions" not in properties:
+                continue
+            for key in LLM_APPROVAL_PARAMETERS:
+                properties.pop(key, None)
+            if isinstance(parameters.get("required"), list):
+                parameters["required"] = [key for key in parameters["required"] if key not in LLM_APPROVAL_PARAMETERS]
+            changed.append(str(function.get("name")))
+    return changed
+
+
+# The agents' tools for MCP *resources* (documents a server publishes; a server's tools are something else): OpenCode,
+# Codex, DSH and Pi offer list_mcp_resources, list_mcp_resource_templates and read_mcp_resource, Claude Code
+# ListMcpResourcesTool and ReadMcpResourceTool, Hermes each server's list_resources and read_resource, Goose its
+# extension manager's. Their descriptions read like the way to an MCP server ("Read a specific resource from an MCP
+# server given the server name and resource URI"; "Resources provide context such as files ..."), and local models
+# take them when asked for "the MCP tool read_file of the server named files" (the local-model research's round 1,
+# sandbox-ai's own proxy, LM Studio): Laguna-S in Codex called read_mcp_resource 27 times with guessed URIs (file://,
+# cwd://, %2F ...: no two calls the same, so no loop guard), in OpenCode it tried seven calls and gave the server up
+# ("the MCP files server isn't exposing any resources, so I can't use it"); Qwen3-Coder-Next in Codex five before
+# its first mcp__files__read_file (runs/smoke__codex__laguna__r1, smoke__opencode__laguna__r1, smoke__codex__qcn__r1).
+# Each such tool now says what it is not, and names one of the request's own MCP functions (llm_resource_hint).
+LLM_RESOURCE_TOOL = re.compile(r"(?:^|_)(?:list_mcp_resources|list_mcp_resource_templates|read_mcp_resource|"
+                               r"list_resources|list_resource_templates|read_resource)$|"
+                               r"^(?:ListMcpResources|ReadMcpResource|ReadMcpResourceDir)Tool$")
+LLM_MCP_FUNCTION = re.compile(r"mcp__([A-Za-z0-9-]+(?:_[A-Za-z0-9-]+)*?)__[A-Za-z0-9_-]+")  # mcp__SERVER__TOOL
+LLM_HINT_SERVERS = 8  # MCP servers the sentence names at most
+
+
+LLM_CODEMODE_RESOURCE = re.compile(r"^  - (tools\.opencode\.(?:list_mcp_resources|list_mcp_resource_templates|"
+                                   r"read_mcp_resource))\(", re.M)  # OpenCode 2's code-mode catalog entries
+# Codex offers these three whatever its MCP servers have (the other agents only for a server that advertises
+# resources, which the MCP relay leaves out when it lists none: McpConnection). The relay reports per server whether
+# it publishes resources (McpGateway.note_resources -> McpRelays' mirror mcp-resources.json, read by the proxy); with
+# every server of a request known to publish none, they are left out of it (llm_resource_tools_out). Round 4:
+# Ornith-1.5-122B failed Codex's smoke test on them (7 guessed read_mcp_resource calls, the server's tool never called).
+LLM_CODEX_RESOURCE_TOOLS = ("list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource")
+LLM_RESOURCES_MIRROR = "mcp-resources.json"  # in the proxy's run directory: {"servers": {NAME: true|false|null}}
+
+
+def llm_resource_tools_out(document, published):
+    """Codex's tools for MCP resources (LLM_CODEX_RESOURCE_TOOLS) left out of a request DOCUMENT, in place, when every
+    MCP server whose functions the request has (mcp__SERVER__T, as llm_flat_tools names them) is known to publish no
+    resources: PUBLISHED ({server: False}, the relay's record). A server it does not know, one that publishes (True)
+    or did not answer in time (None), a request without any server's functions, a record of another shape: nothing
+    is left out. Returns the names left out."""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    if not isinstance(tools, list) or not isinstance(published, dict):
+        return []
+    servers, found = set(), []
+    for tool in tools:
+        name = tool.get("name") if isinstance(tool, dict) else None
+        if not isinstance(name, str):
+            continue
+        if name in LLM_CODEX_RESOURCE_TOOLS:
+            found.append(name)
+        matched = LLM_MCP_FUNCTION.fullmatch(name)  # mcp__SERVER__T, as llm_flat_tools names Codex's
+        if matched:
+            servers.add(matched.group(1))
+    if not found or not servers or any(published.get(server) is not False for server in servers):
+        return []
+    document["tools"] = [tool for tool in tools if not (isinstance(tool, dict) and tool.get("name") in found)]
+    return found
+
+
+
+def llm_resource_hint(document, servers=None, names=None):
+    """The tools for MCP resources (LLM_RESOURCE_TOOL) among the tools of a request DOCUMENT (any of the three APIs)
+    told apart from an MCP server's tools, in place: a sentence after each one's description that says how the
+    request's own MCP functions are named - "tool T of the MCP server files is the function files_T, of exec exec_T
+    - for example files_read_file" (llm_resource_sentence) - and the same sentence under each such entry of OpenCode
+    2's code-mode catalog in the system prompt (llm_codemode_text: those tools are no tools of the request). The same
+    text in every request of a conversation (the tools and the system prompt are the beginning of the server's
+    prompt). Returns the names of the tools changed."""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    holders = []
+    for tool in tools if isinstance(tools, list) else []:
+        inner = tool.get("function") if isinstance(tool, dict) else None
+        holder = inner if isinstance(inner, dict) else tool
+        if isinstance(holder, dict) and isinstance(holder.get("name"), str) and holder["name"]:
+            holders.append(holder)
+    found = [holder for holder in holders if LLM_RESOURCE_TOOL.search(holder["name"])
+             and isinstance(holder.get("description"), str) and holder["description"]]
+    messages = document.get("messages") if isinstance(document, dict) else None
+    catalogs = [message for message in messages if isinstance(message, dict) and message.get("role") == "system"
+                and isinstance(message.get("content"), str) and LLM_CODEMODE_RESOURCE.search(message["content"])] \
+        if isinstance(messages, list) else []
+    if not found and not catalogs:
+        return []
+    others = [holder["name"] for holder in holders if not LLM_RESOURCE_TOOL.search(holder["name"])]
+    hint = llm_resource_sentence(others, servers, names)
+    for holder in found:
+        holder["description"] += hint
+    told = [holder["name"] for holder in found]
+    for message in catalogs:
+        message["content"], entries = llm_codemode_text(message["content"], hint.strip())
+        told += [entry for entry in entries if entry not in told]
+    return told
+
+
+def llm_resource_sentence(others, servers=None, names=None):
+    """The sentence for a tool for MCP resources (with a space before it): what it is not, and how the request's own
+    MCP functions are named. Which functions are a server's: NAMES (llm_flat_tools: Codex's namespaces mcp__SERVER),
+    else those of OTHERS (the request's other tool names) named after one of SERVERS (the start's MCP servers:
+    mcp__S__T, mcp_S_T, S__T or S_T, as the agents name them), else those named mcp__SERVER__T; without any the
+    sentence names none."""
+    places = {}  # server: (the prefix of its functions' names, the first of them)
+    for name, place in names.items() if isinstance(names, dict) else ():
+        if isinstance(place, (list, tuple)) and len(place) == 2 and str(place[0]).startswith("mcp__"):
+            places.setdefault(str(place[0])[len("mcp__"):], (str(place[0]) + LLM_NAMESPACE_JOIN, name))
+    for server in servers if isinstance(servers, (list, tuple)) and not places else ():
+        forms = dict.fromkeys((server, server.replace("-", "_"))) if isinstance(server, str) and server else ()
+        place = next(((prefix, name) for form in forms
+                      for prefix in (f"mcp__{form}__", f"mcp_{form}_", f"{form}__", f"{form}_")
+                      for name in others if name.startswith(prefix) and len(name) > len(prefix)), None)
+        if place:
+            places.setdefault(server, place)
+    for name in others if not places else ():
+        match = LLM_MCP_FUNCTION.fullmatch(name)
+        if match:
+            places.setdefault(match[1], (f"mcp__{match[1]}__", name))
+    shown = list(places.items())[:LLM_HINT_SERVERS]
+    hint = (" (Only for resources an MCP server publishes; most servers publish none. This does not call a server's "
+            "tools and does not read files. A server's tools are functions of their own")
+    if shown:
+        hint += f": tool T of the MCP server {shown[0][0]} is the function {shown[0][1][0]}T" + \
+            "".join(f", of {server} {prefix}T" for server, (prefix, _) in shown[1:]) + f" - for example {shown[0][1][1]}"
+    else:
+        hint += ", named after the server and the tool"
+    return hint + ". Call that function directly.)"
+
+
+# OpenCode 2 (2.2.x) asks the model before its MCP servers are connected and tells it about them later: from the request
+# after the connection on, their tools are functions of the request, and a user message "<system-update>" carries
+# the servers' instructions, one entry per server (escaped inside it: &lt;server name="files"&gt;). Laguna-S planned
+# without them, then looked for the server inside code mode (execute: tools.opencode.list_mcp_resources -> no
+# resources), concluded that no MCP server was registered and used its own tools (research round 3: 0 MCP calls in 5
+# of 5 smoke runs, files_read_file offered from request 3 on).
+LLM_MCP_NOTICE_SERVER = re.compile(r'(?:<|&lt;)server name="([^"<>&\n]{1,64})"(?:>|&gt;)\n')
+LLM_MCP_NOTICE = re.compile(r"(?:<|&lt;)mcp_instructions(?:>|&gt;)")
+
+
+def llm_mcp_notice_text(text, others):
+    """(TEXT, [servers]) with a line under each server's entry of OpenCode 2's MCP notice (LLM_MCP_NOTICE_SERVER) that
+    names the server's functions among OTHERS (the request's tool names: mcp__S__T, mcp_S_T, S__T or S_T) - "Its tools
+    are functions of this request: tool T of the MCP server files is the function files_T - for example
+    files_read_file. Call them directly, not inside execute."; a server without such a function, an entry that has
+    the line already, a text without the notice: as they are."""
+    if not isinstance(text, str) or not LLM_MCP_NOTICE.search(text):
+        return text, []
+    told, out, at = [], [], 0
+    for match in LLM_MCP_NOTICE_SERVER.finditer(text):
+        server = match[1]
+        forms = dict.fromkeys((server, server.replace("-", "_")))
+        place = next(((prefix, name) for form in forms
+                      for prefix in (f"mcp__{form}__", f"mcp_{form}_", f"{form}__", f"{form}_")
+                      for name in others if isinstance(name, str) and name.startswith(prefix)
+                      and len(name) > len(prefix)), None)
+        if not place or server in told:
+            continue
+        line = (f"    Its tools are functions of this request: tool T of the MCP server {server} is the function "
+                f"{place[0]}T - for example {place[1]}. Call them directly, not inside execute.\n")
+        if text.startswith(line, match.end()):
+            continue
+        out.append(text[at:match.end()] + line)
+        at = match.end()
+        told.append(server)
+    return "".join(out) + text[at:], told
+
+
+def llm_mcp_notice(document):
+    """OpenCode 2's MCP notice in a request DOCUMENT's user messages (chat: a string or text parts; Messages: text
+    blocks) with each server's functions named (llm_mcp_notice_text), in place - the same text in every request of a
+    conversation. Returns the servers named."""
+    messages = document.get("messages") if isinstance(document, dict) else None
+    tools = document.get("tools") if isinstance(document, dict) else None
+    if not isinstance(messages, list) or not isinstance(tools, list):
+        return []
+    others = []
+    for tool in tools:
+        inner = tool.get("function") if isinstance(tool, dict) else None
+        holder = inner if isinstance(inner, dict) else tool
+        if isinstance(holder, dict) and isinstance(holder.get("name"), str):
+            others.append(holder["name"])
+    told = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        holders = [(message, "content")] if isinstance(content, str) else \
+            [(part, "text") for part in content if isinstance(part, dict) and part.get("type") == "text"] \
+            if isinstance(content, list) else []
+        for holder, key in holders:
+            holder[key], servers = llm_mcp_notice_text(holder.get(key), others)
+            told += [server for server in servers if server not in told]
+    return told
+
+
+def llm_codemode_text(text, sentence):
+    """(TEXT, [entries]) with SENTENCE as a comment line under each MCP-resource entry of OpenCode 2's code-mode
+    catalog (LLM_CODEMODE_RESOURCE: "  - tools.opencode.read_mcp_resource({ ... }) // ..."), before the next entry
+    or the end of the list; an entry that has it already stays."""
+    line = "\n    // " + sentence
+    entries, out, at = [], [], 0
+    for match in LLM_CODEMODE_RESOURCE.finditer(text):
+        nxt = [index for index in (text.find("\n  - ", match.end()), text.find("\n\n", match.end())) if index >= 0]
+        end = min(nxt) if nxt else len(text)
+        if text.endswith(line, 0, end) or end < at:
+            continue
+        out.append(text[at:end] + line)
+        at = end
+        entries.append(match[1])
+    return "".join(out) + text[at:], entries
+
+
+def llm_plain_arguments(arguments):
+    """ARGUMENTS (a tool call's, JSON text) without Codex's approval parameters (LLM_APPROVAL_PARAMETERS), or None
+    when they hold none of them (or are no JSON object): the call then stays as the model made it."""
+    if not isinstance(arguments, str) or not any(key in arguments for key in LLM_APPROVAL_PARAMETERS):
+        return None
+    try:
+        found = json.loads(arguments)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(found, dict) or not any(key in found for key in LLM_APPROVAL_PARAMETERS):
+        return None
+    return json.dumps({key: value for key, value in found.items() if key not in LLM_APPROVAL_PARAMETERS},
+                      separators=(",", ":"))
+
+
+def llm_call_back(item, names):
+    """One output item of a Responses API answer as the agent expects it, in place: a function_call the model made
+    by a flattened name (NAMES: llm_flat_tools) gets its tool's name and "namespace" again. Returns whether ITEM
+    changed."""
+    if not isinstance(item, dict) or item.get("type") != "function_call" or not isinstance(item.get("name"), str):
+        return False
+    found = names.get(item["name"]) if isinstance(names, dict) else None
+    if not found:
+        return False
+    item["namespace"], item["name"] = found
+    return True
+
+
+class LlmToolAnswer:
+    """The answer to a Responses API request whose tools the relay changed (llm_flat_tools, llm_plain_tools), on its
+    way to the agent: the function calls in it named back (llm_call_back) and, those of the tools PLAIN, without
+    Codex's approval parameters (llm_plain_arguments) - in a stream the items of response.output_item.added and .done,
+    the arguments of response.function_call_arguments.done and the output of response.completed, each event line
+    rewritten whole and every other byte passed as it came (the arguments' deltas too); in an answer that is one JSON
+    document, its output. "changed": the events it rewrote."""
+    LIMIT = 16 << 20  # a line longer than this passes as it came (no event of a model's answer is)
+
+    def __init__(self, names, plain=()):
+        self.names, self.plain, self.pending, self.changed = names or {}, set(plain or ()), b"", 0
+        self.calls = set()  # the ids of the stream's calls of a PLAIN tool
+
+    def call(self, item):
+        """Whether ITEM (an output item) changed: its approval parameters gone, then its name given back."""
+        changed = False
+        if isinstance(item, dict) and item.get("type") == "function_call" and self.plain and \
+                isinstance(item.get("name"), str) and item["name"] in self.plain:
+            if isinstance(item.get("id"), str) and len(self.calls) < 4096:
+                self.calls.add(item["id"])
+            arguments = llm_plain_arguments(item.get("arguments"))
+            if arguments is not None:
+                item["arguments"], changed = arguments, True
+        return llm_call_back(item, self.names) or changed
+
+    def event(self, event):
+        """Whether EVENT (one decoded event, or a whole answer) changed."""
+        if not isinstance(event, dict):
+            return False
+        changed = self.call(event.get("item"))
+        if event.get("type") == "response.function_call_arguments.done" and isinstance(event.get("item_id"), str) \
+                and event["item_id"] in self.calls:
+            arguments = llm_plain_arguments(event.get("arguments"))
+            if arguments is not None:
+                event["arguments"], changed = arguments, True
+        for holder in (event, event.get("response")):
+            output = holder.get("output") if isinstance(holder, dict) else None
+            for item in output if isinstance(output, list) else []:
+                changed = self.call(item) or changed
+        self.changed += changed
+        return changed
+
+    def line(self, line):
+        """One line of the stream (without its line break), rewritten when it is an event with a function call."""
+        if not line.startswith(b"data:") or b"function_call" not in line:
+            return line
+        end = b"\r" if line.endswith(b"\r") else b""
+        try:
+            event = json.loads(line[5:])
+            if self.event(event):
+                return b"data: " + json.dumps(event, separators=(",", ":")).encode() + end
+        except (ValueError, RecursionError, TypeError, AttributeError):
+            pass  # not JSON, or an event of another shape: as it came
+        return line
+
+    def feed(self, payload):
+        """PAYLOAD (identity bytes of the stream) with its whole lines rewritten; a line's beginning is kept back
+        until its end comes (flush gives the rest)."""
+        *lines, self.pending = (self.pending + payload).split(b"\n")
+        data = b"".join(self.line(line) + b"\n" for line in lines)
+        if len(self.pending) > self.LIMIT:
+            data, self.pending = data + self.pending, b""
+        return data
+
+    def flush(self):
+        data, self.pending = self.line(self.pending) if self.pending else b"", b""
+        return data
+
+    def whole(self, data):
+        """DATA, a whole answer: one JSON document rewritten (as it came when nothing in it changes); anything else as
+        a stream's lines (a server that sends its events with a length)."""
+        try:
+            document = json.loads(data)
+        except (ValueError, RecursionError):
+            return self.feed(data) + self.flush()
+        try:
+            if self.event(document):
+                return json.dumps(document, separators=(",", ":")).encode()
+        except (TypeError, AttributeError):
+            pass
+        return data
+
+
+def llm_tool_pieces(pieces, answer, chunked):
+    """The raw PIECES of a streamed answer's body with ANSWER (LlmToolAnswer) applied to the payload. Chunked: newly
+    framed, what it gives of each piece as one chunk (a rewritten line has another length); else the bytes as they
+    come, to the connection's end."""
+    for raw, payload in pieces:
+        if chunked and not payload:
+            if re.match(rb"0+(?:;[^\r\n]*)?\r\n", raw):  # the last chunk and its trailer: what was kept back first
+                rest = answer.flush()
+                if rest:
+                    yield b"%x\r\n" % len(rest) + rest + b"\r\n", rest
+                yield raw, b""
+            continue
+        data = answer.feed(payload)
+        if data:
+            yield (b"%x\r\n" % len(data) + data + b"\r\n" if chunked else data), data
+    if not chunked:
+        rest = answer.flush()
+        if rest:
+            yield rest, rest
+
+
+# The usage of a Messages API answer as Anthropic defines it. LM Studio's /v1/messages (its MLX and llama.cpp runtimes
+# alike) reports {"input_tokens": 49217, "cache_read_input_tokens": 49191}: input_tokens the WHOLE prompt, the cache
+# counter the part of it that came from the prompt cache. In Anthropic's API input_tokens are the tokens NOT read from
+# the cache - the prompt is input_tokens + cache_creation_input_tokens + cache_read_input_tokens - and Claude Code adds
+# them up that way: 98,408, and it compacts when that reaches the window less the answer's tokens (131,072 - 32,768 =
+# 98,304). So it compacted at half the window, again and again - a summary request of 65-81 s, the conversation
+# started over at 22k tokens, what the model had found out gone (the local-model research's round 1, runs/
+# t2_debug__claude__laguna__r1: at 50,589 and 50,308 prompt tokens; unsolved in 20 minutes what the same pair had
+# solved in 5 while its prompt stayed under 45k). The relay takes the cached tokens out of input_tokens on the
+# answer's way to the agent (LlmUsageAnswer), for the kinds of server measured to count that way.
+LLM_USAGE_KINDS = ("lmstudio",)
+LLM_USAGE_CACHED = ("cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def llm_messages_usage(usage):
+    """USAGE (the "usage" of a Messages API answer) as Anthropic defines it, in place: input_tokens without the
+    cached tokens, when the server counted them in (input_tokens at least the cached ones, and some cached). Returns
+    whether it changed; anything else stays as it came (no cache counter, nothing cached, fewer input tokens than
+    cached ones - counted Anthropic's way already -, counters that are no numbers)."""
+    if not isinstance(usage, dict):
+        return False
+    counts = [usage.get(key, 0) for key in ("input_tokens",) + LLM_USAGE_CACHED]
+    if "cache_read_input_tokens" not in usage or "input_tokens" not in usage or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
+        return False
+    cached = counts[1] + counts[2]
+    if not cached or counts[0] < cached:
+        return False
+    usage["input_tokens"] = counts[0] - cached
+    return True
+
+
+class LlmUsageAnswer:
+    """A Messages API answer on its way to the agent with its usage as Anthropic defines it (llm_messages_usage;
+    USAGE) and the model's calls of a tool that was left out of its tools (HIDDEN: names, llm_hide_tools) under a name
+    Claude Code does not know (NAME + LLM_HIDDEN_MARK): in a stream the usage of message_start (its message's) and of
+    message_delta and the tool_use block of content_block_start, each event line rewritten whole and every other byte
+    passed as it came; in an answer that is one JSON document, its usage and its content's tool_use blocks.
+    "changed": the events (documents) it rewrote, "renamed" the calls among them. The same feed/flush/whole as
+    LlmToolAnswer (llm_tool_pieces applies either)."""
+    LIMIT = 16 << 20  # a line longer than this passes as it came
+
+    def __init__(self, usage=True, hidden=()):
+        self.pending, self.changed, self.renamed = b"", 0, 0
+        self.usage, self.hidden = usage, set(hidden or ())
+
+    def rename(self, block):
+        """Whether BLOCK (a content block) is a call of a hidden tool, now named NAME + LLM_HIDDEN_MARK."""
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in self.hidden:
+            block["name"] += LLM_HIDDEN_MARK
+            self.renamed += 1
+            return True
+        return False
+
+    def event(self, event):
+        """Whether EVENT (one decoded event, or a whole answer) changed."""
+        if not isinstance(event, dict):
+            return False
+        changed = False
+        if self.usage:
+            changed = llm_messages_usage(event.get("usage"))
+            message = event.get("message")
+            if isinstance(message, dict) and llm_messages_usage(message.get("usage")):
+                changed = True
+        if self.hidden:
+            changed = self.rename(event.get("content_block")) or changed
+            for block in event.get("content") if isinstance(event.get("content"), list) else []:
+                changed = self.rename(block) or changed
+        self.changed += changed
+        return changed
+
+    def line(self, line):
+        """One line of the stream (without its line break), rewritten when it is an event whose usage changes or a
+        call of a hidden tool."""
+        if not line.startswith(b"data:") or not ((self.usage and b'"cache_read_input_tokens"' in line) or
+                                                 (self.hidden and b'"tool_use"' in line)):
+            return line
+        end = b"\r" if line.endswith(b"\r") else b""
+        try:
+            event = json.loads(line[5:])
+            if self.event(event):
+                return b"data: " + json.dumps(event, separators=(",", ":")).encode() + end
+        except (ValueError, RecursionError, TypeError, AttributeError):
+            pass  # not JSON, or an event of another shape: as it came
+        return line
+
+    def feed(self, payload):
+        """PAYLOAD (identity bytes of the stream) with its whole lines rewritten; a line's beginning is kept back
+        until its end comes (flush gives the rest)."""
+        *lines, self.pending = (self.pending + payload).split(b"\n")
+        data = b"".join(self.line(line) + b"\n" for line in lines)
+        if len(self.pending) > self.LIMIT:
+            data, self.pending = data + self.pending, b""
+        return data
+
+    def flush(self):
+        data, self.pending = self.line(self.pending) if self.pending else b"", b""
+        return data
+
+    def whole(self, data):
+        """DATA, a whole answer: one JSON document rewritten (as it came when nothing in it changes); anything else as
+        a stream's lines."""
+        try:
+            document = json.loads(data)
+        except (ValueError, RecursionError):
+            return self.feed(data) + self.flush()
+        try:
+            if self.event(document):
+                return json.dumps(document, separators=(",", ":")).encode()
+        except (TypeError, AttributeError):
+            pass
+        return data
+
+
+# Structured output of a thinking model on LM Studio: with "response_format" json_schema (or json_object) on
+# /v1/chat/completions LM Studio answered Ornith-1.5-35B/122B and Qwen3.6-35B (Qwen3.5-family MLX models) with an
+# EMPTY content and the schema's JSON as the reasoning ("reasoning_content"), also with thinking switched off - the
+# local-model research's round 5 (runs/j8_api__api__orn35__b1, probes/jsonprobe_orn35): three of six small jobs got
+# nothing. The relay gives the agent the JSON as the answer: reasoning that is the JSON (it starts with { or [)
+# becomes the content of an answer that has none.
+LLM_STRUCTURED_KINDS = ("lmstudio",)
+LLM_REASONING_KEYS = ("reasoning_content", "reasoning")
+
+
+def llm_structured_request(document):
+    """Whether DOCUMENT (a chat request) asks for structured output: response_format json_schema or json_object."""
+    if not isinstance(document, dict):
+        return False
+    form = document.get("response_format")
+    return isinstance(form, dict) and form.get("type") in ("json_schema", "json_object")
+
+
+class LlmStructuredAnswer:
+    """A chat answer to a request for structured output (llm_structured_request) on its way to the agent: the JSON a
+    thinking model gave as its reasoning becomes the content. One JSON document: the message's reasoning goes into an
+    empty content when it parses as JSON. A stream: the reasoning deltas become content deltas once the reasoning is
+    seen to start with { or [ (else it is thinking and stays as it came) - and only while no content came. "changed":
+    the documents or events rewritten. The same feed/flush/whole as LlmToolAnswer (llm_tool_pieces applies it)."""
+    LIMIT = 16 << 20
+
+    def __init__(self):
+        self.pending, self.changed = b"", 0
+        self.mode = None   # None: undecided, "json": reasoning is the answer, "keep": as it came
+
+    def delta(self, delta):
+        """Whether DELTA (one streamed choice's delta) changed."""
+        if not isinstance(delta, dict) or self.mode == "keep":
+            return False
+        if isinstance(delta.get("content"), str) and delta["content"]:
+            self.mode = "keep"   # the model answers in content itself
+            return False
+        key = next((k for k in LLM_REASONING_KEYS if isinstance(delta.get(k), str)), None)
+        if key is None:
+            return False
+        text = delta[key]
+        if self.mode is None:
+            if not text.strip():
+                return False
+            self.mode = "json" if text.lstrip()[:1] in ("{", "[") else "keep"
+        if self.mode != "json":
+            return False
+        delta["content"] = delta.pop(key)
+        return True
+
+    def line(self, line):
+        if not line.startswith(b"data:") or self.mode == "keep" or not any(
+                key.encode() in line for key in LLM_REASONING_KEYS + ("content",)):
+            return line
+        end = b"\r" if line.endswith(b"\r") else b""
+        try:
+            event = json.loads(line[5:])
+            changed = False
+            for choice in event.get("choices") or []:
+                if isinstance(choice, dict):
+                    changed = self.delta(choice.get("delta")) or changed
+            if changed:
+                self.changed += 1
+                return b"data: " + json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode() + end
+        except (ValueError, RecursionError, TypeError, AttributeError):
+            pass
+        return line
+
+    def feed(self, payload):
+        *lines, self.pending = (self.pending + payload).split(b"\n")
+        data = b"".join(self.line(line) + b"\n" for line in lines)
+        if len(self.pending) > self.LIMIT:
+            data, self.pending = data + self.pending, b""
+        return data
+
+    def flush(self):
+        data, self.pending = self.line(self.pending) if self.pending else b"", b""
+        return data
+
+    def whole(self, data):
+        """DATA, a whole answer: its message's reasoning as the content when that is empty and the reasoning JSON."""
+        try:
+            document = json.loads(data)
+        except (ValueError, RecursionError):
+            return self.feed(data) + self.flush()
+        changed = False
+        try:
+            for choice in document.get("choices") or []:
+                message = choice.get("message") if isinstance(choice, dict) else None
+                if not isinstance(message, dict) or (isinstance(message.get("content"), str) and message["content"]):
+                    continue
+                key = next((k for k in LLM_REASONING_KEYS if isinstance(message.get(k), str)), None)
+                if key is None:
+                    continue
+                try:
+                    json.loads(message[key])
+                except (ValueError, RecursionError):
+                    continue
+                message["content"] = message.pop(key)
+                changed = True
+        except (TypeError, AttributeError):
+            return data
+        if not changed:
+            return data
+        self.changed += 1
+        return json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+# A streamed answer kept alive while a local model server reads a long prompt. LM Studio sends the headers of a
+# streamed answer at once and then nothing until the first token - minutes for a fresh 50-100k prompt on a large
+# model. Most agents wait for that with the settings sandbox-ai gives them (llm.agent_wait); Claude Code has no
+# setting: it gives the request up after 300 s without a byte and sends it again, and the server starts the prompt
+# from its beginning each time (the local-model research, round 1: evidence/waits.txt, the real CLIs through this
+# proxy against a server silent for 420 s; with a line every 20 s it waits and finishes). So the proxy sends what a
+# server may send while it works: a line every reader of server-sent events skips (llm_beat), whenever the answer
+# stands between two events and the server has sent nothing for the endpoint's "keepalive" seconds (llm.KEEPALIVE;
+# llm_kept_alive). The agent that went away meanwhile is noticed at the next beat, not at the first token - until
+# then the server went on reading a prompt nobody waited for, and the agent's second try waited behind it.
+# (DeepSeek Harness gives up after 300 s whatever the stream carries: no line and no empty chunk resets its limit.)
+def llm_beat(api):
+    """The keep-alive of a streamed answer of API, as bytes of the stream: Anthropic's own "ping" event on the
+    Messages API (its clients skip it), a comment line of server-sent events elsewhere (every reader skips those)."""
+    return b'event: ping\ndata: {"type": "ping"}\n\n' if api == "messages" else b": keep-alive\n\n"
+
+
+def llm_kept_alive(pieces, stream, seconds, beat, flush=None):
+    """The whole chunks PIECES (whole_chunks, scrubbed_pieces, llm_tool_pieces: (raw, payload)) of a chunked
+    server-sent-events body read from STREAM (the Stream PIECES read from), with BEAT as a chunk of its own -
+    (chunk, None): no payload of the server's - whenever the server has sent nothing for SECONDS and the body stands
+    between two events (nothing sent yet, or the last payload ended one: a beat never lands inside an event). FLUSH
+    (a Scrubber's): what it keeps back of the answer goes out first - (chunk, b"") -, so that the agent has the whole
+    event before the beat; nothing of a secret is lost by it, as no secret reaches over the end of an event (the
+    caller gives no FLUSH for a secret with a line break in it). Ends with the body's last chunk: nothing follows."""
+    chunk = b"%x\r\n" % len(beat) + beat + b"\r\n"
+    pieces, between = iter(pieces), True
+    while True:
+        with contextlib.suppress(OSError, ValueError):  # a socket that is gone: the read below says so
+            pending = getattr(stream.sock, "pending", None)  # a TLS socket: what is decrypted already
+            # (the buffer may still hold the end of the chunk just passed on - its CRLF: nothing of a next one)
+            while between and not stream.buffer.strip(b"\r\n") and not (callable(pending) and pending()) and \
+                    not wait_ready([stream.sock], (), seconds)[0]:
+                rest = flush() if flush is not None else b""
+                if rest:
+                    yield b"%x\r\n" % len(rest) + rest + b"\r\n", b""
+                yield chunk, None
+        try:
+            raw, payload = next(pieces)
+        except StopIteration:
+            return
+        yield raw, payload
+        if payload:
+            between = payload.endswith(b"\n\n")
+        elif re.match(rb"0+(?:;[^\r\n]*)?\r\n", raw):
+            return  # the last chunk: the body is over
+
+
+# OpenCode's session title (llm.TITLE_LIMIT's comment): its title request, answered by the relay with the start's name.
+# Known by OpenCode's own prompt: 1.19.5's system prompt (agent/prompt/title.txt) and its user line "Generate a title
+# for this conversation:" (session/prompt.ts ensureTitle); 2.2.5's system prompt (core/src/plugin/agent.ts
+# PROMPT_TITLE) and its frames "Here is the first message of the conversation: <message>..." / "Here is the
+# conversation so far: <conversation>..." ending "Reply with only the title." (core/src/session/title.ts). Never a
+# request with tools; a title agent with a prompt of your own is not OpenCode's and goes to the model.
+LLM_TITLE_PROMPTS = ("You are a title generator. You output ONLY a thread title.",
+                     "You name conversations so the user can find them later in a list of past sessions.")
+LLM_TITLE_ASKS = (re.compile(r"\AGenerate a title for this conversation:\s*\Z"),
+                  re.compile(r"\AHere is (?:the first message of the conversation:\s*<message>|the conversation so "
+                             r"far:\s*<conversation>)[\s\S]*Reply with only the title\.\s*\Z"))
+
+
+def llm_title_request(document):
+    """Whether DOCUMENT (a chat completions request) is OpenCode's request for a session title: no tools, a system
+    message that begins with one of OpenCode's title prompts (LLM_TITLE_PROMPTS) and a user message of that version's
+    own frame (LLM_TITLE_ASKS). Anything else - a request that only quotes the prompt, a title prompt of your own -
+    is not."""
+    if not isinstance(document, dict) or document.get("tools") or not isinstance(document.get("messages"), list):
+        return False
+    messages = [m for m in document["messages"] if isinstance(m, dict)]
+    system = next((llm_text(m.get("content")) for m in messages if m.get("role") == "system"), "")
+    for number, prompt in enumerate(LLM_TITLE_PROMPTS):
+        if system.startswith(prompt):
+            return any(LLM_TITLE_ASKS[number].match(llm_text(m.get("content"))) for m in messages
+                       if m.get("role") == "user")
+    return False
+
+
+# Claude Code's tools a local model is offered (llm.CLAUDE_CORE_TOOLS' comment): the others are left out of its
+# requests (llm_hide_tools); a call the model makes of one all the same reaches Claude Code under the tool's name with
+# LLM_HIDDEN_MARK (LlmUsageAnswer), a name Claude Code does not know - it answers "No such tool available" -, and in
+# every later request that call gets its name back and its result sandbox-ai's own words (llm_hidden_results). Only
+# Claude Code's own requests (its User-Agent, the Messages API): another harness's tools are never touched.
+LLM_HIDDEN_MARK = "__sandbox_ai_hidden"
+LLM_CLAUDE_AGENT = re.compile(r"claude-cli/")
+
+
+def llm_hidden_text(name):
+    """The result of a call of the tool NAME that was left out of the model's tools."""
+    return (f"[sandbox-ai] {name} is not offered to this model: sandbox-ai leaves Claude Code's tools that local models "
+            "do not use out of its requests (--llm-tools core). Do it with the tools you were given (Bash, Read, Edit, "
+            f"Write, the MCP tools ...). To offer {name}, start with --llm-tools all or --llm-tools core,{name}.")
+
+
+def llm_hide_tools(document, keep):
+    """Leave every tool of a Messages API request DOCUMENT out that is neither among KEEP (names) nor an MCP tool
+    (mcp__SERVER__TOOL) nor the one its tool_choice names; a tool without a name (a server tool) stays. Returns the
+    names left out, sorted ([] for an odd document)."""
+    tools = document.get("tools") if isinstance(document, dict) else None
+    if not isinstance(tools, list) or not isinstance(keep, (list, tuple, set)):
+        return []
+    choice = document.get("tool_choice")
+    wanted = {*keep, *([choice["name"]] if isinstance(choice, dict) and isinstance(choice.get("name"), str) else [])}
+    kept, hidden = [], []
+    for tool in tools:
+        name = tool.get("name") if isinstance(tool, dict) else None
+        if isinstance(name, str) and name not in wanted and not name.startswith("mcp__"):
+            hidden.append(name)
+        else:
+            kept.append(tool)
+    if hidden:
+        document["tools"] = kept
+    return sorted(set(hidden))
+
+
+def llm_hidden_results(document):
+    """In a Messages API request DOCUMENT, in place: every call the agent made of a tool by its hidden name (NAME +
+    LLM_HIDDEN_MARK) named NAME again, and its result (Claude Code's error for a tool it does not know) replaced by
+    llm_hidden_text - the same every time, so that the server's prompt cache holds. Returns the names, in order."""
+    messages = document.get("messages") if isinstance(document, dict) else None
+    if not isinstance(messages, list):
+        return []
+    calls, found = {}, []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            name = block.get("name")
+            if block.get("type") == "tool_use" and isinstance(name, str) and name.endswith(LLM_HIDDEN_MARK) and \
+                    len(name) > len(LLM_HIDDEN_MARK):
+                block["name"] = name[:-len(LLM_HIDDEN_MARK)]
+                calls[block.get("id")] = block["name"]
+                found.append(block["name"])
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
+                block["content"] = llm_hidden_text(calls[block["tool_use_id"]])
+                block["is_error"] = True
+    return found
+
+
 # Sampling raised for the one request after an answer was cut for repeating itself (where the request sets less).
 LLM_BOOST = {"presence_penalty": 0.5, "frequency_penalty": 0.3, "repeat_penalty": 1.15, "repetition_penalty": 1.15,
              "dry_multiplier": 0.8}
 
 
-def llm_request(entry, api, document, turns=None, now=None):
-    """The loop guard and the parameters on one request DOCUMENT to the --llm endpoint ENTRY (changed in place).
-    Returns {"params": {set}, "loop": {what was found and done} or None}; never raises for an odd document."""
+def llm_request(entry, api, document, turns=None, now=None, harness=None, resources=None):
+    """The loop guard and the parameters on one request DOCUMENT to the --llm endpoint ENTRY (changed in place), and
+    an agent's tools as a local server takes them (llm_flat_tools, llm_plain_tools; HARNESS "claude", Claude Code's
+    request: its tools the entry does not keep left out, llm_hide_tools; RESOURCES, the MCP relay's record of which
+    servers publish resources: Codex's resource tools left out, llm_resource_tools_out). Returns {"params": {set}, "loop": {what was
+    found and done} or None, "notes": [the guard's notes], "tools": {what was changed of the tools}, "stop": the text
+    that ends the turn when the model calls a tool again}, the last three only when there are any; never raises for an
+    odd document."""
     loop = entry.get("loop") or {}
     done = {"params": {}, "loop": None}
     extra = {}
+    keep = (entry.get("tools") or {}).get("keep") if isinstance(entry.get("tools"), dict) else None
+    if api == "messages" and harness == "claude" and isinstance(keep, list):
+        hidden, restored = llm_hide_tools(document, keep), llm_hidden_results(document)
+        if hidden or restored:
+            done["tools"] = {**({"hidden": hidden} if hidden else {}), **({"restored": restored} if restored else {})}
+    if api == "responses":
+        tools = llm_flat_tools(document)  # before the loop guard: its notes name the tools as the model sees them
+        plain = llm_plain_tools(document)
+        out = llm_resource_tools_out(document, resources)
+        if tools or plain or out:
+            done["tools"] = {**tools, **({"plain": plain} if plain else {}), **({"resources_out": out} if out else {})}
+    if api in ("chat", "responses", "messages"):
+        completed = llm_schema_keys(document)
+        if completed:
+            done["tools"] = {**(done.get("tools") or {}), "schemas": completed}
+        told = llm_resource_hint(document, entry.get("mcp"), (done.get("tools") or {}).get("names"))
+        if told:
+            done["tools"] = {**(done.get("tools") or {}), "resources": told}
+        named = llm_mcp_notice(document) if api in ("chat", "messages") else []
+        if named:
+            done["tools"] = {**(done.get("tools") or {}), "notice": named}
     if turns is not None and loop.get("enabled", True) and turns.take_cut(entry.get("name")):
         extra = {key: value for key, value in LLM_BOOST.items()
                  if key in set((entry.get("sent") or {}).get(api) or ())}
@@ -4444,48 +9450,57 @@ def llm_request(entry, api, document, turns=None, now=None):
             if isinstance(current, (int, float)) and not isinstance(current, bool) and current >= value:
                 extra.pop(key)
     if loop.get("enabled", True) and api in ("chat", "responses", "messages"):
-        history = llm_tool_history(document, api)
+        spans = llm_turns(document, api)
+        histories = [llm_tool_history(document, api, span) for span in spans] or [[]]
+        history = histories[-1]
         level, name, count, kind = llm_loop_check(history, loop)
-        watchdog = None
+        streak = llm_failure_places(history, loop)[1]
+        watchdog, keys = None, []
+        if turns is not None and (loop.get("watchdog_requests") or loop.get("watchdog_minutes") or turns.notes):
+            keys = LlmTurns.keys(document, api)
         if turns is not None and (loop.get("watchdog_requests") or loop.get("watchdog_minutes")):
-            requests, seconds = turns.count(LlmTurns.key(document, api), now)
+            requests, seconds = turns.count(keys[-1], now)
             if loop.get("watchdog_requests") and requests > loop["watchdog_requests"]:
                 watchdog = f"{requests} model requests in this turn (watchdog_requests {loop['watchdog_requests']})"
             elif loop.get("watchdog_minutes") and seconds > loop["watchdog_minutes"] * 60:
                 watchdog = f"{int(seconds // 60)} minutes in this turn (watchdog_minutes {loop['watchdog_minutes']})"
         if watchdog:
             level, kind = "block", "watchdog"
+            latest = max((index for index, call in enumerate(history) if call[4]), default=None)
+            turns.note(keys[-1], (latest, (
+                f"{LLM_NOTE} This turn has gone on for {watchdog}. Stop calling tools now: summarize the confirmed "
+                "facts, what you tried, the current blocker and one different next step, then wait for the user.")))
+        # The notes, each at its fixed place (llm_note_places; the watchdog's where it was first put): the agent
+        # sends the conversation without them every time, and every request gets the same ones back, the earlier
+        # turns' too - a later request's prompt extends this one's, and the server's prompt cache holds.
+        notes = []
+        for number, turn in enumerate(histories):
+            taken = set()
+            for times, called, stop, holder in llm_note_places(turn, loop):
+                notes.append({"text": llm_note_text(called, times, stop), "holder": holder})
+                llm_add_note(holder, notes[-1]["text"])
+                taken.add(id(holder[0]))
+            for times, called, holder in llm_failure_places(turn, loop)[0]:
+                if id(holder[0]) not in taken:  # a result with a repeat's note gets no second one
+                    hint = llm_failure_hint(document, called, entry.get("mcp"), (done.get("tools") or {}).get("names"))
+                    notes.append({"text": llm_failure_note_text(called, times, hint), "holder": holder})
+                    llm_add_note(holder, notes[-1]["text"])
+            index, text = (turns.note(keys[number]) if number < len(keys) else None) or (None, None)
+            if text and index is not None and index < len(turn) and turn[index][4]:
+                notes.append({"text": text, "holder": turn[index][4]})
+                llm_add_note(turn[index][4], text)
+            elif text and number == len(histories) - 1 and watchdog:
+                # no tool result in this turn to carry it: a message of its own at the end
+                items = document.get("input" if api == "responses" else "messages")
+                if isinstance(items, list):
+                    items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+                                 if api == "responses" else {"role": "user", "content": text})
+                    notes.append({"text": text, "appended": True})
+        if notes:
+            done["notes"] = notes  # for the LLM traffic log (llm_changes), and: the body changed (llm_body)
         if level:
-            if kind == "watchdog":
-                text = (f"{LLM_NOTE} This turn has gone on for {watchdog}. Tool use is paused for this answer: "
-                        "summarize the confirmed facts, what you tried, the current blocker and one different next "
-                        "step, then stop and wait for the user.")
-            elif level == "block":
-                text = (f"{LLM_NOTE} You have called {name} with the same arguments {count} times since the user's "
-                        "last message and got the same result each time. Tool use is paused for this answer: "
-                        "summarize the confirmed facts, what you tried, the current blocker and one different next "
-                        "step, then stop and wait for the user.")
-            else:
-                text = (f"{LLM_NOTE} You have called {name} with the same arguments {count} times and got the same "
-                        "result each time; it will not change. Do not call it again with these arguments: summarize "
-                        "what you know and take a different next step.")
-            target = llm_note_target(history, name) if kind != "watchdog" else \
-                next((holder for *_, holder in reversed(history) if holder), None)
-            if target is not None:
-                llm_add_note(target, text)
-                done["note"] = {"text": text, "holder": target}  # for the LLM traffic log (llm_changes)
-            elif api == "messages" and isinstance(document.get("messages"), list):
-                document["messages"].append({"role": "user", "content": text})
-                done["note"] = {"text": text, "appended": True}
-            elif api == "chat" and isinstance(document.get("messages"), list):
-                document["messages"].append({"role": "user", "content": text})
-                done["note"] = {"text": text, "appended": True}
-            elif api == "responses" and isinstance(document.get("input"), list):
-                document["input"].append({"type": "message", "role": "user",
-                                          "content": [{"type": "input_text", "text": text}]})
-                done["note"] = {"text": text, "appended": True}
             if level == "block":
-                # The request goes as it is (with the note): the answer is held, and one that calls a tool again is
+                # The request goes as it is (with the notes): the answer is held, and one that calls a tool again is
                 # answered in the model's place with this text (llm_held_answer).
                 done["stop"] = (
                     f"{LLM_NOTE} This turn has gone on for {watchdog}, " if watchdog else
@@ -4495,21 +9510,36 @@ def llm_request(entry, api, document, turns=None, now=None):
                     "what you need, or what to try differently."
             done["loop"] = {"action": "paused tools" if level == "block" else "note", "kind": kind,
                             "tool": name, "count": count, **({"watchdog": watchdog} if watchdog else {})}
+        elif loop.get("failures") and streak[1] >= loop["failures"]:
+            done["loop"] = {"action": "note", "kind": "failures", "tool": streak[0], "count": streak[1]}
+    lifted = llm_lift_system(document, api)  # the conversation's start: the same in every request of it
+    if lifted:
+        done["lifted"] = lifted
+    folded = llm_fold_notes(document, api)  # after the guard: it counts the turns as the agent sent them
+    if folded:
+        done["folded"] = folded
     done["params"] = llm_apply_params(document, entry, api, extra)
     if extra:
         done["boost"] = sorted(extra)
     return done
 
 
-def llm_body(head, parts, headers, entry, api, turns=None, keep=False):
+def llm_body(head, parts, headers, entry, api, turns=None, keep=False, resources=None):
     """(HEAD, PARTS, record) of a request to the --llm endpoint: its JSON body read (at most LLM_BODY_LIMIT, plain
     only) and rewritten by llm_request, its framing made a Content-Length; a body it cannot read passes as it came
     (the record says why). KEEP (the LLM traffic log): the record also holds the "document" as sent and "before",
-    llm_snapshot of it as the agent sent it."""
+    llm_snapshot of it as the agent sent it. RESOURCES: llm_request's (the MCP relay's record)."""
     encoding = (header(headers, "content-encoding") or "identity").strip().lower()
     content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
+
+    def skipped(why, head, parts):
+        # With a list of models a body that is not read could name any other: refused, never passed unread.
+        refusal = llm_unread_refusal(entry, why)
+        return head, parts, ({"refused": refusal, "params": {}, "loop": None} if refusal else {"skipped": why})
     if encoding != "identity" or not (content_type == "application/json" or content_type.endswith("+json")):
-        return head, parts, {"skipped": f"not plain JSON ({encoding}, {content_type or 'no type'})"}
+        if isinstance(entry.get("models"), list):
+            return llm_limited_body(head, parts, headers, entry)  # (JSON sent as another type: read all the same)
+        return skipped(f"not plain JSON ({encoding}, {content_type or 'no type'})", head, parts)
     raw, data, total = [], [], 0
     parts = iter(parts)
     for piece, payload in parts:
@@ -4517,26 +9547,36 @@ def llm_body(head, parts, headers, entry, api, turns=None, keep=False):
         data.append(payload)
         total += len(payload)
         if total > LLM_BODY_LIMIT:
-            return head, itertools.chain(raw, parts), {"skipped": f"larger than {LLM_BODY_LIMIT >> 20} MiB"}
+            return skipped(f"larger than {LLM_BODY_LIMIT >> 20} MiB", head, itertools.chain(raw, parts))
     try:
         document = json.loads(b"".join(data))
     except (ValueError, RecursionError):
-        return head, iter(raw), {"skipped": "not valid JSON"}
+        return skipped("not valid JSON", head, iter(raw))
     if not isinstance(document, dict):
-        return head, iter(raw), {"skipped": "not a JSON object"}
+        return skipped("not a JSON object", head, iter(raw))
     model = document.get("model")[:200] if isinstance(document.get("model"), str) else None
     refusal = llm_model_refusal(entry, document)
     if refusal:
         return head, iter(raw), {"refused": refusal, "params": {}, "loop": None, "model": model}
+    if api == "chat" and entry.get("title") and llm_title_request(document):
+        # OpenCode's title request: the relay answers it with the start's name, nothing goes to the server.
+        return head, iter(raw), {"title": str(entry["title"]), "stream": bool(document.get("stream")), "params": {},
+                                 "loop": None, **({"model": model} if model else {})}
     before = llm_snapshot(document) if keep else None
-    done = llm_request(entry, api, document, turns)
+    harness = "claude" if LLM_CLAUDE_AGENT.match(header(headers, "user-agent") or "") else None
+    done = llm_request(entry, api, document, turns, harness=harness, resources=resources)
     if model:
         done["model"] = model
+    if api == "chat" and entry.get("kind") in LLM_STRUCTURED_KINDS and llm_structured_request(document):
+        done["structured"] = True   # the answer's JSON may come as reasoning (LlmStructuredAnswer)
     if keep:
         done = {**done, "document": document, "before": before, "size": total}
-    if not done["params"] and not done["loop"] and not done.get("boost"):
+    if not done["params"] and not done["loop"] and not done.get("boost") and not done.get("notes") and \
+            not done.get("tools") and not done.get("folded") and not done.get("lifted"):
+        done["digest"] = hashlib.sha256(b"".join(data)).hexdigest()  # the body as it goes (LlmRejected)
         return head, iter(raw), done
     body = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    done["digest"] = hashlib.sha256(body).hexdigest()
     lines = [line for line in head[:-4].split(b"\r\n")
              if line.split(b":", 1)[0].strip().lower() not in (b"content-length", b"transfer-encoding")]
     head = b"\r\n".join(lines + [b"Content-Length: %d" % len(body)]) + b"\r\n\r\n"
@@ -4553,15 +9593,28 @@ class LlmStreamGuard:
         self.api, self.repeats = api, repeats
         self.pending, self.texts, self.checked = b"", {}, {}
         self.meta, self.index, self.open, self.tripped = {}, 0, set(), None
+        self.between = True  # the bytes fed so far end an event (or none came yet)
 
     def feed(self, payload):
-        """Look at PAYLOAD (identity bytes of the stream); the reason once the answer repeats itself, else None."""
-        if self.tripped:
-            return self.tripped
+        """Look at PAYLOAD (identity bytes of the stream); the reason once the answer repeats itself, else None.
+        The reason is given only where the bytes fed so far end an event (a blank line): the relay sends the ending
+        right after PAYLOAD, and inside an event the agent would read the server's last event and the ending as one
+        (a server that writes the data line and its blank line apart - LM Studio in the local-model research's round
+        4: OpenCode's "JSON parsing failed" ended the session). Until then the answer goes on as it came."""
         self.pending += payload
         if len(self.pending) > (1 << 20):
             self.pending = self.pending[-(1 << 20):]
         *lines, self.pending = self.pending.split(b"\n")
+        if lines:
+            self.between = not self.pending and not lines[-1].strip()
+        elif payload:
+            self.between = False
+        self.read(lines)
+        return self.tripped if self.tripped and self.between else None
+
+    def read(self, lines):
+        """Watch the events of LINES (whole lines of the stream): sets .tripped once a channel repeats itself; after
+        that only the stream's own bookkeeping (its ids, the open blocks the ending closes) goes on."""
         for line in lines:
             line = line.strip()
             if not line.startswith(b"data:"):
@@ -4573,11 +9626,15 @@ class LlmStreamGuard:
                 event = json.loads(line)
             except (ValueError, RecursionError):
                 continue
-            if isinstance(event, dict):
-                for channel, text in self.deltas(event):
-                    if self.add(channel, text):
-                        return self.tripped
-        return None
+            if not isinstance(event, dict):
+                continue
+            try:
+                found = self.deltas(event)
+            except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+                continue  # an event of another shape (a server's bug): skipped - the guard never cuts the answer for it
+            for channel, text in found:
+                if not self.tripped and self.add(channel, text):
+                    break
 
     def deltas(self, event):
         """[(channel, text)] of one event; the stream's ids kept for the ending."""
@@ -4604,8 +9661,10 @@ class LlmStreamGuard:
             if kind == "message_start" and isinstance(event.get("message"), dict):
                 self.meta.update({k: event["message"].get(k) for k in ("id", "model")})
             elif kind == "content_block_start":
-                self.index = event.get("index", self.index)
-                self.open.add(self.index)
+                index = event.get("index", self.index)
+                if type(index) is int:  # (the ending numbers its own block after them)
+                    self.index = index
+                    self.open.add(index)
             elif kind == "content_block_stop":
                 self.open.discard(event.get("index"))
             elif kind == "content_block_delta" and isinstance(event.get("delta"), dict):
@@ -4702,6 +9761,207 @@ def repeated_block(text, repeats, span=LLM_TEXT_SPAN, periods=LLM_TEXT_PERIOD):
     return None
 
 
+# --- an answer the agent gave up -------------------------------------------------------------------------------------
+#
+# A local model's answer can run for half an hour (OpenCode asks for max_tokens 32000: ~31 minutes at 17 tokens/s),
+# and a server of parallel 1 serves nobody else meanwhile. When the agent gives up (its own timeout, the human's
+# cancel, the run's end), the server must stop: LM Studio does once its client's connection closes ("Client
+# disconnected. Stopping generation..." in its log; a prompt it is reading is finished first). The relay closed the
+# server's connection only when it next wrote to the agent - never while it waited for the server's first byte, read
+# an answer whole (the loop guard's hold, a rewritten answer) or sat in a silent stream: in the local-model research's
+# round 3 an abandoned Devstral answer kept LM Studio busy for 15 minutes, until the model was unloaded. So while the
+# server works on a request of the --llm endpoint the relay watches the agent's side (LlmClientWatch) and closes the
+# server's connection the moment the agent's closes.
+
+def llm_client_gone(sock):
+    """Whether the agent's side of SOCK is gone: closed (its FIN: POLLRDHUP on Linux; elsewhere a read that would
+    return nothing) or broken (POLLHUP, POLLERR) - not while it is open, nor when it sent more (a next request)."""
+    try:
+        fd = sock.fileno()
+    except (OSError, ValueError):
+        return True
+    if fd < 0:
+        return True
+    hangup = getattr(select, "POLLRDHUP", 0)
+    poller = select.poll()
+    poller.register(fd, hangup or select.POLLIN)
+    try:
+        events = poller.poll(0)
+    except (OSError, ValueError):
+        return True
+    for _, flags in events:
+        if flags & (select.POLLHUP | select.POLLERR | select.POLLNVAL | hangup):
+            return True
+        if flags & select.POLLIN and not hangup:
+            try:  # (a TLS socket takes no flags: its own close comes as POLLHUP)
+                return socket.socket.recv(sock, 1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+            except (BlockingIOError, InterruptedError):
+                return False
+            except (OSError, ValueError):
+                return True
+    return False
+
+
+class LlmClientWatch:
+    """While the --llm server works on a request: the agent's connection CLIENT watched (llm_client_gone, every EVERY
+    seconds at the latest - a close wakes it at once on Linux), and the server's connection UPSTREAM shut the moment
+    the agent's is gone, so that the server stops generating; the relay's read of the answer then ends. "fired" once
+    it did, seconds() how long after the start. stop() ends the watch (the answer is complete) without touching
+    anything; it never blocks.
+
+    stop() wakes the watch's thread (a pipe polled beside CLIENT): a thread still in poll() holds CLIENT's socket open
+    in the kernel, so the relay's close of the agent's connection went out only when the poll's time was over - every
+    answer that ends with its connection (Connection: close, HTTP/1.0, an answer without a length) took up to EVERY
+    seconds longer than the server took (509 ms instead of 3 ms for a short one), and each watch's thread lived as
+    long. Without a pipe to be had (out of descriptors) the watch runs as before."""
+
+    def __init__(self, client, upstream, every=0.5):
+        self.client, self.upstream, self.every = client, upstream, every
+        self.lock, self.stopped, self.fired, self.started, self.at = threading.Lock(), False, False, \
+            time.monotonic(), None
+        self.wake = None  # (read end, write end): stop() writes, the thread reads and closes both
+        with contextlib.suppress(OSError):
+            self.wake = os.pipe()
+        try:
+            threading.Thread(target=self.run, name="llm-client-watch", daemon=True).start()
+        except BaseException:
+            self.close_wake()
+            raise
+
+    def close_wake(self):
+        with self.lock:
+            wake, self.wake = self.wake, None
+        for fd in wake or ():
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    def run(self):
+        try:
+            self.watch()
+        finally:
+            self.close_wake()
+
+    def watch(self):
+        hangup = getattr(select, "POLLRDHUP", 0)
+        wake = self.wake[0] if self.wake else None
+        while not self.stopped:
+            try:
+                fd = self.client.fileno()
+                poller = select.poll()
+                poller.register(fd, hangup or select.POLLIN)
+                if wake is not None:
+                    poller.register(wake, select.POLLIN)
+                poller.poll(int(self.every * 1000))
+            except (OSError, ValueError):
+                pass
+            if self.stopped:
+                return
+            if llm_client_gone(self.client):
+                self.fire()
+                return
+            if not hangup:
+                time.sleep(self.every)  # (data waiting without a close would wake the poll at once)
+
+    def fire(self):
+        with self.lock:
+            if self.stopped:
+                return
+            self.fired, self.at = True, time.monotonic()
+        with contextlib.suppress(OSError, ValueError):
+            socket.socket.shutdown(self.upstream, socket.SHUT_RDWR)  # (a TLS socket's own shutdown would talk TLS)
+
+    def seconds(self):
+        return round((self.at or time.monotonic()) - self.started, 1)
+
+    def stop(self):
+        with self.lock:
+            self.stopped = True
+            if self.wake is not None:
+                with contextlib.suppress(OSError):  # (one byte into an empty pipe: it never waits)
+                    os.write(self.wake[1], b"x")
+
+
+# --- the same rejected request again and again (the loop guard's "rejected" layer) --------------------------------------
+#
+# Strata answers a prompt over its context with HTTP 400, and OpenCode answered that with 551 identical requests in
+# 150 s, compaction and retry in turn (the Strata test, 2026-11-17): the loop guard, which reads tool calls, never saw
+# them. The relay remembers a request the --llm server rejected - by its endpoint, path and body as they went to the
+# server - and from the LAYER-th rejection on answers the very same request itself (llm_rejected_reply) for
+# LLM_REJECTED_WINDOW seconds after the last one: the server is spared, the agent gets a plain error and stops. A
+# different request always goes to the server; one that succeeds is forgotten; a timeout (408) and a rate limit (429)
+# are not rejections of the request.
+LLM_REJECTED_WINDOW = 600
+LLM_REJECTED_STATUSES = range(400, 500)
+LLM_REJECTED_RETRIED = (408, 429)
+
+
+class LlmRejected:
+    """The requests the --llm server rejected: {key: {"count", "status", "detail", "at"}}, at most LIMIT (the oldest
+    go first)."""
+    LIMIT = 64
+    DETAIL = 300
+
+    def __init__(self):
+        self.lock, self.entries = threading.Lock(), {}
+
+    @staticmethod
+    def detail(data):
+        """The server's reason in the body DATA of its rejection (error.message, error, message, else its text)."""
+        try:
+            document = json.loads(data)
+            error = document.get("error") if isinstance(document, dict) else None
+            text = error.get("message") if isinstance(error, dict) else error if isinstance(error, str) else \
+                document.get("message") if isinstance(document, dict) else None
+        except (ValueError, RecursionError, TypeError):
+            text = None
+        if not isinstance(text, str):
+            text = bytes(data or b"").decode("utf-8", "replace")
+        return printable_text(" ".join(text.split()), LlmRejected.DETAIL)
+
+    def failed(self, key, status, detail, now=None):
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            entry = self.entries.pop(key, None)
+            if entry is None or now - entry["at"] > LLM_REJECTED_WINDOW:
+                entry = {"count": 0}
+            self.entries[key] = {"count": entry["count"] + 1, "status": status,
+                                 "detail": printable_text(str(detail or ""), self.DETAIL), "at": now}
+            while len(self.entries) > self.LIMIT:
+                self.entries.pop(next(iter(self.entries)))
+
+    def passed(self, key):
+        with self.lock:
+            self.entries.pop(key, None)
+
+    def refusal(self, key, tries, window=LLM_REJECTED_WINDOW, now=None):
+        """{"count", "status", "detail"} when KEY was rejected TRIES times or more, the last within WINDOW seconds;
+        else None."""
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            entry = self.entries.get(key)
+            if entry is None or not tries or entry["count"] < tries or now - entry["at"] > window:
+                return None
+            return {"count": entry["count"], "status": entry["status"], "detail": entry["detail"]}
+
+
+def llm_rejected_reply(count, status):
+    """(the HTTP answer, its text) the relay gives a request the server rejected COUNT times with STATUS: that status
+    and an error in the shape OpenAI's and Anthropic's clients read (error.message). Its words say what happened and
+    match none of the harnesses' patterns for a context overflow (OpenCode compacts again) or a passing fault (they
+    retry); the server's own reason is in the connection log, not here, for that reason."""
+    text = (f"{LLM_NOTE} The model server rejected this exact request {count} times (HTTP {status}), and it came "
+            "once more unchanged: sandbox-ai has not sent it again. Change something before the next step - "
+            "start a new session, shorten the conversation, or pick another model. The server's reason is in "
+            "sandbox-ai's logs of this run (sandbox-ai logs).")
+    body = json.dumps({"type": "error", "error": {"type": "invalid_request_error", "code": "sandbox_ai_rejected_repeat",
+                                                  "message": text}}).encode()
+    import http.client
+    reason = http.client.responses.get(status, "Client Error")
+    return (b"HTTP/1.1 %d " % status + reason.encode("ascii", "replace") +
+            b"\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: %d\r\n\r\n" % len(body)
+            + body), text
+
+
 # --- the LLM traffic log: what an agent and its model exchange --------------------------------------------------------
 #
 # llm-traffic-TIME-RUN.jsonl beside the connection log, one record per model request: the request as it went upstream
@@ -4722,11 +9982,6 @@ LLM_TRAFFIC_QUEUE_BYTES = 96 << 20      # and the request bodies they hold toget
 LLM_TRAFFIC_ENV = "SANDBOX_AI_TRAFFIC_FD"  # the pipe's end the proxy writes to
 LLM_TRAFFIC_CALLS = 256                 # tool calls of one answer kept
 LLM_CONVERSATION_KEYS = ("messages", "input", "prompt", "system", "instructions", "tools")
-# A credential in JSON inside a string of the record (a tool call's arguments, a result: \"api_key\": \"...\"), which
-# SECRET_TEXT's first pattern (unescaped quotes) does not see.
-LLM_ESCAPED_SECRET = re.compile(
-    r'(\\"[A-Za-z0-9_-]*(?:token|secret|passw|api_?key|apikey|authorization|credential|session|cookie|code_verifier'
-    r'|private|signature)[A-Za-z0-9_-]*\\"\s*:\s*)\\"(?:[^"\\]|\\[^"])*\\"', re.I)
 
 
 def llm_usage_merge(usage, value):
@@ -4810,7 +10065,15 @@ class LlmAnswer:
             return
         if isinstance(event, dict):
             self.events += 1
+            self.checked_event(event)
+
+    def checked_event(self, event):
+        """EVENT read (event); one of another shape (a server's bug: a number where a list belongs) is skipped, as
+        an event that is no JSON is - the record never ends the answer it reads beside the agent."""
+        try:
             self.event(event)
+        except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+            pass
 
     def add(self, kind, text):
         if not isinstance(text, str) or not text:
@@ -5020,7 +10283,7 @@ class LlmAnswer:
             else:
                 if isinstance(whole, dict):
                     self.events += 1
-                    self.event(whole)
+                    self.checked_event(whole)
             self.body = b""
         if not self.events and self.start.strip():
             self.error = self.error or {"body": self.start.decode("utf-8", "replace")}
@@ -5047,7 +10310,10 @@ def llm_snapshot(document):
 def llm_changes(before, document, done):
     """[change] the relay made to a request: each field it set or changed ({"field", "from", "to", "why"}; no "from"
     when the agent had not set it; WHY "parameter" - the endpoint's or the start's -, "boost" after a cut answer,
-    "loop guard"), the tools it took away, the loop guard's note ({"field": "messages", "note", "where", "message"}).
+    "loop guard"), the tools it took away, each of the loop guard's notes ({"field": "messages", "note", "where",
+    "message"}; they keep their places, so a request lists those of the steps before it again), an agent's
+    namespace tools offered as plain functions and its approval parameters not offered (llm_flat_tools,
+    llm_plain_tools; WHY "local server").
     BEFORE: llm_snapshot of the document as the agent sent it; DONE: what llm_request returned."""
     if not isinstance(before, dict) or not isinstance(document, dict):
         return []
@@ -5078,12 +10344,46 @@ def llm_changes(before, document, done):
     if before.get("tools") is not None and not isinstance(document.get("tools"), list):
         changes.append({"field": "tools", "from": f"{before['tools']} tools", "why": "loop guard",
                         "note": "taken away for this answer"})
-    note = (done or {}).get("note")
-    if isinstance(note, dict) and note.get("text"):
-        changes.append({"field": "messages", "why": "loop guard", "note": note["text"],
-                        "where": "a new message" if note.get("appended") else "the result of a tool call",
-                        **({"message": note["message"]} if isinstance(note.get("message"), int) else {})})
+    tools = (done or {}).get("tools")
+    if isinstance(tools, dict) and tools.get("namespaces"):
+        changes.append({"field": "tools", "from": f"{tools['namespaces']} namespace tools", "why": "local server",
+                        "note": f"offered as {len(tools.get('names') or {})} plain functions NAMESPACE"
+                                f"{LLM_NAMESPACE_JOIN}TOOL (the model's calls are named back in the answer)"})
+    if isinstance(tools, dict) and tools.get("plain"):
+        changes.append({"field": "tools", "from": ", ".join(LLM_APPROVAL_PARAMETERS), "why": "local server",
+                        "note": "not offered as parameters of " + ", ".join(str(name) for name in tools["plain"][:8])
+                                + " (Codex refuses a call that fills them; taken out of the model's calls too)"})
+    if isinstance(tools, dict) and tools.get("resources"):
+        changes.append({"field": "tools", "why": "local server",
+                        "note": "the description of " + ", ".join(str(name) for name in tools["resources"][:8])
+                                + " says that an MCP server's tools are functions of their own (not resources)"})
+    if isinstance(tools, dict) and tools.get("schemas"):
+        changes.append({"field": "tools", "why": "local server",
+                        "note": "the parameters of " + ", ".join(str(name) for name in tools["schemas"][:8])
+                                + " got an empty \"required\"/\"properties\" (the same schema; a chat template "
+                                  "that reads them fails without)"})
+    if isinstance(tools, dict) and tools.get("notice"):
+        changes.append({"field": "messages", "why": "local server",
+                        "note": "the agent's notice of the MCP servers names the functions of "
+                                + ", ".join(str(name) for name in tools["notice"][:8])
+                                + " (call them directly, not inside execute)"})
+    if (done or {}).get("folded"):
+        changes.append({"field": "messages", "why": "local server",
+                        "note": f"{done['folded']} text(s) of the agent between two tool steps put into the tool "
+                                "result before them (the chat template keeps the earlier reasoning: the prompt cache "
+                                "holds)"})
+    for note in llm_notes((done or {}).get("notes")):
+        if note.get("text"):
+            changes.append({"field": "messages", "why": "loop guard", "note": note["text"],
+                            "where": "a new message" if note.get("appended") else "the result of a tool call",
+                            **({"message": note["message"]} if isinstance(note.get("message"), int) else {})})
     return changes
+
+
+def llm_notes(notes):
+    """[note] of what llm_request returned as its "notes" (each {"text", "holder"} or {"text", "appended"}): a list
+    of them, one alone, or none."""
+    return [note for note in (notes if isinstance(notes, list) else [notes]) if isinstance(note, dict)]
 
 
 def llm_items(document, api):
@@ -5108,28 +10408,31 @@ def llm_digest(value):
                           .encode("utf-8", "replace")).hexdigest()[:12]
 
 
-def llm_digests(document, api, note=None):
-    """[digest]: the system part's, then each message's, as the agent sent them (the loop guard's NOTE taken out
-    again, a message it added left out): a later request of the same conversation begins with the same ones, so that
-    what is new in it can be told (sandbox-ai llm traffic)."""
+def llm_digests(document, api, notes=None):
+    """[digest]: the system part's, then each message's, as the agent sent them (the loop guard's NOTES - llm_notes -
+    taken out again, a message it added left out): a later request of the same conversation begins with the same
+    ones, so that what is new in it can be told (sandbox-ai llm traffic)."""
     system, items = llm_items(document, api)
-    if isinstance(note, dict) and note.get("appended") and items:
+    notes, restore = llm_notes(notes), []
+    if any(note.get("appended") for note in notes) and items:
         items = items[:-1]
-    holder = note.get("holder") if isinstance(note, dict) else None
-    restore, container, key = None, None, None
-    if holder:
-        container, key = holder
+    for note in reversed(notes):  # the last one added first: two notes may share a result
+        if not note.get("holder"):
+            continue
+        container, key = note["holder"]
         value, text = container.get(key), str(note.get("text"))
         if isinstance(value, str) and value.endswith("\n\n" + text):
-            container[key], restore = value[:-len(text) - 2], value
+            restore.append((container, key, value))
+            container[key] = value[:-len(text) - 2]
         elif isinstance(value, list) and value and (value[-1] == text or (
                 isinstance(value[-1], dict) and value[-1].get("text") == text)):
-            container[key], restore = value[:-1], value
+            restore.append((container, key, value))
+            container[key] = value[:-1]
     try:
         return [llm_digest(system if system is not None else "")] + [llm_digest(item) for item in items]
     finally:
-        if restore is not None:
-            container[key] = restore
+        for container, key, value in reversed(restore):
+            container[key] = value
 
 
 def llm_note_message(document, api, holder):
@@ -5243,6 +10546,191 @@ def llm_request_document(data, total, encoding):
     return (document, None) if isinstance(document, dict) else (None, "not a JSON object")
 
 
+# The LLM traffic log as deltas: a model request repeats its whole conversation, so the log grew with the square of a
+# conversation's length (a record of each request, up to --llm-traffic-limit). A record that continues one of the last
+# LLM_TRAFFIC_BASES records written leaves out what that one holds - the messages (input items) it begins with, and
+# its other large fields that are the same (system, tools) - and says so in "delta": {"of": that record's n, "key":
+# "messages" or "input", "kept": how many of its items come first, "same": [fields], "digests": how many of its
+# digests, "order": the request's keys}. Items after those first ones that the base holds elsewhere (a harness that
+# drops its oldest messages at a small context, clears old tool results one by one, or changes its first message with
+# every request: the same items, moved - a common beginning alone left out almost nothing, measured x1.0-2.1) are left
+# out too: "items": what follows the first "kept", each entry a number of items written in the record or [where,
+# how many] of the base's. `sandbox-ai llm traffic` (llm_traffic.Expander) puts it together again. A
+# whole record at least every LLM_TRAFFIC_CHAIN requests of a conversation and for each after LLM_TRAFFIC_RESET bytes
+# written (every part of the log, LLM_TRAFFIC_PART, holds whole ones early on); "llm_traffic_deltas": false in the
+# proxy's configuration (defaults llm_traffic_deltas) writes every record whole, as before.
+LLM_TRAFFIC_BASES = 16
+LLM_TRAFFIC_CHAIN = 64
+LLM_TRAFFIC_RESET = LLM_TRAFFIC_PART // 4
+LLM_DELTA_MIN = 2048     # bytes a delta must leave out (else the record is written whole)
+LLM_DELTA_FIELD = 256    # a field of the request this long or longer is left out when it is the same
+LLM_DELTA_ITEM = 64      # an item this long or longer that the base holds elsewhere is left out
+
+
+def llm_delta_digest(value):
+    """(digest, length) of VALUE as the log writes it (compact_json)."""
+    text = compact_json(value).encode("utf-8", "surrogatepass")
+    return hashlib.blake2b(text, digest_size=16).digest(), len(text)
+
+
+class TrafficDeltas:
+    """The proxy's memory of the LLM traffic log's last records, for writing a record as a delta (see above): of each
+    of the last LLM_TRAFFIC_BASES records written, its API, the digests of its items and of its other fields, its
+    digests and how long its chain of deltas is. encode() then written(); forget() a record that was not written."""
+
+    def __init__(self, bases=LLM_TRAFFIC_BASES, chain=LLM_TRAFFIC_CHAIN, reset=LLM_TRAFFIC_RESET):
+        self.limit, self.chain, self.reset = bases, chain, reset
+        self.bases, self.since = collections.OrderedDict(), 0
+
+    def encode(self, record):
+        """(the record to write - RECORD itself, or a new dict without what its base holds, with "delta" -, what to
+        remember of RECORD for written())."""
+        request = record.get("request")
+        key = next((k for k in ("messages", "input") if isinstance(request, dict) and isinstance(request.get(k), list)),
+                   None)
+        if key is None:
+            return record, None
+        try:
+            items = [llm_delta_digest(item) for item in request[key]]
+            fields = {name: llm_delta_digest(value) for name, value in request.items() if name != key}
+        except (ValueError, RecursionError, TypeError):
+            return record, None
+        digests = record.get("digests") if isinstance(record.get("digests"), list) else []
+        memory = {"api": record.get("api"), "key": key, "items": [d for d, _ in items],
+                  "fields": {name: d for name, (d, _) in fields.items()}, "digests": digests, "depth": 0}
+        if self.since >= self.reset:  # every conversation whole again from here on
+            self.bases.clear()
+            self.since = 0
+        best, kept, same, saved = None, 0, [], 0
+        for number, base in reversed(self.bases.items()):  # the newest first: of two as good, the newer
+            if base is None or base["api"] != memory["api"] or base["key"] != key or base["depth"] + 1 >= self.chain:
+                continue
+            common = 0
+            for mine, theirs in zip(memory["items"], base["items"]):
+                if mine != theirs:
+                    break
+                common += 1
+            equal = [name for name, (digest, size) in fields.items()
+                     if size >= LLM_DELTA_FIELD and base["fields"].get(name) == digest]
+            leaves = sum(size for _, size in items[:common]) + sum(fields[name][1] for name in equal)
+            if common < len(items):  # its items after those: the ones the base holds anywhere
+                index = self.index(base)
+                leaves += sum(size for digest, size in items[common:] if size >= LLM_DELTA_ITEM and digest in index)
+            if leaves > saved:
+                best, kept, same, saved = number, common, equal, leaves
+        if best is None or saved < LLM_DELTA_MIN:
+            return record, memory
+        base = self.bases[best]
+        common = 0
+        for mine, theirs in zip(digests, base["digests"]):
+            if mine != theirs:
+                break
+            common += 1
+        memory["depth"] = base["depth"] + 1
+        delta = {"of": best, "key": key, "kept": kept, "same": same, "digests": common, "order": list(request)}
+        index, layout, new = self.index(base), [], []
+        for position in range(kept, len(items)):
+            digest, size = items[position]
+            at = index.get(digest) if size >= LLM_DELTA_ITEM else None
+            if at is None:
+                new.append(request[key][position])
+                if layout and isinstance(layout[-1], int):
+                    layout[-1] += 1
+                else:
+                    layout.append(1)
+            elif layout and isinstance(layout[-1], list) and sum(layout[-1]) == at:
+                layout[-1][1] += 1
+            else:
+                layout.append([at, 1])
+        if any(isinstance(entry, list) for entry in layout):
+            delta["items"] = layout
+        written = {name: new if name == key else request[name] for name in request if name not in same}
+        out = {}
+        for name, value in record.items():  # in its place: "delta" before the digests and the request
+            if name in ("digests", "request"):
+                out.setdefault("delta", delta)
+                out[name] = digests[common:] if name == "digests" else written
+            else:
+                out[name] = value
+        return out, memory
+
+    @staticmethod
+    def index(base):
+        """{digest: where} of the items of BASE (a record remembered; of equal items the first), made once."""
+        if "index" not in base:
+            found = {}
+            for position, digest in enumerate(base["items"]):
+                found.setdefault(digest, position)
+            base["index"] = found
+        return base["index"]
+
+    def written(self, number, memory, size):
+        """The record NUMBER was written (SIZE bytes); MEMORY (encode()): what a later record may leave out of it -
+        None: nothing (a record cut to its limit, or of no conversation)."""
+        self.since += size
+        self.bases[number] = memory
+        while len(self.bases) > self.limit:
+            self.bases.popitem(last=False)
+
+    def forget(self, number):
+        """The record NUMBER was not written: no later record leaves out what it holds."""
+        if number in self.bases:
+            self.bases[number] = None
+
+
+# A key whose string value is a secret's (SECRET_TEXT's first pattern, as a key of a JSON object).
+LLM_SECRET_KEY = re.compile(r"[A-Za-z0-9_-]*(?:token|secret|passw|api_?key|apikey|authorization|credential|session"
+                            r"|cookie|code_verifier|private|signature)[A-Za-z0-9_-]*", re.I)
+LLM_REDACT_DEPTH = 200
+
+
+def llm_redacted(value, depth=0):
+    """VALUE (a part of an LLM traffic record) with each string redacted on its own, as the connection log redacts a
+    body (redact_text), and a string under a key named like a secret's ("api_key": ..., "session_id": ...) as
+    "[redacted]". The record's line was redacted as text before: "--password-store=basic\\"" (a file the agent read,
+    in every later request of its conversation) lost the backslash of its escaped quote, the line was no JSON and
+    every reader skipped it - 320 of 410 requests of a measured Claude Code run; and the record's own "session" (the
+    start's name) was redacted as a secret's key. Deeper than LLM_REDACT_DEPTH: one string, redacted."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if depth > LLM_REDACT_DEPTH and isinstance(value, (dict, list)):
+        return redact_text(compact_json(value))
+    if isinstance(value, list):
+        return [llm_redacted(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {key: "[redacted]" if isinstance(item, str) and isinstance(key, str) and LLM_SECRET_KEY.fullmatch(key)
+                else llm_redacted(item, depth + 1) for key, item in value.items()}
+    return value
+
+
+def redacted_json(value, ensure_ascii=True):
+    """VALUE (a tool call's arguments, a request's JSON body) as JSON text with its strings redacted one by one
+    (llm_redacted) - never the text as a whole: there a line break is "\\n", which hid `password=` at a line's start
+    from the patterns (no word boundary before the name), and a value before an escaped quote took its backslash. What
+    JSON has no type for is written as its repr()."""
+    def plain(item, depth=0):  # (repr() first: a string like any other for the redaction)
+        if isinstance(item, dict) and depth < LLM_REDACT_DEPTH:
+            return {key if isinstance(key, (str, int, float, bool)) or key is None else repr(key):
+                    plain(entry, depth + 1) for key, entry in item.items()}
+        if isinstance(item, (list, tuple)) and depth < LLM_REDACT_DEPTH:
+            return [plain(entry, depth + 1) for entry in item]
+        return item if isinstance(item, (str, int, float, bool)) or item is None else repr(item)
+    return json.dumps(llm_redacted(plain(value)), ensure_ascii=ensure_ascii, default=repr)
+
+
+def llm_request_cut(line):
+    """True when the LLM traffic log's LINE (llm_traffic_line) holds less of its request than was sent: "truncated"
+    names more than the answer (long strings, older messages, the request) - such a record is no base for a delta."""
+    at = line.rfind(b',"truncated":[')
+    if at < 0:
+        return False
+    try:
+        how = json.loads(line[at + 13:-1])
+    except (ValueError, RecursionError):
+        return True
+    return not isinstance(how, list) or any(entry != "answer" for entry in how)
+
+
 class LlmTraffic:
     """The proxy's side of the LLM traffic log: what is recorded (CONFIG: {"mode", "record_limit", "run", "session"}),
     each exchange made into its record in a thread of its own (never in the connection's: a record of megabytes is
@@ -5257,6 +10745,8 @@ class LlmTraffic:
         self.limit = min(high, max(low, limit)) if isinstance(limit, int) and not isinstance(limit, bool) \
             else LLM_TRAFFIC_RECORD
         self.run, self.session, self.fd, self.secrets = config.get("run"), config.get("session"), fd, secrets
+        # a request that continues an earlier one written as what is new in it (TrafficDeltas; "deltas": false: whole)
+        self.deltas = TrafficDeltas() if config.get("deltas", True) is not False else None
         self.lock = threading.Condition()
         self.queue, self.number, self.lost, self.closed, self.queued = collections.deque(), 0, 0, False, 0
         self.thread = threading.Thread(target=self.serve, daemon=True, name="llm-traffic")
@@ -5307,6 +10797,8 @@ class LlmTraffic:
                 while view:
                     view = view[os.write(self.fd, view):]
             except Exception as exc:  # noqa: BLE001 - a record that fails never stops the next one
+                if self.deltas is not None:  # (not written: no later record leaves out what it holds)
+                    self.deltas.forget(item.get("n"))
                 with self.lock:
                     self.lost += lost + 1
                 with contextlib.suppress(Exception):
@@ -5323,10 +10815,10 @@ class LlmTraffic:
         if document is None and item.get("raw") is not None:
             document, unread = llm_request_document(*item["raw"])
         done = item.get("done") or {}
-        note = done.get("note") if isinstance(done.get("note"), dict) else None
-        if note is not None and document is not None:
-            note = {**note, "message": llm_note_message(document, api, note.get("holder"))}
-            done = {**done, "note": note}
+        notes = llm_notes(done.get("notes"))
+        if notes and document is not None:
+            notes = [{**note, "message": llm_note_message(document, api, note.get("holder"))} for note in notes]
+            done = {**done, "notes": notes}
         answer = item["answer"].result() if item.get("answer") is not None else {}
         model = (document or {}).get("model")
         record = {"version": 1, "n": item.get("n"), "time": item.get("time"), "run": self.run,
@@ -5338,7 +10830,7 @@ class LlmTraffic:
                   "status": item.get("status"), "ms": item.get("ms"), "first_byte_ms": item.get("first_byte_ms"),
                   "bytes_out": item.get("bytes_out"), "bytes_in": item.get("bytes_in")}
         if document is not None:
-            record["digests"] = llm_digests(document, api, note)
+            record["digests"] = llm_digests(document, api, notes)
             record["request"] = document
         else:
             record["request"] = {"unread": unread or "no body"}
@@ -5360,25 +10852,55 @@ class LlmTraffic:
     def line(self, item, lost=0):
         """ITEM's record as the line written: shortened to the limit, redacted (the connection log's patterns, the
         proxy's own credentials by value)."""
-        line, _ = llm_traffic_line(self.record(item, lost), self.limit)
-        text = redact_text(line.decode("utf-8", "replace"))
-        if '\\"' in text:
-            text = LLM_ESCAPED_SECRET.sub(r'\1\\"[redacted]\\"', text)
+        record = self.record(item, lost)
+        written, memory = self.deltas.encode(record) if self.deltas is not None else (record, None)
+        # each string redacted on its own (llm_redacted: never the line as text), only what is written of a delta
+        written = {key: llm_redacted(value) if key not in ("run", "session", "digests", "delta") else value
+                   for key, value in written.items()}
+        line, cut = llm_traffic_line(written, self.limit)
+        text = line.decode("utf-8", "replace")
         for value in self.secrets() or ():
             text = text.replace(value, "[redacted]")
-        return (text + "\n").encode("utf-8", "replace")
+        data = (text + "\n").encode("utf-8", "replace")
+        if self.deltas is not None:
+            self.deltas.written(record.get("n"), None if cut and llm_request_cut(line) else memory, len(data))
+        return data
 
 
 class LlmTrafficFile:
     """The supervisor's side of the LLM traffic log: the lines the proxy writes to the pipe READ_FD, appended to PATH
-    (0600, never through a link), which is rotated at PART bytes (PATH.1 the newest older part, at most PARTS of
-    them; older ones are deleted). A line longer than LINE_LIMIT is dropped (counted in lost). serve() runs until the
-    proxy closes its end."""
+    (0600, never through a link), which is rotated at PART bytes (PATH.1.gz the newest older part, compressed in a
+    thread of its own while the run goes on - PATH.1 until then -, at most PARTS of them; older ones are deleted). A
+    line longer than LINE_LIMIT is dropped (counted in lost). serve() runs until the proxy closes its end (and the last
+    part rotated is compressed)."""
 
     def __init__(self, read_fd, path, part=LLM_TRAFFIC_PART, parts=LLM_TRAFFIC_PARTS, line_limit=None):
         self.read_fd, self.path, self.part, self.parts = read_fd, Path(path), part, parts
         self.line_limit = line_limit or (LLM_TRAFFIC_RECORD_RANGE[1] + (1 << 20))
-        self.fd, self.size, self.lost = None, 0, 0
+        self.fd, self.size, self.lost, self.packing = None, 0, 0, None
+
+    def settle(self):
+        """The part rotated before compressed (its thread done): never moved while it is."""
+        if self.packing is not None:
+            self.packing.join()
+            self.packing = None
+
+    @staticmethod
+    def pack(part):
+        """The rotated part PART compressed into PART.gz (0600, durable), then removed; left as it is when that fails
+        (a full disk: sandbox-ai gc compresses it once the run ended)."""
+        try:
+            fd = os.open(part, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return
+        try:
+            compress_into(fd, part.with_name(part.name + ".gz"))
+        except OSError:
+            return
+        finally:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(part)
 
     def open(self):
         if self.fd is None:
@@ -5390,17 +10912,22 @@ class LlmTrafficFile:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
+        self.settle()
         for number in range(self.parts, 0, -1):
-            older = self.path.with_name(f"{self.path.name}.{number}")
-            if number == self.parts:
-                with contextlib.suppress(FileNotFoundError):
-                    older.unlink()
-            else:
-                with contextlib.suppress(FileNotFoundError):
-                    os.replace(older, self.path.with_name(f"{self.path.name}.{number + 1}"))
+            for suffix in (".gz", ""):  # (one left uncompressed: a full disk)
+                older = self.path.with_name(f"{self.path.name}.{number}{suffix}")
+                if number == self.parts:
+                    with contextlib.suppress(FileNotFoundError):
+                        older.unlink()
+                else:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.replace(older, self.path.with_name(f"{self.path.name}.{number + 1}{suffix}"))
         with contextlib.suppress(FileNotFoundError):
             if self.parts:
-                os.replace(self.path, self.path.with_name(f"{self.path.name}.1"))
+                part = self.path.with_name(f"{self.path.name}.1")
+                os.replace(self.path, part)
+                self.packing = threading.Thread(target=self.pack, args=(part,), daemon=True, name="llm-traffic-pack")
+                self.packing.start()
             else:
                 self.path.unlink()
 
@@ -5460,6 +10987,7 @@ class LlmTrafficFile:
                 with contextlib.suppress(OSError):
                     os.close(self.fd)
                 self.fd = None
+            self.settle()
 
 
 API_KEY_HEADERS = LLM_KEY_HEADERS + ("private-token",)  # GitLab's own
@@ -5550,6 +11078,77 @@ def added_api_keys(path=None):
         document = {}
     entries = checked_api_keys(document.get("api_keys") if isinstance(document, dict) else None)
     _added_api_keys.update(stamp=stamp, entries=entries)
+    return entries
+
+
+ADDED_GIT_LOGINS = "git-logins-added.json"  # in PROXY_RUN: Git logins given during the run (sandbox-ai git-logins give)
+GIT_LOGINS_LIMIT = 64
+GIT_LOGIN_TOKEN = re.compile(r"[A-Za-z0-9_.~+/=-]{8,512}")  # = agent_sandbox.GIT_TOKEN
+GIT_LOGIN_USER = re.compile(r"[A-Za-z0-9_.-]{1,64}")  # = agent_sandbox.GIT_TOKEN_USER
+GIT_LOGIN_HOST = re.compile(r"(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[::1\]")
+_added_git_logins = {"stamp": None, "entries": []}
+
+
+def checked_git_logins(entries):
+    """The well-formed ones of ENTRIES ([{host, port, user, loopback, token}], as `sandbox-ai git-logins give` sends
+    them - the form of proxy.json's "git_tokens"): the host in lower case, a user and a token of the launcher's
+    forms (nothing that could break out of a Basic login's header)."""
+    found = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        host, user, token, port = (entry.get(k) for k in ("host", "user", "token", "port"))
+        if not (isinstance(host, str) and GIT_LOGIN_HOST.fullmatch(host.lower())
+                and isinstance(user, str) and GIT_LOGIN_USER.fullmatch(user)
+                and isinstance(token, str) and GIT_LOGIN_TOKEN.fullmatch(token)
+                and isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535
+                and isinstance(entry.get("loopback", False), bool)):
+            continue
+        found.append({"host": host.lower(), "port": port, "user": user, "loopback": bool(entry.get("loopback")),
+                      "token": token})
+    return found[:GIT_LOGINS_LIMIT]
+
+
+def give_git_logins(entries, path=None, owner=None):
+    """Control op "git-logins": ENTRIES (every Git login given during the run, the whole list) for the proxy, in PATH
+    (its run directory, which only it and the supervisor reach - never the agent), 0600 and owned by the proxy's
+    user: the proxy reads it again when it changes and adds each login on the wire, as it does with the logins of a
+    start (sandbox-ai git-logins, --token-proxy) - before those, so a login given for a server wins over the one the
+    run was started with. No token enters the sandbox. Returns [{host, port, user}]."""
+    path = Path(path) if path else PROXY_RUN / ADDED_GIT_LOGINS
+    if not path.parent.is_dir():
+        raise ValueError("this sandbox runs without the connection proxy: it takes no Git login for its proxy")
+    if not isinstance(entries, list) or len(entries) > GIT_LOGINS_LIMIT:
+        raise ValueError(f"git-logins: a list of at most {GIT_LOGINS_LIMIT} logins")
+    checked = checked_git_logins(entries)
+    if len(checked) != len(entries):
+        raise ValueError("git-logins: every login has a host, port, user and a token usable in a login")
+    if owner is None:  # the run directory's owner: the proxy's user, to whom the supervisor gave it at the start
+        info = path.parent.stat()
+        owner = (info.st_uid, info.st_gid)
+    write_new(path, json.dumps({"version": 1, "git_logins": checked}), 0o600, owner=owner)
+    return [{"host": entry["host"], "port": entry["port"], "user": entry["user"]} for entry in checked]
+
+
+def added_git_logins(path=None):
+    """The Git logins given while the run goes on (give_git_logins wrote them into the proxy's run directory):
+    [{host, port, user, loopback, token}], read again whenever the file changes; [] without one. Looked at for
+    every request the proxy passes on (as added_api_keys: the path as text and os.stat)."""
+    path = os.fspath(path) if path else f"{PROXY_RUN}/{ADDED_GIT_LOGINS}"
+    try:
+        info = os.stat(path)
+    except OSError:
+        _added_git_logins.update(stamp=None, entries=[])
+        return []
+    stamp = (info.st_ino, info.st_mtime_ns, info.st_size)
+    if stamp == _added_git_logins["stamp"]:
+        return _added_git_logins["entries"]
+    try:
+        document = json.loads(Path(path).read_text()[:1 << 20])
+    except (OSError, ValueError, RecursionError):
+        document = {}
+    entries = checked_git_logins(document.get("git_logins") if isinstance(document, dict) else None)
+    _added_git_logins.update(stamp=stamp, entries=entries)
     return entries
 
 
@@ -5669,12 +11268,627 @@ def handshake_abandoned(exc):
     return isinstance(exc, OSError) and ("EOF" in text or "CONNECTION RESET" in text or "CLOSED" in text)
 
 
+# --- the package guard: what npm, pip, cargo and go download through the proxy --------------------------------------
+#
+# For a request to a package registry the proxy tells the package and the version (package_request) and holds a
+# download against three checks, all of them local:
+#   malicious  the version is in the host's offline copy of OSV's malicious-package advisories (MAL-...; packages.py
+#              syncs it, the launcher mounts it at PACKAGES_DIR): refused with the advisory. The human may allow that
+#              one download once (a question; never for the run, never always, never by --ask allow).
+#   min_age    the version is younger than min_age_days (14: the project's own rule for pinned releases): asked.
+#   new_names  the registry does not know the name (404), or its first release is younger than new_name_days (30):
+#              recorded as a possibly hallucinated or slopsquatted name; asked in the strict modes.
+# Release dates come from the registry's own metadata answers to the agent's requests, which the proxy reads as they
+# pass (package_times) and keeps for the run (bounded). Nothing is ever looked up: no request leaves that the agent
+# did not make, no package name goes anywhere it was not going.
+PACKAGES_DIR = Path("/sandbox/packages")  # the host's offline copy (ECOSYSTEM.list), read-only, hidden from the agent
+PACKAGE_ECOSYSTEMS = ("npm", "pypi", "crates", "go")
+PACKAGE_REGISTRIES = {"registry.npmjs.org": "npm", "registry.yarnpkg.com": "npm", "pypi.org": "pypi",
+                      "files.pythonhosted.org": "pypi", "index.crates.io": "crates", "static.crates.io": "crates",
+                      "crates.io": "crates", "proxy.golang.org": "go"}
+PACKAGE_RULESET = "package-guard"  # the "ruleset" of its questions and records; its "rule" is the check
+# A ruleset's "packages" section (and proxy.json's "packages"), each value in rising strictness. malicious: "deny" -
+# refused unless the human allows that one download once; "block" - refused, never asked. min_age and new_names:
+# "report" records, "ask" asks, "deny" refuses. min_age_days: 0 turns the age check off.
+PACKAGE_MALICIOUS = ("deny", "block")
+PACKAGE_DECISIONS = ("report", "ask", "deny")
+PACKAGE_DEFAULTS = {"malicious": "deny", "min_age": "ask", "min_age_days": 14, "new_names": "report"}
+PACKAGE_KEYS = frozenset(PACKAGE_DEFAULTS)
+PACKAGE_AGE_RANGE = (0, 3650)
+PACKAGE_NEW_NAME_DAYS = 30
+PACKAGE_NAMES = 2048               # packages whose release dates the proxy keeps (the least recently used go first)
+PACKAGE_VERSIONS = 200000          # and their versions, all together
+# Bytes of one metadata answer read for dates, as sent (a larger one: release age unknown) and unpacked. An answer
+# is kept while it passes and parsed afterwards: PACKAGE_READING of them are kept at once (the others pass unread),
+# and one is parsed at a time - the proxy shares the sandbox's memory, and every process in it can ask for package
+# documents in a loop.
+PACKAGE_METADATA_LIMIT = 16 << 20
+PACKAGE_UNPACKED_LIMIT = 48 << 20
+PACKAGE_READING = 6
+PACKAGE_NAME = re.compile(r"[!-~]{1,214}")
+PACKAGE_VERSION = re.compile(r"[!-+\--~]{1,128}")  # (no comma: the lists separate versions by it)
+PACKAGE_SPEC = re.compile(r"(npm|pypi|crates|go):([!-~]{1,214}?)(?:@([!-+\--~]{1,128}))?")
+PACKAGE_TIME = re.compile(r"(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d)(?::(\d\d))?(?:[.,]\d+)?\s*(Z|[+-]\d\d:?\d\d)?", re.I)
+PACKAGE_FILES = (".whl", ".tar.gz", ".zip", ".tar.bz2", ".tgz", ".egg", ".tar.xz")
+PACKAGE_ADVISORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,63}")
+
+
+def package_name(ecosystem, name):
+    """NAME as ECOSYSTEM's registry tells packages apart, or None when it is no package name: npm and crates.io in
+    lower case (crates.io reads - and _ alike), PyPI as PEP 503 normalises (runs of -, _ and . are one -), a Go module
+    path as it is (the proxy's !x is X). The offline lists, the allow-lists and the proxy all go by this form."""
+    if not isinstance(name, str) or ecosystem not in PACKAGE_ECOSYSTEMS:
+        return None
+    name = name.strip()
+    if ecosystem == "npm":
+        name = name.lower()
+    elif ecosystem == "pypi":
+        name = re.sub(r"[-_.]+", "-", name.lower())
+    elif ecosystem == "crates":
+        name = name.lower().replace("_", "-")
+    else:
+        name = re.sub(r"!([a-z])", lambda match: match[1].upper(), name)
+    if not PACKAGE_NAME.fullmatch(name) or name.startswith(("-", ".", "/")) or "," in name or "@" in name[1:] or \
+            (name.startswith("@") and (ecosystem != "npm" or name.count("/") != 1)):
+        return None  # (an @ only starts an npm scope: NAME@VERSION is never a name)
+    return name
+
+
+def package_version(ecosystem, version):
+    """VERSION as the lists and the proxy compare it, or None: a Go version without its v and +incompatible, PyPI's
+    in lower case; the others as they are."""
+    if not isinstance(version, str):
+        return None
+    version = version.strip()
+    if ecosystem == "go":
+        version = version[1:] if version[:1] in ("v", "V") else version
+        version = version.split("+", 1)[0]
+    elif ecosystem == "pypi":
+        version = version.lower()
+    return version if PACKAGE_VERSION.fullmatch(version) else None
+
+
+def package_spec(text):
+    """(ecosystem, name, version or None) of an allow-list entry ECOSYSTEM:NAME[@VERSION] (npm:left-pad,
+    npm:@scope/name@1.2.3, pypi:requests@2.32.0, crates:serde, go:github.com/x/y@v1.2.3); ValueError says the form."""
+    match = PACKAGE_SPEC.fullmatch(text.strip()) if isinstance(text, str) else None
+    name = package_name(match[1], match[2]) if match else None
+    version = package_version(match[1], match[3]) if match and match[3] else None
+    if not name or (match[3] and not version):
+        raise ValueError(f"{printable_text(str(text), 120)!r}: a package is ECOSYSTEM:NAME or ECOSYSTEM:NAME@VERSION, "
+                         f"the ecosystem one of {', '.join(PACKAGE_ECOSYSTEMS)} (npm:left-pad, pypi:requests@2.32.0)")
+    return match[1], name, version
+
+
+def package_file_version(name, filename):
+    """The version in a PyPI file's name (a wheel NAME-VERSION-..., a source package NAME-VERSION.tar.gz) of the
+    package NAME (normalised), or None when the file is not that package's."""
+    stem = next((filename[:-len(end)] for end in PACKAGE_FILES if filename.lower().endswith(end)), None)
+    if stem is None:
+        return None
+    fields = stem.split("-")
+    for count in range(1, len(fields)):  # the name itself may hold a - (a source package's)
+        if package_name("pypi", "-".join(fields[:count])) == name:
+            return package_version("pypi", fields[count])
+    return None
+
+
+def package_request(ecosystem, path):
+    """What a GET of PATH (normal_path: decoded, no query) asks ECOSYSTEM's registry for: {"ecosystem", "kind":
+    "metadata" | "download", "name", "version" (None where the path names none), "form"}, or None for anything else
+    (a search, a login, a file that is no package). A download is what brings code into the sandbox; a metadata
+    answer is read for release dates and for whether the name exists."""
+    parts = [part for part in path.split("/") if part]
+
+    def found(kind, name, version=None, form=None):
+        name = package_name(ecosystem, name)
+        if not name:
+            return None
+        return {"ecosystem": ecosystem, "kind": kind, "name": name,
+                "version": package_version(ecosystem, version) if version else None, "form": form}
+    if ecosystem == "npm":
+        if not parts or parts[0].startswith("-"):
+            return None
+        count = 2 if parts[0].startswith("@") else 1
+        if len(parts) < count:
+            return None
+        name, rest = "/".join(parts[:count]), parts[count:]
+        if not rest:
+            return found("metadata", name, form="packument")
+        if len(rest) == 2 and rest[0] == "-" and rest[1].lower().endswith(".tgz"):
+            base, stem = parts[count - 1].lower() + "-", rest[1][:-4]
+            return found("download", name, stem[len(base):] if stem.lower().startswith(base) else None, "tarball")
+        return None
+    if ecosystem == "pypi":
+        if len(parts) == 2 and parts[0] == "simple":
+            return found("metadata", parts[1], form="simple")
+        if len(parts) in (3, 4) and parts[0] == "pypi" and parts[-1] == "json":
+            return found("metadata", parts[1], parts[2] if len(parts) == 4 else None, "json")
+        if len(parts) >= 2 and parts[0] == "packages" and parts[-1].lower().endswith(PACKAGE_FILES):
+            fields = next(parts[-1][:-len(end)] for end in PACKAGE_FILES if parts[-1].lower().endswith(end)).split("-")
+            if len(fields) < 2:
+                return None
+            if parts[-1].lower().endswith(".whl") or len(fields) == 2:
+                return found("download", fields[0], fields[1], "file")
+            # a source package whose name holds a -: the version is its last field
+            return found("download", "-".join(fields[:-1]), fields[-1], "file")
+        return None
+    if ecosystem == "crates":
+        if len(parts) == 3 and parts[0] == "crates" and parts[2].lower().endswith(".crate"):
+            base, stem = parts[1].lower() + "-", parts[2][:-6]
+            return found("download", parts[1], stem[len(base):] if stem.lower().startswith(base) else None, "crate")
+        if len(parts) == 6 and parts[:3] == ["api", "v1", "crates"] and parts[5] == "download":
+            return found("download", parts[3], parts[4], "crate")
+        if len(parts) == 4 and parts[:3] == ["api", "v1", "crates"]:
+            return found("metadata", parts[3], form="api")
+        if 2 <= len(parts) <= 3 and parts[0] not in ("api", "crates"):
+            name = parts[-1].lower()
+            layout = ["1"] if len(name) == 1 else ["2"] if len(name) == 2 else ["3", name[0]] if len(name) == 3 \
+                else [name[:2], name[2:4]]
+            if [part.lower() for part in parts[:-1]] == layout:
+                return found("metadata", name, form="index")
+        return None
+    if ecosystem == "go":
+        if len(parts) >= 2 and parts[-1] == "@latest":
+            return found("metadata", "/".join(parts[:-1]), form="latest")
+        if len(parts) >= 3 and parts[-2] == "@v":
+            module, last = "/".join(parts[:-2]), parts[-1]
+            if last == "list":
+                return found("metadata", module, form="list")
+            if last.endswith(".info"):
+                return found("metadata", module, last[:-5], "info")
+            if last.endswith(".zip"):
+                return found("download", module, last[:-4], "zip")
+        return None
+    return None
+
+
+def package_time(value):
+    """The seconds since the epoch of a registry's time stamp (ISO 8601: 2026-11-05T10:00:00.000Z, with or without
+    an offset), or None."""
+    match = PACKAGE_TIME.match(value.strip()) if isinstance(value, str) else None
+    if not match:
+        return None
+    year, month, day, hour, minute = (int(match[index]) for index in range(1, 6))
+    second = int(match[6] or 0)
+    if not (1970 <= year <= 9999 and 1 <= month <= 12 and 1 <= day <= 31 and hour < 24 and minute < 60 and second < 62):
+        return None
+    year -= month <= 2  # days from the civil date (the proleptic Gregorian calendar)
+    era = year // 400
+    of_era = year - era * 400
+    of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    days = era * 146097 + of_era * 365 + of_era // 4 - of_era // 100 + of_year - 719468
+    offset = 0
+    zone = (match[7] or "Z").replace(":", "")
+    if zone.upper() != "Z":
+        offset = (int(zone[1:3]) * 3600 + int(zone[3:5]) * 60) * (-1 if zone[0] == "-" else 1)
+    return days * 86400 + hour * 3600 + minute * 60 + second - offset
+
+
+def package_times(found, status, data, content_type=""):
+    """What a registry's answer (STATUS, the body DATA as sent: decoded already) to the metadata request FOUND
+    (package_request) tells of the package: {"versions": {version: release time or None}, "created": the first
+    release's time or None, "missing": the registry does not know the name}; None when it tells nothing (an HTML
+    index, an answer that is not what the registry sends, a status that is neither). Never raises."""
+    ecosystem, form, name = found["ecosystem"], found.get("form"), found["name"]
+    if status in (404, 410):
+        # A Go client asks for every prefix of an import path (github.com/x, github.com/x/y ...): its 404s are
+        # no sign of a made-up name. A version's own file missing says nothing of the name either.
+        named = ecosystem != "go" and not (form == "json" and found.get("version"))
+        return {"versions": {}, "created": None, "missing": True} if named else None
+    if status != 200:
+        return None
+    versions, created = {}, None
+
+    def take(version, stamp):
+        version = package_version(ecosystem, version) if isinstance(version, str) else None
+        if version is None or len(versions) >= 50000:
+            return
+        when = package_time(stamp)
+        if when is None:
+            versions.setdefault(version, None)
+        elif versions.get(version) is None or when < versions[version]:
+            versions[version] = when  # (a version's first file is its release)
+    try:
+        if ecosystem == "go" and form == "list":
+            for line in data[:1 << 20].decode("utf-8", "replace").split():
+                take(line, None)
+        elif ecosystem == "crates" and form == "index":
+            for line in data.splitlines():
+                entry = json.loads(line) if line.strip() else None
+                if isinstance(entry, dict):
+                    take(entry.get("vers"), entry.get("pubtime"))
+        else:
+            if ecosystem == "pypi" and form == "simple" and "json" not in str(content_type).lower():
+                return None  # the HTML index: it says no dates
+            document = json.loads(data)
+            if not isinstance(document, dict):
+                return None
+            if ecosystem == "npm":
+                times = document.get("time")
+                if not isinstance(times, dict):
+                    # the abbreviated document (no "time"): the versions exist, their dates are not said
+                    for version in list(document.get("versions") or {})[:50000] \
+                            if isinstance(document.get("versions"), dict) else ():
+                        take(version, None)
+                else:
+                    created = package_time(times.get("created"))
+                    for version, stamp in times.items():
+                        if version not in ("created", "modified"):
+                            take(version, stamp)
+            elif ecosystem == "pypi" and form == "simple":
+                for entry in document.get("files") or []:
+                    if isinstance(entry, dict) and isinstance(entry.get("filename"), str):
+                        take(package_file_version(name, entry["filename"]), entry.get("upload-time"))
+                for version in document.get("versions") or []:
+                    take(version, None)
+            elif ecosystem == "pypi":
+                releases = document.get("releases") if isinstance(document.get("releases"), dict) else {}
+                for version, files in releases.items():
+                    for entry in files if isinstance(files, list) else ():
+                        if isinstance(entry, dict):
+                            take(version, entry.get("upload_time_iso_8601") or entry.get("upload_time"))
+                info = document.get("info") if isinstance(document.get("info"), dict) else {}
+                for entry in document.get("urls") or [] if not releases else []:
+                    if isinstance(entry, dict):
+                        take(info.get("version"), entry.get("upload_time_iso_8601") or entry.get("upload_time"))
+                if not releases:
+                    return {"versions": versions, "created": None, "missing": False, "partial": True}
+            elif ecosystem == "crates":
+                crate = document.get("crate") if isinstance(document.get("crate"), dict) else {}
+                created = package_time(crate.get("created_at"))
+                for entry in document.get("versions") or []:
+                    if isinstance(entry, dict):
+                        take(entry.get("num"), entry.get("created_at"))
+            elif ecosystem == "go":
+                take(document.get("Version"), document.get("Time"))
+                return {"versions": versions, "created": None, "missing": False, "partial": True}
+    except (ValueError, TypeError, AttributeError, RecursionError, UnicodeError):
+        return None
+    known = [when for when in versions.values() if when is not None]
+    # The first release is the package's: PyPI lists every file with its date; crates.io's index says dates only for
+    # newer releases (a package is not young because its old releases have none).
+    if created is None and known and (ecosystem == "pypi" or len(known) == len(versions)):
+        created = min(known)
+    return {"versions": versions, "created": created, "missing": False}
+
+
+def package_settings(value):
+    """VALUE (a ruleset's "packages" section) checked and as it is kept: only the keys it sets; ValueError says what
+    it takes."""
+    days = value.get("min_age_days", 0) if isinstance(value, dict) else None
+    if not isinstance(value, dict) or not value or set(value) - PACKAGE_KEYS or \
+            value.get("malicious", "deny") not in PACKAGE_MALICIOUS or \
+            value.get("min_age", "ask") not in PACKAGE_DECISIONS or \
+            value.get("new_names", "report") not in PACKAGE_DECISIONS or isinstance(days, bool) or \
+            not isinstance(days, int) or not PACKAGE_AGE_RANGE[0] <= days <= PACKAGE_AGE_RANGE[1]:
+        raise ValueError(f'"packages" takes "malicious" ({", ".join(PACKAGE_MALICIOUS)}), "min_age" and "new_names" '
+                         f'({", ".join(PACKAGE_DECISIONS)}) and "min_age_days" ({PACKAGE_AGE_RANGE[0]} to '
+                         f'{PACKAGE_AGE_RANGE[1]}; 0: no age check)')
+    return dict(value)
+
+
+def package_decisions(sections, base=None):
+    """The package guard's settings of a run: BASE (default PACKAGE_DEFAULTS) with every one of SECTIONS ([(who,
+    "packages" section)], the rulesets' and the mode's) weighed in - the strictest decision and the longest minimum
+    age win, so that no ruleset widens another; "by": who decided each key that is not the default's."""
+    result, by = dict(base or PACKAGE_DEFAULTS), {}
+    orders = {"malicious": PACKAGE_MALICIOUS, "min_age": PACKAGE_DECISIONS, "new_names": PACKAGE_DECISIONS}
+    for who, section in sections:
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            if key == "min_age_days":
+                stricter = isinstance(value, int) and not isinstance(value, bool) and value > result[key]
+            else:
+                order = orders.get(key, ())
+                stricter = value in order and order.index(value) > order.index(result[key])
+            if stricter:
+                result[key], by[key] = value, str(who)
+    return {**result, "by": by}
+
+
+class PackageList:
+    """One ecosystem's malicious packages, as the host's offline copy holds them (packages.py writes it): lines
+    NAME<TAB>ADVISORY<TAB>VERSIONS sorted by their bytes, VERSIONS "*" (every version) or versions separated by
+    commas. Looked up in place (mapped, a binary search): no load time, no memory of the proxy's own."""
+
+    def __init__(self, data=b""):
+        self.data = data
+
+    @classmethod
+    def open(cls, path):
+        """The list in the file PATH; an empty one when it is not there or cannot be mapped."""
+        import mmap
+        try:
+            with open(path, "rb") as stream:
+                return cls(mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ))
+        except (OSError, ValueError):  # (missing, unreadable, empty: nothing to map)
+            return cls()
+
+    def __len__(self):
+        return len(self.data)
+
+    def find(self, name):
+        """[(advisory, versions)] of the package NAME (normalised): VERSIONS None for every version, else a set."""
+        if not PACKAGE_NAME.fullmatch(name):  # (a name with a tab or a line break would match part of a line)
+            return []
+        data, key, found = self.data, name.encode("ascii") + b"\t", []
+        low, high = 0, len(data)
+        while low < high:
+            middle = (low + high) // 2
+            start = data.rfind(b"\n", 0, middle) + 1
+            end = data.find(b"\n", start)
+            end = len(data) if end < 0 else end
+            if data[start:end] < key:
+                low = end + 1
+            else:
+                high = start
+        while low < len(data) and len(found) < 64:
+            end = data.find(b"\n", low)
+            end = len(data) if end < 0 else end
+            line = data[low:end]
+            if not line.startswith(key):
+                break
+            advisory, _, versions = line[len(key):].decode("utf-8", "replace").partition("\t")
+            found.append((advisory, None if versions.strip() in ("*", "") else set(versions.strip().split(","))))
+            low = end + 1
+        return found
+
+
+def open_package_lists(directory=None):
+    """{ecosystem: PackageList} of the offline copy in DIRECTORY (PACKAGES_DIR: the launcher's mount). The proxy
+    opens them before it gives up its privileges; an ecosystem without a file has an empty list."""
+    directory = Path(directory) if directory is not None else PACKAGES_DIR
+    return {ecosystem: PackageList.open(directory / f"{ecosystem}.list") for ecosystem in PACKAGE_ECOSYSTEMS}
+
+
+class PackageGuard:
+    """The package guard of one run's proxy: CONFIG is proxy.json's "packages" (package_decisions and "allow": the
+    run's and the project's allow-list entries, "registries": more hosts by ecosystem), LISTS the malicious packages
+    (open_package_lists)."""
+
+    def __init__(self, config, lists=None, clock=time.time):
+        config = config if isinstance(config, dict) else {}
+        # The launcher's settings, each taken only as what it can be (anything else: the default).
+        given = {key: config[key] for key in PACKAGE_KEYS if key in config}
+        self.settings = dict(PACKAGE_DEFAULTS)
+        for key, value in given.items():
+            with contextlib.suppress(ValueError):
+                self.settings.update(package_settings({key: value}))
+        self.by = config.get("by") if isinstance(config.get("by"), dict) else {}
+        days = config.get("new_name_days")
+        self.new_name_days = days if isinstance(days, int) and not isinstance(days, bool) and 0 < days <= 3650 \
+            else PACKAGE_NEW_NAME_DAYS
+        self.registries = {**PACKAGE_REGISTRIES, **{str(host).lower(): ecosystem for host, ecosystem in
+                                                    (config.get("registries") or {}).items()
+                                                    if ecosystem in PACKAGE_ECOSYSTEMS}}
+        self.full_metadata = config.get("npm_full_metadata", True) is not False
+        self.allowed = set()
+        for entry in config.get("allow") or []:
+            with contextlib.suppress(ValueError):
+                self.allowed.add(package_spec(entry))
+        self.lists = lists if lists is not None else open_package_lists(config.get("lists"))
+        self.clock, self.lock = clock, threading.Lock()
+        # (reading: metadata answers kept while they pass; parsing: one of them read at a time)
+        self.reading, self.parsing = threading.BoundedSemaphore(PACKAGE_READING), threading.Lock()
+        self.known, self.versions, self.passed = collections.OrderedDict(), 0, collections.OrderedDict()
+        # "audit": [{"name", ...settings}] - the audit rulesets' sections, which decide nothing and are recorded.
+        self.audits = [{"name": str(source.get("name") or "rules"),
+                        "settings": {**PACKAGE_DEFAULTS, **{key: source[key] for key in PACKAGE_KEYS if key in source}}}
+                       for source in config.get("audit") or [] if isinstance(source, dict)]
+        memory_part("package dates kept", lambda: self.versions)
+        memory_shedder("package dates", self.forget)
+
+    def ecosystem(self, names):
+        """The ecosystem of the registry among NAMES (the server's verified name, the Host header's), or None."""
+        for name in names:
+            ecosystem = self.registries.get(name)
+            if ecosystem:
+                return ecosystem
+        return None
+
+    def malicious(self, ecosystem, name, version):
+        """The advisory that lists VERSION of NAME as malicious (a version that is not known: any of the name's)."""
+        for advisory, versions in self.lists.get(ecosystem, PackageList()).find(name):
+            if versions is None or version is None or version in versions:
+                return advisory if PACKAGE_ADVISORY.fullmatch(advisory) else "MAL-?"
+        return None
+
+    def read(self, found, status, pieces, size, headers):
+        """The registry answered the metadata request FOUND with STATUS and a body of SIZE bytes (PIECES, as sent: kept
+        only up to PACKAGE_METADATA_LIMIT): unpack it and keep what it says (learn), one answer at a time. What is
+        worth telling of it: learn's news, or {"unread": why} for a body the guard could not read."""
+        data = b""
+        if status == 200:
+            if size > PACKAGE_METADATA_LIMIT:
+                return {"unread": "larger than the guard reads"}
+            with self.parsing:
+                data = self.body(b"".join(pieces), headers)
+                del pieces[:]
+                if data is None:
+                    return {"unread": "an encoding the guard does not read"}
+                return self.learn(found, status, data, header(headers, "content-type") or "")
+        return self.learn(found, status, data, header(headers, "content-type") or "")
+
+    def learn(self, found, status, data, content_type=""):
+        """Keep what the registry's answer to the metadata request FOUND says (package_times); returns what is new
+        to tell: {"missing": True} the first time a name is not there, {"new_name_days": N} the first time a
+        package turns out younger than new_name_days, else {}."""
+        told = package_times(found, status, data, content_type)
+        if told is None:
+            return {}
+        key, now = (found["ecosystem"], found["name"]), self.clock()
+        with self.lock:
+            entry = self.known.pop(key, None) or {"versions": {}, "created": None, "missing": False, "told": set()}
+            self.versions -= len(entry["versions"])
+            if told["missing"]:
+                entry["missing"] = not entry["versions"]
+            else:
+                entry["missing"] = False
+                for version, when in told["versions"].items():
+                    if when is not None or version not in entry["versions"]:
+                        entry["versions"][version] = when
+                if told["created"] is not None:
+                    entry["created"] = told["created"] if entry["created"] is None else \
+                        min(entry["created"], told["created"])
+            self.known[key] = entry
+            self.versions += len(entry["versions"])
+            while len(self.known) > PACKAGE_NAMES or (self.versions > PACKAGE_VERSIONS and len(self.known) > 1):
+                _, dropped = self.known.popitem(last=False)
+                self.versions -= len(dropped["versions"])
+            news = {}
+            if entry["missing"] and "missing" not in entry["told"]:
+                entry["told"].add("missing")
+                news["missing"] = True
+            days = self.days(entry["created"], now)
+            if days is not None and days < self.new_name_days and "new" not in entry["told"]:
+                entry["told"].add("new")
+                news["new_name_days"] = days
+        return news
+
+    @staticmethod
+    def days(when, now):
+        """Whole days from WHEN to NOW (0 for a time ahead of this clock), or None."""
+        return None if when is None else max(0, int((now - when) // 86400))
+
+    def seen(self, ecosystem, name):
+        """The proxy read a metadata answer for NAME in this run already."""
+        with self.lock:
+            return (ecosystem, name) in self.known
+
+    def decide(self, package, settings):
+        """(decision, check, reason) of SETTINGS for the facts in PACKAGE (verdict): "allow", or the strictest of what
+        the checks that apply decide."""
+        ecosystem, name, version = package["ecosystem"], package["name"], package.get("version")
+        label = f"{ecosystem} {name}" + (f" {version}" if version else "")
+        advisory = package.get("malicious")
+        if advisory:
+            return settings["malicious"], "malicious", (f"package guard: {label} is a known malicious package "
+                                                        f"({advisory}, https://osv.dev/vulnerability/{advisory})")
+        if package.get("allowed"):
+            return "allow", None, None
+        findings, age, limit = [], package.get("age_days"), settings["min_age_days"]
+        if limit and age is not None and age < limit:
+            findings.append((settings["min_age"], "min-age",
+                             f"package guard: {label} was released {age} day{'' if age == 1 else 's'} ago (younger "
+                             f"than {limit} days)"))
+        if "new_name_days" in package:
+            days = package["new_name_days"]
+            findings.append((settings["new_names"], "new-name",
+                             f"package guard: the package {ecosystem} {name} is only {days} "
+                             f"day{'' if days == 1 else 's'} old (first released less than {self.new_name_days} days "
+                             "ago): possibly a hallucinated or slopsquatted name"))
+        if not findings:
+            return "allow", None, None
+        decision, check, reason = max(findings, key=lambda item: PACKAGE_DECISIONS.index(item[0]))
+        return decision, check, "; ".join([reason] + [text.removeprefix("package guard: ")
+                                                      for _, other, text in findings if other != check])
+
+    def verdict(self, found):
+        """{"decision": "allow" | "report" | "ask" | "deny" | "block", "check", "reason", "package", "audit"} for
+        the download FOUND. PACKAGE is what the record and the question show: {"ecosystem", "name", "version",
+        "age_days" (None: the proxy saw no date for it), "malicious" (the advisory), "new_name_days", "allowed"}.
+        AUDIT: what each audit ruleset's settings would decide beyond that ([{"would", "rule", "ruleset",
+        "reason"}])."""
+        ecosystem, name, version = found["ecosystem"], found["name"], found.get("version")
+        key = (ecosystem, name, version)
+        with self.lock:
+            if key in self.passed:
+                self.passed.move_to_end(key)
+                return self.passed[key]
+            entry = self.known.get((ecosystem, name))
+            released = entry["versions"].get(version) if entry and version else None
+            created = entry["created"] if entry else None
+            if entry:
+                self.known.move_to_end((ecosystem, name))
+        now = self.clock()
+        age, name_age = self.days(released, now), self.days(created, now)
+        package = {"ecosystem": ecosystem, "name": name, "version": version, "age_days": age}
+        advisory = self.malicious(ecosystem, name, version)
+        if advisory:
+            package["malicious"] = advisory
+        if name_age is not None and name_age < self.new_name_days:
+            package["new_name_days"] = name_age
+        if (ecosystem, name, None) in self.allowed or (version and key in self.allowed):
+            package["allowed"] = True
+        decision, check, reason = self.decide(package, self.settings)
+        verdict = {"decision": decision, "check": check, "reason": reason, "package": package, "audit": []}
+        order = ("allow", *PACKAGE_DECISIONS, "block")
+        for source in self.audits:
+            would, rule, why = self.decide(package, source["settings"])
+            if would != "allow" and order.index(would) > order.index(decision):
+                verdict["audit"].append({"would": would, "rule": f"(packages {rule})", "ruleset": source["name"],
+                                         "reason": why})
+        if decision == "allow" and not verdict["audit"] and (age is not None or package.get("allowed")):
+            # Old enough stays old enough, and the lists do not change during a run: not judged again.
+            with self.lock:
+                self.passed[key] = verdict
+                while len(self.passed) > 4096:
+                    self.passed.popitem(last=False)
+        return verdict
+
+    def forget(self):
+        """Drop the release dates kept (the memory guard's, under pressure): downloads are then judged by the
+        malicious lists alone until their metadata passes again."""
+        with self.lock:
+            self.known.clear()
+            self.passed.clear()
+            self.versions = 0
+
+    def metadata_head(self, head, found, headers):
+        """HEAD of the metadata request FOUND as it goes to the registry, so that the answer says release dates
+        and the proxy can read it: npm's abbreviated document has none, so the full one is asked for (the same
+        request, another Accept: nothing is looked up); an answer the proxy read no dates from yet is not asked for
+        conditionally (a 304 says nothing); the encoding is one the standard library decodes."""
+        if found["ecosystem"] == "npm" and self.full_metadata and \
+                "vnd.npm.install-v1" in (header(headers, "accept") or "").lower():
+            head = re.sub(rb"(?im)^accept[ \t]*:[^\r\n]*\r\n", b"", head)
+            head = head[:-2] + b"Accept: application/json\r\n\r\n"
+        if not self.seen(found["ecosystem"], found["name"]):
+            head = re.sub(rb"(?im)^(?:if-none-match|if-modified-since)[ \t]*:[^\r\n]*\r\n", b"", head)
+        offered = [token.split(";")[0].strip() for token in (header(headers, "accept-encoding") or "").lower().split(",")]
+        if any(token not in ("gzip", "identity", "deflate", "") for token in offered):
+            # br, zstd: asked for gzip instead where the client takes it, else for no encoding (every client does)
+            head = re.sub(rb"(?im)^accept-encoding[ \t]*:[^\r\n]*\r\n", b"", head)
+            head = head[:-2] + (b"Accept-Encoding: gzip\r\n\r\n" if "gzip" in offered
+                                else b"Accept-Encoding: identity\r\n\r\n")
+        return head
+
+    @staticmethod
+    def body(data, headers):
+        """The metadata answer DATA decoded (gzip, deflate), or None when its encoding is one the standard library
+        does not read or it unpacks to more than PACKAGE_UNPACKED_LIMIT."""
+        encoding = (header(headers, "content-encoding") or "identity").strip().lower()
+        if encoding in ("identity", ""):
+            return data
+        if encoding in ("gzip", "x-gzip", "deflate"):
+            with contextlib.suppress(zlib.error):
+                unpacker = zlib.decompressobj(47)
+                unpacked = unpacker.decompress(data, PACKAGE_UNPACKED_LIMIT)
+                return None if unpacker.unconsumed_tail else unpacked
+        return None
+
+
+# Connections the proxy serves at once (security review SAI-12). Each is a thread of the proxy, which shares the run's
+# process limit with the supervisor and the agent, and up to four descriptors; it may wait a second for its first
+# bytes, 30 s for its server, or for the human's answer. Every process of the sandbox can open them in a loop: one
+# more than this is reset at once - before a thread, a lookup or a question is made for it - and said in the
+# connection log at most every PROXY_REFUSED_SECONDS (with how many). Far above what an agent, a package manager and
+# a browser hold together.
+PROXY_CONNECTIONS = 512
+PROXY_REFUSED_SECONDS = 10
+
+
 class ProxyServer:
-    """Connections of one sandbox run; one thread per connection."""
+    """Connections of one sandbox run; one thread per connection, PROXY_CONNECTIONS at most."""
     traffic = None  # the LLM traffic log (LlmTraffic), when the run keeps one (proxy_main)
+    spend = None  # the run's spending and budgets (SpendMeter), when the launcher gave the proxy its prices
+    packages = None  # the package guard (PackageGuard), when the launcher's proxy.json has "packages"
+    secret_guard = None  # the secret guard (SecretGuard), when the launcher's proxy.json has "secrets"
 
     def __init__(self, config, log_fd, checker=None, run_dir=PROXY_RUN, destination=original_destination,
-                 upstream=None, asker=None, who=None, connect=None):
+                 upstream=None, asker=None, who=None, connect=None, package_lists=None):
         import ssl
         self.config, self.log_fd, self.checker, self.run_dir = config, log_fd, checker, run_dir
         # CONNECT ((address, port), timeout) -> socket: how the proxy reaches a destination (tests: somewhere else).
@@ -5689,6 +11903,8 @@ class ProxyServer:
         # (CHECKER_OWED of them) are read and dropped before the next request (under check_lock).
         self.checker_buffer, self.checker_owed = b"", 0
         self.counter, self.contexts, self.adverts, self.verified = 0, {}, {}, {}
+        # The connections served at once (PROXY_CONNECTIONS), and those refused beyond them since the log last said so.
+        self.slots, self.refused_many, self.refused_said = threading.BoundedSemaphore(PROXY_CONNECTIONS), 0, None
         self.allow_file = Path(config.get("allow_file", "")) if config.get("allow_file") else None
         self.allow_mtime = None
         system = run_dir / "system.pem"
@@ -5715,15 +11931,38 @@ class ProxyServer:
         # the proxy keeps its own.
         self.taint_file = Path(config["taint_file"]) if config.get("taint_file") else None
         self.taint_mtime, self.taint_state, self.local_taint = None, {"tainted": False}, None
+        # Which MCP servers publish resources, as the supervisor's MCP relay found (resources_file, its mirror, re-read
+        # on change): Codex's resource tools are left out of a local model's requests where none does.
+        self.resources_file = Path(config["resources_file"]) if config.get("resources_file") else None
+        self.resources_mtime, self.resources_state = None, None
+        # The package guard (--no-package-guard: no "packages"): PACKAGE_LISTS are the malicious packages, opened
+        # by proxy_main while it may still read the launcher's mount.
+        if isinstance(config.get("packages"), dict):
+            self.packages = PackageGuard(config["packages"], package_lists)
+        # The secret guard (no "secrets": a start without it): the values the run was given and the token shapes;
+        # values registered during the run come through a file in the proxy's own directory.
+        if isinstance(config.get("secrets"), dict):
+            self.secret_guard = SecretGuard(config["secrets"], added=os.path.join(os.fspath(run_dir), SECRET_ADDED))
 
     # -- bookkeeping --
 
     def log(self, record):
         record = self.resolve({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record})
-        line = json.dumps(record, ensure_ascii=False)
-        for value in self.own_secrets():
-            line = line.replace(value, "[redacted]")
-        line = (line + "\n").encode()
+        if self.config.get("connection_bodies") != "all":  # a download by its digest and first bytes
+            record = binary_answer(record)
+        secrets = self.logged_secrets()
+
+        def line_for(size):
+            # Under the file's lock: a body this part of the log holds already is written as a reference to it
+            # (logged_once); a size below the last one is a rotation (rotate_held_log): the new part holds none yet.
+            bodies = self.__dict__.setdefault("logged_bodies", {})
+            if size < getattr(self, "log_size", 0):
+                bodies.clear()
+            text = json.dumps(logged_once(record, bodies), ensure_ascii=False)
+            for value in secrets:
+                text = text.replace(value, "[redacted]")
+            return gap + (text + "\n").encode()
+        gap = b""
         with self.lock:
             # A record that cannot be written (the disk of the run's logs full, a quota) is counted and the
             # connection goes on: the log raised into the connection's thread, which then ended with a traceback
@@ -5731,20 +11970,22 @@ class ProxyServer:
             # stayed full. The first record written again says how many were lost.
             lost = getattr(self, "lost_records", 0)
             if lost:
-                gap = json.dumps({"time": record["time"], "event": "log-gap", "lost": lost,
-                                  "reason": "records not written (the disk was full or not writable)"})
-                line = (gap + "\n").encode() + line
+                gap = (json.dumps({"time": record["time"], "event": "log-gap", "lost": lost, "reason":
+                                   "records not written (the disk was full or not writable)"}) + "\n").encode()
             try:
-                view = memoryview(line)
-                while view:
-                    view = view[os.write(self.log_fd, view):]
+                # under the file's lock: the run's rotation of this log (rotate_held_log) empties it under it too
+                self.log_size = append_locked(self.log_fd, line_for)
                 self.lost_records = 0
             except OSError as exc:
                 self.lost_records = lost + 1
+                self.__dict__.get("logged_bodies", {}).clear()  # (what this record holds was not written)
                 if not lost:
                     with contextlib.suppress(Exception):
-                        print(f"agent-sandbox: the connection log cannot be written ({exc.strerror or exc}); "
-                              "records are counted until it can", file=sys.stderr, flush=True)
+                        where = filesystem_text(os.path.dirname(os.path.realpath(f"/proc/self/fd/{self.log_fd}"))) \
+                            if getattr(exc, "errno", None) in (errno.ENOSPC, errno.EDQUOT) else ""
+                        print(f"agent-sandbox: the connection log cannot be written ({exc.strerror or exc}"
+                              + (f"; {where}" if where else "") + "); records are counted until it can",
+                              file=sys.stderr, flush=True)
 
     def own_secrets(self):
         """The credentials the proxy adds itself (--llm keys and header secrets, --token-proxy tokens), longest first,
@@ -5758,16 +11999,25 @@ class ProxyServer:
             found = {form for value in values if isinstance(value, str) and len(value) >= 4
                      for form in (value, json.dumps(value, ensure_ascii=False)[1:-1])}
             self._own_secrets = sorted(found, key=len, reverse=True)
-        added = added_api_keys()
-        if not added:
+        added, logins = added_api_keys(), added_git_logins()
+        if not added and not logins:
             return self._own_secrets
-        # Given during the run: merged again only when the file changed (added_api_keys keeps its list until then).
+        # Given during the run: merged again only when a file changed (added_api_keys and added_git_logins keep
+        # their lists until then).
         cached = getattr(self, "_own_with_added", None)
-        if cached is None or cached[0] is not added:
-            extra = {form for entry in added for form in (entry["key"], json.dumps(entry["key"], ensure_ascii=False)[1:-1])
-                     if len(entry["key"]) >= 4}
-            self._own_with_added = cached = (added, sorted(set(self._own_secrets) | extra, key=len, reverse=True))
-        return cached[1]
+        if cached is None or cached[0] is not added or cached[1] is not logins:
+            values = [entry["key"] for entry in added] + [entry["token"] for entry in logins]
+            extra = {form for value in values for form in (value, json.dumps(value, ensure_ascii=False)[1:-1])
+                     if len(value) >= 4}
+            self._own_with_added = cached = (added, logins,
+                                             sorted(set(self._own_secrets) | extra, key=len, reverse=True))
+        return cached[2]
+
+    def logged_secrets(self):
+        """What no log of the proxy ever holds: own_secrets(), and every form of the values the run was given and
+        of what the secret guard found (SecretGuard.forms_text)."""
+        own = self.own_secrets()
+        return own if self.secret_guard is None else [*own, *self.secret_guard.forms_text()]
 
     def attribute(self, client):
         """The supervisor's lookup of the process behind CLIENT (Attribution), started now and read when a
@@ -5857,6 +12107,24 @@ class ProxyServer:
             return {"http_host": printable_text(self.http_host(first), 253),
                     "request_line": printable_text(redact_text(line), 500)}
         return {}
+
+    def mcp_resources(self):
+        """{server: True | False | None} of the MCP relay's mirror (resources_file): whether each server publishes
+        resources; None without the file or for one that cannot be read."""
+        if self.resources_file is None:
+            return None
+        try:
+            mtime = self.resources_file.stat().st_mtime_ns
+            if mtime != self.resources_mtime:
+                data = json.loads(self.resources_file.read_bytes()[:1 << 20])
+                servers = data.get("servers") if isinstance(data, dict) else None
+                self.resources_state = servers if isinstance(servers, dict) else None
+                self.resources_mtime = mtime
+        except FileNotFoundError:
+            self.resources_state, self.resources_mtime = None, None
+        except (OSError, ValueError, RecursionError):
+            self.resources_state = None
+        return self.resources_state
 
     def taint(self):
         """The run's taint state if it is tainted, else None."""
@@ -6056,11 +12324,40 @@ class ProxyServer:
             except OSError:
                 time.sleep(0.1)  # e.g. out of file descriptors: no busy loop
                 continue
+            if not self.slots.acquire(blocking=False):
+                self.refuse_many(client)
+                continue
             try:
-                threading.Thread(target=self.handle, args=(client,), daemon=True).start()
+                threading.Thread(target=self.served, args=(client,), daemon=True).start()
             except RuntimeError:  # no thread to be had (the sandbox's process limit): this connection only
+                self.slots.release()
                 client.close()
                 time.sleep(0.1)
+
+    def served(self, client):
+        """One connection (handle), holding one of the proxy's PROXY_CONNECTIONS until it is over."""
+        try:
+            self.handle(client)
+        finally:
+            self.slots.release()
+
+    def refuse_many(self, client, clock=time.monotonic):
+        """One connection more than PROXY_CONNECTIONS at once: reset right here, in the accepting thread (nothing is
+        allocated for it), and counted; the log says it at most every PROXY_REFUSED_SECONDS."""
+        with contextlib.suppress(OSError):
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        with contextlib.suppress(OSError):
+            client.close()
+        now = clock()
+        with self.lock:
+            self.refused_many += 1
+            if self.refused_said is not None and now - self.refused_said < PROXY_REFUSED_SECONDS:
+                return
+            count, self.refused_many, self.refused_said = self.refused_many, 0, now
+        with contextlib.suppress(Exception):  # (never the accept loop's end)
+            self.log({"event": "denied", "connections": count,
+                      "reason": f"more than {PROXY_CONNECTIONS} connections through the proxy at once: {count} "
+                                "refused (a process of the sandbox opens them faster than they end)"})
 
     def handle(self, client):
         with self.lock:
@@ -6102,7 +12399,11 @@ class ProxyServer:
                                 "protocol": protocol, **self.asked_by(record)}
                     answer = self.asker("connect", {**question, **({"host": name} if name else {})})
                     record["approval"] = approval_record(answer)
-                if not answer or answer.get("decision") != "allow" or not allowed_destination(self.allow(), address, port):
+                # Allowed for the run (or always): the destination is in the allow-list now. Allowed once: this
+                # connection passes on its own answer (once_allowed), and no other does.
+                if not answer or answer.get("decision") != "allow" or not (
+                        allowed_destination(self.allow(), address, port)
+                        or once_allowed(answer, self.allow(), address, port)):
                     self.refuse(client, {**record, **self.origin(first), "event": "denied",
                                          "reason": "not allowed by the network options"
                                          if not answer else not_approved(answer)},
@@ -6378,12 +12679,14 @@ class ProxyServer:
                   "ms": int((time.monotonic() - started) * 1000)})
 
     def git_token(self, scheme, origin, record, method, path, target, headers):
-        """The Basic credentials (bytes) the proxy adds to this request (--token-proxy, sandbox-ai git-logins), or
-        None: over HTTPS only to the server whose certificate was checked for the token's host (ORIGIN is that
+        """The Basic credentials (bytes) the proxy adds to this request (--token-proxy, sandbox-ai git-logins, a login
+        given during the run), or None: over HTTPS only to the server whose certificate was checked for the token's host (ORIGIN is that
         name); for a server on the host's loopback (plain http://localhost:PORT) only to the loopback port it was
         given for, which the sandbox reaches only as the host's (pasta, the relay); always on the token's port, for
         Git's smart HTTP requests, and never when the agent sends credentials of its own."""
-        tokens = self.config.get("git_tokens", [])
+        # A login given during the run (sandbox-ai git-logins give) before the start's: for a server both name, the
+        # given one is used (as a start's --git-token-* option wins over sandbox-ai git-logins).
+        tokens = added_git_logins() + self.config.get("git_tokens", [])
         if not tokens or header(headers, "authorization"):
             return None
         destination = str(record.get("destination", ""))
@@ -6460,24 +12763,92 @@ class ProxyServer:
                 return early, AMBIGUOUS
         return early, Ruleset.body(data, headers)
 
-    def http_ask(self, verdict, method, url, host, path, body, asked_by=None, exact=None):
+    def http_ask(self, verdict, method, url, host, path, body, asked_by=None, exact=None, more=None):
         """The human's answer to a request an ask rule holds (kind "http"); without approvals it is refused.
         ASKED_BY: the process and sandbox of the connection, shown in the question. EXACT: what else makes the
-        request this one (its target as sent, its Host header), for the digest beside URL and BODY."""
+        request this one (its target as sent, its Host header), for the digest beside URL and BODY. MORE: further
+        details of the question (the package guard's "package")."""
         if self.asker is None:
             return {"decision": "deny", "scope": "once", "reason": "asking is off (--ask off or no approvals)"}
         details = {"rule": verdict["rule"], "ruleset": verdict["ruleset"], "method": printable_text(method, 20),
                    "host": printable_text(host, 300), "path": printable_text(path, 2000),
                    "url": printable_text(url, 2000), "reason": printable_text(verdict["reason"], 1000),
-                   **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(asked_by or {})}
+                   **({"taint": verdict["taint"]} if verdict.get("taint") else {}), **(asked_by or {}),
+                   **(more or {})}
         if isinstance(body, (dict, list)):
-            details["body"] = printable_text(redact_text(json.dumps(shortened(body), default=repr)), 1000)
+            details["body"] = printable_text(redacted_json(shortened(body)), 1000)
         # The digest of exactly this request (keyed: nobody can test guesses against a question's file): a request
         # with another query or body made while this one is asked gets a question of its own, never this answer.
         salt = self.__dict__.setdefault("ask_salt", secrets.token_bytes(32))
         exact_text = json.dumps([method, url, host, path, body, exact], ensure_ascii=True, default=repr).encode()
         details["call_digest"] = hashlib.blake2b(exact_text, key=salt, digest_size=16).hexdigest()
         return self.asker("http", details)
+
+    def package_found(self, origin, headers, method, target):
+        """What the request METHOD TARGET asks a package registry for (package_request), None for any other request.
+        The registry is told by every name the request could reach: the server's verified name (ORIGIN) and the Host
+        header (a front end routes by it: an allowed host on the same one is no way to a registry past the guard).
+        A path that servers read differently (a dot segment) names no package the guard could tell: {"kind":
+        "ambiguous"}, refused."""
+        if method.upper() != "GET":
+            return None
+        claimed = host_name(header(headers, "host"))
+        names = ([] if is_address_origin(origin) else [Ruleset.name(origin)]) + \
+            ([Ruleset.name(claimed)] if claimed else [])
+        ecosystem = self.packages.ecosystem(names)
+        if ecosystem is None:
+            return None
+        if ambiguous_path(target):
+            return {"ecosystem": ecosystem, "kind": "ambiguous", "name": None, "version": None}
+        return package_request(ecosystem, normal_path(target))
+
+    def package_gate(self, found, method, url, host, path, entry, asked_by=None, exact=None):
+        """Why the package guard refuses the request FOUND (package_found), or None: it passes. A download is judged
+        (PackageGuard.verdict) and ENTRY, its record, gets "package"; what is held for a question waits for the
+        human's answer here. A known malicious version is refused unless the human allows that one download once."""
+        if found["kind"] == "ambiguous":
+            entry.update(package={"ecosystem": found["ecosystem"]}, decision="deny", rule="ambiguous-path",
+                         ruleset=PACKAGE_RULESET)
+            return ("package guard: a path on a package registry that servers read differently (a dot segment); "
+                    "which package it names cannot be told, so it stays refused")
+        if found["kind"] != "download":
+            return None
+        verdict = self.packages.verdict(found)
+        package, decision, check = dict(verdict["package"]), verdict["decision"], verdict["check"]
+        entry["package"] = package
+        if verdict["audit"]:
+            entry["audit"] = [*entry.get("audit", []), *verdict["audit"]]
+        if decision == "allow":
+            return None
+        if decision == "report":
+            package["reported"] = check
+            return None
+        spec = f"{package['ecosystem']}:{package['name']}" + (f"@{package['version']}" if package["version"] else "")
+        malicious = check == "malicious"
+        how = ("a known malicious version is never allowed by a list or for a run: only your answer to its "
+               "question allows this one download" if malicious else
+               f"to allow it in every run of the project: sandbox-ai packages allow {spec}")
+        entry.update(decision="deny" if decision in ("deny", "block") else "ask", rule=check, ruleset=PACKAGE_RULESET)
+        if decision == "block" or (decision == "deny" and not malicious):
+            return f"{verdict['reason']}; {how}" if decision == "deny" else verdict["reason"]
+        shown = {key: printable_text(str(value), 300) if isinstance(value, str) else value
+                 for key, value in package.items()}
+        answer = self.http_ask({"rule": check, "ruleset": PACKAGE_RULESET, "reason": verdict["reason"]}, method, url,
+                               host, path, None, asked_by, exact,
+                               more={"package": {**shown, **({} if malicious else {"allow": f"sandbox-ai packages allow {spec}"})}})
+        entry["approval"] = approval_record(answer)
+        if answer.get("decision") == "allow":
+            return None
+        return f"{not_approved(answer, verdict['reason'])}; {how}"
+
+    def package_learned(self, found, status, pieces, size, reply_headers, entry):
+        """The registry answered the metadata request FOUND (PIECES of SIZE bytes, read as they passed): its release
+        dates are kept for the downloads that follow, and ENTRY, its record, says what is worth telling - a name the
+        registry does not know, a package younger than the guard's new_name_days, an answer that could not be read."""
+        news = self.packages.read(found, status, pieces, size, reply_headers)
+        if news:
+            entry["package"] = {"ecosystem": found["ecosystem"], "name": found["name"],
+                                "metadata": found.get("form"), **news}
 
     @staticmethod
     def next_request_or_upstream_gone(stream, client, replies, upstream, timeout=None):
@@ -6606,9 +12977,11 @@ class ProxyServer:
                         head = self.continued(client, head, headers)
                         parts = stream.body(framing)
                         early, facts["body"] = self.http_rule_body(parts, headers)
+                        facts["body_read"] = True
                         parts = itertools.chain(early, parts)
                     ruled = self.rules.http(facts)
-                    entry.update(decision=ruled["decision"], rule=ruled["rule"], ruleset=ruled["ruleset"])
+                    entry.update(decision=ruled["decision"], rule=ruled["rule"], ruleset=ruled["ruleset"],
+                                 **Ruleset.audited(ruled))
                     refusal = ruled["reason"] if ruled["decision"] == "deny" else None
                     if ruled["decision"] == "ask":
                         answer = self.http_ask(ruled, method, redact_text(url), authority,
@@ -6628,6 +13001,24 @@ class ProxyServer:
                         self.log({**entry, "event": "denied", "reason": refusal, "request": request})
                         current.pop("entry", None)
                         return
+                found = self.package_found(origin, headers, method, target) if self.packages is not None else None
+                if found is not None:
+                    # The package guard: a download is judged before anything goes to the registry.
+                    refusal = self.package_gate(found, method, redact_text(url), authority, path or "/", entry,
+                                                {**self.asked_by(record), **({"host_header": claim} if claim else {})},
+                                                exact=[target, header(headers, "host")])
+                    if refusal:
+                        message = f"sandbox-ai: {refusal}\n".encode()
+                        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                                 + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
+                        self.log({**entry, "event": "denied", "reason": refusal,
+                                  "request": {"headers": redact_headers(headers)}})
+                        current.pop("entry", None)
+                        return
+                    if found["kind"] == "metadata":
+                        head = self.packages.metadata_head(head, found, headers)
+                    else:
+                        found = None
                 if parts is None:
                     framing = request_framing(headers)
                     head = self.continued(client, head, headers)
@@ -6663,28 +13054,48 @@ class ProxyServer:
                 llm_target = llm_endpoint(self.config.get("llm"), scheme, origin, port, path, target) \
                     if method.upper() == "POST" else None
                 llm_kind = llm_api(path) if llm_target is not None else None
-                stream_guard, hold = None, None
+                stream_guard, hold, tool_answer = None, None, None
                 # The LLM traffic log (--llm-traffic): this request and its answer, recorded once it ends.
                 wanted = self.traffic.wants(llm_kind is not None, method, path) if self.traffic is not None else None
                 done = {}
+                if not llm_kind and method.upper() not in ("GET", "HEAD", "OPTIONS"):
+                    # Any other request with a body to the server (its native APIs: Ollama's /api/generate, LM
+                    # Studio's /api/v1/chat and /models/load ...) is held to the models the start offers as well.
+                    limited = llm_target or llm_endpoint(self.config.get("llm"), scheme, origin, port, path, target,
+                                                         anywhere=True)
+                    if limited is not None:
+                        head, parts, done = llm_limited_body(head, parts, headers, limited)
                 if llm_kind:
                     turns = self.__dict__.setdefault("llm_turns", LlmTurns())
                     head, parts, done = llm_body(head, parts, headers, llm_target, llm_kind, turns,
-                                                 keep=wanted is not None)
+                                                 keep=wanted is not None, resources=self.mcp_resources())
                     if done.get("model"):
                         entry["llm_model"] = done["model"]  # which model of the server (the agent may switch)
-                    if done.get("refused"):
-                        # A model the start does not offer (--llm-models): an error in the APIs' own shape (OpenAI's
-                        # and Anthropic's clients both read error.message), nothing goes to the server.
-                        message = json.dumps({"type": "error", "error": {
-                            "type": "invalid_request_error", "code": "model_not_offered",
-                            "message": f"sandbox-ai: {done['refused']}"}}).encode()
-                        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
-                                 b"Connection: close\r\n" + b"Content-Length: %d\r\n\r\n" % len(message) + message)
-                        self.log({**entry, "event": "denied", "reason": done["refused"], "rule": "(llm-models)",
-                                  "request": {"headers": redact_headers(headers)}})
-                        current.pop("entry", None)
-                        return
+                if done.get("refused"):
+                    # A model the start does not offer (--llm-models): an error in the APIs' own shape (OpenAI's
+                    # and Anthropic's clients both read error.message), nothing goes to the server.
+                    message = json.dumps({"type": "error", "error": {
+                        "type": "invalid_request_error", "code": "model_not_offered",
+                        "message": f"sandbox-ai: {done['refused']}"}}).encode()
+                    send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+                             b"Connection: close\r\n" + b"Content-Length: %d\r\n\r\n" % len(message) + message)
+                    self.log({**entry, "event": "denied", "reason": done["refused"], "rule": "(llm-models)",
+                              "request": {"headers": redact_headers(headers)}})
+                    current.pop("entry", None)
+                    return
+                if done.get("title"):
+                    # OpenCode's title request (llm_title_request): the start's name, in the model's place.
+                    answer = llm_stop_answer("chat", done.get("model") or "", done["title"], done.get("stream"))
+                    send_all(client, b"HTTP/1.1 200 OK\r\nContent-Type: " +
+                             (b"text/event-stream\r\nCache-Control: no-cache" if done.get("stream")
+                              else b"application/json") +
+                             b"\r\nConnection: close\r\nContent-Length: %d\r\n\r\n" % len(answer) + answer)
+                    entry.update(status=200, llm_title=done["title"], request={"headers": redact_headers(headers)},
+                                 bytes_in=len(answer), ms=int((time.monotonic() - started) * 1000))
+                    self.log(entry)
+                    current.pop("entry", None)
+                    return
+                if llm_kind:
                     if done.get("params"):
                         entry["llm_params"] = done["params"]
                     if done.get("boost"):
@@ -6700,6 +13111,41 @@ class ProxyServer:
                     elif loop.get("enabled", True) and loop.get("text"):
                         stream_guard = LlmStreamGuard(llm_kind, loop["text"])
                         head = identity_head(head)  # the guard reads the answer as it comes
+                    tools = done.get("tools") or {}
+                    if tools:
+                        entry["llm_tools"] = {key: value for key, value in tools.items() if key != "names"}
+                    if tools.get("names") or tools.get("plain"):
+                        # the model's calls get the agent's names back, and lose the parameters that were not offered
+                        tool_answer = LlmToolAnswer(tools.get("names"), tools.get("plain"))
+                        head = identity_head(head)
+                    elif done.get("structured"):
+                        # structured output of a thinking model: the JSON it gave as reasoning becomes the answer
+                        tool_answer = LlmStructuredAnswer()
+                        head = identity_head(head)
+                    elif llm_kind == "messages" and (llm_target.get("kind") in LLM_USAGE_KINDS or tools.get("hidden")):
+                        # the answer's usage as the Messages API defines it (the cached tokens counted once), and a
+                        # call of a tool left out of Claude Code's (llm_hide_tools) under a name it does not know
+                        tool_answer = LlmUsageAnswer(llm_target.get("kind") in LLM_USAGE_KINDS, tools.get("hidden"))
+                        head = identity_head(head)
+                rejected = None
+                tries = (llm_target.get("loop") or {}).get("rejected", 0) if llm_kind else 0
+                if tries and done.get("digest") and (llm_target.get("loop") or {}).get("enabled", True):
+                    # The loop guard's "rejected" layer: the very same request the server rejected TRIES times
+                    # (LlmRejected) is answered here, never sent again.
+                    rejected = f"{llm_target.get('name')}\0{path}\0{done['digest']}"
+                    memory = self.__dict__.setdefault("llm_rejected", LlmRejected())
+                    refusal = memory.refusal(rejected, tries)
+                    if refusal:
+                        reply, text = llm_rejected_reply(refusal["count"], refusal["status"])
+                        send_all(client, reply)
+                        entry.update(status=refusal["status"], request={"headers": redact_headers(headers)},
+                                     llm_loop={"action": "refused", "kind": "rejected", "count": refusal["count"],
+                                               "status": refusal["status"], "detail": refusal["detail"],
+                                               "endpoint": llm_target.get("name")},
+                                     ms=int((time.monotonic() - started) * 1000))
+                        self.log(entry)
+                        current.pop("entry", None)
+                        return
                 if wanted:
                     current["traffic"] = self.traffic_item(wanted, llm_target, llm_kind or llm_api(path), origin,
                                                            url, headers, done, started)
@@ -6726,9 +13172,46 @@ class ProxyServer:
                               "request": {"headers": redact_headers(headers)}})
                     current.pop("entry", None)
                     return
+                billing = None
+                if self.spend is not None and (method.upper() == "POST" and (is_model_request(path) or llm_target)
+                                               or (method.upper() == "POST" or websocket) and spend_host(origin)):
+                    # The budgets: checked before a request goes out, never during its answer. Once one is used
+                    # up, every request to a provider billed per token is held back - its batches, embeddings and
+                    # WebSockets too (a model WebSocket's turns are priced as they pass: WebSocketUsage; the others
+                    # are not): no way around the budget.
+                    billing = spend_billing(origin, path, head, llm_target)
+                    refused = self.spend.refusal(billing)
+                    if refused:
+                        send_all(client, spend_refusal_reply(llm_api(path), refused))
+                        for name in ("token_added", "llm", "api_keys"):
+                            entry.pop(name, None)  # nothing went out
+                        self.log({**entry, "event": "denied", "reason": refused, "rule": "(budget)",
+                                  "request": {"headers": redact_headers(headers)}})
+                        current.pop("entry", None)
+                        return
+                if billing == "api" and self.spend.budgets and method.upper() == "POST" and llm_api(path) == "chat":
+                    # A streamed answer says its usage only when asked (stream_options.include_usage): under a
+                    # budget every streamed Chat Completions request asks, or it would never be counted.
+                    head, parts, asked = spend_include_usage(head, parts, headers)
+                    if asked:
+                        entry["spend_include_usage"] = True
                 added = bool(entry.get("token_added") or llm or keys)
-                if added:
+                if added or billing is not None:
+                    # (a request the meter counts too: its usage is read from the answer, which an encoding the
+                    # agent asked for - br, zstd - would hide; no budget would ever be used up)
                     head = identity_head(head)
+                ws_usage = None
+                if websocket and billing is not None:
+                    # A WebSocket to a model provider (the Responses API's: Codex's turns; any path - one the
+                    # model paths do not name is no way around the count): each answer's usage is read from the
+                    # server's frames as they pass (WebSocketUsage) - uncompressed, so the offer of
+                    # permessage-deflate is taken off (an extension both sides may go without).
+                    head = re.sub(rb"(?im)^sec-websocket-extensions[ \t]*:[^\r\n]*\r\n", b"", head)
+                    ws_usage = WebSocketUsage(self.spend, origin, billing, llm_api(path), llm_target)
+                if self.secret_guard is not None:
+                    # The secret guard: the request as the agent sent it, searched before or while it goes out.
+                    parts = secret_request(self, current, target, headers, parts, entry, record, origin, method,
+                                           authority, path, claim)
                 send_all(upstream, head)
                 sent = len(head)
                 for raw in pending:
@@ -6746,10 +13229,14 @@ class ProxyServer:
                         traffic["total"] += len(payload)
                 entry["request"] = {"headers": redact_headers(headers),
                                     "body": body_record(captured.data, captured.total, headers, limit)}
+                if llm_target is not None:
+                    # The server works on it now: an agent that goes meanwhile ends it there (LlmClientWatch).
+                    current["watch"] = LlmClientWatch(client, upstream)
                 while True:
                     reply = replies.head()
                     if reply is None:
                         entry.update(error="the server closed the connection without an answer")
+                        self.llm_unwatch(current, entry)
                         self.traffic_submit(current, entry)
                         self.log(entry)
                         current.pop("entry", None)
@@ -6774,6 +13261,9 @@ class ProxyServer:
                         reply = Scrubber(s.encode("latin-1", "replace") for s in self.own_secrets()).mask(reply)
                     if hold and status == 200:
                         break  # the head waits for the whole answer (below)
+                    if tool_answer is not None and status == 200 and \
+                            (response_framing(method, status, reply_headers) or ("",))[0] == "length":
+                        break  # one JSON document: its head waits for its length after the rewrite (below)
                     send_all(client, reply)
                     if 100 <= status < 200 and status != 101:
                         continue
@@ -6792,6 +13282,26 @@ class ProxyServer:
                 received = len(reply)
                 closing = response_framing(method, status, reply_headers)
                 pieces = replies.body(closing)
+                if tool_answer is not None and status == 200 and closing:
+                    plain = (header(reply_headers, "content-encoding") or "identity").lower() == "identity"
+                    if closing[0] != "length":
+                        if plain:
+                            pieces = llm_tool_pieces(pieces, tool_answer, closing[0] == "chunked")
+                    else:
+                        if plain and closing[1] <= LLM_BODY_LIMIT:
+                            data = tool_answer.whole(b"".join(payload for _, payload in pieces))
+                            lines = [part for part in reply[:-4].split(b"\r\n")
+                                     if part.split(b":", 1)[0].strip().lower() != b"content-length"]
+                            reply = b"\r\n".join(lines + [b"Content-Length: %d" % len(data)]) + b"\r\n\r\n"
+                            pieces = iter([(data, data)])
+                        if not hold:
+                            send_all(client, reply)  # (with hold it goes below, with the answer or the relay's own)
+                # A registry's metadata answer: read for release dates as it passes (the package guard) - unless
+                # as many as the guard keeps at once are passing already (PACKAGE_READING).
+                learning, learned = None, 0
+                if found is not None and status in (200, 404, 410) and self.packages.reading.acquire(blocking=False):
+                    learning, current["reading"] = [], True
+                scrubber = None
                 if added:
                     encoding = (header(reply_headers, "content-encoding") or "identity").lower()
                     if encoding != "identity":
@@ -6807,6 +13317,21 @@ class ProxyServer:
                     stream_guard = None
                 if stream_guard is not None and chunked and not added:
                     pieces = whole_chunks(pieces)  # a cut comes between two chunks, never inside one
+                beats = llm_target.get("keepalive") if llm_kind and llm_target is not None else None
+                if isinstance(beats, (int, float)) and not isinstance(beats, bool) and beats > 0 and status == 200 \
+                        and chunked and not hold \
+                        and "text/event-stream" in (header(reply_headers, "content-type") or "").lower() \
+                        and (header(reply_headers, "content-encoding") or "identity").lower() == "identity":
+                    # A model server of your own that is silent (it reads the prompt): the agent gets a keep-alive
+                    # every BEATS seconds, as a chunk of its own between two events (llm_kept_alive). The scrubber
+                    # of the run's credentials keeps the answer's last bytes back until the next piece: they go out
+                    # before a beat (at the end of an event no secret can be half through - unless one has a line
+                    # break in it: no beats then).
+                    if scrubber is None:
+                        pieces = llm_kept_alive(whole_chunks(pieces), replies, beats, llm_beat(llm_kind))
+                    elif not any(b"\n" in secret for secret in scrubber.secrets):
+                        pieces = llm_kept_alive(pieces, replies, beats, llm_beat(llm_kind),
+                                                scrubber.flush if scrubber.keep else None)
                 cut, replaced = None, None
                 if hold and status == 200:
                     # The loop guard's block step: the model was told to stop calling tools (the note). Its whole
@@ -6830,10 +13355,19 @@ class ProxyServer:
                     else:
                         pieces = iter(held)  # read for the records, never passed on
                 for raw, payload in pieces:
+                    if payload is None:  # the proxy's own keep-alive (llm_kept_alive): no byte of the server's
+                        send_all(client, raw)
+                        continue
                     if replaced is None:
                         send_all(client, raw)
                     received += len(raw)
                     answer.add(payload)
+                    if learning is not None:
+                        learned += len(payload)
+                        if learned <= PACKAGE_METADATA_LIMIT and status == 200:
+                            learning.append(payload)
+                        else:
+                            learning.clear()  # (more than the guard reads, or a 404's page: not kept)
                     if answer_read is not None:
                         answer_read.feed(payload)
                     if stream_guard is not None and payload and stream_guard.feed(payload):
@@ -6863,6 +13397,12 @@ class ProxyServer:
                              (b"Connection: close\r\n" if closes else b"") + b"\r\n" + replaced)
                     entry["llm_loop"] = {**entry.get("llm_loop", {}), "ended": "the model called a tool again: "
                                          "sandbox-ai answered in its place and the turn ended"}
+                if learning is not None:
+                    with contextlib.suppress(Exception):  # reading the dates never fails the request
+                        self.package_learned(found, status, learning, learned, reply_headers, entry)
+                    learning = None
+                    if current.pop("reading", None):
+                        self.packages.reading.release()
                 if advert and status == 200:
                     with self.lock:
                         self.adverts[key] = advertised_refs(self.decoded(answer.data, reply_headers))
@@ -6871,9 +13411,31 @@ class ProxyServer:
                 model = usage.result() if usage is not None else None
                 if model:
                     entry["model"] = model
+                    if billing is not None:
+                        with contextlib.suppress(Exception):  # the count never fails the request
+                            api = llm_api(path)
+                            model_name = model.get("model") or done.get("model")
+                            named = None if model_name else SPEND_REQUEST_MODEL.match(captured.data[:4096])
+                            if named:  # an answer that names none (the compaction's): the request's top-level one
+                                model_name = named[1].decode()
+                            spent = self.spend.record(spend_provider(origin, model_name, self.spend.prices,
+                                                                     llm_target),
+                                                      model_name, billing, api, model.get("usage"),
+                                                      llm_target.get("name") if llm_target else None)
+                            entry["spend"] = {"usd": spent.get("usd"), "billing": billing}
+                if isinstance(tool_answer, LlmUsageAnswer) and tool_answer.changed:
+                    entry["llm_usage"] = {"cached_tokens_out_of_input_tokens": tool_answer.changed}
+                if isinstance(tool_answer, LlmStructuredAnswer) and tool_answer.changed:
+                    entry["llm_structured"] = {"reasoning_as_content": tool_answer.changed}
                 credentials = credential_headers(headers)
                 if credentials:
                     entry["credentials"] = credentials
+                self.llm_unwatch(current, entry, complete=True)
+                if rejected is not None and status in LLM_REJECTED_STATUSES and status not in LLM_REJECTED_RETRIED:
+                    self.__dict__.setdefault("llm_rejected", LlmRejected()).failed(
+                        rejected, status, LlmRejected.detail(self.decoded(answer.data, reply_headers)))
+                elif rejected is not None and 200 <= status < 300:
+                    self.__dict__.setdefault("llm_rejected", LlmRejected()).passed(rejected)
                 entry.update(status=status, response={"headers": redact_headers(reply_headers),
                                                       "body": body_record(answer.data[:limit], answer.total,
                                                                           reply_headers, limit)},
@@ -6887,11 +13449,16 @@ class ProxyServer:
                     counts = [len(stream.buffer), len(replies.buffer)]
                     if stream.buffer:
                         send_all(upstream, stream.buffer)
+                    used_up = False
                     if replies.buffer:
                         send_all(client, replies.buffer)
-                    relay(client, upstream, counts)
+                        used_up = ws_usage is not None and ws_usage.feed(replies.buffer)
+                    if not used_up:
+                        relay(client, upstream, counts, watch=ws_usage.feed if ws_usage is not None else None)
                     self.log({**record, "event": "upgraded", "url": entry["url"], "bytes_out": counts[0],
-                              "bytes_in": counts[1]})
+                              "bytes_in": counts[1],
+                              **({"model_requests": ws_usage.count} if ws_usage is not None and ws_usage.count
+                                 else {})})
                     return
                 wants_close = any((header(h, "connection") or "").lower() == "close" for h in (headers, reply_headers))
                 if wants_close or (closing and closing[0] == "close") or line.endswith("HTTP/1.0"):
@@ -6899,15 +13466,39 @@ class ProxyServer:
             except CanaryRefused as refused:
                 canary_refusal(self, client, refused, current.get("entry") or record)
                 return
-            except OSError as exc:
+            except SecretRefused as refused:
+                secret_refusal(self, client, refused, current.get("entry") or record, headers)
+                return
+            except (OSError, ValueError) as exc:
+                secret_flush(current)  # (what went out of a body that broke off is searched before its record)
                 # The request went out: it is logged even if a side breaks the connection afterwards (a client
-                # that closes once it has what it wanted), never only as a bare error.
-                if current.get("entry") is not None:
+                # that closes once it has what it wanted), never only as a bare error - nor when the agent went
+                # away and the relay ended the server's answer (LlmClientWatch: its read then ends mid-answer).
+                watch = current.get("watch")
+                if current.get("entry") is not None and (isinstance(exc, OSError) or (watch and watch.fired)):
                     current["entry"].setdefault("error", f"{type(exc).__name__}: {exc}")
+                    self.llm_unwatch(current, current["entry"])
                     self.traffic_submit(current, current["entry"])
                     self.log(current["entry"])
                     return
+                if watch is not None:
+                    watch.stop()
                 raise
+            finally:
+                if current.pop("reading", None):  # (a metadata answer that broke off: its place is free again)
+                    self.packages.reading.release()
+
+    @staticmethod
+    def llm_unwatch(current, entry, complete=False):
+        """The watch of CURRENT's request (LlmClientWatch) ended; if the agent had gone before the answer was COMPLETE
+        and the server's connection was closed for it, ENTRY says so ("llm_cancelled")."""
+        watch = current.pop("watch", None)
+        if watch is None:
+            return
+        watch.stop()
+        if watch.fired and not complete:
+            entry["llm_cancelled"] = (f"the agent closed its connection after {watch.seconds()} s: sandbox-ai closed "
+                                      "the server's at once, which cancelled the answer")
 
     def traffic_item(self, source, target, api, origin, url, headers, done, started):
         """The LLM traffic log's start of an exchange (LlmTraffic.record): what is known before it goes upstream. The
@@ -6918,6 +13509,7 @@ class ProxyServer:
                 "source": source, "endpoint": target.get("name") if isinstance(target, dict) else None,
                 "host": origin, "url": redact_text(url), "api": api, "started": started}
         done = dict(done or {})
+        done.pop("digest", None)
         document, before = done.pop("document", None), done.pop("before", None)
         item["size"] = done.pop("size", 0)
         item["done"] = done
@@ -7075,14 +13667,22 @@ class ProxyServer:
         return line + b"\n"
 
 
-def drop_to_proxy_user():
-    """No capabilities, groups or privilege gain from here on: the proxy reads what agents send."""
+def drop_to_proxy_user(settings=None):
+    """No capabilities, groups or privilege gain from here on: the proxy reads what agents send. The bounding set
+    goes first (while this process may still drop it), then the groups and the user - which empties the other
+    sets -, its memory is no other process's to read, and it gets the filter of a sandbox's processes
+    (proxy_confined; SETTINGS: isolation_settings, read while the session's configuration can still be read)."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    for capability in range(64):  # PR_CAPBSET_DROP (not taken above the kernel's last capability, nor without
+        libc.prctl(24, capability, 0, 0, 0)  # CAP_SETPCAP: proxy_confined looks at what is left)
     os.setgroups([])
     os.setresgid(PROXY_UID, PROXY_UID, PROXY_UID)
     os.setresuid(PROXY_UID, PROXY_UID, PROXY_UID)
-    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE: the session CA's key is in this process's memory
     if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS
         raise OSError(ctypes.get_errno(), "Cannot set no_new_privs for the proxy")
+    if SANDBOX_PROCESS:
+        proxy_confined(settings if settings is not None else isolation_settings({}))
 
 
 def proxy_listeners(port=PROXY_PORT):
@@ -7141,20 +13741,33 @@ def proxy_main(log_fd, ready_fd, ask_fd=None, asking=True):
     allow.chmod(0o644)
     config["allow_file"] = str(allow)
     config["taint_file"] = str(PROXY_RUN / "taint.json")  # written by the supervisor (Taint)
+    config["resources_file"] = str(PROXY_RUN / LLM_RESOURCES_MIRROR)  # written by the supervisor (McpRelays)
     config["rules_file"] = str(PROXY_RUN / RELOADED_RULES)  # written by the supervisor (RunRules)
     for root, dirs, files in os.walk(PROXY_RUN):
         for name in [*dirs, *files]:
             os.chown(os.path.join(root, name), PROXY_UID, PROXY_UID)
     os.chown(PROXY_RUN, PROXY_UID, PROXY_UID)
-    drop_to_proxy_user()
+    # The package guard's lists of malicious packages (the launcher's read-only mount): opened here, while this
+    # process may read them; mapped, so they cost the proxy no memory of its own.
+    package_lists = open_package_lists() if isinstance(config.get("packages"), dict) else None
+    drop_to_proxy_user(isolation_settings())
     if stdin_is_pipe():  # started by the supervisor (start_proxy), which stops it by closing the pipe
         threading.Thread(target=exit_on_eof, args=(sys.stdin.buffer,), daemon=True).start()
-    channel = AskChannel(socket.socket(fileno=ask_fd)) if ask_fd is not None else None
-    server = ProxyServer(config, log_fd, checker, run_dir=PROXY_RUN, asker=channel if asking else None, who=channel)
+    waits = config.get("ask_timeout")  # (--ask-timeout: the supervisor's question waits this long)
+    waits = waits if isinstance(waits, int) and not isinstance(waits, bool) and 0 < waits <= ASK_TIMEOUT_RANGE[1] \
+        else APPROVAL_SECONDS
+    channel = AskChannel(socket.socket(fileno=ask_fd), timeout=waits + 10) if ask_fd is not None else None
+    server = ProxyServer(config, log_fd, checker, run_dir=PROXY_RUN, asker=channel if asking else None, who=channel,
+                         package_lists=package_lists)
     traffic_fd = os.environ.get(LLM_TRAFFIC_ENV, "")
     if isinstance(config.get("traffic"), dict) and traffic_fd.isdigit():
         # The LLM traffic log: records go to the supervisor over this pipe (it writes the log directory).
-        server.traffic = LlmTraffic(config["traffic"], int(traffic_fd), server.own_secrets)
+        server.traffic = LlmTraffic(config["traffic"], int(traffic_fd), server.logged_secrets)
+    spend_fd = os.environ.get(SPEND_ENV, "")
+    if isinstance(config.get("spend"), dict):
+        # What the run's model requests cost, its budgets; the log goes to the supervisor's descriptor.
+        server.spend = SpendMeter(config["spend"], int(spend_fd) if spend_fd.isdigit() else None,
+                                  PROXY_RUN / SPEND_CONTROL)
     server.serve(listeners)
     # Freed memory back to the system every half minute, its TLS contexts dropped if it grows large anyway (the
     # supervisor's guard; no records: this user writes no control directory).
@@ -7177,20 +13790,23 @@ def start_proxy(cfg, broker=None, who=None, taint=None):
     ready_r, ready_w = os.pipe()
     mine, theirs = socket.socketpair() if broker is not None or who is not None or taint is not None else (None, None)
     traffic = start_traffic_log(cfg)
+    spend = open_spend_log(cfg)
     try:
         ask = [str(theirs.fileno()), *([] if broker is not None else ["--no-ask"])] if theirs else []
-        env = {**base_env(), **({LLM_TRAFFIC_ENV: str(traffic)} if traffic is not None else {})}
+        env = {**base_env(), **({LLM_TRAFFIC_ENV: str(traffic)} if traffic is not None else {}),
+               **({SPEND_ENV: str(spend)} if spend is not None else {})}
         # stdin is how the proxy is stopped: it runs as its own user, which the supervisor may not signal
         # (Podman gives it no CAP_KILL); it exits when the pipe closes.
         process = subprocess.Popen([*SUPERVISOR_PYTHON, "/sandbox/runtime.py", "--internal-proxy", str(log_fd),
                                     str(ready_w), *ask],
                                    pass_fds=(log_fd, ready_w, *([theirs.fileno()] if theirs else []),
-                                             *([traffic] if traffic is not None else [])),
+                                             *([traffic] if traffic is not None else []),
+                                             *([spend] if spend is not None else [])),
                                    env=env, stdin=subprocess.PIPE)
         os.close(ready_w)
         ready_w = -1
         deadline = time.monotonic() + 30
-        while not select.select([ready_r], [], [], 0.2)[0]:
+        while not wait_ready([ready_r], (), 0.2)[0]:
             if process.poll() is not None or time.monotonic() > deadline:
                 stop_process(process)
                 raise RuntimeError("The connection proxy did not start (see its error above)")
@@ -7206,10 +13822,29 @@ def start_proxy(cfg, broker=None, who=None, taint=None):
             theirs.close()
         if traffic is not None:
             os.close(traffic)  # the proxy's end: the supervisor's writer reads until the proxy closes it
+        if spend is not None:
+            os.close(spend)
     if mine is not None:
         threading.Thread(target=serve_asks, args=(mine, broker, who, taint), daemon=True).start()
     trust_session_ca()
     return process
+
+
+def open_spend_log(cfg, directory=None):
+    """The spend log of the run (CFG["spend"]: spend-TIME-RUN.jsonl in the log directory), opened for the proxy to
+    append to (a descriptor; None: no such log, or no log directory). Never fails the start."""
+    name = cfg.get("spend") if isinstance(cfg, dict) else None
+    directory = Path(directory) if directory is not None else LOG_DIR
+    if not isinstance(name, str) or not re.fullmatch(r"spend-[A-Za-z0-9._-]{1,200}\.jsonl", name) or \
+            not directory.is_dir():
+        return None
+    try:
+        fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        print(f"agent-sandbox: no spend log this run: {exc.strerror or exc}", file=sys.stderr)
+        return None
+    os.set_inheritable(fd, False)
+    return fd
 
 
 def start_traffic_log(cfg, directory=None):
@@ -7611,10 +14246,11 @@ class Taint:
 
     def append(self, record):
         if self.log is not None:
+            # Under the connection log's lock, as the proxy writes it: its rotation (rotate_held_log) empties it under
+            # that lock - a record appended without it between the last copy and the emptying was lost.
             with contextlib.suppress(OSError):
-                with open(self.log, "a") as stream:
-                    stream.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record})
-                                 + "\n")
+                append_record(self.log, (json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                                     **record}) + "\n").encode(), 0o600)
 
     @staticmethod
     def because(state):
@@ -7642,7 +14278,12 @@ class Taint:
 
 RULE_DECISIONS = ("allow", "ask", "deny")  # in rising strictness
 DECIDED = {"allow": "allowed", "ask": "held for a question", "deny": "denied"}
-RULESET_KEYS = {"version", "description", "defaults", "http", "mcp", "devices", "canary", "tool", "untrusted"}
+RULESET_KEYS = {"version", "description", "defaults", "http", "mcp", "devices", "canary", "tool", "untrusted",
+                "mode", "packages", "secrets"}
+# "mode": "audit": the ruleset decides nothing - what its rules would have decided is recorded beside the decision
+# (the records' "audit": [{"would", "rule", "ruleset", "reason"}]; sandbox-ai rules audit sums them up), so that a
+# ruleset can be tried before it holds. "enforce" (the default) decides as every ruleset does.
+RULE_MODES = ("enforce", "audit")
 RULE_SECTIONS = ("http", "mcp", "devices", "tool")
 # "canary": what a read of a canary file and a canary token leaving do (canary.py), in rising strictness
 CANARY_ON_READ = ("report", "ask", "pause", "stop")
@@ -7664,7 +14305,10 @@ USB_CLASSES = {"audio": "01", "cdc": "02", "hid": "03", "physical": "05", "image
                "wireless": "e0", "misc": "ef", "application": "fe", "vendor": "ff"}
 UNTRUSTED_KEYS = {"id", "description", "host", "path", "server", "agent", "tool"}
 TOOL_RULE_KEYS = {"id", "description", "agent", "tool", "args", "decision", "priority", "reason", "when"}
-RULE_AGENT = re.compile(r"\*|claude|codex|opencode")
+# The agents a tool rule may name (every agent of the launcher; "*" for all). Rules for an agent without hooks never
+# reach it: its start with such rules is refused (the launcher's check of each agent).
+RULE_AGENT = re.compile(r"\*|claude|codex|opencode2?|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi")
+RULE_AGENT_NAMES = "claude, codex, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, or *"
 CONDITION_KEYS = {"type", "const", "enum", "pattern", "glob", "path_glob", "minLength", "maxLength", "minimum",
                   "maximum", "items", "properties", "required", "additionalProperties", "not", "anyOf", "allOf",
                   "optional"}
@@ -7794,6 +14438,14 @@ class Ruleset:
             fail('"defaults" takes "http", "mcp", "devices" and "tool", each "allow", "ask" or "deny"')
         result = {"version": 1, "defaults": {key: defaults.get(key, "allow") for key in RULE_SECTIONS},
                   "http": [], "mcp": [], "devices": [], "tool": [], "untrusted": []}
+        mode = document.get("mode", "enforce")
+        if mode not in RULE_MODES:
+            fail('"mode" is "enforce" (the default) or "audit" (decide nothing, record what the rules would decide)')
+        if mode == "audit":
+            if document.get("untrusted") or "canary" in document:
+                fail('an audit ruleset ("mode": "audit") only records what its rules would decide: "untrusted" and '
+                     '"canary" act on the run - take them out, or let the ruleset enforce')
+            result["mode"] = "audit"
         if "canary" in document:
             canary = document["canary"]
             if not isinstance(canary, dict) or not canary or set(canary) - {"on_read", "on_send"} or \
@@ -7802,6 +14454,19 @@ class Ruleset:
                 fail(f'"canary" takes "on_read" ({", ".join(CANARY_ON_READ)}) and "on_send" '
                      f'({", ".join(CANARY_ON_SEND)})')
             result["canary"] = dict(canary)
+        if "packages" in document:  # the package guard's decisions (package_settings); an audit ruleset's: recorded
+            try:
+                result["packages"] = package_settings(document["packages"])
+            except ValueError as exc:
+                fail(str(exc))
+        if "secrets" in document:  # the secret guard's decisions (secret_settings)
+            if mode == "audit":
+                fail('an audit ruleset ("mode": "audit") only records what its rules would decide: "secrets" acts on '
+                     'the run - take it out, or let the ruleset enforce (its default, report, holds nothing)')
+            try:
+                result["secrets"] = secret_settings(document["secrets"])
+            except ValueError as exc:
+                fail(str(exc))
         seen = set()
         untrusted = document.get("untrusted", [])
         if not isinstance(untrusted, list) or len(untrusted) > RULE_LIMIT:
@@ -8002,7 +14667,7 @@ class Ruleset:
         if "tool" not in rule:
             raise RuleError('"tool" is required: a tool name such as Bash, Read or WebFetch, a pattern with *, or a '
                             'list of them')
-        checked.update(agent=cls.strings(rule.get("agent"), "agent", RULE_AGENT, "claude, codex, opencode, or *", "*"),
+        checked.update(agent=cls.strings(rule.get("agent"), "agent", RULE_AGENT, RULE_AGENT_NAMES, "*"),
                        tool=cls.strings(rule["tool"], "tool", RULE_TOOL,
                                         "a tool name (A-Z a-z 0-9 _ - . : /, * as a wildcard)"))
         if "args" in rule:
@@ -8341,9 +15006,11 @@ class Ruleset:
         return None
 
     def pins(self, address):
-        """ADDRESS is pinned for a host that has HTTP rules: only HTTP the proxy can check may reach it."""
+        """ADDRESS is pinned for a host that has HTTP rules: only HTTP the proxy can check may reach it (not for an
+        audit ruleset's: it decides nothing)."""
         address = self.name(address)
-        return any(address in rule["addresses"] for source in self.sources for rule in source["http"])
+        return any(address in rule["addresses"] for source in self.sources if source.get("mode") != "audit"
+                   for rule in source["http"])
 
     @classmethod
     def request(cls, origin, method, target, headers, address=None):
@@ -8429,9 +15096,12 @@ class Ruleset:
         return AMBIGUOUS
 
     def needs_body(self, facts):
-        """A rule with a body condition may decide the request FACTS: the proxy reads the body first."""
+        """An enforcing rule with a body condition may decide the request FACTS: the proxy reads the body first. Never
+        for an audit ruleset's rule (it decides nothing: the request is not held back for it) - such a rule is
+        matched without the body then, and its record says so (http: "body": "not read")."""
         return any("body" in rule and self.route(rule, facts, facts["methods"]) is not False
-                   for number in range(len(self.sources)) for rule in self.http_rules(number, facts))
+                   for number, source in enumerate(self.sources) if source.get("mode") != "audit"
+                   for rule in self.http_rules(number, facts))
 
     def applies(self, rule, facts):
         names = facts["names"]
@@ -8482,15 +15152,15 @@ class Ruleset:
         # The rules that apply to the request, in their order, once: a rule that does not apply matches nothing
         # (http_match), so only these are held against it.
         applied = [self.http_rules(number, facts) for number in range(len(self.sources))]
-        applying = [source["name"] for source, rules in zip(self.sources, applied) if any(
-            "*" not in rule["host"] for rule in rules)]
+        applying = [source["name"] for source, rules in zip(self.sources, applied) if source.get("mode") != "audit"
+                    and any("*" not in rule["host"] for rule in rules)]
         if applying and facts["claimed"] and not facts["literal"] and facts["claimed"] != facts["server"]:
             # Servers route by Host and one certificate covers many names: the rules of the name verified
             # and of the name claimed could differ, so neither is trusted.
             return {"decision": "deny", "rule": "(host)", "ruleset": applying[0],
                     "reason": f"the Host header {facts['claimed']} differs from the server name {facts['server']} "
                               f"({', '.join(applying)})"}
-        best = None
+        best, audits = None, []
         # The agent's own model API (its provider by its verified name, its --llm endpoint): what a ruleset says of
         # every host ("*", its default) is not meant for it - the agent sends everything to its model, a question
         # for each answer would stop it. A rule naming the host still holds, and so does the administrator's policy.
@@ -8510,6 +15180,8 @@ class Ruleset:
                     if rule.get("when"):
                         verdict["reason"] += f": {Taint.because(facts['taint'])}"
                         verdict["taint"] = facts["taint"]
+                    if "body" in rule and not facts.get("body_read") and source.get("mode") == "audit":
+                        verdict["body"] = "not read"  # (no enforcing rule needed it: matched without it)
                     break
             else:
                 if any(rule["decision"] == "allow" and "*" not in rule["host"] for rule in rules):
@@ -8520,10 +15192,8 @@ class Ruleset:
                     verdict = {"decision": source["defaults"]["http"], "rule": "(default)", "ruleset": source["name"],
                                "reason": f"{method} {path} on {shown_host}: no rule of {source['name']} allows it "
                                          f"(its default is {source['defaults']['http']})"}
-            if verdict and (best is None or RULE_DECISIONS.index(verdict["decision"]) >
-                            RULE_DECISIONS.index(best["decision"])):
-                best = verdict
-        return best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+            best = self.merged(best, verdict, source, audits)
+        return self.concluded(best, audits)
 
     # -- MCP --
 
@@ -8532,9 +15202,36 @@ class Ruleset:
         return any(source["mcp"] or source["defaults"]["mcp"] != "allow" for source in self.sources)
 
     def mcp_asks(self):
-        """Some rule or default of this ruleset may ask about a tool call."""
+        """Some rule or default of this ruleset may ask about a tool call (an audit ruleset never does)."""
         return any(source["defaults"]["mcp"] == "ask" or any(r["decision"] == "ask" for r in source["mcp"])
-                   for source in self.sources)
+                   for source in self.sources if source.get("mode") != "audit")
+
+    @staticmethod
+    def merged(best, verdict, source, audits):
+        """BEST with SOURCE's VERDICT taken in: the stricter decision wins. An audit ruleset decides nothing: what
+        it would have decided (other than allow) goes to AUDITS."""
+        if not verdict:
+            return best
+        if source.get("mode") == "audit":
+            if verdict["decision"] != "allow":
+                audits.append({"would": verdict["decision"], "rule": verdict["rule"], "ruleset": verdict["ruleset"],
+                               **({"body": verdict["body"]} if verdict.get("body") else {}),
+                               "reason": str(verdict.get("reason") or "")[:300]})
+            return best
+        if best is None or RULE_DECISIONS.index(verdict["decision"]) > RULE_DECISIONS.index(best["decision"]):
+            return verdict
+        return best
+
+    @staticmethod
+    def concluded(best, audits):
+        """The decision (allow when no ruleset has a say), with "audit": what audit rulesets would have decided."""
+        result = best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+        return {**result, "audit": audits} if audits else result
+
+    @staticmethod
+    def audited(verdict):
+        """{"audit": [...]} of VERDICT for a record, or {}."""
+        return {"audit": verdict["audit"]} if verdict.get("audit") else {}
 
     @staticmethod
     def for_server(source, server, section="mcp"):
@@ -8557,13 +15254,13 @@ class Ruleset:
         """{"decision", "rule", "ruleset", "reason"} for a call of TOOL with ARGUMENTS (an object) on SERVER; TAINT:
         the run's taint state, for the rules that hold only in tainted runs. SECTION "tool": the agent's own
         tools, SERVER the agent."""
-        best = None
+        best, audits = None, []
         tainted = bool(taint and taint.get("tainted"))
         for source in self.sources:
             verdict, rules = None, [rule for rule in self.for_server(source, server, section)
                                     if not rule.get("when") or tainted]
             for rule in rules:
-                outcome = self.all_of([self.tool(rule["tool"], tool), *(self.holds(c, self.member(arguments, n))
+                outcome = self.all_of([self.tool(rule["tool"], tool), *(self.argument(arguments, n, c)
                                                                         for n, c in rule.get("args", {}).items())])
                 if outcome or (outcome is None and rule["decision"] != "allow"):
                     verdict = {"decision": rule["decision"], "rule": rule["id"], "ruleset": source["name"],
@@ -8585,14 +15282,43 @@ class Ruleset:
                     verdict = {"decision": source["defaults"][section], "rule": "(default)", "ruleset": source["name"],
                                "reason": f"no rule of {source['name']} allows the tool {tool} of {server} (its "
                                          f"default is {source['defaults'][section]})"}
-            if verdict and (best is None or RULE_DECISIONS.index(verdict["decision"]) >
-                            RULE_DECISIONS.index(best["decision"])):
-                best = verdict
-        return best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+            best = self.merged(best, verdict, source, audits)
+        return self.concluded(best, audits)
+
+    ARGUMENT_VALUES = 5000  # values of a call "*" looks at; a call with more is unknown under it
+
+    def argument(self, arguments, name, condition):
+        """True, False or None: the call's ARGUMENTS against the CONDITION of argument NAME. NAME "*": some value of
+        the arguments, at any depth (its strings; also every name of an object), holds it - a rule
+        on a credential in whatever argument (builtin:mcp-no-credentials). A value that cannot be judged, or more
+        than ARGUMENT_VALUES of them, is unknown."""
+        if name != "*":
+            return self.holds(condition, self.member(arguments, name))
+        values, unknown, todo = [], False, [(arguments, 0)]
+        while todo:
+            value, depth = todo.pop()
+            if depth > 32 or len(values) > self.ARGUMENT_VALUES:
+                unknown = True
+                break
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    values.append(str(key))
+                    todo.append((item, depth + 1))
+            elif isinstance(value, list):
+                todo += [(item, depth + 1) for item in value]
+            elif isinstance(value, str):
+                values.append(value)
+        results = [self.holds(condition, value) for value in values]
+        if True in results:
+            return True
+        return None if unknown or None in results else False
 
     def hidden(self, server, tool):
-        """True if every call of TOOL on SERVER is denied, whatever its arguments: tools/list leaves it out."""
+        """True if every call of TOOL on SERVER is denied, whatever its arguments: tools/list leaves it out (never by
+        an audit ruleset)."""
         for source in self.sources:
+            if source.get("mode") == "audit":
+                continue
             rules, verdict = self.for_server(source, server), None
             for rule in rules:
                 if self.tool(rule["tool"], tool) is not True:
@@ -8648,7 +15374,7 @@ class Ruleset:
 
     def device(self, facts):
         """{"decision", "rule", "ruleset", "reason"} for the device FACTS; rule None when no ruleset has a say."""
-        best, shown = None, self.device_name(facts)
+        best, shown, audits = None, self.device_name(facts), []
         for source in self.sources:
             verdict = None
             for rule in source["devices"]:
@@ -8673,21 +15399,34 @@ class Ruleset:
                                "ruleset": source["name"],
                                "reason": f"no rule of {source['name']} allows the device {shown} (its default is "
                                          f"{source['defaults']['devices']})"}
-            if verdict and (best is None or RULE_DECISIONS.index(verdict["decision"]) >
-                            RULE_DECISIONS.index(best["decision"])):
-                best = verdict
-        return best or {"decision": "allow", "rule": None, "ruleset": None, "reason": None}
+            best = self.merged(best, verdict, source, audits)
+        return self.concluded(best, audits)
 
 
 # --- agent hooks: rules for the agents' own tools ----------------------------------------------------------
 #
-# Claude Code, Codex and OpenCode call a hook before and after each of their own tools (Bash, file edits,
-# WebFetch, their MCP tools). The launcher installs it as managed configuration on read-only paths, so the agent
-# cannot drop it: Claude Code's /etc/claude-code/managed-settings.json (allowManagedHooksOnly), Codex's
-# /etc/codex/requirements.toml (allow_managed_hooks_only, the hooks feature pinned on), an OpenCode plugin. The
-# hook (hook_client) asks the supervisor over HOOK_SOCKET; the supervisor (HookServer) applies the "tool" rules
+# The agents call a hook before and after each of their own tools (Bash, file edits, WebFetch, their MCP tools). The
+# launcher installs it as managed configuration on read-only paths, each through the agent's own API in its reviewed
+# release:
+#
+# - Claude Code: /etc/claude-code/managed-settings.json (allowManagedHooksOnly);
+# - Codex: /etc/codex/requirements.toml (allow_managed_hooks_only, the hooks feature pinned on);
+# - OpenCode: a plugin (tool.execute.before/after);
+# - Qwen Code: its system settings /etc/qwen-code/settings.json (command hooks, sequential: after the user's and the
+#   project's, so the input they rewrite is the input checked);
+# - Hermes: its managed configuration /etc/hermes/config.yaml (shell hooks pre_tool_call/post_tool_call, fail_closed;
+#   they replace the user's own while they hold);
+# - Pi: sandbox-ai's extension /etc/pi/sandbox-ai.js (tool_call/tool_result; the checked input is frozen);
+# - OpenCode 2: a V2 plugin directory /etc/opencode2/sandbox-ai-hooks (tool execute.before/after; frozen the same);
+# - DeepSeek Harness: a Cordis plugin /etc/dsh/sandbox-ai-hooks.mjs inserted by sandbox-ai's patch (tools/pre-execute
+#   and a monotonic tools.guard: a call the hook did not allow never runs; DSH freezes arguments itself);
+# - Letta Code: hooks in ~/.letta/settings.json, laid in by sandbox-ai's start at every start (no system layer);
+# - Goose: a plugin with hooks.json, linked into its plugin folder by the image's goose command at every start (no
+#   system layer; a start whose plugin is disabled is refused).
+#
+# The hook (hook_client) asks the supervisor over HOOK_SOCKET; the supervisor (HookServer) applies the "tool" rules
 # of the rulesets, asks the human where a rule says ask, records untrusted tools in the run's taint and logs each
-# call to tools.jsonl.
+# call to tools.jsonl. OpenHands and nanobot have no hook a start can install: such a start is refused.
 #
 # A guard rail, not a boundary: Bash runs whatever it is given (python -c, a script, base64), and the agent's
 # network goes through the proxy anyway. The hook fails closed: whatever goes wrong refuses the call.
@@ -8698,19 +15437,103 @@ HOOK_LIMIT = 4 << 20          # one hook message to the supervisor
 HOOK_VALUE_LIMIT = 256 << 10  # a longer string of a tool's input is unknown to the rules (never matched, never cut)
 HOOK_READ_LIMIT = 64 << 20    # what the client reads of the agent's message
 HOOK_TIMEOUT = 110            # seconds the client waits: below the agents' own hook timeout (120, see the launcher)
+# Hook messages answered at once (security review SAI-12): each is a thread of the supervisor, and one that asks the
+# human waits for the answer. An agent runs a handful of tool calls in parallel; a process of the sandbox that opens
+# the socket in a loop gets "refused" beyond these, before anything is read.
+HOOK_AT_ONCE = 64
 HOOK_EVENTS = ("PreToolUse", "PostToolUse")
-HOOK_AGENTS = ("claude", "codex", "opencode")
+HOOK_AGENTS = ("claude", "codex", "opencode", "qwen", "hermes", "pi", "opencode2", "dsh", "letta", "goose")
 # The first Codex that reads hooks and allow_managed_hooks_only from requirements.toml (rust-v0.131.0); an older
 # one ignores both without a word, so its run is refused rather than started without the rules.
 CODEX_HOOKS_VERSION = (0, 131, 0)
+# The Codex whose plugin system sandbox-ai reviewed (rust-v0.169.0: codex-rs/core-plugins): the kits' plugins are given
+# only to it or a later one, whose requirements keep plugin MCP servers off and marketplace sources restricted the
+# same way; an older one is refused rather than trusted to.
+CODEX_PLUGINS_VERSION = (0, 169, 0)
 # OpenCode's tool names as Claude Code and Codex name the same tools, so that one rule holds for all three.
 OPENCODE_TOOLS = {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "multiedit": "MultiEdit",
                   "glob": "Glob", "grep": "Grep", "list": "LS", "webfetch": "WebFetch", "websearch": "WebSearch",
                   "patch": "apply_patch", "task": "Task", "todowrite": "TodoWrite", "todoread": "TodoRead"}
 OPENCODE_ARGUMENTS = {"filePath": "file_path", "oldString": "old_string", "newString": "new_string",
                       "replaceAll": "replace_all", "patchText": "command"}
+# The newer agents' tool names (their reviewed releases' own ids) as Claude Code names the same tools, and the
+# arguments renamed to Claude Code's: one rule holds for every agent. A name not listed stays as the agent gives it
+# (MCP tools: mcp__SERVER__TOOL where the agent names them so, Qwen Code, Pi).
+AGENT_TOOLS = {
+    "opencode": OPENCODE_TOOLS,
+    # Qwen Code 0.26.4: packages/core/src/tools/tool-names.ts.
+    "qwen": {"run_shell_command": "Bash", "read_file": "Read", "write_file": "Write", "edit": "Edit",
+             "glob": "Glob", "grep_search": "Grep", "list_directory": "LS", "web_fetch": "WebFetch",
+             "web_search": "WebSearch", "agent": "Task", "todo_write": "TodoWrite", "notebook_edit": "NotebookEdit",
+             "skill": "Skill"},
+    # Hermes v0.22.5: tools/terminal_tool.py, file_tools.py, web_tools.py, delegate_tool.py.
+    "hermes": {"terminal": "Bash", "read_file": "Read", "write_file": "Write", "patch": "Edit",
+               "search_files": "Grep", "web_extract": "WebFetch", "web_search": "WebSearch",
+               "delegate_task": "Task", "todo": "TodoWrite", "skill_view": "Skill"},
+    # Pi 1.4.0: packages/coding-agent/src/core/tools (webfetch: an extension's, should one register it).
+    "pi": {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "find": "Glob", "grep": "Grep",
+           "ls": "LS", "webfetch": "WebFetch"},
+    # OpenCode 2.2.5: packages/core/src/tool/plugin/*.ts.
+    "opencode2": {"shell": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "glob": "Glob", "grep": "Grep",
+                  "webfetch": "WebFetch", "websearch": "WebSearch", "patch": "apply_patch", "subagent": "Task",
+                  "todowrite": "TodoWrite", "skill": "Skill"},
+    # DeepSeek Harness 0.2.1-rc.5: docs/tool-catalog.md.
+    "dsh": {"bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit", "glob": "Glob", "grep": "Grep",
+            "web_fetch": "WebFetch", "web_search": "WebSearch", "subagent": "Task", "todo_write": "TodoWrite",
+            "skill": "Skill"},
+    # Letta Code 0.34.36 names its tools as Claude Code does (src/tools/schemas); its Codex-style set as Codex.
+    "letta": {"ApplyPatch": "apply_patch", "ExecCommand": "Bash", "exec_command": "Bash",
+              "apply_patch": "apply_patch"},
+    # Goose 1.57.0: its developer extension (crates/goose/src/agents/platform_extensions/developer).
+    "goose": {"developer__shell": "Bash", "developer__write": "Write", "developer__edit": "Edit",
+              "developer__tree": "LS"},
+}
+# {agent: {Claude Code's tool name or "*": {the agent's argument: Claude Code's}}}.
+AGENT_ARGUMENTS = {
+    "opencode": {"*": OPENCODE_ARGUMENTS},
+    "opencode2": {"*": {"oldString": "old_string", "newString": "new_string", "replaceAll": "replace_all",
+                        "patchText": "command"},
+                  **{tool: {"path": "file_path"} for tool in ("Read", "Write", "Edit")}},
+    "pi": {tool: {"path": "file_path"} for tool in ("Read", "Write", "Edit")},
+    "hermes": {**{tool: {"path": "file_path"} for tool in ("Read", "Write", "Edit")},
+               "apply_patch": {"patch": "command"}, "WebFetch": {"urls": "url"}},
+    "goose": {**{tool: {"path": "file_path"} for tool in ("Write", "Edit")},
+              "Edit": {"path": "file_path", "before": "old_string", "after": "new_string"}},
+    "letta": {"Bash": {"cmd": "command"}, "apply_patch": {"input": "command"}},
+}
 PATCH_FILE = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 SEARCH_TOOLS = ("Glob", "Grep", "LS")  # without "path" they search the working directory
+
+
+def agent_call(agent, tool, arguments):
+    """(tool, arguments) of AGENT's call of its own TOOL as the rules see it: Claude Code's names (AGENT_TOOLS,
+    AGENT_ARGUMENTS). Hermes' patch in its V4A mode is apply_patch; its web_extract's list of URLs stays a list
+    under "url" (a condition on a string holds for none of a list: a rule on WebFetch's url then asks or refuses).
+    ValueError for a call that gives one argument under both names with two values (nothing decides which one the
+    agent's tool takes)."""
+    if agent == "hermes" and tool == "patch" and isinstance(arguments, dict) and arguments.get("mode") == "patch":
+        tool = "apply_patch"
+    else:
+        tool = AGENT_TOOLS.get(agent, {}).get(tool, tool)
+    renames = AGENT_ARGUMENTS.get(agent, {})
+    if isinstance(arguments, dict) and renames:
+        names = {**renames.get("*", {}), **renames.get(tool, {})}
+        renamed = {}
+        for key, value in arguments.items():
+            name = names.get(key, key)
+            # The agent's name and Claude Code's for one argument, with two values (path: /etc/x beside file_path:
+            # /work/ok): the agent's tool runs its own and ignores the other, the rules would see whichever came
+            # last. Such a call cannot be judged: refused (hook_client fails closed), never checked by one of them.
+            if name in renamed and json.dumps(renamed[name], sort_keys=True, default=repr) != \
+                    json.dumps(value, sort_keys=True, default=repr):
+                raise ValueError(f"the call gives {name} twice, with two values (as "
+                                 f"{' and '.join(sorted(k for k in arguments if names.get(k, k) == name))})")
+            renamed[name] = value
+        arguments = renamed
+        if agent == "hermes" and tool == "WebFetch" and isinstance(arguments.get("url"), list) and \
+                len(arguments["url"]) == 1:
+            arguments["url"] = arguments["url"][0]
+    return tool, arguments
 
 
 def hook_value(value, depth=0):
@@ -8728,9 +15551,10 @@ def hook_value(value, depth=0):
     return value
 
 
-def hooks_supported(agent, command, run=subprocess.run):
-    """None if AGENT's executable (COMMAND[0]) holds the hooks it is given, else why not: a Codex older than
-    CODEX_HOOKS_VERSION, or one whose version cannot be read."""
+def hooks_supported(agent, command, run=subprocess.run, needed=CODEX_HOOKS_VERSION, what="holds managed hooks"):
+    """None if AGENT's executable (COMMAND[0]) holds the hooks it is given, else why not: a Codex older than NEEDED
+    (CODEX_HOOKS_VERSION; CODEX_PLUGINS_VERSION for the kits' plugins, WHAT it then does), or one whose version
+    cannot be read."""
     if agent != "codex":
         return None
     try:
@@ -8740,9 +15564,8 @@ def hooks_supported(agent, command, run=subprocess.run):
     found = re.search(r"\b(\d+)\.(\d+)\.(\d+)", out)
     if not found:
         return f"the version of Codex could not be read ({printable_text(out.strip(), 80)!r})"
-    if tuple(map(int, found.groups())) < CODEX_HOOKS_VERSION:
-        return f"Codex {found.group(0)} is older than {'.'.join(map(str, CODEX_HOOKS_VERSION))}, the first that " \
-               "holds managed hooks"
+    if tuple(map(int, found.groups())) < needed:
+        return f"Codex {found.group(0)} is older than {'.'.join(map(str, needed))}, the first that {what}"
     return None
 
 
@@ -8753,6 +15576,12 @@ def hook_problem(cfg, run=subprocess.run):
     agent = cfg.get("hook_agent") or (cfg.get("hooks") or {}).get("agent")
     # A helper's command is its server: the agent it runs for each task is found by its name.
     command = [cfg["hook_binary"]] if isinstance(cfg.get("hook_binary"), str) else cfg.get("command") or []
+    if cfg.get("codex_plugins"):
+        # The image's codex, whatever runs first (a helper's server, a shell with --binary): it reads the plugins.
+        problem = hooks_supported("codex", ["codex"], run=run, needed=CODEX_PLUGINS_VERSION,
+                                  what="sandbox-ai's review of Codex's plugin system covers")
+        if problem:
+            return f"the kits' Codex plugins cannot be given: {problem}; update the agent (sandbox-ai build codex)"
     problem = hooks_supported(agent, command, run=run) if agent else None
     if problem is None:
         for companion in cfg.get("companion_hook_agents") or []:  # the agents --with, started from the shell
@@ -8765,11 +15594,13 @@ def hook_problem(cfg, run=subprocess.run):
     return f"{what} cannot hold: {problem}; update the agent (sandbox-ai build)"
 
 
-def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout=HOOK_TIMEOUT):
-    """The agents' hook (`runtime.py --internal-hook AGENT EVENT`): the agent's JSON on STDIN (Claude Code and Codex:
-    tool_name, tool_input, cwd; the OpenCode plugin: tool, args, cwd), the supervisor's decision back. Refused is
+def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout=HOOK_TIMEOUT, stdout=None):
+    """The agents' hook (`runtime.py --internal-hook AGENT EVENT`): the agent's JSON on STDIN (Claude Code, Codex,
+    Qwen Code, Hermes, Letta Code, Goose: tool_name, tool_input and the directory; sandbox-ai's plugins and extensions
+    for OpenCode, OpenCode 2, Pi and DSH: tool, args, cwd), the supervisor's decision back. Refused is
     exit status 2 with the reason on STDERR, which Claude Code and Codex both take as blocked (the OpenCode plugin
-    throws); allowed is 0 without output, and the agent's own permissions go on. Fails closed: whatever goes wrong
+    throws); allowed is 0 without output (for Letta Code the checked input as updatedInput), and the agent's own
+    permissions go on. Fails closed: whatever goes wrong
     before a PreToolUse is decided refuses the call. PostToolUse only records (the tool ran already): always 0."""
     stdin, stderr = stdin or sys.stdin.buffer, stderr or sys.stderr
     pre = event != "PostToolUse"  # an event of no known name is refused too
@@ -8784,17 +15615,18 @@ def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout
         if not isinstance(tool, str) or not tool:
             raise ValueError("the hook message names no tool")
         arguments = message.get("tool_input", message.get("args"))
-        exact = arguments  # as the agent will run it (OpenCode's own names): what its question shows
-        if agent == "opencode":
-            tool = OPENCODE_TOOLS.get(tool, tool)
-            if isinstance(arguments, dict):
-                arguments = {OPENCODE_ARGUMENTS.get(key, key): value for key, value in arguments.items()}
-        result = message.get("tool_response", message.get("result"))
+        exact = arguments  # as the agent will run it (its own names): what its question shows
+        tool, arguments = agent_call(agent, tool, arguments)
+        result = message.get("tool_response", message.get("tool_output", message.get("result")))
         size = message.get("result_bytes")
-        request = {"agent": agent, "event": event, "tool": tool[:200], "input": hook_value(arguments),
-                   "cwd": message.get("cwd") if isinstance(message.get("cwd"), str) else "",
+        # The call's directory: Claude Code's "cwd", Letta Code's "working_directory", Goose's "working_dir".
+        cwd = next((message[key] for key in ("cwd", "working_directory", "working_dir")
+                    if isinstance(message.get(key), str)), "")
+        extra = message.get("extra") if isinstance(message.get("extra"), dict) else {}  # Hermes' ids
+        request = {"agent": agent, "event": event, "tool": tool[:200], "input": hook_value(arguments), "cwd": cwd,
                    "session_id": str(message.get("session_id", message.get("sessionID", "")))[:100],
-                   "tool_use_id": str(message.get("tool_use_id", message.get("callID", "")))[:100]}
+                   "tool_use_id": str(message.get("tool_use_id", message.get("callID", message.get(
+                       "tool_call_id", extra.get("tool_call_id", "")))))[:100]}
         if pre:
             # The call as it will run, for its question (HookServer.decide): its first 64 KiB and more (a value too
             # large for the rules too), the whole size, and a digest of all of it that binds an answer to this call.
@@ -8816,6 +15648,13 @@ def hook_client(agent, event, stdin=None, stderr=None, socket_path=None, timeout
         if not pre:
             return 0
         if isinstance(answer, dict) and answer.get("decision") == "allow":
+            if agent == "letta" and isinstance(exact, dict):
+                # Letta Code takes the first updatedInput of an event's hooks: the input as checked, so a hook of the
+                # user's after this one cannot rewrite the call (letta.py: OWN_COMMANDS).
+                stdout = stdout or sys.stdout
+                stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                                "updatedInput": exact}}) + "\n")
+                stdout.flush()
             return 0
         reason = answer.get("reason") if isinstance(answer, dict) and isinstance(answer.get("reason"), str) else ""
         stderr.write(f"sandbox-ai: {printable_text(reason, 2000) or 'the tool call is refused'}\n")
@@ -8908,6 +15747,11 @@ class HookServer:
         # The key of call_digest: a question's file names its call by a digest nobody can test guesses against.
         self.salt = secrets.token_bytes(32)
         self.lock, self.ready = threading.Lock(), threading.Event()  # ready: listening, open to the agent
+        # Who sends a hook message, as the kernel says (peer): SANDBOXED - this supervisor is the first process of
+        # the sandbox's PID namespace, where every process of the sandbox shows with its PID.
+        self.who, self.sandboxed = Attribution(secret_values=secret_values), os.getpid() == 1
+        self.slots = threading.BoundedSemaphore(HOOK_AT_ONCE)
+        self.asking = threading.local()  # .client: the process whose message this thread answers (answer, decide)
 
     @staticmethod
     def facts(tool, arguments, cwd):
@@ -8927,14 +15771,39 @@ class HookServer:
                               for path in found]
         return facts
 
-    def decide(self, message):
-        """{"decision", "reason"} for one hook MESSAGE; logged."""
+    def peer(self, connection):
+        """({"process": ...}, None): the process at the other end of CONNECTION as the kernel names it (SO_PEERCRED),
+        for the record and the question - or (None, why) for a peer whose message is not read at all: another user
+        than the sandbox's own (the socket is the agent's user's alone, mode 0600: this is its second lock), or, where
+        this supervisor sees every process of the sandbox, one that is none of them.
+
+        This tells who connected, not that the agent meant the call (security review SAI-22): the agent's commands
+        run as the agent's user below the agent's own process, and can start this client with a message of their
+        own. No check here can tell the two apart; the question shows the process so that the human can."""
+        try:
+            pid, uid, _ = Attribution.peer(connection)
+        except (OSError, struct.error):
+            return None, "its process cannot be told"
+        if uid != os.getuid():
+            return None, f"user {uid} is not the agent's"
+        if pid <= 0:
+            if self.sandboxed:
+                return None, "its process is none of this sandbox"
+            return {"process": {"unknown": "the client's process is not visible here", "uid": uid}}, None
+        info = self.who.process(pid)
+        return {"process": info or {"unknown": "the client process ended", "pid": pid, "uid": uid}}, None
+
+    def decide(self, message, client=None):
+        """{"decision", "reason"} for one hook MESSAGE; logged. CLIENT (peer; default: the one of the message this
+        thread answers): the process that sent it, kept in the record and shown in its question."""
+        client = client if client is not None else getattr(self.asking, "client", None)
         agent, event = str(message.get("agent", ""))[:20], str(message.get("event", ""))[:40]
         tool, arguments = str(message.get("tool", ""))[:200], message.get("input")
         arguments = arguments if isinstance(arguments, dict) else {} if arguments is None else {"input": arguments}
         cwd = message.get("cwd") if isinstance(message.get("cwd"), str) else ""
         record = {"agent": agent, "event": event, "tool": tool,
-                  **{key: str(message[key])[:100] for key in ("session_id", "tool_use_id") if message.get(key)}}
+                  **{key: str(message[key])[:100] for key in ("session_id", "tool_use_id") if message.get(key)},
+                  **(client or {})}
         state = self.taint.shown() if self.taint is not None else None
         if state and state.get("tainted"):
             record["tainted"] = state.get("since")
@@ -8948,7 +15817,8 @@ class HookServer:
             verdict = {"decision": "deny", "rule": None, "ruleset": None, "reason": "not a hook of a known agent"}
         else:
             verdict = self.rules.agent_tool(agent, tool, self.facts(tool, arguments, cwd), state)
-        record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"])
+        record.update(decision=verdict["decision"], rule=verdict["rule"], ruleset=verdict["ruleset"],
+                      **Ruleset.audited(verdict))
         answer = {"decision": verdict["decision"], "reason": verdict.get("reason") or ""}
         if verdict["decision"] == "ask":
             if self.broker is None:
@@ -8960,7 +15830,8 @@ class HookServer:
                                                    **({"too_large": more} if more else {}),
                                                    "rule": verdict["rule"], "ruleset": verdict["ruleset"],
                                                    "reason": printable_text(verdict["reason"], 1000),
-                                                   **({"taint": verdict["taint"]} if verdict.get("taint") else {})})
+                                                   **({"taint": verdict["taint"]} if verdict.get("taint") else {}),
+                                                   **(client or {})})
                 record["approval"] = approval_record(approval)
                 answer = {"decision": "allow" if approval.get("decision") == "allow" else "deny",
                           "reason": not_approved(approval, verdict["reason"])}
@@ -9028,14 +15899,16 @@ class HookServer:
         line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **record}, ensure_ascii=False,
                           default=repr) + "\n"
         with self.lock, contextlib.suppress(OSError):
-            with open(self.log, "a") as stream:
-                stream.write(line)
+            append_record(self.log, line.encode("utf-8", "replace"))
 
     def serve(self, path=None, stop=None):
         """Answer the agents' hooks on PATH (one message per connection) until STOP is set."""
         path = Path(path or HOOK_SOCKET)
         server = listen_unix(str(path))
-        os.chmod(path, 0o666)
+        # The agent's user alone (it was 0666 until 0.1.116): the agent and its hook run as the sandbox's root, as
+        # this supervisor does; no other user of the sandbox (the proxy's, the sound server's, a nested container's)
+        # has a hook to ask.
+        os.chmod(path, 0o600)
         self.ready.set()
         server.settimeout(0.5)
         while stop is None or not stop.is_set():
@@ -9047,14 +15920,39 @@ class HookServer:
                 if accept_transient(exc):
                     continue
                 break
+            if not self.slots.acquire(blocking=False):
+                self.refuse(connection, f"more than {HOOK_AT_ONCE} tool calls are being checked at once")
+                continue
             try:
-                threading.Thread(target=self.answer, args=(connection,), daemon=True).start()
+                threading.Thread(target=self.answered, args=(connection,), daemon=True).start()
             except RuntimeError:  # no thread to be had (the sandbox's process limit): this hook only
+                self.slots.release()
                 connection.close()
                 time.sleep(0.1)
         server.close()
 
+    def answered(self, connection):
+        """One hook message (answer), holding one of the server's HOOK_AT_ONCE until it is answered."""
+        try:
+            self.answer(connection)
+        finally:
+            self.slots.release()
+
+    @staticmethod
+    def refuse(connection, reason):
+        """Answer CONNECTION with a refusal without reading it (fail closed: the hook's client refuses the call)."""
+        with connection:
+            with contextlib.suppress(OSError):
+                connection.settimeout(2)
+                connection.sendall((json.dumps({"decision": "deny", "reason": reason}) + "\n").encode())
+
     def answer(self, connection):
+        client, refused = self.peer(connection)
+        if refused:
+            # Not a hook of this sandbox's agent: nothing of the message is read, no rule is asked, nothing is recorded
+            # as a tool call. Said as a safeguard (the launcher's watch), where the agent cannot see or fill it.
+            safeguard_event("guard", "a request on the agent's hook socket", f"refused unread: {refused}")
+            return self.refuse(connection, f"not a hook of this sandbox ({refused})")
         with connection:
             try:
                 connection.settimeout(10)
@@ -9065,6 +15963,7 @@ class HookServer:
                         break
                     data += chunk
                 message = json.loads(data) if len(data) <= HOOK_LIMIT else None
+                self.asking.client = client  # (decide's own argument is the message alone, also where it is replaced)
                 answer = self.decide(message) if isinstance(message, dict) else \
                     {"decision": "deny", "reason": "not a hook message"}
             except (OSError, ValueError, RecursionError) as exc:
@@ -9151,7 +16050,14 @@ RELAY_GRACE = 30  # seconds a relayed connection waits for its other side once o
 def join_streams(first, second):
     """Copy both ways between the sockets FIRST and SECOND until both sides are done; closes them. As the proxy's
     relay: once one side ended, the other gets RELAY_GRACE quiet seconds to finish (a service that never closes
-    does not keep the connection), and a connection quiet both ways for IDLE_TIMEOUT ends."""
+    does not keep the connection), and a connection quiet both ways for IDLE_TIMEOUT ends.
+
+    Each side passes on what it gets at once (no_delay; a Unix socket has no such wait): a relay does not know where
+    a message ends, and with Nagle's algorithm on its TCP side a second piece - a request's body after its head, an
+    answer's after its headers, a stream's next token - waited for the peer's delayed ACK of the first: 40 ms each
+    way (83 ms an exchange through a relayed host port instead of 2.5 ms)."""
+    for sock in (first, second):
+        no_delay(sock)
     try:
         relay(first, second, [0, 0], idle=IDLE_TIMEOUT, grace=RELAY_GRACE)
     finally:
@@ -9332,8 +16238,9 @@ NFT_SECONDS = 30  # one firewall change during the run, at most
 
 class RuntimeNetwork:
     """What was allowed during the run: the firewall's runtime chain and the proxy's allow-list, changed by
-    `sandbox-ai net` and by approvals. A connection allowed "once" is open for ONCE_SECONDS, long enough
-    to connect (an established connection outlives its rule)."""
+    `sandbox-ai net` and by approvals. A connection allowed "once" is open in the firewall for ONCE_SECONDS, long
+    enough to connect (an established connection outlives its rule); the proxy lets only the connections through
+    that waited for that answer (once_allowed: its allow-list names such a target under "once", never under "tcp")."""
     ONCE_SECONDS = 30
 
     def __init__(self, base_allow, allow_file=None, apply=None, within=None):
@@ -9393,7 +16300,9 @@ class RuntimeNetwork:
         self.apply_rules(script)
         self.state, self.once, self.cuts = state, once, cuts
         if self.allow_file is not None:
-            allow = merged_allow(self.base, effective, self.no_ssh | once)
+            # What was allowed once is not the proxy's to let everybody through (once_allowed): told apart.
+            allow = merged_allow(self.base, state, self.no_ssh)
+            allow["once"] = [[address, port] for address, port in sorted(once)]
             allow["loopback"] = sorted({*self.base.get("loopback", []), *self.relays})
             if cuts:  # the proxy holds it too (allowed_destination), and closes what it forbids
                 allow["cut"] = self.cut_view()
@@ -9871,6 +16780,87 @@ def starting_cuts(network, directory=None):
     return shown
 
 
+# --- the launcher's watch: never a sandbox without its supervisor on the host ------------------------------------
+#
+# The launcher (the supervisor on the host: approvals, the safeguard, memory and canary watches, `sandbox-ai stop`)
+# holds an exclusive lock on SUPERVISOR_LOCK in the run's directory - CONTROL_DIR here - for as long as it runs; the
+# kernel lets go of it whatever ends the launcher (its cleanup, a crash, SIGKILL, the OOM killer). When that lock is
+# free, or the run's directory is gone (the launcher of 0.1.93 removed it at its end although Podman had not removed
+# the pod: the control socket - net allow, approvals, the kill switch - went with it, unseen), nobody on the host can
+# reach this sandbox any more. This process then cuts the sandbox's network itself (fail closed: the kill switch "all"
+# on behalf of SUPERVISOR_GONE_BY), and ends the run where it has no kill switch; says why on its standard error and
+# as a safeguard, and records it in the run's directory (SUPERVISOR_END, which sandbox-ai list and doctor say). The
+# agent's terminal stays: the human saves the work, then `sandbox-ai stop NAME` and `sandbox-ai resume NAME`. Only
+# where the launcher's kernel is this one (config.json "launcher_lock": a local engine on Linux; a lock does not cross
+# podman machine's shared folders).
+SUPERVISOR_LOCK = "supervisor.lock"
+SUPERVISOR_END = "supervisor-ended.json"  # liveness.SUPERVISOR_END (a test keeps both the same)
+SUPERVISOR_GONE_BY = "supervisor-gone"  # agent_sandbox.OUTLIVED_BY
+LAUNCHER_WATCH_SECONDS = 2.0
+
+
+def launcher_gone(directory=None):
+    """Why this run's launcher is gone for certain: its lock (SUPERVISOR_LOCK) is free, or the run's directory with it
+    was removed; None while it holds the lock, or when that cannot be told (a file system that refuses locks)."""
+    directory = Path(directory or CONTROL_DIR)
+    try:
+        fd = os.open(directory / SUPERVISOR_LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return "its run directory on the host was removed (and the control socket with it)"
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:  # held (EWOULDBLOCK), or no locks here (ENOLCK, EINVAL): nothing is known
+        return None
+    finally:
+        os.close(fd)  # (and with it the lock taken just now)
+    return "its launcher, the supervisor on the host, has ended"
+
+
+def watch_launcher(network, stop, end=None, directory=None, interval=LAUNCHER_WATCH_SECONDS, gone=launcher_gone):
+    """Until STOP is set: every INTERVAL seconds whether the launcher is GONE (launcher_gone); once it is, the network
+    is cut (NETWORK.set_cut "all", SUPERVISOR_GONE_BY), else - no kill switch, or the cut failed - END(text) ends the
+    run (by default SIGTERM to this process, which wait_child hands to the agent). Said on standard error, as a
+    safeguard, in the run's directory (SUPERVISOR_END, CUT_STATE) when it is there. The reason, or None (stopped)."""
+    directory = Path(directory or CONTROL_DIR)
+    while not stop.wait(interval):
+        why = gone(directory)
+        if why is None:
+            continue
+        cut, error = None, None
+        try:
+            shown = network.set_cut("all", SUPERVISOR_GONE_BY)
+            cut = shown.get("cut") if isinstance(shown, dict) else None
+        except Exception as exc:  # noqa: BLE001 - whatever stops the cut: the run ends instead
+            error = printable_text(str(exc), 300) or type(exc).__name__
+        text = (f"this sandbox runs on without its supervisor: {why}; "
+                + (f"its network is cut (kill switch {cut}): nothing leaves it" if cut else
+                   f"its network could not be cut ({error}): the run ends")
+                + ". Save your work, then on the host: sandbox-ai stop NAME, then: sandbox-ai resume NAME")
+        with contextlib.suppress(Exception):
+            print(f"agent-sandbox: error: {text}", file=sys.stderr, flush=True)
+        safeguard_event("guard", "the sandbox's network, as its supervisor on the host is gone", text,
+                        directory=directory)
+        with contextlib.suppress(Exception):
+            entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "why": why, "by": "sandbox",
+                     **({"cut": cut} if cut else {"cut_error": error or "no kill switch"})}
+            fd = os.open(directory / SUPERVISOR_END, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                stream.write(json.dumps(entry))
+        if cut:
+            with contextlib.suppress(Exception):  # what net list shows (as starting_cuts)
+                temporary = directory / f".{CUT_STATE}.{os.getpid()}"
+                temporary.write_text(json.dumps({"mode": cut, "cuts": shown.get("cuts", {}),
+                                                 "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+                os.replace(temporary, directory / CUT_STATE)
+        else:
+            (end or (lambda _text: os.kill(os.getpid(), signal.SIGTERM)))(text)
+        return why
+    return None
+
+
 def cut_modes(cut):
     """The modes the kill switch CUT holds at once ([]: none). A run can be cut by several (its own cut, and those of
     the runs it acts for: a shared MCP server): each holds, so only what every one of them keeps stays reachable.
@@ -10122,8 +17112,8 @@ RELOAD_LIMIT = 64  # rulesets in one reload
 def http_sources(sources):
     """The rulesets the proxy holds (as the launcher's proxy_rules writes them): their HTTP part, the ones with HTTP
     rules, a default for HTTP other than allow, or untrusted hosts."""
-    return [{"name": source["name"], "version": 1, "defaults": {"http": source["defaults"]["http"]},
-             "http": source["http"], "untrusted": [entry for entry in source.get("untrusted", []) if "host" in entry]}
+    return [{"name": source["name"], "version": 1, **({"mode": "audit"} if source.get("mode") == "audit" else {}),
+             "defaults": {"http": source["defaults"]["http"]}, "http": source["http"], "untrusted": [entry for entry in source.get("untrusted", []) if "host" in entry]}
             for source in sources
             if source["name"] != "--allow-http" and (source["http"] or source["defaults"]["http"] != "allow"
                                                       or any("host" in entry for entry in source.get("untrusted", [])))]
@@ -10336,6 +17326,222 @@ def control_client(source=None, out=None, paths=None, timeout=60):
     return 0
 
 
+# --- one OAuth login callback, relayed from the human's browser (sandbox-ai's oauth_relay.py) ----------------------
+#
+# An agent's browser login (claude, codex with SANDBOX_AI_LOGIN_CALLBACK=1, an MCP server's OAuth) sends the browser back
+# to a server of the agent on the sandbox's own loopback (redirect_uri=http://127.0.0.1:PORT/PATH), which no browser
+# outside the sandbox reaches. When the human allows opening such a URL (approvals, browser question), sandbox-ai's
+# one-shot catcher on the machine of the browser takes exactly one request to that port and path and hands it to the
+# host's sandbox-ai, which checks it against the question and sends it here (control op "oauth-callback"; only the
+# human reaches the control socket). The supervisor sends it to 127.0.0.1:PORT (or [::1]:PORT) in the sandbox - only
+# loopback, only that port - follows the agent's redirects to its own port and path there (Codex: /auth/callback
+# answers 302 to /success, where its login ends), and returns the agent's answer page. Nothing else is reachable.
+
+OAUTH_METHODS = ("GET", "POST")
+# Where the agent's server is: the callback's address; for "localhost" ::1, then 127.0.0.1 (as a browser tries them:
+# a Node server listening on "localhost" may have only one of them).
+OAUTH_ADDRESSES = {"127.0.0.1": ("127.0.0.1",), "::1": ("::1",), "localhost": ("::1", "127.0.0.1")}
+OAUTH_TARGET = re.compile(r"/[!-~]{0,8191}")
+OAUTH_HOST = re.compile(r"(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}")
+# What of the browser's request goes in: never its cookies (a browser sends 127.0.0.1's cookies to every port) nor its
+# authorization, origin or referrer.
+OAUTH_HEADERS = ("accept", "accept-language", "content-type", "user-agent")
+OAUTH_BODY_LIMIT = 1 << 20
+OAUTH_RESPONSE_LIMIT = 1 << 20
+OAUTH_SECONDS = 30
+OAUTH_REDIRECTS = 3
+# Who takes the callback (security review SAI-26). The supervisor reaches the agent's server by its port, and every
+# process of the sandbox may listen on a port of its loopback: one that binds [::1]:PORT beside the agent's
+# 127.0.0.1:PORT, or takes the port when the agent's server has ended, would be handed the login's code. So the
+# supervisor looks who listens before it connects (oauth_listeners: the listening sockets of that port and the
+# processes that hold them): two listening sockets of different processes - the callback goes to neither; and the
+# host names the socket it saw listening when the human allowed the login (control op "oauth-listener",
+# oauth_relay.start) - another one at the callback's time, and the callback is not delivered. The process that takes
+# it is in the answer (the host's record of the callback). Not solved by this: a process that listens BEFORE the
+# agent does and asks for the login itself - the agent and its commands are one user (docs/reviews/
+# security-review-fixes-A.md).
+OAUTH_LISTENER_ADDRESSES = ("127.0.0.1", "::1", "0.0.0.0", "::")
+
+
+_oauth_who = None
+
+
+def oauth_who():
+    """The Attribution the callback's listener is looked up with, made once (each registers with the memory guard)."""
+    global _oauth_who
+    if _oauth_who is None:
+        _oauth_who = Attribution()
+    return _oauth_who
+
+
+def oauth_listeners(port, who=None):
+    """The listening TCP sockets of PORT on the sandbox's loopback (or on every address) with the process that holds
+    each, as far as it shows here: [{"address", "inode", "pid", "start", "comm", "exe"}] (pid None: a process of
+    another PID namespace - a service's or the browser's container, which share the network)."""
+    who = who or oauth_who()
+    sockets = [entry for entry in who.sockets()
+               if entry["protocol"] == "tcp" and entry["state"] == "LISTEN" and entry["local"][1] == port
+               and entry["local"][0] in OAUTH_LISTENER_ADDRESSES]
+    if not sockets:
+        return []
+    owners = who.scan()
+    found = []
+    for entry in sockets:
+        pid = (owners.get(entry["inode"]) or (None, None))[0]
+        info = who.process(pid) if pid else None
+        found.append({"address": entry["local"][0], "inode": entry["inode"], "pid": pid if info else None,
+                      **({key: info[key] for key in ("start", "comm", "exe") if key in info} if info else {})})
+    return found
+
+
+def oauth_listener_refusal(listeners, pinned=None):
+    """Why the callback is not delivered to LISTENERS (oauth_listeners), or None. PINNED: {"inode": N} of the socket
+    that listened when the human allowed the login, as the host kept it."""
+    def named(entry):
+        return (f"{printable_text(str(entry.get('comm') or 'a process'), 64)} (pid {entry['pid']})" if entry.get("pid")
+                else "a process outside the sandbox's own (a service's or the browser's container)")
+    holders = {(entry["pid"], entry.get("start")) if entry.get("pid") else ("?", entry["inode"]) for entry in listeners}
+    if len(holders) > 1:
+        return ("more than one process listens on the callback's port in the sandbox ("
+                + ", ".join(sorted({named(entry) for entry in listeners})) + "): the login's answer is handed to "
+                "neither. End the one that is not the agent's login, then sign in again")
+    if isinstance(pinned, dict) and listeners and isinstance(pinned.get("inode"), int) and \
+            not isinstance(pinned.get("inode"), bool) and \
+            all(entry["inode"] != pinned["inode"] for entry in listeners):
+        return ("another socket listens on the callback's port than when you allowed the login (then: "
+                f"{printable_text(str(pinned.get('comm') or 'a process'), 64)}; now: {named(listeners[0])}): the "
+                "login's answer is not handed to it. Start the login again")
+    return None
+
+
+def oauth_request(request):
+    """The validated fields of an "oauth-callback" REQUEST: (address, port, method, target, host, headers, body)."""
+    port = request.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError("port: 1-65535")
+    address = request.get("address", "127.0.0.1")
+    if address not in OAUTH_ADDRESSES:
+        raise ValueError("only the sandbox's loopback (127.0.0.1, ::1 or localhost) is reached")
+    method = request.get("method")
+    if method not in OAUTH_METHODS:
+        raise ValueError(f"method: {' or '.join(OAUTH_METHODS)}")
+    target = request.get("target")
+    if not isinstance(target, str) or not OAUTH_TARGET.fullmatch(target):
+        raise ValueError("target: a path (and query) of printable ASCII")
+    host = request.get("host")
+    if not isinstance(host, str) or not OAUTH_HOST.fullmatch(host) or int(host.rsplit(":", 1)[1]) != port:
+        raise ValueError("host: 127.0.0.1, localhost or [::1] with the port")
+    headers = request.get("headers") or {}
+    if not isinstance(headers, dict):
+        raise ValueError("headers: an object")
+    kept = {}
+    for name, value in headers.items():
+        if isinstance(name, str) and name.lower() in OAUTH_HEADERS and isinstance(value, str) and \
+                re.fullmatch(r"[ -~]{0,1000}", value):
+            kept[name.lower()] = value
+    try:
+        body = base64.b64decode(request.get("body") or "", validate=True)
+    except (binascii.Error, TypeError, ValueError):
+        raise ValueError("body: base64") from None
+    if len(body) > OAUTH_BODY_LIMIT:
+        raise ValueError("body: too long")
+    if body and method != "POST":
+        raise ValueError("only a POST has a body")
+    return address, port, method, target, host, kept, body
+
+
+def oauth_same_server(location, target, port):
+    """The path (and query) LOCATION (a redirect's) leads to when it stays on the agent's own server - relative, or
+    http://127.0.0.1|localhost|[::1]:PORT - else None."""
+    if not isinstance(location, str) or not re.fullmatch(r"[!-~]{1,8192}", location):
+        return None
+    joined = urllib.parse.urljoin(f"http://127.0.0.1:{port}{target}", location)
+    parts = urllib.parse.urlsplit(joined)
+    try:
+        same = parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1") and parts.port == port
+    except ValueError:
+        return None
+    if not same or parts.username or parts.password:
+        return None
+    return (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+
+
+def oauth_callback(request, connection_class=None, listeners=None):
+    """Control op "oauth-callback": the one relayed request sent to the agent's server on the sandbox's loopback;
+    {"status", "content_type", "body" (base64), "location" (a redirect elsewhere, not followed), "followed"}."""
+    import http.client
+    address, port, method, target, host, headers, body = oauth_request(request)
+    connection_class = connection_class or http.client.HTTPConnection
+    listeners = (listeners or oauth_listeners)(port)
+    refusal = oauth_listener_refusal(listeners, request.get("listener"))
+    if refusal:
+        raise ValueError(refusal)
+    followed = []
+    for hop in range(OAUTH_REDIRECTS + 1):
+        connection = None
+        try:
+            for candidate in OAUTH_ADDRESSES[address]:
+                connection = connection_class(candidate, port, timeout=OAUTH_SECONDS)
+                try:
+                    connection.connect()
+                    break
+                except OSError as exc:  # nothing there (or no such loopback): the next address, if any
+                    connection.close()
+                    nothing = isinstance(exc, ConnectionRefusedError) or \
+                        exc.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT, errno.ENETUNREACH)
+                    if candidate == OAUTH_ADDRESSES[address][-1] or not nothing:
+                        raise
+            connection.putrequest(method, target, skip_host=True, skip_accept_encoding=True)
+            connection.putheader("Host", host)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            if method == "POST":
+                connection.putheader("Content-Length", str(len(body)))
+            connection.putheader("Connection", "close")
+            connection.endheaders(body if method == "POST" else None)
+            response = connection.getresponse()
+            data = response.read(OAUTH_RESPONSE_LIMIT + 1)
+            status, kind = response.status, response.getheader("Content-Type") or ""
+            location = response.getheader("Location")
+        except (OSError, http.client.HTTPException) as exc:
+            raise ValueError(f"the agent's server on {host} did not answer ({exc.__class__.__name__}: "
+                             f"{printable_text(str(exc), 200)})") from None
+        finally:
+            if connection is not None:
+                connection.close()
+        if len(data) > OAUTH_RESPONSE_LIMIT:
+            raise ValueError("the agent's answer is too long")
+        nxt = oauth_same_server(location, target, port) if status in (301, 302, 303, 307, 308) else None
+        if nxt is None or hop == OAUTH_REDIRECTS:
+            break
+        followed.append(printable_text(nxt.split("?", 1)[0], 300))
+        method, target, body, headers = "GET", nxt, b"", {k: v for k, v in headers.items() if k != "content-type"}
+    return {"status": int(status), "content_type": printable_text(kind, 200),
+            "body": base64.b64encode(data).decode("ascii"),
+            **({"location": printable_text(location, 2000)} if status in (301, 302, 303, 307, 308) and location
+               else {}), "followed": followed,
+            # Who took it, for the host's record of the callback.
+            **({"listener": {key: listeners[0][key] for key in ("pid", "comm", "exe") if listeners[0].get(key)}}
+               if listeners else {})}
+
+
+def oauth_answer(connection, request):
+    """Answer an "oauth-callback" REQUEST on CONNECTION (its own copy, closed here) in a thread of its own: the agent
+    may take seconds (Codex exchanges the code first), and the control socket keeps serving meanwhile."""
+    try:
+        answer = {"ok": True, **oauth_callback(request)}
+    except Exception as exc:  # noqa: BLE001 - one request's failure is its answer
+        answer = {"ok": False, "error": str(exc)[:500] or type(exc).__name__}
+    try:
+        connection.settimeout(10)
+        connection.sendall((json.dumps(answer) + "\n").encode())
+    except OSError:
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            connection.close()
+
+
 def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, relays=None, sandboxed=None,
                    rules=None, token_file=None, broker=None, listening=None, cuts_ready=None):
     """Serve `sandbox-ai net` requests (allow, revoke, show, untaint; watch: a workspace added during the run, for
@@ -10411,6 +17617,40 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                     with contextlib.suppress(OSError):
                         connection.sendall((json.dumps(answer) + "\n").encode())
                     continue
+                if request.get("op") == "git-logins":
+                    # `sandbox-ai git-logins give|revoke` (net allow|revoke --git-token-*): the logins for the proxy,
+                    # within the policy (an option the administrator forbids is not done by a request written by
+                    # hand either: the kinds the request names, and every kind when all three are forbidden).
+                    kinds = ("--git-token-env", "--git-token-file", "--git-token-secret")
+                    named = [o for o in request.get("options") or [] if o in kinds] \
+                        if isinstance(request.get("options"), list) else []
+                    refused = [o for o in named if o in forbid] or ([kinds[0]] if all(o in forbid for o in kinds)
+                                                                    else [])
+                    if request.get("git_logins") and refused:
+                        safeguard_event("policy", f"sandbox-ai net allow {refused[0]}",
+                                        f"{refused[0]} is not allowed by the administrator's policy", option=refused[0])
+                        raise ValueError(f"{refused[0]} is not allowed by the administrator's policy")
+                    widened = [o for o in (named or kinds) if mode and o in (mode.get("refuses") or [])]
+                    if request.get("git_logins") and widened and (named or len(widened) == len(kinds)):
+                        raise ValueError(f"{widened[0]} widens the security mode {mode.get('name')} of this run")
+                    answer = {"ok": True, "git_logins": give_git_logins(request.get("git_logins"))}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "secret-values":
+                    # A secret the human gave into the running sandbox (a Git login with --in-sandbox): registered
+                    # with the proxy's secret guard, which reports or holds it on its way to another host.
+                    answer = {"ok": True, "values": give_secret_values(request.get("values"))}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "spend":
+                    # `sandbox-ai spend raise` (only takes the human: a peer inside the sandbox is refused above),
+                    # and the launcher's count of what other runs spent of a shared budget.
+                    answer = {"ok": True, **give_spend(request)}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
                 if request.get("op") == "rules":
                     if rules is None:
                         raise ValueError("this sandbox keeps no rules to show or reload")
@@ -10419,6 +17659,23 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
                                              else rules.shown())}
                     with contextlib.suppress(OSError):
                         connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "oauth-listener":  # who listens on a login's callback port now
+                    port = request.get("port")
+                    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+                        raise ValueError("port: 1-65535")
+                    answer = {"ok": True, "listeners": oauth_listeners(port)}
+                    with contextlib.suppress(OSError):
+                        connection.sendall((json.dumps(answer) + "\n").encode())
+                    continue
+                if request.get("op") == "oauth-callback":
+                    oauth_request(request)  # refused at once when it is not one
+                    handed = connection.dup()
+                    try:
+                        threading.Thread(target=oauth_answer, args=(handed, request), daemon=True).start()
+                    except BaseException:
+                        handed.close()
+                        raise
                     continue
                 if request.get("op") == "decide":
                     if broker is None:
@@ -10485,8 +17742,8 @@ def control_server(path, network, stop=None, forbid=(), mode=None, taint=None, r
 # A connection to a destination the options do not allow, a lookup of a name they do not pin, a push
 # the privacy check has warnings about, and a request an ask rule holds are put to the human: the
 # request appears as a file in the run's control directory on the host (sandbox-ai approvals, the app,
-# a desktop notification); the answer comes back as a file next to it. Without an answer within
-# APPROVAL_SECONDS it is refused.
+# a desktop notification); the answer comes back as a file next to it. Without an answer within the run's
+# --ask-timeout (APPROVAL_SECONDS by default) that try fails and the question stays open (NOT_ANSWERED below).
 
 APPROVAL_SECONDS = 60
 VERIFY_SECONDS = 15      # how long "Allow always" for a name waits for the certificate that proves it
@@ -10500,10 +17757,14 @@ def narrowest_scope(*scopes):
     return min((scope if scope in SCOPES else "once" for scope in scopes), key=SCOPES.index)
 
 
-# A question nobody answered is no decision: its request is refused, and for UNANSWERED_PAUSE seconds the same request
-# is refused at once without a new question (the agent does not wait out the timeout again and again); then it is
-# asked again. Only the human's answers are remembered for the run.
-UNANSWERED_PAUSE = 120
+# A question nobody answered in time is no decision and no refusal of its own: its request fails with NOT_ANSWERED,
+# and the question stays open - "timed out" in the lists, answerable later (the app, the web interface, `sandbox-ai
+# approvals allow ID`). A later answer is applied at once (a connection or a name for the run: opened now; "once":
+# kept for the next try of the same request), and the next try waits for that same question again (up to the
+# timeout) instead of asking a new one. Nothing is refused at once for not being answered (until 0.1.98 the same
+# request was, for 2 minutes, and that could not be taken back).
+NOT_ANSWERED = "not answered yet - the human may still allow it; retry later"
+ASK_TIMEOUT_RANGE = (5, 3600)  # seconds a question may wait (--ask-timeout; the launcher checks it)
 QUESTION_ID = re.compile(r"[0-9]{1,12}-[0-9]{1,10}-[0-9]{1,10}")  # as ApprovalBroker.ask names its questions
 DECIDE_ACTIONS = ("list", "allow", "deny", "forget")
 DECIDED_KINDS = ("connect", "dns", "push", "http", "mcp", "tool")  # the questions the broker asks itself
@@ -10555,7 +17816,7 @@ class ApprovalBroker:
 
     def __init__(self, directory, network, timeout=APPROVAL_SECONDS, poll=0.2, clock=time.monotonic, max_scope="always",
                  blocked=None, hosts_file=Path("/etc/hosts"), no_inspect=(), public=None, verify_seconds=VERIFY_SECONDS,
-                 name_ports=(443,), pause=UNANSWERED_PAUSE):
+                 name_ports=(443,)):
         self.directory, self.network, self.timeout, self.poll, self.clock = Path(directory), network, timeout, poll, clock
         # What "Allow always" for a connection remembers (see remembers): the names sandbox-ai pinned (HOSTS_FILE,
         # the sandbox's /etc/hosts), the hosts whose TLS is not opened (NO_INSPECT), which addresses count as
@@ -10572,8 +17833,11 @@ class ApprovalBroker:
         self.blocked_hosts = {h for h in blocked.get("hosts", []) if isinstance(h, str)}
         self.blocked_tcp = {t for t in blocked.get("tcp", []) if isinstance(t, str)}
         self.lock, self.pending, self.decided, self.counter = threading.Lock(), {}, {}, 0
-        # Questions nobody answered: {key: {"until": clock time, "answer", ...}}, refused at once until then.
-        self.cooling, self.pause = {}, pause
+        # Questions nobody answered in time ({slot: its entry}): still open, answered whenever the human gets to them
+        # (late_watch); the next try of the same request waits for the same question again. GRANTED: a late "allow
+        # once" ({slot: answer}), kept for that request's next try, which it is applied to and used up by.
+        self.late, self.granted, self.late_thread = {}, {}, None
+        self.late_poll = max(5 * poll, 0.05)
         self.serial, self.wildcard_asked = 0, {}  # every question's number (its ID); wildcard questions per suffix
         self.run_token = secrets.randbelow(10 ** 9)  # IDs differ between sandboxes asking in the same second
         self.directory.mkdir(mode=0o700, exist_ok=True)
@@ -10588,6 +17852,10 @@ class ApprovalBroker:
             return kind, f"{details.get('url', '')} {digest}"
         # The fields as a JSON list, never joined with spaces: a decoded path or the agent's Host header may hold
         # one, and "/x" with Host "y z" must not be the key of "/x y" with Host "z".
+        if kind == "http" and isinstance(details.get("secret"), dict):
+            # the secret guard's: "run" covers this kind of value on its way to this host, whatever the endpoint
+            return kind, json.dumps([SECRET_RULESET, str(details.get("rule", "")),
+                                     str(details["secret"].get("host", ""))])
         if kind == "http":  # "run" covers this endpoint under this rule, not the rule's other requests
             return kind, json.dumps([str(details.get(k, "")) for k in ("ruleset", "rule", "method", "host", "path",
                                                                       "host_header")])
@@ -10595,6 +17863,8 @@ class ApprovalBroker:
             return kind, json.dumps([str(details.get(k, "")) for k in ("ruleset", "rule", "server", "tool")])
         if kind == "tool":  # the agent's own tool: "run" covers it under this rule
             return kind, json.dumps([str(details.get(k, "")) for k in ("ruleset", "rule", "agent", "tool")])
+        if kind == "mcp-tools":  # a server's tool list: an answer covers this very list (its digest), not a later one
+            return kind, json.dumps([str(details.get(k, "")) for k in ("server", "list_digest")])
         return kind, str(details.get("destination") or details.get("name") or details.get("url") or "")
 
     @staticmethod
@@ -10607,10 +17877,11 @@ class ApprovalBroker:
         return key
 
     @staticmethod
-    def cools(kind, key, slot):
-        """What a question nobody answered refuses for a while (cooling): for a tool call (mcp, tool) that exact call
-        (its SLOT), as its question was bound to it - another call of the tool is asked on its own; else its KEY."""
-        return slot if kind in ("mcp", "tool") else key
+    def once_only(kind, details):
+        """A question whose "allow" never counts beyond the one request: a download the package guard holds as a
+        known malicious version."""
+        package = details.get("package") if kind == "http" and isinstance(details, dict) else None
+        return isinstance(package, dict) and bool(package.get("malicious"))
 
     def blocked(self, kind, details):
         if kind == "dns":
@@ -10620,29 +17891,53 @@ class ApprovalBroker:
             return (f"[{address}]:{port}" if ":" in address else f"{address}:{port}") in self.blocked_tcp
         return False
 
-    def ask(self, kind, details, wait=True):
-        """{"decision": "allow"|"deny", "scope", "reason"} for a question; WAIT=False only files it."""
+    def ask(self, kind, details, wait=True, late=None):
+        """{"decision": "allow"|"deny", "scope", "reason"} for a question; WAIT=False only files it. LATE(details,
+        answer): called with the human's answer if it comes after the question timed out (an MCP relay's tool list:
+        McpGateway.late_tools) - such an answer is then the caller's to apply, never kept for a next try."""
         refusal = getattr(self.network, "cut_refusal", lambda *_: None)(kind, details)
         if isinstance(refusal, str) and refusal:  # the kill switch holds: nothing it forbids is asked (or opened)
             return {"decision": "deny", "scope": "once", "reason": refusal}
         if self.blocked(kind, details):
             return {"decision": "deny", "scope": "run", "reason": "blocked always for this project"}
+        if kind == "dns" and reserved_name(details.get("name", "")):  # (the DNS stub asks for none of them either)
+            return {"decision": "deny", "scope": "run", "reason": RESERVED_REASON}
         key = self.key(kind, details)
         slot = self.slot(kind, details, key)
-        cools = self.cools(kind, key, slot)
         with self.lock:
             if key in self.decided:
                 return self.remembered(self.decided[key])
-            cooling = self.cooling.get(cools)
-            if cooling is not None:
-                if self.clock() < cooling["until"]:
-                    return cooling["answer"]  # not answered a moment ago: refused at once, not asked again yet
-                del self.cooling[cools]
+            granted = self.granted.pop(slot, None)
+        if granted is not None:  # allowed once after its question had timed out: for this try, applied now
+            try:
+                self._apply(kind, details, granted)
+            except (ValueError, TypeError, KeyError, OSError, subprocess.CalledProcessError) as exc:
+                return {"decision": "deny", "scope": "once", "reason": f"could not be applied: {exc}"}
+            return granted
+        with self.lock:
+            if key in self.decided:  # (decided meanwhile)
+                return self.remembered(self.decided[key])
             more = details.get("too_large") if kind in ("mcp", "tool") else None
             if isinstance(more, int) and not isinstance(more, bool) and more > 0:
                 # Its question could not show all of it: refused, never asked (an answer for the run still covers it).
                 return {"decision": "deny", "scope": "once", "reason": too_large_refusal(more)}
             waiting = self.pending.get(slot)
+            if waiting is None and slot in self.late:
+                # Asked before and not answered yet: this try waits for the same question again (open once more).
+                waiting = self.late.pop(slot)
+                waiting["attempt"] = {"event": threading.Event(), "answer": None}
+                waiting["tries"] += 1
+                if callable(late):
+                    waiting["on_late"] = late
+                self.pending[slot] = waiting
+                try:
+                    self._state(waiting, "open")
+                    threading.Thread(target=self._wait, args=(key, kind, waiting["details"], waiting),
+                                     name="approval-wait", daemon=True).start()
+                except (OSError, RuntimeError) as exc:  # no space, no more threads: refused now, still answerable
+                    self.pending.pop(slot, None)
+                    self.late[slot] = waiting
+                    return {"decision": "deny", "scope": "once", "reason": f"could not ask again: {exc}"}
             if waiting is None:
                 below = str(details.get("wildcard")) if kind == "dns" and details.get("wildcard") else None
                 if below is not None:
@@ -10656,10 +17951,11 @@ class ApprovalBroker:
                     self.counter += 1
                 self.serial += 1
                 ident = f"{int(time.time())}-{self.run_token}-{self.serial}"
-                waiting = self.pending[slot] = {"id": ident, "event": threading.Event(), "answer": None,
-                                                "wildcard": below is not None, "slot": slot}
                 if kind == "connect":  # shown in the question: what "Allow always" will remember
                     details = {**details, "remembers": self.remembers(details)}
+                waiting = self.pending[slot] = {"id": ident, "attempt": {"event": threading.Event(), "answer": None},
+                                                "wildcard": below is not None, "slot": slot, "details": details,
+                                                "tries": 1, **({"on_late": late} if callable(late) else {})}
                 try:
                     self._write(f"{ident}.json", {"id": ident, "kind": kind, "time": time.strftime(
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "timeout": self.timeout, **details})
@@ -10668,10 +17964,25 @@ class ApprovalBroker:
                 except (OSError, RuntimeError) as exc:  # no space, no more threads: refused, not asked
                     self.pending.pop(slot, None)
                     return {"decision": "deny", "scope": "once", "reason": f"could not ask: {exc}"}
+            attempt = waiting["attempt"]  # (this try's: a later one waits on one of its own)
         if not wait:
             return None
-        waiting["event"].wait(self.timeout + 5)
-        return waiting["answer"] or {"decision": "deny", "scope": "once", "reason": "no answer"}
+        attempt["event"].wait(self.timeout + 5)
+        return attempt["answer"] or {"decision": "deny", "scope": "once", "reason": NOT_ANSWERED}
+
+    def _state(self, waiting, state):
+        """{ID}.state beside question WAITING: "open" (a try waits for it, since when and how long) or "timeout"
+        (nobody waits; it stays answerable), for the lists on the host (approvals.question_state)."""
+        self._write(f"{waiting['id']}.state", {"state": state, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                                                   time.gmtime()),
+                                                "timeout": self.timeout, "tries": waiting.get("tries", 1)})
+
+    @staticmethod
+    def _release(waiting, answer):
+        """The try waiting for WAITING now gets ANSWER."""
+        attempt = waiting["attempt"]
+        attempt["answer"] = attempt["answer"] or answer
+        attempt["event"].set()
 
     def _write(self, name, data):
         write_new(self.directory / name, json.dumps(data), 0o600)
@@ -10694,25 +18005,30 @@ class ApprovalBroker:
                                 f"answers are capped to \"{self.max_scope}\" by {capper}",
                                 directory=self.directory.parent, mode=mode, target="approval scope")
             scope = self.max_scope
+        # A human's answer may say why (a lookup closed because its name does not exist: approvals.close_missing),
+        # kept for the lists; --ask allow's is in its reason already.
+        why = answer.get("why") if answer.get("by") != AUTO_BY and isinstance(answer.get("why"), str) else None
         return {"decision": answer["decision"], "scope": scope,
-                "reason": answered_reason(answer), "addresses": answer.get("addresses", [])}
+                "reason": answered_reason(answer), "addresses": answer.get("addresses", []),
+                **({"why": printable_text(why, 300)} if why else {})}
 
     def _wait(self, key, kind, details, waiting):
+        attempt = waiting["attempt"]  # this try's (a later try of a question that timed out waits on its own)
         try:
             self._settle(key, kind, details, waiting)
         except OSError:  # the .done file not written (a full disk): refused below, the thread ends quietly
             pass
         finally:
-            if not waiting["event"].is_set():
+            if not attempt["event"].is_set():
                 # Something failed on the way (a damaged answer, a full disk): the asker is refused now, not after
                 # its timeout, and the question is open no more (it would hold one of OPEN_QUESTIONS for good, and
                 # every later ask of it would wait in vain).
                 with self.lock:
-                    if self.pending.get(waiting["slot"]) is waiting:
+                    if self.pending.get(waiting["slot"]) is waiting and waiting["attempt"] is attempt:
                         self.pending.pop(waiting["slot"], None)
-                waiting["answer"] = waiting["answer"] or {"decision": "deny", "scope": "once",
+                attempt["answer"] = attempt["answer"] or {"decision": "deny", "scope": "once",
                                                           "reason": "the answer could not be handled"}
-                waiting["event"].set()
+                attempt["event"].set()
 
     def _settle(self, key, kind, details, waiting):
         deadline = self.clock() + self.timeout
@@ -10722,14 +18038,72 @@ class ApprovalBroker:
             if answer:
                 break
             time.sleep(self.poll)
-        unanswered = answer is None
-        if unanswered:  # no decision: refused now, refused at once for a while (UNANSWERED_PAUSE), then asked again
-            until = time.time() + self.pause
-            answer = {"decision": "deny", "scope": "once", "reason": f"no answer within {self.timeout} s",
-                      "question": waiting["id"], "why": self.unanswered_why(details, waiting["id"], until)}
+        if answer is None:
+            # No decision: this try fails, the question stays open (late) - answered later, it counts for the next.
+            with self.lock:
+                if self.pending.get(waiting["slot"]) is waiting:
+                    self.pending.pop(waiting["slot"], None)
+                    self.late[waiting["slot"]] = waiting
+                    waiting.update(key=key, kind=kind)
+            try:
+                self._state(waiting, "timeout")
+            finally:
+                self._release(waiting, {"decision": "deny", "scope": "once", "reason": NOT_ANSWERED,
+                                        "question": waiting["id"], "why": self.waiting_why(details, waiting["id"])})
+                self.late_watch()
+            return
+        self._finish(key, kind, details, waiting, answer)
+
+    def late_watch(self):
+        """Watch the questions that timed out for their answers (one thread while there are any)."""
+        with self.lock:
+            if self.late_thread is not None or not self.late:
+                return
+            self.late_thread = threading.Thread(target=self._late_loop, name="approval-late", daemon=True)
+            thread = self.late_thread
+        try:
+            thread.start()
+        except RuntimeError:  # no thread to be had: the next try reads the answer itself (it waits for the question)
+            with self.lock:
+                self.late_thread = None
+
+    def _late_loop(self):
+        while True:
+            time.sleep(self.late_poll)
+            with self.lock:
+                entries = list(self.late.values())
+                if not entries:
+                    self.late_thread = None
+                    return
+            for waiting in entries:
+                answer = self._read_answer(waiting["id"])
+                if answer is None:
+                    continue
+                with self.lock:
+                    if self.late.get(waiting["slot"]) is not waiting:
+                        continue  # a try waits for it again: its own wait takes the answer
+                    del self.late[waiting["slot"]]
+                try:  # an "always" may wait for the certificate that proves the name: the others are not held up
+                    threading.Thread(target=self._finish_late, args=(waiting, answer), name="approval-late-answer",
+                                     daemon=True).start()
+                except RuntimeError:
+                    self._finish_late(waiting, answer)
+
+    def _finish_late(self, waiting, answer):
+        with contextlib.suppress(OSError):
+            self._finish(waiting["key"], waiting["kind"], waiting["details"], waiting, answer, late=True)
+
+    def _finish(self, key, kind, details, waiting, answer, late=False):
+        """Apply the human's ANSWER to question WAITING; LATE: given after its try had failed - an "allow once" is
+        then kept for the next try of the request (granted) instead of opening something nobody waits for."""
         if kind in ("push", "http", "mcp", "tool") and answer["scope"] == "always":
             answer = {**answer, "scope": "run"}  # pushes, requests and tool calls are never remembered beyond the run
-        if answer["decision"] == "allow":
+        if answer["decision"] == "allow" and answer["scope"] != "once" and self.once_only(kind, details):
+            answer = {**answer, "scope": "once"}  # a known malicious package version: this one download, no more
+        on_late = waiting.get("on_late") if late else None
+        # A late "allow once" is kept for the request's next try - unless the asker takes late answers itself.
+        later = late and answer["decision"] == "allow" and answer["scope"] == "once" and not callable(on_late)
+        if answer["decision"] == "allow" and not later:
             try:
                 self._apply(kind, details, answer)
             except (ValueError, TypeError, KeyError, OSError, subprocess.CalledProcessError) as exc:
@@ -10738,43 +18112,49 @@ class ApprovalBroker:
         if kind == "connect" and answer["decision"] == "allow" and answer["scope"] == "always":
             remember = details.get("remembers") or self.remembers(details)
         with self.lock:
-            self.pending.pop(waiting["slot"], None)
-            if unanswered:
-                cools = self.cools(kind, key, waiting["slot"])  # (a tool call: only that call, as its question)
-                self.cooling[cools] = {"until": self.clock() + self.pause, "kind": kind, "question": waiting["id"],
-                                     "details": self.shown_details(details), "answer": {
-                                         **answer, "reason": f"no answer within {self.timeout} s to question "
-                                                             f"{waiting['id']}; refused without asking until "
-                                                             f"{time.strftime('%H:%M:%S', time.gmtime(until))} UTC"}}
+            if self.pending.get(waiting["slot"]) is waiting:
+                self.pending.pop(waiting["slot"], None)
+            if later:
+                self.granted[waiting["slot"]] = {**answer, "question": waiting["id"]}
             elif answer["scope"] in ("run", "always"):
                 # The human's answer: asked once per run (a deny counts for the run unless "once").
                 self.decided[key] = {**answer, "question": waiting["id"], "kind": kind,
                                      "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                                      "details": self.shown_details(details)}
-        proof = bool(remember) and remember.get("verified") == "on connection"
+        proof = bool(remember) and remember.get("verified") == "on connection" and not late
         if proof:  # the proxy goes on first: the approved connection is what proves (or not) the name it sent
-            waiting["answer"] = answer
-            waiting["event"].set()
+            self._release(waiting, answer)
             remember = self.await_proof(details, remember)
-        self._write(f"{waiting['id']}.done", {**answer, "id": waiting["id"], **({"remember": remember} if remember else {})})
+        elif remember and remember.get("verified") == "on connection":
+            # Answered after the try had gone: no connection proves the name now, the address is remembered.
+            remember = {"tcp": remember["tcp"], "why": "answered after its connection had failed: no certificate "
+                                                       "proved the name"}
+        self._write(f"{waiting['id']}.done", {**answer, "id": waiting["id"], **({"late": True} if late else {}),
+                                              **({"remember": remember} if remember else {})})
         if not proof:
-            waiting["answer"] = answer
-            waiting["event"].set()
+            self._release(waiting, answer)
+        if callable(on_late):
+            try:
+                on_late(details, answer)
+            except Exception as exc:  # noqa: BLE001 - the answer stands; the asker sees it at its next try
+                print(f"agent-sandbox: a late answer to question {waiting['id']} was not applied: "
+                      f"{printable_text(str(exc), 300)}", file=sys.stderr)
 
     @staticmethod
     def shown_details(details):
         """What a remembered decision shows of its question (sandbox-ai approvals decided, the app's Blocked list)."""
         return {k: printable_text(details[k], 300) for k in SHOWN_DETAILS if details.get(k) not in (None, "")}
 
-    def unanswered_why(self, details, ident, until):
-        """Why a question nobody answered refuses its request, in plain words, and what to do."""
+    def waiting_why(self, details, ident):
+        """Why a request whose question nobody answered in time failed, in plain words, and what happens now."""
         if details.get("ruleset"):
             asks = f"the ruleset {details['ruleset']} (rule {details.get('rule')}) asks before it"
         else:
             asks = "the run's network options do not allow it, so it is asked"
-        return (f"{asks}, and question {ident} was not answered within {self.timeout} s. It is refused without "
-                f"asking until {time.strftime('%H:%M:%S', time.gmtime(until))} UTC, then asked again. Allow it for "
-                f"the run on the app's Approvals page (Blocked) or with: sandbox-ai approvals allow {ident} --scope run"
+        return (f"{asks}, and question {ident} was not answered within {self.timeout} s. The question stays open: "
+                f"once the human allows it, the next try of the same request goes through (each try waits up to "
+                f"{self.timeout} s for the answer). Retry later rather than at once and in a loop, or say what you "
+                f"need. The human answers on the app's Approvals page or with: sandbox-ai approvals allow {ident}"
                 + (". Allowing its host in the network settings does not change what a ruleset decides"
                    if details.get("ruleset") else ""))
 
@@ -10785,22 +18165,22 @@ class ApprovalBroker:
         if entry.get("decision") != "deny" or not entry.get("question"):
             return entry
         return {**entry, "why": f"you denied it for this run (question {entry['question']}); take that back on the "
-                                f"app's Approvals page (Blocked) or with: sandbox-ai approvals ask-again "
+                                f"app's Approvals page (Refused) or with: sandbox-ai approvals ask-again "
                                 f"{entry['question']}"}
 
     def decided_list(self):
-        """The run's remembered decisions and the requests refused for now because nobody answered (newest first)."""
-        now = self.clock()
+        """The run's remembered decisions and the questions nobody answered in time, still open (newest first)."""
         with self.lock:
             entries = [{"question": entry.get("question"), "kind": entry.get("kind") or key[0],
                         "decision": entry.get("decision"), "scope": entry.get("scope"), "reason": entry.get("reason"),
                         "time": entry.get("time"), "details": entry.get("details", {}),
                         **({"changed": entry["changed"]} if entry.get("changed") else {})}
                        for key, entry in self.decided.items()]
-            entries += [{"question": entry["question"], "kind": entry["kind"], "decision": "deny",
-                         "scope": "pause", "reason": entry["answer"]["reason"], "details": entry["details"],
-                         "seconds_left": max(0, int(entry["until"] - now))}
-                        for entry in self.cooling.values() if entry["until"] > now]
+            entries += [{"question": entry["id"], "kind": entry.get("kind"), "decision": None, "scope": "timeout",
+                         "reason": NOT_ANSWERED, "details": self.shown_details(entry.get("details") or {})}
+                        for entry in self.late.values()]
+            entries += [{"question": entry.get("question"), "kind": slot[0], "decision": "allow",
+                         "scope": "next try", "reason": entry.get("reason")} for slot, entry in self.granted.items()]
         return sorted(entries, key=lambda e: str(e.get("question") or ""), reverse=True)
 
     def question_of(self, ident):
@@ -10825,15 +18205,16 @@ class ApprovalBroker:
         if action not in DECIDE_ACTIONS:
             raise ValueError(f"decide: one of {', '.join(DECIDE_ACTIONS)}")
         if action == "list":
-            return {"decided": self.decided_list(), "max_scope": self.max_scope, "pause": self.pause}
+            return {"decided": self.decided_list(), "max_scope": self.max_scope, "timeout": self.timeout}
         ident = request.get("question")
         kind, details = self.question_of(ident)
         key = self.key(kind, details)
-        cools = self.cools(kind, key, self.slot(kind, details, key))
         with self.lock:
             if any(slot[:2] == key for slot in self.pending):  # (a tool call's slot is its key and its arguments)
                 raise ValueError(f"question {ident} is open: answer it (sandbox-ai approvals allow|deny {ident})")
-            was = self.decided.get(key) or (self.cooling.get(cools) or {}).get("answer")
+            was = self.decided.get(key) or next((entry for slot, entry in self.granted.items() if slot[:2] == key),
+                                                None)
+            late = [entry for slot, entry in self.late.items() if slot[:2] == key]
         was = {k: was.get(k) for k in ("decision", "scope", "reason")} if was else None
         notes = []
         if action in ("deny", "forget") and was and was.get("decision") == "allow" and was.get("scope") != "once":
@@ -10848,7 +18229,10 @@ class ApprovalBroker:
         if action == "forget":
             with self.lock:
                 self.decided.pop(key, None)
-                self.cooling.pop(cools, None)
+                for slot in [slot for slot in self.granted if slot[:2] == key]:
+                    self.granted.pop(slot, None)
+            if late and was is None:
+                notes.append("its question is still open: the next try waits for your answer to it")
             return {"forgot": was is not None, "was": was, "question": ident, **({"notes": notes} if notes else {})}
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         entry = {"decision": action, "scope": "run", "reason": "answered", "question": ident, "kind": kind,
@@ -10857,6 +18241,10 @@ class ApprovalBroker:
             if kind == "dns":
                 raise ValueError("a name is allowed with sandbox-ai net allow RUN --allow-host NAME (the host looks it "
                                  "up and pins it)")
+            if self.once_only(kind, details):
+                raise ValueError("a known malicious package version is allowed for one download at most, never for "
+                                 f"the run: ask again (sandbox-ai approvals ask-again {ident}) and answer the next "
+                                 "question")
             if SCOPES.index("run") > SCOPES.index(self.max_scope):
                 by, mode = getattr(self, "capped_by", ("policy", None))
                 capper = f"the security mode {mode}" if by == "mode" else "the administrator's policy"
@@ -10870,8 +18258,13 @@ class ApprovalBroker:
                 notes.append(f"recorded, but the kill switch holds: {cut}")
         with self.lock:
             self.decided[key] = entry
-            for cooled in [cooled for cooled in self.cooling if cooled[:2] == key]:  # (a tool call's: key + arguments)
-                self.cooling.pop(cooled, None)
+            for slot in [slot for slot in self.granted if slot[:2] == key]:  # (a tool call's: key + arguments)
+                self.granted.pop(slot, None)
+            late = [self.late.pop(slot) for slot in [slot for slot in self.late if slot[:2] == key]]
+        for waiting in late:  # answered by this decision: listed so on the host, not open any more
+            with contextlib.suppress(OSError):
+                self._write(f"{waiting['id']}.done", {"decision": action, "scope": "run", "reason": "answered",
+                                                      "id": waiting["id"], "late": True})
         return {"decided": {k: entry[k] for k in ("question", "kind", "decision", "scope", "details")}, "was": was,
                 **({"notes": notes} if notes else {})}
 
@@ -11038,17 +18431,26 @@ class AskChannel:
         self.sock, self.timeout, self.lock, self.waiting, self.counter = sock, timeout, threading.Lock(), {}, 0
         # STALLED: the last send did not go out in time (the supervisor reads nothing); CUT: a line went out only
         # in part, so the next message first ends it (the supervisor skips the broken line).
-        self.stalled, self.cut = False, False
+        self.stalled, self.cut, self.ended = False, False, False
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
-        for line in self.sock.makefile("r", encoding="utf-8"):
-            with contextlib.suppress(ValueError):
-                message = json.loads(line)
-                slot = self.waiting.get(message.get("id"))
-                if slot:
-                    slot.answer = message
-                    slot.event.set()
+        try:
+            for line in self.sock.makefile("r", encoding="utf-8"):
+                with contextlib.suppress(ValueError, AttributeError, TypeError, RecursionError):
+                    message = json.loads(line)
+                    slot = self.waiting.get(message.get("id"))
+                    if slot:
+                        slot.answer = message
+                        slot.event.set()
+        except (OSError, ValueError, RecursionError):  # (a reset, a closed socket, a line that is no text)
+            pass
+        # The channel ended: no answer comes any more - the questions waiting are answered (None: denied) now, not
+        # after their whole time, and so is every later one (request).
+        with self.lock:
+            self.ended = True
+            for slot in list(self.waiting.values()):
+                slot.event.set()
 
     def _send(self, data):
         """Send DATA (under the lock); False if it did not go out whole. The lock is held at most ASK_SEND_SECONDS
@@ -11077,7 +18479,8 @@ class AskChannel:
         with self.lock:
             self.counter += 1
             slot = self.waiting[self.counter] = Pending(self, self.counter)
-            sent = self._send((json.dumps({"id": self.counter, "kind": kind, **details}) + "\n").encode())
+            sent = not self.ended and self._send((json.dumps({"id": self.counter, "kind": kind, **details}) +
+                                                  "\n").encode())
         if not sent:
             slot.event.set()  # no answer will come: nobody waits for one
         return slot
@@ -11378,7 +18781,7 @@ class Canaries:
         recent = {}
         try:
             while not stop.is_set():
-                if not select.select([fd], [], [], 0.2)[0]:
+                if not wait_ready([fd], (), 0.2)[0]:
                     continue
                 data, pos = os.read(fd, 65536), 0
                 while pos + 16 <= len(data):
@@ -11485,6 +18888,784 @@ def canary_push(server, verdict, entry, record):
         entry["canary"] = {"canary": str(ident), "where": "push"}
 
 
+# --- the secret guard: secrets in what the sandbox sends (egress DLP) ----------------------------------------------
+#
+# Every request the proxy opens is searched for the secrets the run was handed in plain text (--secret-env, --env
+# values with a secret's name, a Git token without --token-proxy, the variables of its MCP servers, a login given
+# into the sandbox) - registered like canary tokens: the same forms (plain, URL-, base64-, hex-, JSON-encoded), also
+# inside a gzip body and across two parts of one - and for the token shapes of the privacy check (GitHub, AWS,
+# Google, OpenAI ... keys, private keys), which tell a secret the agent read from a file. proxy.json's "secrets"
+# (secret_guard.py writes it) says what the run does about one that goes to a host it was not given for: report
+# (the default), ask, or block; a ruleset's "secrets" section and the security mode can only tighten that.
+#
+# A request to the run's own model provider is the agent's conversation: a secret in its body entered the model's
+# context. That is recorded and never held, and nothing the agent sees or sends is ever changed.
+#
+# Without a hold (report) a body is searched after it went out, while the server works on its answer: the request
+# is not slowed down. Where the run asks or blocks, the first RULE_BODY_LIMIT bytes of a body are read and searched
+# before anything of the request reaches the server; a longer body is searched as it passes (blocked: cut off where
+# the secret comes; asked: recorded, not held).
+#
+# No record, question, refusal or log line holds a value: names, kinds and encodings only.
+
+SECRET_RULESET = "secret-guard"  # the "ruleset" of its questions and records; their "rule" names what was found
+SECRET_DECISIONS = ("report", "ask", "block")  # in rising strictness
+SECRET_DEFAULTS = {"on_send": "report", "on_shape": "report"}  # a known value; a token shape
+SECRET_KEYS = frozenset(SECRET_DEFAULTS)
+SECRET_FOUND = 8         # findings a request's record and a question name; more are counted
+SECRET_MATCHES = 64      # matches of one shape looked at in one piece of a body
+SECRET_SEEN = 4096       # findings the guard remembers having said (a conversation carries its secrets every turn)
+SECRET_OVERLAP = 512     # bytes of a piece searched again with the next: a token across two pieces is found
+SECRET_ADDED = "secrets-added.json"  # in PROXY_RUN: values registered during the run (a login given into the sandbox)
+SECRET_ADDED_LIMIT = 64
+SECRET_WHAT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}")  # a shape's id or a value's (env:NAME, git-token:HOST)
+SECRET_HOST = re.compile(r"\*|(?:\*\.)?[a-z0-9_](?:[a-z0-9_.-]{0,251}[a-z0-9_])?")
+SECRET_STRIDE = 16       # a known value of at least SECRET_STRIDE + 3 bytes is told by four bytes at every 16th place
+# "a" for every character of base64 (either alphabet), " " for any other byte: a run of base64 is a run of "a"
+SECRET_BASE64_MARKS = bytes(97 if chr(byte) in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_"
+                            else 32 for byte in range(256))
+SECRET_BASE64_RUN = b"a" * 24  # the shortest run that is decoded
+SECRET_BASE64_BREAKS = (b"\n", b"\r\n", b"\\n", b"\\r\\n")  # a line break inside wrapped base64, also as JSON has it
+SECRET_URLSAFE = bytes.maketrans(b"-_", b"+/")
+SECRET_PLACES = {"url": "URL", "header": "headers", "body": "body"}
+SECRET_LEARNED = 32      # shape matches whose base64 forms the logs mask (a body logged as base64, a file in a field)
+_secrets_added = {"stamp": None, "entries": []}
+
+
+def secret_settings(value):
+    """VALUE (a ruleset's "secrets" section) checked and as it is kept; ValueError says what it takes."""
+    if not isinstance(value, dict) or not value or set(value) - SECRET_KEYS or \
+            any(not isinstance(item, str) or item not in SECRET_DECISIONS for item in value.values()):
+        raise ValueError(f'"secrets" takes "on_send" and "on_shape" ({", ".join(SECRET_DECISIONS)}): what a secret '
+                         'the run was given, and what looks like a credential, does on its way to another host')
+    return dict(value)
+
+
+def secret_decisions(sections, base=None):
+    """The secret guard's settings of a run: BASE (default SECRET_DEFAULTS) with every one of SECTIONS ([(who,
+    "secrets" section)], the rulesets' and the mode's) weighed in - the strictest wins, so that no ruleset widens
+    another; "by": who decided each key that is not the default's."""
+    result, by = dict(base or SECRET_DEFAULTS), {}
+    for who, section in sections:
+        for key, value in section.items() if isinstance(section, dict) else ():
+            if key in SECRET_KEYS and isinstance(value, str) and value in SECRET_DECISIONS and \
+                    SECRET_DECISIONS.index(value) > SECRET_DECISIONS.index(result[key]):
+                result[key], by[key] = value, str(who)
+    return {**result, "by": by}
+
+
+def secret_host(origin):
+    """The host of ORIGIN (the server as the proxy verified it: its name, else address[:port]) as the guard compares
+    and names it: lower case, an address in one form, no port."""
+    origin = str(origin or "")
+    if is_address_origin(origin):
+        address = origin.rsplit(":", 1)[0].strip("[]") if origin.count(":") == 1 or origin.startswith("[") else origin
+        with contextlib.suppress(ValueError):
+            return str(ipaddress.ip_address(address.strip("[]")))
+    return origin.lower().rstrip(".")
+
+
+def secret_host_matches(host, pattern):
+    """HOST is the one PATTERN names: * (any), a name, or *.DOMAIN (every name below it)."""
+    return pattern == "*" or host == pattern or (pattern.startswith("*.") and host.endswith(pattern[1:]))
+
+
+def secret_spec(text):
+    """(what, host) of an allow-list entry WHAT@HOST, or None: WHAT a shape's id, a value's, or *; HOST a name,
+    *.DOMAIN or *."""
+    what, at, host = text.rpartition("@") if isinstance(text, str) else ("", "", "")
+    if at and (what == "*" or SECRET_WHAT.fullmatch(what)) and SECRET_HOST.fullmatch(host) and len(host) <= 253:
+        return what, host
+    return None
+
+
+def secret_phrase(finding):
+    """A finding in words: a known value by its label ("the value of NAME (--secret-env)", "the Git token for HOST
+    (--git-token-env)"), a shape as "what looks like a GitHub token". Never the value. (No label says "--option
+    NAME": the logs' redaction takes the word after an option named like a secret for its value.)"""
+    label = str(finding.get("label") or finding.get("id") or "a secret")
+    if finding.get("kind") == "value":
+        return label
+    article = "" if label.endswith("material") else "an " if label[:1] in "AEIOaeio" or label.startswith("npm") \
+        else "a "
+    return f"what looks like {article}{label}"
+
+
+def secret_reason(findings, host):
+    """Why the guard holds a request with FINDINGS on its way to HOST: where in the request each is, how it was
+    encoded (nothing for plain text), and what it is."""
+    said = []
+    for finding in findings[:SECRET_FOUND]:
+        encoding = "+".join(part for part in str(finding.get("encoding") or "").split("+") if part and part != "plain")
+        text = f"in its {SECRET_PLACES.get(finding.get('where'), 'body')}" + (f" ({encoding})" if encoding else "") \
+            + f" {secret_phrase(finding)}"
+        if text not in said:
+            said.append(text)
+    given = all(finding.get("kind") == "value" for finding in findings)
+    return "secret guard: this request carries " + (said[0] if len(said) == 1 else ", ".join(said[:-1]) + " and "
+                                                    + said[-1]) + \
+        (f", which was not given for {host}" if given else f", on its way to {host}")
+
+
+def secret_specs(findings, host):
+    """The allow-list entries that would let FINDINGS pass to HOST."""
+    return list(dict.fromkeys(f"{finding['id']}@{host}" for finding in findings))[:SECRET_FOUND]
+
+
+def secret_allow_hint(findings, host):
+    specs = secret_specs(findings, host)
+    return ("to allow it: " + " ".join(f"--allow-send {spec}" for spec in specs) + " (one start) or sandbox-ai "
+            "secret-guard allow " + " ".join(specs) + " (every run of the project)")
+
+
+class SecretRefused(Exception):
+    """A request the secret guard refuses: nothing more of it reaches the server."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class SecretMatcher(CanaryMatcher):
+    """The run's known values in the forms the launcher listed (FORMS [[text, value id, encoding]], as a canary's
+    tokens). Every value in DATA is told, not only the first; and fast, however many there are: a form of at least
+    SECRET_STRIDE + 3 bytes, wherever it lies, covers one of the places 0, 16, 32 ... of DATA with four of its first
+    19 bytes - so the four bytes at every 16th place are looked up in the set of those (GRAMS: one pass, 2 ms for a
+    mebibyte), and only a piece where one is there is searched for the forms themselves (half a millisecond per
+    form and mebibyte, as shorter forms always are). The canaries' one expression of all forms takes 20 ms for a
+    mebibyte with five values."""
+
+    def __init__(self, forms=()):
+        super().__init__(forms)
+        self.by_value, self.plain, grams = {}, {}, set()
+        for needle, entry in self.forms.items():
+            sampled = len(needle) >= SECRET_STRIDE + 3
+            self.by_value.setdefault(entry["canary"], []).append((needle, entry["encoding"], sampled))
+            if entry["encoding"] == "plain":
+                self.plain[entry["canary"]] = needle
+            if sampled:
+                grams |= {int.from_bytes(needle[offset:offset + 4], sys.byteorder) for offset in range(SECRET_STRIDE)}
+        self.grams = frozenset(grams)
+
+    def every(self, data):
+        """{value id: encoding} of the values in DATA (bytes): each by the first of its forms that is there."""
+        whole = len(data) & ~3
+        sampled = bool(self.grams) and not self.grams.isdisjoint(memoryview(data)[:whole].cast("I")[::4])
+        found = {}
+        for ident, forms in self.by_value.items():
+            for needle, encoding, by_sample in forms:
+                if (sampled or not by_sample) and needle in data:
+                    found[ident] = encoding
+                    break
+        return found
+
+    def known(self, text):
+        """TEXT (what a shape matched) is one of the run's values itself: told as that value, not as a shape."""
+        return any(value in text or text in value for value in self.plain.values())
+
+
+def secret_pivot(anchor, taken):
+    """The place in ANCHOR (text) of its rarest character in ordinary traffic - "_", then "-", other punctuation,
+    capitals and digits, small letters, a blank last - and among equals one that is a pivot already (TAKEN), else the
+    last."""
+    def rarity(char):
+        return 0 if char == "_" else 1 if char == "-" else 5 if char == " " else 4 if char.islower() else \
+            3 if char.isalnum() else 2
+    best = min(map(rarity, anchor))
+    places = [index for index, char in enumerate(anchor) if rarity(char) == best]
+    return next((index for index in places if anchor[index] in taken), places[-1])
+
+
+class SecretShapes:
+    """The token shapes ([{"id", "regex", "label", "anchors", "hosts", "tail"}], the privacy check's): each is looked
+    for only where one of its anchors is (a literal every match begins with); a shape without anchors is searched
+    whole. The anchors are found by their rarest character (secret_pivot): one expression per such character - the
+    character, then which anchor lies around it - which the expression engine runs as a search for one byte, 0.5 ms
+    for a mebibyte, instead of the shapes' own expressions tried at every position (100 ms). "tail": what follows
+    the anchor in every match (an expression: sixteen characters of a token, say), so that a look-alike in ordinary
+    text (sk-learn, hf_hub) is dropped there and then."""
+
+    def __init__(self, shapes=()):
+        self.shapes, self.anchors, self.slow, self.pivots, tails = {}, {}, [], [], {}
+        for shape in shapes if isinstance(shapes, list) else []:
+            ident, regex = (shape.get("id"), shape.get("regex")) if isinstance(shape, dict) else (None, None)
+            if not isinstance(ident, str) or not SECRET_WHAT.fullmatch(ident) or not isinstance(regex, str) or \
+                    ident in self.shapes:
+                continue
+            try:
+                pattern = re.compile(regex.encode())
+            except (re.error, RecursionError, OverflowError, UnicodeError):
+                continue
+            anchors, hosts = (shape.get(key) if isinstance(shape.get(key), list) else [] for key in ("anchors", "hosts"))
+            anchors = [anchor.encode() for anchor in anchors if isinstance(anchor, str) and len(anchor) >= 2]
+            hosts = [host for host in hosts if isinstance(host, str) and SECRET_HOST.fullmatch(host)]
+            label = shape.get("label") if isinstance(shape.get("label"), str) else ident
+            self.shapes[ident] = {"label": printable_text(label, 80), "hosts": hosts}
+            tail = shape.get("tail") if isinstance(shape.get("tail"), str) and len(shape["tail"]) <= 200 else ""
+            with contextlib.suppress(re.error, RecursionError, OverflowError):
+                re.compile(tail)
+                tails.setdefault(ident, tail)
+            for anchor in anchors:
+                self.anchors.setdefault(anchor, []).append((ident, pattern))
+            if not anchors:
+                self.slow.append((ident, pattern))
+        by_pivot = {}
+        for anchor in self.anchors:
+            text = anchor.decode("latin-1")
+            place = secret_pivot(text, by_pivot)
+            by_pivot.setdefault(text[place], []).append((anchor, place))
+        def ahead(anchor, place):
+            """What lies ahead of the pivot where ANCHOR is: its rest, and what every shape of it goes on with (only
+            where all of them say so: one without a tail is looked at wherever the anchor is)."""
+            known = [tails.get(ident, "") for ident, _ in self.anchors[anchor]]
+            after = f"(?:{'|'.join(f'(?:{tail})' for tail in dict.fromkeys(known))})" if all(known) else ""
+            return re.escape(anchor[place + 1:].decode("latin-1")) + after
+        for pivot, anchors in by_pivot.items():
+            # the pivot, then one empty group per anchor: the text before the pivot behind it, the rest ahead
+            choices = "|".join(f"(?<={re.escape(anchor[:place + 1].decode('latin-1'))})"
+                               f"(?={ahead(anchor, place)})()" for anchor, place in anchors)
+            self.pivots.append((re.compile(f"{re.escape(pivot)}(?:{choices})".encode("latin-1")),
+                                [(place, self.anchors[anchor]) for anchor, place in anchors]))
+
+    def __bool__(self):
+        return bool(self.shapes)
+
+    def every(self, data):
+        """[(shape id, the bytes it matched)] in DATA, at most SECRET_MATCHES for a pivot."""
+        found = []
+        for expression, anchors in self.pivots:
+            tried, after = 0, {}
+            for hit in expression.finditer(data):
+                place, shapes = anchors[hit.lastindex - 1]
+                for ident, pattern in shapes:
+                    if hit.start() - place >= after.get(ident, 0):  # (not inside what the shape matched before)
+                        match = pattern.match(data, hit.start() - place)
+                        if match:
+                            found.append((ident, match.group()))
+                            after[ident] = match.end()
+                            tried += 1
+                if tried >= SECRET_MATCHES:
+                    break
+        for ident, pattern in self.slow:
+            found += [(ident, match.group()) for match in itertools.islice(pattern.finditer(data), SECRET_MATCHES)]
+        return found
+
+
+class SecretBase64:
+    """The base64 runs of a body, decoded as its pieces pass: a file in a JSON field (GitHub's contents API), a data
+    URL, an attachment. A run that goes on in the next piece is decoded on from where it stopped, and so is wrapped
+    base64 across its line breaks."""
+
+    def __init__(self):
+        self.open, self.carry, self.tail = False, b"", b""
+
+    def decode(self, out, text, last):
+        """The decoded bytes of TEXT (base64 of a run, whole groups unless LAST) appended to OUT, with the end of
+        what was decoded of the run before them (a token across two pieces)."""
+        text = text.translate(SECRET_URLSAFE)
+        if last:
+            text = text[:len(text) - 1] if len(text) % 4 == 1 else text
+            text += b"=" * (-len(text) % 4)
+        try:
+            decoded = base64.b64decode(text) if text else b""
+        except (binascii.Error, ValueError):
+            decoded = b""
+        if decoded:
+            out.append(self.tail + decoded)
+            self.tail = (self.tail + decoded)[-SECRET_OVERLAP:]
+
+    def feed(self, data):
+        """[decoded bytes] of the base64 runs in DATA, the next piece of the body."""
+        out, start, marks = [], 0, data.translate(SECRET_BASE64_MARKS)
+        if self.open:
+            start = marks.find(b" ")
+            start = len(data) if start < 0 else start
+            text = self.carry + data[:start]
+            if start == len(data):  # the run goes on
+                whole = len(text) - len(text) % 4
+                self.decode(out, text[:whole], False)
+                self.carry = text[whole:]
+                return out
+            self.decode(out, text, True)
+            self.open, self.carry, self.tail = False, b"", b""
+        end = max(len(marks.rstrip(b"a")), start)  # (where a run at the end begins: it may go on)
+        before, aligned = None, False
+
+        def goes_on(position):
+            """(where the run at POSITION really begins, whether it goes on from the run before across a line break).
+            A line break as JSON has it ends in a letter (the n of \\n), which is no part of the run."""
+            gap = data[before:position] if aligned else None
+            if gap in (b"\\", b"\\r\\") and data[position:position + 1] == b"n":
+                return position + 1, True
+            return position, gap in SECRET_BASE64_BREAKS
+        position = marks.find(SECRET_BASE64_RUN, start, end)
+        while position >= 0:
+            stop = marks.find(b" ", position, end)
+            stop = end if stop < 0 else stop
+            position, joined = goes_on(position)
+            if not joined:
+                self.tail = b""
+            self.decode(out, data[position:stop], True)
+            before, aligned = stop, (stop - position) % 4 == 0
+            position = marks.find(SECRET_BASE64_RUN, stop, end)
+        if end < len(data):
+            end, joined = goes_on(end)
+            if not joined:
+                self.tail = b""
+            text = data[end:]
+            whole = len(text) - len(text) % 4
+            self.decode(out, text[:whole], False)
+            self.open, self.carry = True, text[whole:]
+        else:
+            self.tail = b""
+        return out
+
+
+class SecretGuard:
+    """What the proxy looks for in a run's requests and what it does about a finding: proxy.json's "secrets" -
+    {"on_send", "on_shape", "values": [{"id", "label", "hosts", "shape"}], "forms": [[text, value id, encoding]],
+    "shapes": [...], "allow": ["WHAT@HOST"], "providers": [host]}. A finding is {"id", "kind": "value"|"shape",
+    "label", "where": "url"|"header"|"body"[, "encoding"]} and, for the guard's own use, "key": what tells it from
+    another finding of its kind (never recorded)."""
+
+    def __init__(self, config, added=None):
+        config = config if isinstance(config, dict) else {}
+        self.settings = {key: config[key] if isinstance(config.get(key), str) and config[key] in SECRET_DECISIONS
+                         else default for key, default in SECRET_DEFAULTS.items()}
+        self.values = {}
+        for entry in config.get("values") if isinstance(config.get("values"), list) else []:
+            ident = entry.get("id") if isinstance(entry, dict) else None
+            if isinstance(ident, str) and SECRET_WHAT.fullmatch(ident):
+                self.values[ident] = {
+                    "label": printable_text(entry["label"], 120) if isinstance(entry.get("label"), str) else ident,
+                    "hosts": [host for host in entry.get("hosts") or [] if isinstance(host, str)
+                              and SECRET_HOST.fullmatch(host)] if isinstance(entry.get("hosts"), list) else [],
+                    "shape": entry.get("shape") if isinstance(entry.get("shape"), str) else None}
+        self.base_forms = config.get("forms") if isinstance(config.get("forms"), list) else []
+        self.base_values = dict(self.values)
+        self.matcher = SecretMatcher(self.base_forms)
+        self.shapes = SecretShapes(config.get("shapes"))
+        self.allow = [spec for spec in map(secret_spec, config.get("allow") if isinstance(config.get("allow"), list)
+                                           else []) if spec]
+        self.providers = {host.lower().rstrip(".") for host in config.get("providers") or []
+                          if isinstance(host, str)} if isinstance(config.get("providers"), list) else set()
+        self.seen, self.salt, self.lock = collections.OrderedDict(), secrets.token_bytes(16), threading.Lock()
+        self.added_file, self.added_entries = added, None
+        self.redactions, self.learned = None, collections.OrderedDict()
+
+    @property
+    def active(self):
+        self.refresh()
+        return bool(self.matcher or self.shapes)
+
+    @property
+    def strictest(self):
+        """The strictest thing this run does about a finding: without a hold (report) bodies are searched after
+        they went out."""
+        kinds = [self.settings["on_send"]] * bool(self.matcher) + [self.settings["on_shape"]] * bool(self.shapes)
+        return max(kinds, key=SECRET_DECISIONS.index, default="report")
+
+    def refresh(self):
+        """The values registered during the run (added_secret_values: a login the human gave into the sandbox) taken
+        in when their file changed."""
+        if self.added_file is None:
+            return
+        entries = added_secret_values(self.added_file)
+        if entries is self.added_entries:
+            return
+        with self.lock:
+            self.added_entries = entries
+            values, forms = dict(self.base_values), list(self.base_forms)
+            for entry in entries:
+                values[entry["id"]] = {"label": entry["label"], "hosts": entry["hosts"], "shape": None}
+                forms += [[text, entry["id"], encoding] for text, encoding in entry["forms"]]
+            self.values, self.matcher, self.redactions = values, SecretMatcher(forms), None
+
+    def context(self, host):
+        """HOST is the run's own model provider: a secret in a request to it entered the model's context."""
+        return host_matches(host, self.providers)
+
+    def allowed(self, finding, host, provider=False):
+        """FINDING on its way to HOST is none: the human allowed it (the allow-list), the value was given for that
+        host, or the token is where its own service takes its login (a GitHub token in a header to github.com) -
+        anywhere in a request to the run's own PROVIDER (its login's refresh carries its tokens in the body)."""
+        ident, where = finding["id"], finding["where"]
+        if any((what == "*" or what == ident) and secret_host_matches(host, pattern) for what, pattern in self.allow):
+            return True
+        shape = ident
+        if finding["kind"] == "value":
+            value = self.values.get(ident) or {}
+            if any(secret_host_matches(host, pattern) for pattern in value.get("hosts", ())):
+                return True
+            shape = value.get("shape")
+        home = self.shapes.shapes.get(shape, {}).get("hosts", ()) \
+            if (provider or where in ("url", "header")) and shape else ()
+        return any(secret_host_matches(host, pattern) for pattern in home)
+
+    def finding(self, ident, kind, where, encoding="", text=None):
+        label = (self.values.get(ident) or {}).get("label", ident) if kind == "value" else \
+            self.shapes.shapes[ident]["label"]
+        key = ident if text is None else hashlib.blake2b(text, key=self.salt, digest_size=12).hexdigest()
+        return {"id": ident, "kind": kind, "label": label, "where": where,
+                **({"encoding": encoding} if encoding else {}), "key": f"{kind}:{ident}:{key}"}
+
+    def search(self, data, where, host, packed="", decoded=(), provider=False):
+        """The findings in DATA (bytes of a request's WHERE) on its way to HOST (PROVIDER: the run's own), without
+        what is allowed there: values first, then shapes (one that is a known value itself is that value). PACKED:
+        how DATA was packed (gzip); DECODED: the base64 runs of DATA, decoded - searched for shapes too."""
+        found = [self.finding(ident, "value", where, encoding + ("+" + packed if packed else ""))
+                 for ident, encoding in self.matcher.every(data).items()] if self.matcher else []
+        if self.shapes:
+            shaped = [(ident, text, packed) for ident, text in self.shapes.every(data)]
+            shaped += [(ident, text, "base64" + ("+" + packed if packed else "")) for piece in decoded
+                       for ident, text in self.shapes.every(piece)]
+            for ident, text, encoding in shaped:
+                if not self.matcher.known(text):
+                    found.append(self.finding(ident, "shape", where, encoding, text))
+                    if where == "body":
+                        self.learn(text)
+        return [finding for finding in found if not self.allowed(finding, host, provider)] if found else found
+
+    def learn(self, text):
+        """TEXT (what a shape matched in a body) is masked in the logs from now on in its base64 forms too (at each
+        of the three offsets a token can have in an encoded stream): a body the log keeps as base64, a file in a
+        JSON field. As it is, the logs' own masks know its shape."""
+        with self.lock:
+            if text in self.learned:
+                self.learned.move_to_end(text)
+                return
+            forms = set()
+            for skip in range(3):
+                piece = text[skip:]
+                encoded = base64.b64encode(piece[:len(piece) // 3 * 3]).decode()
+                if len(encoded) >= 8:
+                    forms |= {encoded, encoded.replace("+", "-").replace("/", "_")}
+            self.learned[text] = sorted(forms, key=len, reverse=True)
+            if len(self.learned) > SECRET_LEARNED:
+                self.learned.popitem(last=False)
+            self.redactions = None
+
+    def head(self, target, headers, host):
+        """The findings in a request's TARGET (its path and query as sent) and HEADERS on their way to HOST. A Basic
+        login is read as what it holds."""
+        self.refresh()
+        if not (self.matcher or self.shapes):
+            return []
+        raw = str(target).encode("utf-8", "replace")
+        plain = urllib.parse.unquote_to_bytes(raw) if b"%" in raw else raw
+        found = self.search(raw if plain == raw else raw + b"\n" + plain, "url", host)
+        lines, logins = [], []
+        for name, value in headers:
+            lines.append(f"{name}: {value}")
+            if name.lower() in ("authorization", "proxy-authorization") and value[:6].lower() == "basic ":
+                with contextlib.suppress(binascii.Error, ValueError):
+                    logins.append(base64.b64decode(value[6:].strip() + "=" * (-len(value[6:].strip()) % 4)))
+        text = "\n".join(lines).encode("utf-8", "replace")
+        # (a known value in a Basic login is told by its base64 forms; a token shape by what the login decodes to)
+        return found + self.search(text, "header", host, decoded=logins)
+
+    def fresh(self, key, place):
+        """True the first time the finding KEY is said for PLACE (a host, or "context") in this run."""
+        mark = (key, place)
+        with self.lock:
+            if mark in self.seen:
+                return False
+            self.seen[mark] = True
+            if len(self.seen) > SECRET_SEEN:
+                self.seen.popitem(last=False)
+            return True
+
+    def clean(self, text):
+        """TEXT (of a question or a refusal: a URL, a path) without any form of a known value."""
+        text = str(text if text is not None else "")
+        for form in self.forms_text():
+            if form in text:
+                text = text.replace(form, "[redacted]")
+        return text
+
+    def forms_text(self):
+        """Every form of every known value as text, and the base64 forms of what a shape matched (learn), longest
+        first: what a log line or a question never holds."""
+        self.refresh()
+        redactions = self.redactions
+        if redactions is None:
+            # (never a short number: a log line's own numbers are no secret, and stay numbers)
+            found = {needle.decode("utf-8", "replace") for needle in self.matcher.forms
+                     if not (needle.isdigit() and len(needle) < 12)}
+            with self.lock:
+                found |= {form for forms in self.learned.values() for form in forms}
+            redactions = self.redactions = sorted(found, key=len, reverse=True)
+        return redactions
+
+
+class SecretScan:
+    """One request body on its way to HOST searched piece by piece: each together with the end of the piece before,
+    a gzip or deflate body uncompressed too (as CanaryMatcher.scan), its base64 runs decoded - not on the way to the
+    provider (CONTEXT), whose requests carry megabytes of pictures."""
+
+    def __init__(self, guard, host, context, headers):
+        self.guard, self.host, self.context = guard, host, bool(context)
+        packed = (header(headers, "content-encoding") or "").strip().lower() if headers else ""
+        self.packed = packed if packed in ("gzip", "x-gzip", "deflate") else ""
+        self.inflate = zlib.decompressobj(47) if self.packed else None
+        self.keep = max(guard.matcher.longest - 1, SECRET_OVERLAP)
+        self.tail = self.plain_tail = b""
+        self.runs = None if context or not guard.shapes else SecretBase64()
+        self.total = 0
+
+    def feed(self, payload):
+        """The findings in PAYLOAD, the body's next piece (those across its start among them)."""
+        guard = self.guard
+        self.total += len(payload)
+        window = self.tail + payload
+        runs = self.runs.feed(payload) if self.runs is not None and self.inflate is None else ()
+        found = guard.search(window, "body", self.host, decoded=runs, provider=self.context)
+        self.tail = window[-self.keep:]
+        if self.inflate is not None:
+            try:
+                plain = self.inflate.decompress(payload, CANARY_INFLATE)
+            except zlib.error:
+                self.inflate, plain = None, b""
+            if plain:
+                window = self.plain_tail + plain
+                runs = self.runs.feed(plain) if self.runs is not None else ()
+                found += guard.search(window, "body", self.host, self.packed.replace("x-gzip", "gzip"), runs,
+                                      self.context)
+                self.plain_tail = window[-self.keep:]
+        return found
+
+
+class SecretCheck:
+    """One request under the secret guard: what was found in it so far (ENTRY, its record, gets "secret": {"host",
+    "found", "decision"[, "context", "repeat", "more", "past_limit"]}), and what the run does about each finding
+    before more of the request goes on. ASK(rule, reason, findings) puts a held request to the human."""
+
+    def __init__(self, guard, entry, host, context, ask, home=None):
+        self.guard, self.entry, self.host, self.context, self.ask = guard, entry, host, context, ask
+        # HOME: the host for what is at home there (the allow-list, a value's own host, a service's login): HOST,
+        # or "" where the request's Host header names another server.
+        self.home = host if home is None else home
+        self.have, self.found, self.more, self.approved = set(), [], 0, set()
+        self.scan, self.kept, self.size, self.past, self.decision = None, [], 0, False, "report"
+
+    def record(self, findings, past):
+        """ENTRY's "secret" with FINDINGS (new in this request) added."""
+        place = "context" if self.context else self.host
+        for finding in findings:
+            shown = {key: value for key, value in finding.items() if key != "key"}
+            if not self.guard.fresh(finding["key"], place):
+                shown["repeat"] = True
+            if any({k: v for k, v in have.items() if k != "repeat"} == {k: v for k, v in shown.items() if k != "repeat"}
+                   for have in self.found):
+                continue
+            if len(self.found) < SECRET_FOUND:
+                self.found.append(shown)
+            else:
+                self.more += 1
+        self.entry["secret"] = {
+            "host": self.host, **({"context": True} if self.context else {}), "decision": self.decision,
+            "found": self.found, **({"more": self.more} if self.more else {}),
+            **({"repeat": True} if all(found.get("repeat") for found in self.found) else {}),
+            **({"past_limit": True} if past or (self.entry.get("secret") or {}).get("past_limit") else {})}
+
+    def take(self, findings):
+        """FINDINGS of this request's next part: recorded, and decided before the part goes on - SecretRefused when
+        the run blocks it or the human does not allow it."""
+        fresh = []
+        for finding in findings:
+            mark = (finding["key"], finding["where"], finding.get("encoding"))
+            if mark not in self.have:
+                self.have.add(mark)
+                fresh.append(finding)
+        if not fresh:
+            return
+        open_ = [finding for finding in fresh if finding["id"] not in self.approved]
+        decision = "report" if self.context else max(
+            (self.guard.settings["on_send" if finding["kind"] == "value" else "on_shape"] for finding in open_),
+            key=SECRET_DECISIONS.index, default="report")
+        late = self.past and decision == "ask"  # past the hold: nothing of the request waits for an answer any more
+        if late:
+            decision = "report"
+        if SECRET_DECISIONS.index(decision) > SECRET_DECISIONS.index(self.decision):
+            self.decision = decision
+        self.record(fresh, late)
+        if decision == "report":
+            return
+        held = [finding for finding in open_
+                if self.guard.settings["on_send" if finding["kind"] == "value" else "on_shape"] != "report"]
+        rule = ",".join(sorted({finding["id"] for finding in held}))[:200]
+        reason, hint = secret_reason(held, self.host), secret_allow_hint(held, self.host)
+        self.entry.update(decision="deny" if decision == "block" else "ask", rule=rule, ruleset=SECRET_RULESET)
+        if decision == "block":
+            raise SecretRefused(reason + (f" (found past the first {RULE_BODY_LIMIT >> 20} MiB of its body: the "
+                                          "request was cut off there)" if self.past else "") + f"; {hint}")
+        answer = self.ask(rule, reason, held)
+        self.entry["approval"] = approval_record(answer)
+        if answer.get("decision") != "allow":
+            raise SecretRefused(f"{not_approved(answer, reason)}; {hint}")
+        self.approved |= {finding["id"] for finding in held}
+
+    def body(self, parts, headers, hold):
+        """PARTS ((raw, payload) of the request's body) passed on unchanged. HOLD: each is searched before it is passed
+        on (take decides). Else the body is searched once it went out (flush) - at the latest every RULE_BODY_LIMIT
+        bytes, so that no more of it is kept than that."""
+        self.scan = SecretScan(self.guard, self.home, self.context, headers)
+        for raw, payload in parts:
+            if payload and hold:
+                self.take(self.searched(payload, True))
+            elif payload:
+                self.kept.append(payload)
+                self.size += len(payload)
+                if self.size > RULE_BODY_LIMIT:
+                    self.flush()
+            yield raw, payload
+        self.flush()
+
+    def searched(self, payload, hold):
+        """The findings in PAYLOAD (SecretScan.feed). A search that fails is no reason to lose a request that only
+        would have been reported: its record says so ("secret_error") and it goes on unsearched. Where the run holds
+        requests, one that cannot be searched is not sent."""
+        try:
+            return self.scan.feed(payload) if self.scan is not None else []
+        except Exception as exc:  # noqa: BLE001 - the guard never takes a connection down with a traceback
+            self.scan = None
+            self.entry["secret_error"] = type(exc).__name__
+            if hold:
+                raise SecretRefused("secret guard: this request could not be searched for secrets "
+                                    f"({type(exc).__name__}), and this run holds what it cannot check") from None
+            return []
+
+    def flush(self):
+        """Search what went out and was not searched yet."""
+        kept, self.kept, self.size = self.kept, [], 0
+        for payload in kept:
+            self.take(self.searched(payload, False))
+
+
+def secret_request(server, current, target, headers, parts, entry, record, origin, method, authority, path, claim=None):
+    """PARTS of the request ENTRY records (its TARGET and HEADERS as the agent sent them), as they go on to the server
+    the proxy verified (ORIGIN) under the secret guard: unchanged; SecretRefused when the run blocks what was found
+    or the human does not allow it. To the run's provider only the body is searched (the model's context: its
+    headers are the login there), and nothing is held. A push is the privacy check's."""
+    guard = server.secret_guard
+    if guard is None or not guard.active or "push" in entry:
+        return parts
+    host = secret_host(origin)
+    # A Host header that names another server than the one verified (a front end routes by it): nothing is at home
+    # there - no value's own host, no service's login, not the provider's conversation.
+    context, home = guard.context(host) and not claim, "" if claim else host
+
+    def ask(rule, reason, findings):
+        shown = [{key: value for key, value in finding.items() if key != "key"} for finding in findings[:SECRET_FOUND]]
+        # (the URL of the record is redacted already; the path as servers read it may hold what was found: no
+        # question shows a token, by its shape or by its value)
+        return server.http_ask(
+            {"rule": rule, "ruleset": SECRET_RULESET, "reason": reason}, method, guard.clean(entry.get("url")),
+            guard.clean(redact_text(authority)), guard.clean(redact_text(path or "/")), None,
+            {**server.asked_by(record), **({"host_header": guard.clean(redact_text(claim))} if claim else {})},
+            exact=[target, header(headers, "host")],
+            more={"secret": {"host": host, "found": shown,
+                             "allow": "sandbox-ai secret-guard allow " + " ".join(secret_specs(findings, host))}})
+    check = current["secret"] = SecretCheck(guard, entry, host, context, ask, home)
+    if not context:
+        check.take(guard.head(target, headers, home))
+    hold = not context and guard.strictest != "report"
+    searched = check.body(parts, headers, hold)
+    if not hold:
+        return searched
+    early, size = [], 0
+    for part in searched:  # read and searched before anything of the request reaches the server
+        early.append(part)
+        size += len(part[1])
+        if size >= RULE_BODY_LIMIT:
+            break
+    check.past = True
+    return itertools.chain(early, searched)
+
+
+def secret_flush(current):
+    """The request of CURRENT broke off while its body went out: what did go out is searched all the same, before
+    its record is written."""
+    check = current.get("secret")
+    if check is not None:
+        with contextlib.suppress(Exception):
+            check.flush()
+
+
+def secret_refusal(server, client, refused, entry, headers=None):
+    """Answer a request SecretRefused stopped and log it."""
+    message = f"sandbox-ai: {refused.reason}\n".encode()
+    with contextlib.suppress(OSError):
+        send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n"
+                 + f"Content-Length: {len(message)}\r\n\r\n".encode() + message)
+    for name in ("token_added", "llm", "api_keys"):
+        entry.pop(name, None)  # nothing more went to the server
+    server.log({**entry, "event": "denied", "reason": refused.reason,
+                **({"request": {"headers": redact_headers(headers)}} if headers else {})})
+
+
+def checked_secret_values(entries):
+    """The well-formed ones of ENTRIES ([{"id", "label", "hosts", "forms": [[text, encoding]]}], as the host sends
+    values registered during the run)."""
+    found = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or \
+                not SECRET_WHAT.fullmatch(entry["id"]):
+            continue
+        forms = [[form[0], form[1]] for form in entry.get("forms") if isinstance(form, list) and len(form) == 2
+                 and all(isinstance(part, str) for part in form) and 8 <= len(form[0]) <= 4096
+                 and len(form[1]) <= 40][:64] if isinstance(entry.get("forms"), list) else []
+        hosts = [host for host in entry.get("hosts") if isinstance(host, str) and SECRET_HOST.fullmatch(host)][:32] \
+            if isinstance(entry.get("hosts"), list) else []
+        if forms:
+            found.append({"id": entry["id"], "hosts": hosts, "forms": forms,
+                          "label": printable_text(entry["label"], 120) if isinstance(entry.get("label"), str)
+                          else entry["id"]})
+    return found[:SECRET_ADDED_LIMIT]
+
+
+def give_secret_values(entries, path=None, owner=None):
+    """Control op "secret-values": ENTRIES (every value registered during the run, the whole list) for the proxy's
+    secret guard, in PATH (its run directory, which only it and the supervisor reach - never the agent), 0600 and
+    owned by the proxy's user; the proxy reads it again when it changes. Returns the ids taken."""
+    path = Path(path) if path else PROXY_RUN / SECRET_ADDED
+    if not path.parent.is_dir():
+        raise ValueError("this sandbox runs without the connection proxy: it has no secret guard")
+    if not isinstance(entries, list) or len(entries) > SECRET_ADDED_LIMIT:
+        raise ValueError(f"secret-values: a list of at most {SECRET_ADDED_LIMIT} values")
+    checked = checked_secret_values(entries)
+    if len(checked) != len(entries):
+        raise ValueError("secret-values: every value has an id and its forms")
+    if owner is None:  # the run directory's owner: the proxy's user, to whom the supervisor gave it at the start
+        info = path.parent.stat()
+        owner = (info.st_uid, info.st_gid)
+    write_new(path, json.dumps({"version": 1, "values": checked}), 0o600, owner=owner)
+    return [entry["id"] for entry in checked]
+
+
+def added_secret_values(path=None):
+    """The values registered while the run goes on (give_secret_values wrote them into the proxy's run directory),
+    read again whenever the file changes; [] without one. Looked at for every request (as added_git_logins: the path
+    as text and os.stat); the list is the same object until the file changes."""
+    path = os.fspath(path) if path else f"{PROXY_RUN}/{SECRET_ADDED}"
+    try:
+        info = os.stat(path)
+    except OSError:
+        if _secrets_added["stamp"] is not None or _secrets_added.get("path") != path:
+            _secrets_added.update(stamp=None, entries=[], path=path)
+        return _secrets_added["entries"]
+    stamp = (path, info.st_ino, info.st_mtime_ns, info.st_size)
+    if stamp == _secrets_added["stamp"]:
+        return _secrets_added["entries"]
+    try:
+        document = json.loads(Path(path).read_text()[:4 << 20])
+    except (OSError, ValueError, RecursionError):
+        document = {}
+    entries = checked_secret_values(document.get("values") if isinstance(document, dict) else None)
+    _secrets_added.update(stamp=stamp, entries=entries, path=path)
+    return entries
+
+
 def stop_process(process, grace=2):
     """Stop PROCESS: close its stdin (the proxy exits on that), give it GRACE seconds, then signal it. A process
     of another user may not be signalled without CAP_KILL: it ends with the sandbox's PID namespace at the latest."""
@@ -11551,7 +19732,300 @@ def git_credential(operation, stream=None, out=None, path=None):
     return 0
 
 
+# --- untrusted: a command of the sandbox without the agent's own (security review SAI-18, SAI-21) -------------------
+#
+# The agent and every command it runs are one user in one sandbox: a test suite, a build script or a package's
+# install script reads the agent's login (~/.codex/auth.json, ~/.claude), its transcripts and settings, the run's
+# configuration, and reaches the agent's terminal (tmux), its hooks and its MCP relays as the agent itself does.
+# File modes do not part one user from itself, and sandbox-ai cannot give the agent's tools another user: the agents
+# start their commands themselves. What the kernel offers without any privilege is Landlock: a process restricts
+# itself and all it starts, for good.
+#
+#     python3 -I /sandbox/runtime.py --untrusted [--write PATH]... [--env NAME]... [--] COMMAND [ARGUMENT]...
+#
+# runs COMMAND with
+# - no access to the agent's state and the credentials below HOME (UNTRUSTED_HOME) nor to /sandbox (the run's
+#   configuration, its Git logins, the terminal's folder) and the supervisor's folders in /run (hooks, MCP relays);
+# - the rest of the file system to read, and to write only the workspaces (/work, /workspaces), /tmp, /var/tmp,
+#   /dev and what --write names: HOME is read-only for it (what the agent's own shell reads at its next start -
+#   .bashrc, .gitconfig, ~/.local/bin - cannot be changed by it);
+# - no way to the processes outside it: it cannot read their memory, environment or descriptors (/proc/PID/environ of
+#   the agent) nor trace them (Landlock's ptrace scope), and - Linux 6.12 - cannot signal them or reach their abstract
+#   Unix sockets;
+# - where the kernel has it (Landlock's access right for a Unix socket's path): no connection to a Unix socket in a
+#   folder it has no access to - tmux's (keys typed into the agent, its screen read), the hooks', the MCP relays';
+# - an environment without the run's secrets (the launcher's secret_names and every name that looks like a key,
+#   token or password; --env NAME keeps one) and without TMUX.
+# The network is the sandbox's own (the firewall, the proxy): unchanged. Landlock missing (a kernel before 5.13, or
+# switched off): the command is not run - never unconfined. What the kernel cannot do is said in one line.
+#
+# This is the executor; that every command of an agent goes through it is not enforced here (the agent decides what
+# it starts). docs/reviews/security-review-fixes-A.md says what is missing for that.
+
+LANDLOCK_CREATE_RULESET, LANDLOCK_ADD_RULE, LANDLOCK_RESTRICT_SELF = 444, 445, 446  # (the same on every architecture)
+LL_FS_EXECUTE, LL_FS_WRITE_FILE, LL_FS_READ_FILE, LL_FS_READ_DIR = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+LL_FS_REFER, LL_FS_TRUNCATE, LL_FS_IOCTL_DEV = 1 << 13, 1 << 14, 1 << 15
+# The right to resolve a Unix socket's path for connecting or sending to it. Asked of the kernel itself
+# (landlock_supported): the ABI version that brought it is not relied on.
+LL_FS_RESOLVE_UNIX = 1 << 16
+LL_FS_V1 = (1 << 13) - 1  # execute ... make_sym
+LL_SCOPE_ABSTRACT_UNIX, LL_SCOPE_SIGNAL = 1 << 0, 1 << 1
+# Below HOME: the agents' state (logins, transcripts, settings, skills), sandbox-ai's own, and where credentials lie.
+UNTRUSTED_HOME = (
+    ".claude", ".claude.json", ".claude.json.backup", ".codex", ".config/opencode", ".local/share/opencode",
+    ".opencode", ".hermes", ".qwen", ".gemini", ".config/goose", ".local/share/goose", ".local/state/goose",
+    ".openhands", ".nanobot", ".letta", ".pi", ".dsh", ".agents", ".cairn", ".config/sandbox-ai",
+    ".ssh", ".gnupg", ".git-credentials", ".config/git/credentials", ".netrc", ".npmrc", ".yarnrc.yml", ".pypirc",
+    ".config/gh", ".config/hub", ".config/glab-cli", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
+    ".cargo/credentials", ".cargo/credentials.toml", ".local/share/keyrings", ".password-store", ".config/op",
+    ".bash_history", ".zsh_history", ".python_history", ".node_repl_history", ".lesshst")
+UNTRUSTED_SYSTEM = ("/sandbox", "/run/sandbox-hooks", "/run/sandbox-mcp", "/run/sandbox-proxy",
+                    "/run/sandbox-control")
+UNTRUSTED_WRITABLE = ("/work", "/workspaces", "/tmp", "/var/tmp", "/dev", "/proc")
+UNTRUSTED_SECRET_NAME = re.compile(r"(?i)api_?key|token|secret|passw|credential|auth|cookie|session_?key")
+UNTRUSTED_DROPPED = ("TMUX", "TMUX_PANE", "TMUX_TMPDIR")
+# A folder on the way to a protected one (HOME, a folder above it, ~/.config ...) is listed, never what lies below its
+# entries: the size of the trees beside the way does not count. Of one such folder at most UNTRUSTED_SIBLINGS entries
+# are named (dot entries first, then folders, then the rest, by name) and at most UNTRUSTED_LISTED are read at all;
+# what is left out gets no rule - no access (never more) - and is said.
+UNTRUSTED_SIBLINGS = 10000
+UNTRUSTED_LISTED = 100000
+
+
+def landlock_supported(libc=None):
+    """{"abi", "fs" (the access rights this kernel handles), "unix" (a Unix socket's path is one of them), "scope"
+    (the scopes it has)}; an OSError when the kernel has no Landlock, or it is switched off."""
+    libc = libc or ctypes.CDLL(None, use_errno=True)
+    abi = libc.syscall(LANDLOCK_CREATE_RULESET, None, ctypes.c_size_t(0), 1)
+    if abi < 1:
+        error = ctypes.get_errno()
+        raise OSError(error, f"this kernel has no Landlock ({os.strerror(error)})")
+    handled = LL_FS_V1 | (LL_FS_REFER if abi >= 2 else 0) | (LL_FS_TRUNCATE if abi >= 3 else 0) | \
+        (LL_FS_IOCTL_DEV if abi >= 5 else 0)
+    unix = False
+    if abi >= 6:  # asked: a ruleset that handles the right is made, or refused with EINVAL
+        attr = struct.pack("QQQ", handled | LL_FS_RESOLVE_UNIX, 0, 0)
+        probe = libc.syscall(LANDLOCK_CREATE_RULESET, ctypes.c_char_p(attr), ctypes.c_size_t(len(attr)), 0)
+        if probe >= 0:
+            os.close(probe)
+            unix = True
+    return {"abi": abi, "fs": handled | (LL_FS_RESOLVE_UNIX if unix else 0), "unix": unix,
+            "scope": (LL_SCOPE_ABSTRACT_UNIX | LL_SCOPE_SIGNAL) if abi >= 6 else 0}
+
+
+def untrusted_protected(home):
+    """The absolute paths an untrusted command gets no access to: the agents' and the credentials' below HOME, the
+    run's own folders."""
+    home = os.path.normpath(home or "/root")
+    named = {os.path.normpath(os.path.join(home, name)) for name in UNTRUSTED_HOME} | set(UNTRUSTED_SYSTEM)
+    # Landlock holds folders, not names: one reached through a link (/home -> /var/home, ~/.claude -> elsewhere) is
+    # protected where it really is, else its real place would be named beside the link and readable.
+    return named | {os.path.realpath(path) for path in named}
+
+
+def untrusted_paths(protected, root="/", limit=UNTRUSTED_SIBLINGS, listed=UNTRUSTED_LISTED):
+    """(paths, cut): the largest subtrees below ROOT that hold none of PROTECTED - every entry of ROOT and of each
+    folder on the way to a protected path, but those - and {folder: entries of it left out, -1 when more than LISTED}.
+    Landlock has no "all but": what is not named has no access. Only the folders on the way are listed, never what lies
+    below their other entries; the way itself is known, not searched for. Of one folder at most LIMIT entries are
+    named (dot entries, then folders, then the rest, by name), of LISTED read: the rest has no access. A link is never
+    named nor followed (its target has its own place in the tree: one put where an entry is allowed gives nothing
+    away)."""
+    root = os.path.normpath(root)
+    ancestors = set()
+    for path in protected:
+        while path not in ("/", ""):
+            path = os.path.dirname(path)
+            ancestors.add(path)
+
+    def guarded(path):
+        return any(path == item or path.startswith(item.rstrip("/") + "/") for item in protected)
+    found, cut = [], {}
+    pending = [] if guarded(root) else [root]
+    while pending:
+        directory = pending.pop()
+        for path in ancestors:  # the way down: taken whether or not its folder is among the entries named
+            if path != directory and os.path.dirname(path) == directory and not guarded(path):
+                with contextlib.suppress(OSError):
+                    if stat.S_ISDIR(os.lstat(path).st_mode):  # (a link on the way: neither named nor followed)
+                        pending.append(path)
+        entries, more, read = [], False, 0
+        try:
+            with os.scandir(directory) as listing:
+                for entry in listing:
+                    read += 1
+                    if read > listed:  # (every entry read counts: links and the protected too)
+                        more = True
+                        break
+                    if entry.path in ancestors or entry.path in protected:
+                        continue
+                    with contextlib.suppress(OSError):
+                        if not entry.is_symlink():
+                            entries.append((not entry.name.startswith("."), not entry.is_dir(follow_symlinks=False),
+                                            entry.name, entry.path))
+        except OSError:
+            continue
+        entries.sort()
+        found.extend(entry[3] for entry in entries[:limit])
+        if more or len(entries) > limit:
+            cut[directory] = -1 if more else len(entries) - limit
+    return sorted(found), cut
+
+
+def untrusted_environment(environ, secret_names=(), keep=()):
+    """ENVIRON without the run's secrets: the launcher's SECRET_NAMES, every name that looks like a key, a token or
+    a password, and tmux's; KEEP names stay."""
+    keep = set(keep)
+    return {name: value for name, value in environ.items()
+            if name in keep or not (name in secret_names or name in UNTRUSTED_DROPPED
+                                    or UNTRUSTED_SECRET_NAME.search(name))}
+
+
+def landlock_restrict(read, write, support=None, libc=None):
+    """Restrict this process and everything it starts, for good: the paths READ to read and execute, the paths WRITE to
+    change as well; nothing else of the file system; SUPPORT's scopes. An OSError when the kernel refuses any step
+    (then nothing may be run as if confined)."""
+    libc = libc or ctypes.CDLL(None, use_errno=True)
+    support = support or landlock_supported(libc)
+    handled = support["fs"]
+
+    def call(number, *arguments):
+        result = libc.syscall(number, *arguments)
+        if result < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, f"Landlock: {os.strerror(error)}")
+        return result
+    attr = struct.pack("QQQ", handled, 0, support["scope"])
+    # (a kernel before the scopes knows only the first two fields: the size says how much is given)
+    size = len(attr) if support["scope"] else 8
+    ruleset = call(LANDLOCK_CREATE_RULESET, ctypes.c_char_p(attr), ctypes.c_size_t(size), 0)
+    try:
+        reading = handled & (LL_FS_EXECUTE | LL_FS_READ_FILE | LL_FS_READ_DIR | LL_FS_RESOLVE_UNIX)
+        of_files = handled & (LL_FS_EXECUTE | LL_FS_WRITE_FILE | LL_FS_READ_FILE | LL_FS_TRUNCATE | LL_FS_IOCTL_DEV)
+        for paths, access in ((read, reading), (write, handled)):
+            for path in paths:
+                try:
+                    fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+                except OSError:
+                    continue  # (gone meanwhile, or not there in this sandbox: no rule, no access)
+                try:
+                    allowed = access if stat.S_ISDIR(os.fstat(fd).st_mode) else access & of_files
+                    if allowed:
+                        rule = struct.pack("=Qi", allowed, fd)
+                        call(LANDLOCK_ADD_RULE, ruleset, 1, ctypes.c_char_p(rule), 0)  # 1: a path beneath
+                finally:
+                    os.close(fd)
+        if libc.prctl(38, 1, 0, 0, 0) != 0:  # PR_SET_NO_NEW_PRIVS: Landlock asks for it
+            error = ctypes.get_errno()
+            raise OSError(error, f"no_new_privs: {os.strerror(error)}")
+        call(LANDLOCK_RESTRICT_SELF, ruleset, 0)
+    finally:
+        os.close(ruleset)
+    return support
+
+
+def untrusted_plan(home, write=(), root="/"):
+    """(read, write, cut): the paths an untrusted command may read, those it may change too (UNTRUSTED_WRITABLE and
+    WRITE, never inside a protected folder), and the crowded folders on the way with what of them is left out."""
+    protected = untrusted_protected(home)
+    writable = []
+    for path in (*UNTRUSTED_WRITABLE, *write):
+        path = os.path.realpath(path)
+        inside = [guarded for guarded in protected if path == guarded or path.startswith(guarded + "/")
+                  or guarded.startswith(path.rstrip("/") + "/")]
+        if inside:
+            raise ValueError(f"--write {path}: it holds, or lies in, what an untrusted command gets no access to "
+                             f"({sorted(inside)[0]})")
+        writable.append(path)
+    read, cut = untrusted_paths(protected, root)
+    return read, writable, cut
+
+
+def untrusted_cut_note(cut):
+    """The entries of crowded folders on the way that the command cannot read (CUT of untrusted_paths), in one line;
+    None when there are none."""
+    if not cut:
+        return None
+    said = [f"{'more than ' + str(UNTRUSTED_LISTED - UNTRUSTED_SIBLINGS) if count < 0 else count} in "
+            f"{printable_text(folder, 200)}"
+            for folder, count in sorted(cut.items())[:5]]
+    return (f"sandbox-ai untrusted: entries of crowded folders on the way to the protected ones are not readable for "
+            f"the command (at most {UNTRUSTED_SIBLINGS} of one folder are allowed; dot entries and folders first): "
+            f"{'; '.join(said)}{' ...' if len(cut) > 5 else ''}")
+
+
+def untrusted_note(support):
+    """What this kernel's Landlock cannot keep an untrusted command from, in one line; None when it has everything."""
+    missing = []
+    if not support["unix"]:
+        missing.append("the Unix sockets of the agent's terminal (tmux), its hooks and its MCP relays")
+    if not support["scope"]:
+        missing.append("signals to the agent's processes")
+    if not missing:
+        return None
+    return (f"sandbox-ai untrusted: this kernel's Landlock (ABI {support['abi']}) does not keep the command from "
+            f"{' nor from '.join(missing)}; the agent's files and processes' memory are out of its reach")
+
+
+def untrusted(arguments, environ=None, execute=None, out=None, config=None):
+    """--untrusted [--write PATH]... [--env NAME]... [--check] [--] COMMAND ...: COMMAND confined (above), in this
+    process's place; --check instead says what would hold, as JSON. 126 when it cannot be confined, 2 for a wrong
+    call."""
+    environ = dict(os.environ if environ is None else environ)
+    out = out or sys.stderr
+    write, keep, check = [], [], False
+    arguments = list(arguments)
+    while arguments and arguments[0].startswith("--"):
+        option = arguments.pop(0)
+        if option == "--":
+            break
+        if option == "--check":
+            check = True
+        elif option in ("--write", "--env") and arguments:
+            (write if option == "--write" else keep).append(arguments.pop(0))
+        else:
+            print(f"sandbox-ai untrusted: unknown option {printable_text(option, 80)}; usage: --untrusted "
+                  "[--write PATH]... [--env NAME]... [--] COMMAND [ARGUMENT]...", file=out)
+            return 2
+    if not arguments and not check:
+        print("sandbox-ai untrusted: no command; usage: --untrusted [--write PATH]... [--env NAME]... [--] COMMAND "
+              "[ARGUMENT]...", file=out)
+        return 2
+    try:
+        support = landlock_supported()
+        read, writable, cut = untrusted_plan(environ.get("HOME") or "/root", write)
+    except (OSError, ValueError) as exc:
+        print(f"sandbox-ai untrusted: not run - the command cannot be confined: {exc}", file=out)
+        return 126
+    secret_names = ()
+    with contextlib.suppress(OSError, ValueError, RecursionError, AttributeError):
+        secret_names = tuple(json.loads(Path(config or SESSION_CONFIG).read_text()).get("secret_names") or ())
+    kept = untrusted_environment(environ, secret_names, keep)
+    if check:
+        print(json.dumps({"landlock": support["abi"], "unix_sockets": support["unix"],
+                          "signals": bool(support["scope"]), "write": writable,
+                          "protected": sorted(untrusted_protected(environ.get("HOME") or "/root")),
+                          "unreadable": {folder: count for folder, count in sorted(cut.items())},
+                          "environment_dropped": sorted(set(environ) - set(kept))}), file=sys.stdout)
+        return 0
+    try:
+        landlock_restrict(read, writable, support)
+    except OSError as exc:
+        print(f"sandbox-ai untrusted: not run - the command cannot be confined: {exc}", file=out)
+        return 126
+    for note in (untrusted_note(support), untrusted_cut_note(cut)):
+        if note:
+            print(note, file=out)
+    try:
+        (execute or os.execvpe)(arguments[0], arguments, kept)
+    except OSError as exc:
+        print(f"sandbox-ai untrusted: {printable_text(arguments[0], 200)}: {exc.strerror or exc}", file=out)
+        return 127 if isinstance(exc, FileNotFoundError) else 126
+    return 0
+
+
 if __name__ == "__main__":
+    SANDBOX_PROCESS = True  # (see there: only a process of the sandbox itself is filtered and judged)
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "--internal-bootstrap":
             result = inner_bootstrap()
@@ -11583,15 +20057,21 @@ if __name__ == "__main__":
             result = open_request(sys.argv[2:])
         elif len(sys.argv) == 3 and sys.argv[1] == "--internal-git-credential":
             result = git_credential(sys.argv[2])
-        elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-relay":
+        elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-relay":  # (a path, or fd:N: relay_listener)
             result = attach_relay(sys.argv[2], ["tmux", "attach", "-t", "sandbox"])
         # macOS: the host's sandbox-ai reaches the sockets in podman machine's VM through `podman exec`.
         elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-client":
             result = attach_client(sys.argv[2])
+        elif len(sys.argv) == 3 and sys.argv[1] == "--internal-shell-relay":
+            result = shell_relay(sys.argv[2])
+        elif len(sys.argv) >= 4 and sys.argv[1] == "--internal-shell-client" and sys.argv[3] in ("tty", "pipe"):
+            result = shell_client(sys.argv[2], sys.argv[4:], tty=sys.argv[3] == "tty")
         elif len(sys.argv) == 3 and sys.argv[1] == "--internal-attach-probe":
             result = attach_probe(sys.argv[2])
         elif len(sys.argv) == 2 and sys.argv[1] == "--internal-control-client":
             result = control_client()
+        elif len(sys.argv) >= 2 and sys.argv[1] == "--untrusted":  # in the sandbox: a command without the agent's own
+            result = untrusted(sys.argv[2:])
         else:
             print("sandbox-ai runtime: internal entry point; use sandbox-ai", file=sys.stderr)
             result = 2

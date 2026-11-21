@@ -40,7 +40,8 @@ def test_two_app_starts_at_the_same_moment_make_one_app(qapp, tmp_path, monkeypa
     assert first.claim() is True
     asked = []
     first.asked.connect(asked.append)
-    monkeypatch.setattr(single_instance, "QLocalSocket", NobodyYet)
+    # (nobody answers yet: the probe of the socket - instance_probe since the takeover of an older app - finds no one)
+    monkeypatch.setattr(single_instance.instance_probe, "ask", lambda path: None)
     monkeypatch.setattr(single_instance, "ASK_FOR", 0.3, raising=False)
     second = single_instance.Instance(path)
     assert second.claim() is False, "a second app"

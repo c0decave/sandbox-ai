@@ -261,7 +261,8 @@ def test_pod_failure_ownership_matrix(stage, tmp_path, monkeypatch):
     popen = Mock(side_effect=OSError("spawn") if stage == "spawn" else None)
     monkeypatch.setattr(s.subprocess, "Popen", popen)
     monkeypatch.setattr(sr, "wait_child", Mock(side_effect=OSError("wait")))
-    with pytest.raises((OSError, subprocess.CalledProcessError)):
+    # (an image that is not there and a pod Podman did not create are said in words: ValueError)
+    with pytest.raises((OSError, subprocess.CalledProcessError, ValueError)):
         s.run_pod(s.parse_args(["codex", "--offline"]), tmp_path, tmp_path)
     cleaned = [c for c in run.call_args_list if c.args[0][1:4] == ["pod", "rm", "--force"]]
     assert len(cleaned) == (1 if stage in ("spawn", "wait") else 0)

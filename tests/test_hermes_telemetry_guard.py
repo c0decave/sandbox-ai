@@ -429,11 +429,11 @@ def test_e2e_a_hermes_sandbox_gets_the_guard_read_only(tmp_path, extra):
     session = tmp_path / "kept/session"
     for name, content in hermes.guard_files().items():
         target = f"{hermes.SITE_PACKAGES}/{Path(name).name}"
-        assert target in mounts and mounts[target].endswith(",ro,nodev"), mounts.get(target)
+        assert target in mounts and mounts[target].endswith(",ro,nodev,nosuid"), mounts.get(target)
         assert f"/{name},dst=" in mounts[target]
         assert (session / name).read_text() == content
     if not extra:  # the managed configuration (the pins), read-only too
-        assert mounts["/etc/hermes"].endswith(",ro,nodev")
+        assert mounts["/etc/hermes"].endswith(",ro,nodev,nosuid")
     kept = {name: (session / name).read_text() for name in hermes.guard_files()}
     managed = tmp_path / "etc-hermes"
     managed.mkdir()

@@ -252,7 +252,7 @@ def test_terms_explain_themselves_on_hover_with_or_without_question_marks(qapp, 
         assert says("launch.agent") in launch.agent.toolTip() or launch.agent.toolTip()
         assert all(label.toolTip() for label in launch.form.labels.values()) if hasattr(launch.form, "labels") else True
         # column titles, on many pages
-        samples = [(window.hosts.table, "Answers"), (window.kits.table, "Brings"), (window.approvals.open, "Refused in"),
+        samples = [(window.hosts.table, "Answers"), (window.kits.table, "Brings"), (window.approvals.open, "Time left / answer"),
                    (window.mcp.servers, "Serves"), (window.mcp.catalog, "Signature"), (window.connections.table, "Method"),
                    (window.sandboxes.table, "Backend"), (window.credentials.secrets, "Kept in"),
                    (window.images.images, "Built"), (window.team.table, "Members"), (window.llm.servers, "VPN")]

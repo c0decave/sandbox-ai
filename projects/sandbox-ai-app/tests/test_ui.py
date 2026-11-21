@@ -119,9 +119,9 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 
 def test_pages_and_preview(window, env):
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
-        "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Approvals", "Terminals", "MANAGE",
+        "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Terminals", "Approvals", "MANAGE",
         "File manager", "Kits & plugins", "MCP servers", "LLM servers", "Images", "Credentials", "Teams", "MONITORING",
-        "Connections", "Activity", "LLM traffic", "Statistics",
+        "Connections", "Activity", "LLM traffic", "Statistics", "System monitor",
         "SYSTEM", "System", "Hosts", "Help"]
     launch = window.launch
     launch.agent.setCurrentText("codex")
@@ -296,6 +296,39 @@ def test_connections_follow_reads_at_its_interval_and_appends_what_came(window, 
     assert wait(lambda: page.table.rowCount() == 1, 5), "a filter change fills the table again"
 
 
+def test_sandboxes_page_of_a_test_ignores_launchers_others_started(window, tmp_path):
+    """The Sandboxes page reads this account's launcher processes from /proc: on a machine where other sessions run
+    sandbox-ai (or its tests) at the same time, their launchers were rows of the tests' pages, and the tests that
+    count rows failed now and then (conftest.only_this_sessions_launchers). A launcher this test run did not start
+    (here: another session's, with a HOME of its own, left to init by a shell that exits at once) is not one of the
+    tests' rows."""
+    script = tmp_path / "agent_sandbox.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    subprocess.run(["sh", "-c", f'"{sys.executable}" "{script}" claude --workspace "{tmp_path}" >/dev/null 2>&1 &'],
+                   check=True, env={**os.environ, "HOME": str(tmp_path / "another-session")})
+    stranger = None
+    try:
+        deadline = time.monotonic() + 10
+        while stranger is None and time.monotonic() < deadline:
+            for entry in Path("/proc").iterdir():
+                try:
+                    if entry.name.isdigit() and str(script).encode() in (entry / "cmdline").read_bytes():
+                        stranger = int(entry.name)
+                except OSError:
+                    pass
+            time.sleep(0.02)
+        assert stranger is not None, "the stranger launcher did not start"
+        read_now(window.sandboxes)
+        assert window.sandboxes.table.rowCount() == 0
+        assert all(pid != stranger for pid, *_ in backend.launcher_processes())
+    finally:
+        if stranger is not None:
+            try:
+                os.kill(stranger, 9)
+            except ProcessLookupError:
+                pass
+
+
 def test_sandboxes_and_system_pages_build(window, wait):
     read_now(window.sandboxes)
     assert window.sandboxes.table.rowCount() == 0
@@ -370,7 +403,7 @@ def test_approvals_page_lists_counts_down_and_answers(window, env, wait):
     assert 40 <= left <= 45, page.open.item(0, 4).text()
     assert page.open.item(1, 4).text() == "no time limit" and page.open.item(1, 2).font().bold()
     assert page.current() is None and not page.allow_button.isEnabled(), "two questions: nothing chosen for you"
-    assert any(f"within {window.sai.approval_seconds} seconds" in text for text in texts(page.open_box))
+    assert any(f"up to {window.sai.approval_seconds} seconds" in text for text in texts(page.open_box))
     nav = window.nav_item("approvals")
     assert nav.text() == "Approvals  (2)" and nav.font().bold()
     # One notification per new question (up to NOTIFY_AT_ONCE), each naming its sandbox.
@@ -389,20 +422,20 @@ def test_approvals_page_lists_counts_down_and_answers(window, env, wait):
     assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text())["decision"] == "deny"
     # Allow once through the command line.
     page.open.selectRow(0)
-    page.scope.setCurrentIndex(page.scope.findData("once"))
     widgets.SHOWN.clear()
-    page.answer("allow")
-    title, text, _ = widgets.SHOWN[-1]  # Allow asks first: which sandbox, what, which scope
-    assert title == "Allow this request?" and f"claude-abc ({env / 'project'})" in text
-    assert "192.0.2.7:5432" in text and "Scope: once" in text
+    page.answer("allow")  # (once: what Allow once sends)
+    assert widgets.SHOWN == [], "no question first (user 2026-11-17): the click is the answer, Undo takes it back"
     assert wait(lambda: page.answering is None, 90)
     assert json.loads((run / "approvals" / "1700000000-1-1.answer").read_text()) == {"decision": "allow", "scope": "once"}
     assert page.open.rowCount() == 0 and nav.text() == "Approvals"
     (run / "approvals" / "1700000000-1-1.done").write_text(json.dumps({"decision": "allow", "scope": "once",
                                                                        "reason": "answered"}))
+    (run / "approvals" / "1700000000-1-2.done").write_text(json.dumps({"decision": "deny", "scope": "run",
+                                                                       "reason": "answered"}))
     page.poll()
-    answers = {page.history.item(r, 3).text() for r in range(page.history.rowCount())}
-    assert "allowed" in answers and "denied" in answers
+    # Answered: in the same table, under its tabs.
+    tabs = [page.state_tabs.tabText(i) for i in range(page.state_tabs.count())]
+    assert tabs == ["Open (0)", "Allowed (1)", "Refused (1)", "Timed out (0)", "All (2)"]
 
 
 def test_block_always_and_the_blocked_list(window, env, wait):
@@ -412,22 +445,22 @@ def test_block_always_and_the_blocked_list(window, env, wait):
     page.poll()
     assert page.current() is not None and page.block_button.isEnabled()
     widgets.SHOWN.clear()
-    page.answer("deny", "always")  # what the Block always button does: asked first (it outlives the run)
-    title, text, _ = widgets.SHOWN[-1]
-    assert title == "Block always?" and "192.0.2.66:443" in text and "every later start" in text
+    page.block_button.click()  # at once, no question first (user 2026-11-17)
+    assert widgets.SHOWN == []
     assert wait(lambda: page.answering is None, 90)
     answer = json.loads((run / "approvals" / "1700000000-1-9.answer").read_text())
     # In this run a block counts for the run; sandbox-ai remembers it for the project once the sandbox applied it.
     assert answer["decision"] == "deny" and answer["scope"] == "run"
 
 
-def test_the_policy_caps_the_scope_box(qapp, env, monkeypatch):
+def test_the_policy_caps_the_scope_buttons(qapp, env, monkeypatch):
     from sandbox_ai_app import pages
     sai = backend.SandboxAI()
     monkeypatch.setattr(sai, "max_scope", lambda: "run")
     page = pages.ApprovalsPage(sai, interval=0)
-    always = page.scope.findData("always")
-    assert not page.scope.model().item(always).isEnabled() and page.scope.model().item(page.scope.findData("run")).isEnabled()
+    entry = ("claude-abc", {"id": "1700000000-1-1", "kind": "connect", "destination": "192.0.2.7:443"}, "local")
+    assert page.scope_refused(entry, "run") is None
+    assert "administrator's policy" in page.scope_refused(entry, "always")
     page.timer.stop()
 
 
@@ -462,16 +495,15 @@ def test_approvals_selection_is_cleared_when_its_question_goes(window, env, wait
     assert page.open.rowCount() == 1 and page.current() is None, "the selection does not jump to another question"
     assert not page.open.selectionModel().selectedRows()
     assert not page.allow_button.isEnabled() and not page.deny_button.isEnabled()
-    # A wider scope is for one answer only.
     page.open.selectRow(0)
-    page.scope.setCurrentIndex(page.scope.findData("always"))
     page.answer("deny")
     assert wait(lambda: page.answering is None, 90)
     assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text())["decision"] == "deny"
-    assert page.scope.currentData() == "once"
 
 
-def test_allow_asks_first_with_cancel_as_default_for_always(window, env, monkeypatch, wait):
+def test_allow_answers_at_once_also_always(window, env, monkeypatch, wait):
+    """User 2026-11-17: "wenn man schon auf freigeben und blockieren geklickt hat, nicht nochmal in einem weiteren
+    Fenster nachfragen, sondern machen" - Allow, also for always, and Deny go as clicked; Undo takes them back."""
     from sandbox_ai_app import pages
     run = fake_run(env)
     ask(run, "1700000000-1-5", kind="connect", destination="192.0.2.9:443")
@@ -479,24 +511,15 @@ def test_allow_asks_first_with_cancel_as_default_for_always(window, env, monkeyp
     page.poll()
     assert page.current() is not None, "the one open question is selected, ready to answer"
     asked = []
-    fake_confirm = lambda parent, title, text, accept, destructive=False, **k: asked.append((text, destructive)) \
-        or False  # noqa: E731
-    # An allow for the run is a plain confirmation; "always" outlives the run: the app's one policy, ask_first
-    # (widgets.confirm with Cancel the default).
+    fake_confirm = lambda *a, **k: asked.append(a) or False  # noqa: E731
     monkeypatch.setattr(pages, "confirm", fake_confirm)
     monkeypatch.setattr(widgets, "confirm", fake_confirm)
-    page.scope.setCurrentIndex(page.scope.findData("always"))
-    page.answer("allow")
-    assert asked and asked[-1][1] is True and "always (this project)" in asked[-1][0], "Cancel is the default"
-    assert page.answering is None and not (run / "approvals" / "1700000000-1-5.answer").exists(), "declined"
-    page.scope.setCurrentIndex(page.scope.findData("run"))
-    page.answer("allow")
-    assert asked[-1][1] is False
-    count = len(asked)
-    page.answer("deny")  # one click
-    assert len(asked) == count
+    page.allow_always_button.click()
     assert wait(lambda: page.answering is None, 90)
-    assert json.loads((run / "approvals" / "1700000000-1-5.answer").read_text())["decision"] == "deny"
+    assert asked == [] and widgets.SHOWN == []
+    assert json.loads((run / "approvals" / "1700000000-1-5.answer").read_text()) == {"decision": "allow",
+                                                                                     "scope": "always"}
+    assert not page.undo_button.isHidden()
 
 
 def test_approvals_are_read_in_the_background(window, env, wait):
@@ -525,12 +548,12 @@ def test_approvals_asked_and_refused_in_are_shown_whole(window, env):
             assert page.open.columnWidth(column) >= bold.horizontalAdvance(item.text()) + 8, (column, item.text())
 
 
-def test_approvals_countdown_reaches_refused(window, env):
+def test_approvals_countdown_reaches_timed_out(window, env):
     run = fake_run(env)
     ask(run, "1700000000-1-3", seconds_ago=0, kind="dns", name="pypi.org")
     page = window.approvals
     page.poll(now=time.time() + 61)
-    assert page.open.item(0, 4).text() == "refused" and page.open.item(0, 2).text() == "look up the name pypi.org"
+    assert page.open.item(0, 4).text() == "timed out" and page.open.item(0, 2).text() == "look up the name pypi.org"
 
 
 # -- statistics --
@@ -1096,7 +1119,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     window.sandboxes.table.selectRow(0)
     window.sandboxes.show_allowed()
     assert time.monotonic() - began < 3, "the commands run in the background"
-    live_mcp = [window.sandboxes.run_named[key] for key in ("add-mcp", "remove-mcp")]  # for kept starts only
+    live_mcp = [window.sandboxes.run_named[key] for key in ("add-mcp", "remove-mcp", "add-kits", "remove-kits")]  # for kept starts only
     live_mcp.append(window.sandboxes.run_named["browser"])  # for a start with --browser only
     buttons = [window.system.privacy_button, window.system.check_button, window.launch.dry_button,
                window.mcp.load_button, *[b for b in window.sandboxes.run_buttons if b not in live_mcp]]
@@ -1111,7 +1134,9 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     assert all(button.isEnabled() for button in buttons)
     assert window.system.checks.rowCount() == 1
     titles = [title for title, *_ in widgets.SHOWN]
-    assert "Plan (dry run)" in titles and any(t.startswith("Privacy check") for t in titles) and "claude-abc" in titles
+    # (the Start page's folder followed the project opened meanwhile: its plan is said to be out of date - R2-20)
+    assert any(t.startswith("Plan (dry run)") for t in titles) and any(t.startswith("Privacy check") for t in titles) \
+        and "claude-abc" in titles
 
 
 def test_background_timeout_answers_at_once_but_keeps_the_button_until_the_thread_ends(qapp, wait):
@@ -1305,7 +1330,7 @@ def test_an_answer_that_hangs_frees_the_buttons_after_a_while(window, env, monke
         page.answer("deny")
         assert page.answering is not None and not page.deny_button.isEnabled()
         assert wait(lambda: page.answering is None, 10), "given up after its timeout"
-        assert page.deny_button.isEnabled() and page.message.text() == "Not answered"
+        assert page.deny_button.isEnabled() and page.message.text().startswith("Not answered")
     finally:
         release.set()
 
@@ -1569,7 +1594,7 @@ def test_closing_hides_to_the_tray_and_answering_goes_on(window, env, monkeypatc
     window.closed.connect(lambda: closed.append(True))
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
     assert not window.quit_app(), "Quit in the tray menu asks first: a sandbox runs"
-    assert "refused after" in widgets.SHOWN[-1][1] and not closed
+    assert "fails after" in widgets.SHOWN[-1][1] and not closed
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     asked = len(widgets.SHOWN)
     assert window.quit_app() and closed == [True] and window.finished and not window.approvals.timer.isActive()
@@ -1625,7 +1650,7 @@ def test_without_a_tray_closing_warns_that_questions_will_be_refused(window, env
     window.closeEvent(event)
     title, text, _ = widgets.SHOWN[-1]
     assert not event.isAccepted() and title == "Quit"
-    assert f"refused after {window.sai.approval_seconds} seconds" in text
+    assert f"fails after {window.sai.approval_seconds} seconds" in text and "stays open" in text  # (24h review B)
 
 
 def test_autostart_is_a_setting_written_only_when_ticked(window, env, wait):
@@ -1807,7 +1832,7 @@ def test_the_window_in_german(qapp, env, monkeypatch):
     w = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=0)
     try:
         assert [w.nav.item(i).text() for i in range(w.nav.count())][:7] == [
-            "PROJEKT", "Start", "Board", "LAUFEND", "Sandboxen & Sitzungen", "Freigaben", "Terminals"]
+            "PROJEKT", "Start", "Board", "LAUFEND", "Sandboxen & Sitzungen", "Terminals", "Freigaben"]
         assert w.approvals.allow_button.text() == "Einmal erlauben"
         assert w.launch.form.tabText(1) == "Netzwerk"
     finally:
@@ -1857,7 +1882,7 @@ def test_devices_and_limits_of_a_running_sandbox(window, env, monkeypatch, wait)
     shown = []
 
     class FakeDevices:
-        def __init__(self, parent, candidates):
+        def __init__(self, parent, candidates, title=None, **kwargs):
             shown.append(candidates)
 
         def exec(self):
@@ -1911,7 +1936,7 @@ def test_workspaces_of_a_running_sandbox(window, env, monkeypatch, wait):
                         lambda run, value, force: calls.append(("remove", run, value, force)) or next(answers))
 
     class FakeWorkspace:
-        def __init__(self, parent, run):
+        def __init__(self, parent, run, host="local", **kwargs):
             self.read_only = QtWidgets.QCheckBox()
 
         def exec(self):
@@ -1950,6 +1975,96 @@ def test_the_board_applies_devices_and_limits_live(window, env, monkeypatch, wai
     button = next(b for b in board.inspector_holder.findChildren(QtWidgets.QPushButton) if "now" in b.text())
     button.click()
     assert wait(lambda: calls == [("claude-abc", "/dev/video0")], 20)
+
+
+def test_the_network_dialog_shows_what_the_run_was_given_already(qapp):
+    """Live (2026-11-16): ticked presets and hosts allowed with Erlauben… looked gone when the dialog was opened again -
+    it always opened empty. It shows what the run may reach now (net show --json): the presets it has are ticked and
+    greyed ("allowed already"), the names, addresses, networks and ports listed above; only what is new is sent."""
+    from sandbox_ai_app.ui import NetworkDialog, given_network
+    shown = {"run": "web", "https": [{"address": "140.82.112.3", "names": ["github.com"]},
+                                     {"address": "140.82.112.5", "names": ["api.github.com"]}],
+             "tcp": [{"address": "192.0.2.10", "port": 5432, "names": []}], "all_ports": ["192.0.2.0/24"],
+             "host_wildcards": ["*.githubusercontent.com"], "host_ports": [3000], "dns": ["192.0.2.53"], "git": []}
+    current = given_network(json.dumps(shown))
+    assert current["hosts"] == {"github.com", "api.github.com", "*.githubusercontent.com"}
+    presets = {"github": ["github.com", "api.github.com", "*.githubusercontent.com"], "pypi": ["pypi.org"]}
+    dialog = NetworkDialog(None, presets, "Allow", {"--allow-host-port", "--dns"}, current=current)
+    assert dialog.presets["github"].isChecked() and not dialog.presets["github"].isEnabled()
+    assert "allowed already" in dialog.presets["github"].toolTip()
+    assert not dialog.presets["pypi"].isChecked() and dialog.presets["pypi"].isEnabled()
+    text = dialog.given.text()
+    for part in ("github.com", "*.githubusercontent.com", "192.0.2.10:5432", "192.0.2.0/24", "3000"):
+        assert part in text, text
+    assert dialog.arguments() == [], "nothing new: nothing sent"
+    dialog.presets["pypi"].setChecked(True)
+    assert dialog.arguments() == ["--allow-pypi"]
+    assert given_network("not json") is None and given_network("") is None
+    plain = NetworkDialog(None, presets, "Allow", set())
+    assert plain.given.isHidden() and plain.presets["github"].isEnabled()
+
+
+def test_the_revoke_dialog_shows_what_the_run_has_and_a_typed_allow_is_kept_until_sent(window, monkeypatch, wait):
+    """The bug class of Erlauben… (2026-11-16): Revoke… opened empty too (nothing said what the run has to take back),
+    and what was typed into Allow… was gone after Cancel, a "no" or a refusal. Revoke reads net show --json as Allow
+    does: the line lists it, presets the run does not have are greyed. What was typed and not sent comes back for the
+    same run (drafts.py), with Empty the form; once sandbox-ai took it, it is gone."""
+    from sandbox_ai_app import drafts, ui
+    from sandbox_ai_app.ui import NetworkDialog, given_network
+    shown = {"https": [{"address": "151.101.0.223", "names": ["pypi.org", "files.pythonhosted.org"]}], "tcp": [],
+             "all_ports": [], "host_wildcards": [], "host_ports": []}
+    current = given_network(json.dumps(shown))
+    presets = {"pypi": ["pypi.org", "files.pythonhosted.org"], "github": ["github.com"]}
+    revoke = NetworkDialog(None, presets, "Revoke", set(), current=current, op="revoke")
+    assert "pypi.org" in revoke.given.text() and not revoke.given.isHidden()
+    assert revoke.presets["pypi"].isEnabled() and not revoke.presets["pypi"].isChecked()
+    assert not revoke.presets["github"].isEnabled() and "not allowed" in revoke.presets["github"].toolTip()
+    revoke.deleteLater()
+    key = ("net", "allow", "local", "claude-abc")
+    first = NetworkDialog(None, presets, "Allow", {"--git-token-env"}, draft=key)
+    assert first.draft.notice.isHidden()
+    first.hosts.setText("api.example.org")
+    first.git_url.setText("https://git.example.org")
+    first.git_ref.setText("GITEA_TOKEN")
+    first.presets["github"].setChecked(True)
+    first.reject()
+    assert key in drafts.DRAFTS
+    again = NetworkDialog(None, presets, "Allow", {"--git-token-env"}, draft=key)
+    assert again.hosts.text() == "api.example.org" and again.git_ref.text() == "GITEA_TOKEN"
+    assert again.presets["github"].isChecked() and not again.draft.notice.isHidden()
+    other = NetworkDialog(None, presets, "Allow", set(), draft=("net", "allow", "local", "claude-xyz"))
+    assert other.hosts.text() == "", "another run's dialog starts empty"
+    again.draft.empty()
+    assert again.hosts.text() == "" and not again.presets["github"].isChecked() and key not in drafts.DRAFTS
+    for dialog in (first, again, other):
+        dialog.deleteLater()
+    # Through the page: refused, the draft stays; taken, it is gone.
+    page = window.sandboxes
+    instance = backend.Instance("run", "run:claude-abc", "claude-abc", run="claude-abc", state="running", record={})
+    monkeypatch.setattr(page, "current", lambda: instance)
+    monkeypatch.setattr(window.sai, "net_options", lambda op: {"--allow-host"})
+    statuses, sent = [1, 0], []
+
+    def host_run(host, *args, timeout=120):
+        if args[:2] == ("net", "show"):
+            return 0, json.dumps(shown), ""
+        sent.append(args)
+        return statuses.pop(0), "", "refused" if not sent[1:] else ""
+    monkeypatch.setattr(window.sai, "host_run", host_run)
+
+    def typed(dialog):
+        if not dialog.hosts.text():
+            dialog.hosts.setText("api.example.org")
+        dialog.done(QtWidgets.QDialog.DialogCode.Accepted)
+        return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(ui.NetworkDialog, "exec", typed)
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    page.network("allow")
+    assert wait(lambda: len(sent) == 1 and not widgets.busy(page), 15)
+    assert drafts.DRAFTS.get(key, {}).get("hosts") == "api.example.org", "refused: what was typed stays"
+    page.network("allow")
+    assert wait(lambda: len(sent) == 2 and not widgets.busy(page), 15)
+    assert sent[1][:4] == ("net", "allow", "claude-abc", "--allow-host") and key not in drafts.DRAFTS
 
 
 def test_the_network_dialog_offers_what_the_installed_sandbox_ai_can(qapp):
@@ -2229,7 +2344,7 @@ def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, en
     assert wait(lambda: page.open.rowCount() == 4 and "ct2" in page.remote_note.text(), 15)
     hosts = [page.open.item(r, 5).text() for r in range(4)]
     assert hosts.count("this machine") == 1 and hosts.count("ct1") == 3
-    assert "on every host" in page.open_box.title() and "(3 on other hosts)" in page.open_box.title()
+    assert "of every host" in page.open_box.title() and "(3 waiting on other hosts)" in page.open_box.title()
     assert window.nav_item("approvals").text() == "Approvals  (4)"
     assert "every host" in window.nav_item("approvals").toolTip()
     assert any("on ct1" in title for title, _ in notes), "a new question of another host is announced too"
@@ -2241,12 +2356,11 @@ def test_approvals_of_every_host_are_one_table_answered_on_their_host(window, en
     assert 30 <= left <= 40, "counted down from the host's own time left"
     assert page.open.item(connect, 2).text() == "connect to 192.0.2.7:443"
     page.open.selectRow(connect)
-    assert not page.scope.model().item(page.scope.findData("always")).isEnabled(), "that host's widest answer"
-    page.scope.setCurrentIndex(page.scope.findData("run"))
+    assert not page.allow_always_button.isEnabled(), "that host's widest answer"
+    assert "ct1" in page.allow_always_button.toolTip()
     widgets.SHOWN.clear()
-    page.answer("allow")
-    title, text, _ = widgets.SHOWN[-1]
-    assert title == "Allow this request?" and "Host: ct1" in text and "claude-r (~/srv) on ct1" in text
+    page.allow_run_button.click()
+    assert widgets.SHOWN == [], "answered as clicked (user 2026-11-17): no question first"
     assert wait(lambda: page.answering is None, 15)
     assert ("ct1", ("approvals", "allow", "1700000000-1-1", "--scope", "run")) in ran
     # Measured when the host took the answer, not after: the read it starts may have run before this line.
@@ -2309,7 +2423,7 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
                         answers.get(tuple(args), (0, "done", "")))
 
     class FakeNetwork:
-        def __init__(self, parent, presets, title, supported=None):
+        def __init__(self, parent, presets, title, supported=None, current=None, **kwargs):
             seen.append(("net", title, set(supported or ())))
 
         def exec(self):
@@ -2322,7 +2436,7 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
             return False
 
     class FakeWorkspace:
-        def __init__(self, parent, run, host="local"):
+        def __init__(self, parent, run, host="local", **kwargs):
             seen.append(("workspace", run, host))
             self.read_only = QtWidgets.QCheckBox()
 
@@ -2336,7 +2450,7 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
             return ""
 
     class FakeDevices:
-        def __init__(self, parent, candidates, title=None):
+        def __init__(self, parent, candidates, title=None, **kwargs):
             seen.append(("device", candidates, title))
 
         def exec(self):
@@ -2407,13 +2521,86 @@ def test_the_limits_and_workspace_dialogs_of_another_host(qapp):
     assert ui.size_text(512 << 20) == "512m" and ui.size_text(1000) == "1000"
     dialog = ui.WorkspaceDialog(None, "web", host="ct1")
     assert dialog.windowTitle() == "Add workspace to web on ct1"
-    assert not [b for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() in ("Folder…", "File…")], \
-        "this computer's folders and files are not offered for another host"
+    assert dialog.host == "ct1" and sorted(b.text() for b in dialog.browse_buttons) == ["File…", "Folder…"], \
+        "ct1's folders and files are offered (listed over SSH: remote_chooser), never this computer's"
     dialog.deleteLater()
     dialog = ui.WorkspaceDialog(None, "claude-abc")
     browse = [b.text() for b in dialog.findChildren(QtWidgets.QPushButton) if b.text() in ("Folder…", "File…")]
     assert sorted(browse) == ["File…", "Folder…"]
     dialog.deleteLater()
+
+
+def test_the_add_dialogs_of_a_run_show_what_it_has_and_keep_what_was_typed(window, monkeypatch, wait):
+    """The bug class of Erlauben… (2026-11-16): Add device…, Add workspace… and Add MCP server… opened as if the run
+    had nothing - what was added before looked lost, and could be offered again. Each reads what the run has on its
+    host as it opens: listed above, greyed in the choice. A path or name typed and not sent comes back for that run
+    (drafts.py)."""
+    from sandbox_ai_app import drafts, ui
+    key = ("device", "local", "claude-abc")
+    dialog = ui.DeviceDialog(None, [("/dev/video0", None, "a camera"), ("/dev/ttyUSB0", None, None)],
+                             added=["/dev/video0"], draft=key)
+    video = dialog.list.item(0)
+    assert "added already" in video.text() and not video.flags() & Qt.ItemFlag.ItemIsEnabled
+    assert "/dev/video0" in dialog.given.text() and not dialog.given.isHidden()
+    assert dialog.list.item(1).flags() & Qt.ItemFlag.ItemIsEnabled
+    dialog.edit.setText("/dev/ttyUSB0")
+    dialog.reject()
+    again = ui.DeviceDialog(None, [], draft=key)
+    assert again.path() == "/dev/ttyUSB0" and again.given.isHidden()
+    for made in (dialog, again):
+        made.deleteLater()
+    key = ("workspace", "ct1", "web")
+    added = [{"host": "/srv/data", "sandbox": "/workspaces/data", "mode": "ro", "source": "added"}]
+    dialog = ui.WorkspaceDialog(None, "web", host="ct1", added=added, draft=key)
+    assert "/workspaces/data" in dialog.given.text() and not dialog.given.isHidden()
+    dialog.edit.setText("/srv/more")
+    dialog.name_edit.setText("more")
+    dialog.read_only.setChecked(True)
+    dialog.reject()
+    again = ui.WorkspaceDialog(None, "web", host="ct1", draft=key)
+    assert (again.directory(), again.name(), again.read_only.isChecked()) == ("/srv/more", "more", True)
+    assert ui.WorkspaceDialog(None, "api", host="ct1", draft=("workspace", "ct1", "api")).directory() == "", \
+        "another run's dialog starts empty"
+    for made in (dialog, again):
+        made.deleteLater()
+    live = ui.LiveMcpDialog(None, "work", servers=[("fetch", "defined"), ("github", "")], agent="claude",
+                            attached=["fetch", "helper-codex-0123abcd"])
+    fetch = live.choice.findData("server:fetch")
+    assert not live.choice.model().item(fetch).isEnabled() and "attached already" in live.choice.itemText(fetch)
+    assert live.value() == ("server", "github"), "the first one it does not have is chosen"
+    assert "fetch" in live.given.text() and "Codex as a helper" in live.given.text()
+    live.deleteLater()
+    drafts.DRAFTS.clear()
+    # Through the page, on another host: what that host lists goes into the dialogs.
+    page = window.sandboxes
+    there = backend.Instance("session", backend.remote_key("ct1", "web"), "web", session="web", agent="claude",
+                             state="running", host="ct1", record={"mcp_running": ["fetch"]})
+    monkeypatch.setattr(page, "current", lambda: there)
+    answers = {("workspace", "list", "web", "--json"): (0, json.dumps(
+                   [{"host": "/srv/app", "sandbox": "/work", "mode": "rw", "source": "start"}] + added), ""),
+               ("devices", "list", "web", "--json"): (0, json.dumps([
+                   {"id": "1", "value": "/dev/ttyUSB0", "source": "added", "state": "attached", "nodes": []}]), "")}
+    monkeypatch.setattr(window.sai, "host_run", lambda name, *args, timeout=120: answers.get(tuple(args), (0, "", "")))
+    seen = []
+
+    def opened(cls):
+        def exec_(dialog):
+            seen.append((cls.__name__, dialog.given.text()))
+            return QtWidgets.QDialog.DialogCode.Rejected
+        monkeypatch.setattr(cls, "exec", exec_)
+    for cls in (ui.WorkspaceDialog, ui.DeviceDialog, ui.LiveMcpDialog):
+        opened(cls)
+    page.add_workspace()
+    assert wait(lambda: seen and not widgets.busy(page), 15)
+    assert seen[-1][0] == "WorkspaceDialog" and "/workspaces/data" in seen[-1][1] and "/work " not in seen[-1][1]
+    page.add_device()
+    assert wait(lambda: len(seen) == 2 and not widgets.busy(page), 15)
+    assert seen[-1][0] == "DeviceDialog" and "/dev/ttyUSB0" in seen[-1][1]
+    monkeypatch.setattr(window.sai, "host_mcp_servers", lambda host: [("fetch", "defined", ""), ("github", "", "")])
+    page.add_mcp()
+    assert wait(lambda: len(seen) == 3 and not widgets.busy(page), 15)
+    assert seen[-1][0] == "LiveMcpDialog" and "fetch" in seen[-1][1]
+    assert drafts.DRAFTS == {}, "nothing typed: no draft"
 
 
 def test_an_action_on_another_host_reads_its_starts_again_even_while_a_read_runs(window, monkeypatch, wait):
@@ -2696,7 +2883,7 @@ def test_deny_is_for_the_run_deny_once_is_once_and_an_expired_question_is_not_an
     assert not page.allow_button.isEnabled() and not page.deny_button.isEnabled()
     assert "time is up" in page.deny_button.toolTip()
     page.answer("deny")
-    assert page.message.text().startswith("Expired") and page.answering is None
+    assert "time is up" in page.message.text() and page.answering is None
     assert not (run / "approvals" / "1700000000-1-3.answer").exists()
 
 
@@ -2707,11 +2894,11 @@ def test_the_policy_is_read_at_every_scan_and_caps_allows_only(window, env, monk
     ask(run, "1700000000-1-1", kind="connect", destination="192.0.2.7:5432", address="192.0.2.7", port=5432)
     page = window.approvals
     page.poll()
-    always, run_scope = page.scope.findData("always"), page.scope.findData("run")
-    assert page.scope.model().item(always).isEnabled()
+    assert page.allow_always_button.isEnabled()
     monkeypatch.setattr(window.sai, "max_scope", lambda: "once")
     page.poll()
-    assert not page.scope.model().item(always).isEnabled() and not page.scope.model().item(run_scope).isEnabled()
+    assert not page.allow_always_button.isEnabled() and not page.allow_run_button.isEnabled()
+    assert page.allow_button.isEnabled()
     assert page.block_button.isEnabled(), "a block is a deny: never capped"
     calls = []
     monkeypatch.setattr(window.sai, "call", lambda *args, timeout=120, input=None: calls.append(args) or (0, "", ""))
@@ -2720,8 +2907,7 @@ def test_the_policy_is_read_at_every_scan_and_caps_allows_only(window, env, monk
     # Only the answers: the window calls sandbox-ai for other things meanwhile (e.g. a launch's --dry-run).
     answers = lambda: [args for args in calls if args[:1] == ("approvals",)]  # noqa: E731
     assert answers()[-1] == ("approvals", "deny", "1700000000-1-1", "--scope", "run")
-    page.scope.setCurrentIndex(always)
-    page.answer("allow")
+    page.answer("allow", "always")
     assert "at most" in page.message.text() and len(answers()) == 1, "an allow above the policy is not sent"
 
 
@@ -2750,11 +2936,17 @@ def test_the_approvals_keys_answer_the_selected_question(window, env, wait, qapp
     assert wait(lambda: page.answering is None, 60)
     ask(run, "1700000000-1-2", kind="connect", destination="192.0.2.8:5432", address="192.0.2.8", port=5432)
     page.poll()
-    page.open.selectRow(widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-2")))
+    # (selected without the keyboard: QTest's Ctrl+Shift above leaves Qt's modifier state behind, and a table that
+    # takes several rows reads that as "toggle")
+    from PySide6.QtCore import QItemSelectionModel
+    row = widgets.find_row(page.open, ("local", "claude-abc", "1700000000-1-2"))
+    page.open.selectionModel().select(page.open.model().index(row, 0), QItemSelectionModel.SelectionFlag.ClearAndSelect
+                                      | QItemSelectionModel.SelectionFlag.Rows)
+    assert page.chosen(), "selected"
     page.open.setFocus()
     widgets.SHOWN.clear()
     QTest.keyClick(page.open, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
-    assert widgets.SHOWN and widgets.SHOWN[-1][0] == "Allow this request?", "an allow is asked first"
+    assert widgets.SHOWN == [], "no question first (user 2026-11-17): the key is the answer"
     assert wait(lambda: (run / "approvals" / "1700000000-1-2.answer").exists(), 60)
     assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text())["decision"] == "allow"
     assert window.actions["nav-compact"].shortcuts()[0].toString() == "Ctrl+Shift+B"
@@ -2763,7 +2955,8 @@ def test_the_approvals_keys_answer_the_selected_question(window, env, wait, qapp
                                   (Qt.Key.Key_D, Qt.KeyboardModifier.AltModifier),
                                   (Qt.Key.Key_B, control_shift))} - {None}, "no menu's key is taken"
     assert all(w.accessibleName() for w in (page.open, page.history, page.always, page.allow_button, page.deny_button,
-                                            page.deny_once_button, page.block_button, page.scope, page.host_filter))
+                                            page.deny_once_button, page.block_button, page.allow_run_button,
+                                            page.allow_always_button, page.host_filter))
     # The Questions window answers with the same keys.
     assert wait(lambda: page.answering is None, 60)
     ask(run, "1700000000-1-3", kind="connect", destination="192.0.2.9:5432", address="192.0.2.9", port=5432)
@@ -2815,9 +3008,10 @@ def test_allow_on_a_question_s_toast_is_the_answer_no_second_question(window, en
     page.poll()
     key = ("local", "claude-abc", "1700000000-1-1")
     toast, buttons = question_toast(window, qapp, key)
-    assert list(buttons) == ["Allow", "Allow always…", "Block", "Block always…", "Open approvals"]
+    assert list(buttons) == ["Allow once", "Always allow", "Always, also for later sessions", "Block",
+                             "Block always", "Open approvals"]
     widgets.SHOWN.clear()
-    buttons["Allow"].click()
+    buttons["Allow once"].click()
     qapp.processEvents()  # the toast runs its action from the event loop
     assert widgets.SHOWN == [], "no second question after Allow on the toast"
     assert page.settled(key) and page.open_keys() == [], "settled: the Questions window offers it no more"
@@ -2836,9 +3030,8 @@ def test_allow_on_a_question_s_toast_is_the_answer_no_second_question(window, en
     assert json.loads((run / "approvals" / "1700000000-1-2.answer").read_text()) == {"decision": "deny", "scope": "run"}
 
 
-def test_allow_always_on_a_toast_asks_once_and_that_is_the_answer(window, env, wait, qapp, monkeypatch):
-    """"Always" outlives the run: its one confirmation is where it is answered (the button says "…"), and nothing
-    asks after it."""
+def test_allow_always_on_a_toast_is_the_answer(window, env, wait, qapp, monkeypatch):
+    """User 2026-11-17: no second window after a click - "always" on a toast is answered as clicked too."""
     monkeypatch.setattr(backend, "setting", lambda key, *a: {"notify": True, "notifications": True, "notify_style": "themed"}.get(
         key, backend.SETTINGS.get(key)))
     run = fake_run(env)
@@ -2847,10 +3040,10 @@ def test_allow_always_on_a_toast_asks_once_and_that_is_the_answer(window, env, w
     page.poll()
     _, buttons = question_toast(window, qapp, ("local", "claude-abc", "1700000000-1-3"))
     widgets.SHOWN.clear()
-    buttons["Allow always…"].click()
+    buttons["Always, also for later sessions"].click()
     qapp.processEvents()
     assert wait(lambda: page.answering is None, 90)
-    assert [title for title, _, _ in widgets.SHOWN] == ["Allow this request?"], "exactly one confirmation"
+    assert widgets.SHOWN == [], "no confirmation"
     assert json.loads((run / "approvals" / "1700000000-1-3.answer").read_text())["decision"] == "allow"
 
 
@@ -3032,7 +3225,7 @@ def test_the_network_options_of_another_host_are_that_hosts(window, monkeypatch,
         (0, help_text, "") if args[-1:] == ("--help",) else (0, "ok", "")))
 
     class FakeNetwork:
-        def __init__(self, parent, presets, title, supported=None):
+        def __init__(self, parent, presets, title, supported=None, current=None, **kwargs):
             seen.append((set(presets), set(supported or ())))
 
         def exec(self):
@@ -3266,6 +3459,31 @@ def test_the_rows_of_the_sandboxes_tree_that_are_not_starts_have_no_actions(wind
     assert page.current().key == "mcp:fetch"
 
 
+def test_shell_opens_a_terminal_tab_with_sandbox_ai_shell_here_and_on_a_host(window, monkeypatch, wait):
+    """Shell beside Attach: a new terminal tab (in the app) running `sandbox-ai shell NAME`, here or over SSH as
+    attach goes there; a tab of its own each time. Only while the start runs."""
+    page = sandboxes_tree(window, monkeypatch)
+    assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
+    opened = []
+    monkeypatch.setattr(page, "terminal", lambda argv, title, embedded=None, **k: opened.append((argv, title, embedded)))
+    monkeypatch.setattr(window.sai, "host_terminal", lambda name, *args: ["ssh", "-tt", name, "sandbox-ai", *args])
+    shell = page.session_buttons["shell"]
+    page.table.selectRow(widgets.find_row(page.table, "session:work"))
+    assert shell.isEnabled() and widgets.button_text(shell) == i18n.tr("Shell") and "sandbox-ai shell NAME" in shell.toolTip()
+    page.session("shell")
+    page.session("shell")
+    assert [argv[3:] for argv, _, _ in opened] == [["shell", "work"], ["shell", "work"]]
+    assert opened[0][1] == i18n.tr("shell: {name}", name="work") and opened[0][2] is True
+    page.table.selectRow(widgets.find_row(page.table, backend.remote_key("ct1", "web")))
+    assert shell.isEnabled(), shell.toolTip()
+    page.session("shell")
+    assert opened[-1] == (["ssh", "-tt", "ct1", "sandbox-ai", "shell", "web"],
+                          f"ct1: {i18n.tr('shell: {name}', name='web')}", True)
+    # An MCP server's sandbox has none.
+    page.table.selectRow(widgets.find_row(page.table, backend.remote_key("ct1", "mcp-docs")))
+    assert not shell.isEnabled() and "MCP server" in shell.toolTip()
+
+
 def test_the_sandboxes_tree_keeps_its_folds_and_selection_across_reads(window, monkeypatch, wait):
     page = sandboxes_tree(window, monkeypatch)
     assert wait(lambda: page.table.rowCount() == 4 and page.remote_reading is None, 15)
@@ -3312,6 +3530,36 @@ def test_the_version_shows_at_the_bottom_right(window):
     assert label is not None and label.isVisibleTo(window)
     assert __version__ in label.text() and label.toolTip()
     assert window.statusBar().layout() is not None
+
+
+
+def test_the_version_says_where_the_app_runs_from_and_a_launcher_that_differs(window, monkeypatch):
+    """After an update the running app may be older than the sandbox-ai it calls (2026-11-18: "it says 0.1.97"): the
+    label says both versions then, its tooltip and Help > About the folder the app runs from."""
+    from sandbox_ai_app import __version__
+    label = window.findChild(QtWidgets.QLabel, "version_label")
+    assert str(backend.PACKAGE_DIR) in label.toolTip() and str(window.sai.directory) in label.toolTip()
+    monkeypatch.setattr(window.sai, "version", lambda: "9.9.9")
+    other = window.make_version_label()
+    assert other.text() == f"App {__version__} · sandbox-ai 9.9.9"
+    other.deleteLater()
+    monkeypatch.undo()
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    window.actions["about"].trigger()
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "About sandbox-ai-app" and f"sandbox-ai-app {__version__} from {backend.PACKAGE_DIR}" in text
+
+
+def test_a_newer_start_gets_the_usual_quit(window, monkeypatch):
+    """single_instance: a newer start asks the running app to make way - the window's own Quit (its questions); True
+    when it quits or stops its work to quit, False when the human keeps the window."""
+    monkeypatch.setattr(window, "quit_app", lambda: False)
+    assert window.quit_for_another_start() is False
+    monkeypatch.setattr(window, "stopping", True, raising=False)
+    assert window.quit_for_another_start() is True
+    monkeypatch.setattr(window, "stopping", False, raising=False)
+    monkeypatch.setattr(window, "quit_app", lambda: True)
+    assert window.quit_for_another_start() is True
 
 
 def test_a_git_login_is_given_to_a_running_sandbox(window, env, wait, monkeypatch):

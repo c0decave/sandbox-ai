@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from .files import printable, printable_text
 from .i18n import tr
-from .widgets import AsyncCommand, background, button, fill, plain_label, selected_keys, set_notice, table
+from .widgets import AsyncCommand, background, button, fill, list_menu, plain_label, selected_keys, set_notice, table
 
 NPM_SEARCH = "https://registry.npmjs.org/-/v1/search?text={query}&size=25"
 PYPI_PROJECT = "https://pypi.org/pypi/{name}/json"
@@ -226,6 +226,7 @@ class PackageBrowser(QGroupBox):
         bottom.addWidget(self.status, 1)
         bottom.addWidget(self.add_button)
         layout.addLayout(bottom)
+        list_menu(self.results, lambda: [self.add_button])  # (a right click: Add, as the button)
         self.command = AsyncCommand(timeout=960, parent=self)
         self.command.finished.connect(self.os_found)
         self.update_buttons()
@@ -360,7 +361,9 @@ class DeriveDialog(QDialog):
         self.entry.returnPressed.connect(lambda: self.add(self.entry.text().strip()))
         entry_row.addWidget(self.entry, 1)
         entry_row.addWidget(button(tr("Add"), tr("Add it to the packages"), lambda: self.add(self.entry.text().strip())))
-        entry_row.addWidget(button(tr("Remove"), tr("Remove the selected package"), self.remove))
+        self.remove_button = button(tr("Remove"), tr("Remove the selected package"), self.remove)
+        entry_row.addWidget(self.remove_button)
+        list_menu(self.chosen, lambda: [self.remove_button])  # (a right click: Remove, as the button)
         layout.addLayout(entry_row)
         self.browser = PackageBrowser("apt", page, self.add, target=lambda: source)
         layout.addWidget(self.browser, 1)

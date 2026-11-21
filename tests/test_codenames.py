@@ -242,5 +242,5 @@ def test_the_option_has_its_short_form_and_help():
     parser = launcher.build_parser()
     action = next(a for a in parser._actions if "--name-style" in a.option_strings)
     assert action.option_strings == ["-nv", "--name-style"] and list(action.choices) == ["codename", "project"]
-    assert "--name-style" in dict(launcher.HELP_GROUPS)["Sessions, terminal and display"]
+    assert "--name-style" in dict(launcher.HELP_GROUPS)["Sessions and terminal"]
     assert "--name-style" not in launcher.CONFIG_FORBIDDEN  # a project may keep AGENT-PROJECT names

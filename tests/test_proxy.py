@@ -6,6 +6,7 @@ import base64
 import contextlib
 import http.server
 import importlib.util
+import functools
 import json
 import os
 from pathlib import Path
@@ -1390,21 +1391,23 @@ def test_a_thread_that_cannot_start_does_not_end_the_proxys_accept_loop(monkeypa
     def handle(client):
         with client:
             client.sendall(b"served")
-    no_thread_for(monkeypatch, "handle")
+    no_thread_for(monkeypatch, "served")  # (a connection's thread: ProxyServer.served, which holds its place)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
-    threading.Thread(target=rt.ProxyServer.accept_loop, args=(types.SimpleNamespace(handle=handle), listener),
-                     daemon=True).start()
+    proxy = types.SimpleNamespace(handle=handle, slots=threading.BoundedSemaphore(1))
+    proxy.served = functools.wraps(rt.ProxyServer.served)(lambda client: rt.ProxyServer.served(proxy, client))
+    threading.Thread(target=rt.ProxyServer.accept_loop, args=(proxy, listener), daemon=True).start()
     try:
         assert first_answer(listener.getsockname()) == b""
+        # (the place of the connection whose thread did not start is free again: one place is all there is here)
         assert first_answer(listener.getsockname()) == b"served"
     finally:
         listener.close()
 
 
 def test_a_thread_that_cannot_start_does_not_end_the_hook_server(monkeypatch):
-    no_thread_for(monkeypatch, "answer")
+    no_thread_for(monkeypatch, "answered")  # (a message's thread: HookServer.answered, which holds its place)
     directory = Path(tempfile.mkdtemp(prefix="hooks-", dir="/tmp"))
     server, stop = rt.HookServer(rt.Ruleset([])), threading.Event()
     thread = threading.Thread(target=server.serve, args=(directory / "decide.sock", stop), daemon=True)
@@ -1581,7 +1584,8 @@ def exchange_once(server, request, origin, scheme="https", destination="203.0.11
     thread = threading.Thread(target=upstream)
     thread.start()
     agent_side.sendall(request)
-    agent_side.shutdown(socket.SHUT_WR)
+    # (no half-close: the proxy takes an agent that closes its side while the --llm server works for one that gave
+    # up, and closes the server's connection - runtime.LlmClientWatch; the server's answer ends the exchange)
     server.exchange(rt.Stream(proxy_client), proxy_client, proxy_upstream, scheme, origin,
                     {"connection": 1, "destination": destination})
     thread.join(3)

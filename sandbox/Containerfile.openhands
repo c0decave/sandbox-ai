@@ -1,0 +1,102 @@
+# OpenHands (Agent Canvas + Agent Server: OpenHands/OpenHands, OpenHands/software-agent-sdk, MIT) as sandbox-ai's agent
+# openhands (sandbox-ai build openhands). Only the reviewed releases (docs/OPENHANDS_REVIEW.md, sandbox/openhands.py):
+# npm's @openhands/agent-canvas and its dependencies exactly as Containerfile.openhands.lock has them, each checked
+# against its sha512 integrity by npm ci, with no install script run (--ignore-scripts); the agent server, the SDK,
+# its tools and workspace and the automation backend with every Python dependency exactly as
+# Containerfile.openhands-python.lock has them (uv pip install --require-hashes), from pypi.org; CPython from uv's own
+# builds. Nothing is piped into a shell, nothing is fetched when OpenHands starts (upstream's uvx download is replaced
+# by the image's install: sandbox/openhands_cli.py), and OpenHands cannot update itself: its install is read-only in
+# the sandbox (a new release is reviewed, then built here). No Docker, no desktop app, no editor server.
+# uv ships as a static binary in its official image; COPY --from takes only it. Pinned: it also decides the CPython
+# build (the release Hermes' and Cairn's images use).
+ARG UV_VERSION=0.13.5
+# Floating tag: the current Active LTS line with its newest patch release (the Canvas needs Node.js 24 or later).
+# Pin with --build-arg NODE_IMAGE=docker.io/library/node:<version>-bookworm-slim.
+ARG NODE_IMAGE=docker.io/library/node:lts-bookworm-slim
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM ${NODE_IMAGE}
+
+# The reviewed releases; others do not match the locks (npm ci and uv's hash check refuse them).
+ARG OPENHANDS_VERSION=1.34.0
+ARG OPENHANDS_SERVER_VERSION=1.58.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates bash git python3 python3-pip python3-venv firejail nftables ripgrep util-linux \
+    vim netcat-traditional bind9-dnsutils iputils-ping iproute2 traceroute curl wget tmux \
+    openssh-client jq openssl \
+    && rm -rf /var/lib/apt/lists/*
+# GitHub CLI from GitHub's own apt repository (Debian's gh is years behind), the key over HTTPS.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -nv -O /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+RUN gh --version
+# GUI base (--gui): virtual display, VNC over a Unix socket, fonts and the runtime libraries Playwright's Chromium
+# needs (fetched at run time, e.g. `uvx playwright install chromium`).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb x11vnc x11-utils fonts-liberation fonts-dejavu-core \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcairo-gobject2 libcups2 \
+    libdbus-1-3 libdbus-glib-1-2 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 \
+    libpango-1.0-0 libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 libxcomposite1 \
+    libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 libxtst6 \
+    libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxshmfence1 libxkbfile1 libfontconfig1 gdb \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /uvx /usr/local/bin/
+RUN python3 -m pip --version && uv --version
+# The Agent Canvas exactly as locked (scripts/agent_npm_lock.py openhands: every version older than 14 days at the
+# review, each with its integrity; its install scripts are not run: a message, a polyfill's funding note).
+COPY Containerfile.openhands.lock /opt/openhands/package-lock.json
+RUN printf '{"name":"sandbox-ai-openhands","private":true,"dependencies":{"@openhands/agent-canvas":"%s"}}\n' \
+       "${OPENHANDS_VERSION}" > /opt/openhands/package.json \
+    && cd /opt/openhands && npm ci --ignore-scripts --no-audit --no-fund \
+    && npm cache clean --force \
+    && test "$(node -p 'require("/opt/openhands/node_modules/@openhands/agent-canvas/package.json").version')" \
+       = "${OPENHANDS_VERSION}"
+# CPython 3.12 (the Canvas asks for 3.12 to 3.14) beside Debian's python3, which sandbox-ai's setup keeps using; the
+# agent server, the SDK and the automation backend with their dependencies exactly as locked
+# (scripts/openhands_lock.py: versions older than 14 days at the review).
+COPY Containerfile.openhands-python.lock /opt/openhands/requirements.lock
+# Only for these steps: the agent's own uv keeps its defaults.
+RUN export UV_PYTHON_INSTALL_DIR=/opt/openhands/python UV_NO_CONFIG=1 UV_CACHE_DIR=/tmp/uv-cache \
+    && uv python install --no-bin 3.12 \
+    && uv venv --python 3.12 --python-preference only-managed /opt/openhands/venv \
+    && uv pip install --python /opt/openhands/venv/bin/python --require-hashes --no-deps \
+       -r /opt/openhands/requirements.lock \
+    && test "$(/opt/openhands/venv/bin/python -c 'import importlib.metadata as m; print(m.version("openhands-agent-server"))')" \
+       = "${OPENHANDS_SERVER_VERSION}" \
+    && rm -rf /tmp/uv-cache
+# sandbox-ai's openhands command (the Canvas with its uvx in front of the real one, the settings of the start, one
+# task without the UI); the same file is the Canvas' uvx.
+COPY openhands_cli.py /usr/local/bin/openhands
+RUN chmod 755 /usr/local/bin/openhands \
+    && mkdir -p -m 755 /opt/openhands/bin /etc/openhands \
+    && ln -s /usr/local/bin/openhands /opt/openhands/bin/uvx \
+    && ln -s /opt/openhands/node_modules/.bin/agent-canvas /usr/local/bin/agent-canvas \
+    && HOME=/tmp/openhands-check openhands --version \
+    && HOME=/tmp/openhands-check LITELLM_LOCAL_MODEL_COST_MAP=True OPENHANDS_SUPPRESS_BANNER=1 \
+       /opt/openhands/venv/bin/agent-server --help >/dev/null \
+    && rm -rf /tmp/openhands-check
+# Its telemetry is off for every process of the image (sandbox/openhands.py: TELEMETRY_ENV; the launcher sets the
+# rest, and its proxy refuses the hosts).
+ENV AGENT_CANVAS_DISABLE_TELEMETRY=1 VITE_DO_NOT_TRACK=1 DO_NOT_TRACK=1 OH_TELEMETRY_EXPORTER=none \
+    OH_TELEMETRY_CONSENT=denied OH_TELEMETRY_CONSENT_MODE=override ANONYMIZED_TELEMETRY=false \
+    BROWSER_USE_CLOUD_SYNC=false OTEL_SDK_DISABLED=true
+# LiteLLM's model catalog from its own copy (--openhands-enable model-catalog downloads it), no SDK banner.
+ENV LITELLM_LOCAL_MODEL_COST_MAP=True OPENHANDS_SUPPRESS_BANNER=1
+# sandbox-ai's telemetry guard (telemetry_guard.py): a .pth in the venv's site-packages runs it at the start of every
+# process of OpenHands' Python (the agent server, the automation backend, a task, a script run with it), and the
+# openhands command calls it before the Canvas. Whatever starts them in the sandbox, the consent granted, an exporter,
+# browser-use's sync, a Laminar key or an OpenTelemetry endpoint is refused and the opt-out variables pinned first; the
+# launcher mounts its current copies read-only over these.
+COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py
+RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install openhands
+RUN HOME=/tmp/openhands-check openhands --version && /opt/openhands/venv/bin/python -c pass \
+    && ! OH_TELEMETRY_CONSENT=granted /opt/openhands/venv/bin/python -c pass 2>/dev/null \
+    && ! HOME=/tmp/openhands-check AGENT_CANVAS_DISABLE_TELEMETRY=0 openhands --version 2>/dev/null \
+    && rm -rf /tmp/openhands-check
+ENV HOME=/root
+WORKDIR /work

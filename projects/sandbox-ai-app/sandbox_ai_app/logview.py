@@ -409,11 +409,11 @@ class LogPanel(QWidget):
             self.insert_entries(shown, self.formats())
         if at_end:  # following the end; someone reading further up keeps their place
             bar.setValue(bar.maximum())
-        if not self.watching:
-            for entry in shown:
-                if RANK.get(entry.get("level"), 1) >= RANK["WARNING"]:
-                    self.unread_count += 1
-                    self.unread.emit(self.unread_count)
+        if not self.watching:  # (said once per burst: the window's title set per warning was most of a burst's cost)
+            new = sum(1 for entry in shown if RANK.get(entry.get("level"), 1) >= RANK["WARNING"])
+            if new:
+                self.unread_count += new
+                self.unread.emit(self.unread_count)
 
     def changeEvent(self, event):  # noqa: N802
         """A new theme (or the system's colours): the levels' colours made again, the entries drawn in them."""

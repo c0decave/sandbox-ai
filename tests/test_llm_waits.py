@@ -244,6 +244,100 @@ def test_goose_takes_stream_idle_timeout_and_keeps_its_own_for_a_public_service(
     assert {name: env[name] for name in GOOSE_WAITS} == {"OPENAI_TIMEOUT": "3600", "GOOSE_STREAM_TIMEOUT": "3600"}
 
 
+# --- Pi: httpIdleTimeoutMs and retry.provider.timeoutMs of its settings ---------------------------------------------
+
+PI_FILE = ".pi/agent/settings.json"
+
+
+def pi_home(a, tmp_path, existing=None):
+    """(the paths prepare_home says it wrote, ~/.pi/agent/settings.json afterwards or None) for the start A, in a
+    HOME that held EXISTING (text) there - through the launcher's own update_json_defaults."""
+    home = tmp_path / "home"
+    (home / ".pi/agent").mkdir(parents=True, exist_ok=True)
+    if existing is not None:
+        (home / PI_FILE).write_text(existing)
+    done = llm.prepare_home(a, home, lambda *args: pytest.fail("nothing else is written for Pi"),
+                            launcher.update_json_defaults, None)
+    return done, (home / PI_FILE).read_text() if (home / PI_FILE).exists() else None
+
+
+def test_regression_pi_waits_an_hour_for_a_local_server(tmp_path):
+    """Pi 1.4.0 gives up after 300 s without the response headers or without a byte of the body (httpIdleTimeoutMs,
+    its HTTP client's two waits; retry.provider.timeoutMs, the provider request's, is the same unless set): through
+    a prefill of 420 s it ended three requests after 300 s each ("terminated", "Request timed out.":
+    runs/delay_headers_pi, delay_silent_pi) and the run failed; with both raised it waited and answered
+    (runs/delayfix3_pi). Pi reads them from its user's settings only, so the start sets them in the sandbox's HOME."""
+    done, text = pi_home(start("pi"), tmp_path)
+    assert done == [PI_FILE]
+    assert json.loads(text) == {"httpIdleTimeoutMs": HOUR_MS, "retry": {"provider": {"timeoutMs": HOUR_MS}}}
+    assert llm.pi_wait_settings(llm.LOCAL_WAIT) == json.loads(text)
+
+
+def test_pi_takes_stream_idle_timeout_and_keeps_its_own_for_a_public_service(tmp_path):
+    done, text = pi_home(start("pi", "stream_idle_timeout=900"), tmp_path)
+    assert json.loads(text) == {"httpIdleTimeoutMs": 900_000, "retry": {"provider": {"timeoutMs": 900_000}}}
+    # A public service: Pi's own waits, its settings are not touched (not even created).
+    done, text = pi_home(start("pi", record=PUBLIC), tmp_path / "public")
+    assert done == [] and text is None
+    kept = json.dumps({"httpIdleTimeoutMs": 120000})
+    assert pi_home(start("pi", record=PUBLIC), tmp_path / "kept", kept) == ([], kept)
+
+
+def test_pi_keeps_every_other_setting_of_yours(tmp_path):
+    yours = {"theme": "light", "httpIdleTimeoutMs": 300000, "transport": "sse",
+             "retry": {"enabled": True, "maxRetries": 5, "provider": {"maxRetries": 1, "timeoutMs": 300000}},
+             "packages": ["npm:pi-thing"]}
+    done, text = pi_home(start("pi"), tmp_path, json.dumps(yours))
+    assert json.loads(text) == {**yours, "httpIdleTimeoutMs": HOUR_MS,
+                                "retry": {"enabled": True, "maxRetries": 5,
+                                          "provider": {"maxRetries": 1, "timeoutMs": HOUR_MS}}}
+    # The next start with the same wait changes nothing: the file is not written again.
+    path = tmp_path / "home" / PI_FILE
+    before = path.stat().st_mtime_ns, path.stat().st_ino
+    assert pi_home(start("pi"), tmp_path, None)[0] == [PI_FILE]
+    assert (path.stat().st_mtime_ns, path.stat().st_ino) == before
+    # A "retry" that is no object (a hand-edited file) is replaced by one that holds the wait.
+    done, text = pi_home(start("pi"), tmp_path / "odd", json.dumps({"retry": "yes", "theme": "dark"}))
+    assert json.loads(text) == {"retry": {"provider": {"timeoutMs": HOUR_MS}}, "theme": "dark",
+                                "httpIdleTimeoutMs": HOUR_MS}
+
+
+def test_pi_settings_that_cannot_be_read_stay_as_they_are(tmp_path, capsys):
+    done, text = pi_home(start("pi"), tmp_path, "{ not json")
+    assert done == [] and text == "{ not json"
+    err = capsys.readouterr().err
+    assert PI_FILE in err and "unchanged" in err and "5 minutes" in err and "httpIdleTimeoutMs" in err
+    done, text = pi_home(start("pi"), tmp_path / "list", "[1, 2]")
+    assert done == [] and text == "[1, 2]"
+
+
+def test_the_other_agents_homes_get_no_pi_settings(tmp_path):
+    for agent in ("qwen", "goose", "hermes", "opencode2"):
+        home = tmp_path / agent
+        home.mkdir()
+        assert llm.prepare_home(start(agent), home, lambda *args: None, launcher.update_json_defaults, None) == []
+        assert not (home / ".pi").exists()
+
+
+def test_e2e_a_pi_start_writes_the_wait_into_its_settings(host, tmp_path):
+    """The real ./sandbox-ai pi --llm (only Podman stood in for): the sandbox's HOME holds Pi's settings with the
+    wait, beside what was there."""
+    env = {"SANDBOX_AI_LLM_NO_CONTEXT_FETCH": "1", "SANDBOX_AI_SECRETS": "file"}
+    host.add_image("localhost/pi-sandbox:latest")
+    added = host.run("llm", "add", "lms", "--kind", "lmstudio", "--url", "http://127.0.0.1:1234", "--model", "m",
+                     env=env)
+    assert added.returncode == 0, added.stderr
+    state = tmp_path / "pi-home"
+    (state / ".pi/agent").mkdir(parents=True)
+    state.chmod(0o700)
+    (state / PI_FILE).write_text(json.dumps({"theme": "light"}))
+    started = host.run("pi", "--no-tmux", "--no-auth", "--llm", "lms:m", "--llm-param", "stream_idle_timeout=1200",
+                       "--state-dir", str(state), env={**env, "FAKE_PODMAN_RUN": "0:0"})
+    assert started.returncode == 0, started.stderr
+    assert json.loads((state / PI_FILE).read_text()) == {
+        "theme": "light", "httpIdleTimeoutMs": 1_200_000, "retry": {"provider": {"timeoutMs": 1_200_000}}}
+
+
 # --- e2e: the real ./sandbox-ai --dry-run ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -251,7 +345,7 @@ def host(tmp_path):
     return Host(tmp_path / "host")
 
 
-@pytest.mark.parametrize("agent", ["codex", "opencode", "qwen", "goose", "claude"])
+@pytest.mark.parametrize("agent", ["codex", "opencode", "qwen", "goose", "claude", "pi"])
 def test_e2e_the_plan_names_the_agents_wait(host, agent):
     env = {"SANDBOX_AI_LLM_NO_CONTEXT_FETCH": "1"}
     added = host.run("llm", "add", "lms", "--kind", "lmstudio", "--url", "http://127.0.0.1:1234", "--model", "m",

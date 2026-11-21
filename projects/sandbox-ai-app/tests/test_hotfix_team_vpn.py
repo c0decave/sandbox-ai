@@ -83,7 +83,10 @@ def test_the_picker_lists_the_hosts_profiles_with_their_type_and_every_agent_can
     dialog = dialog_for(["codex"])
     labels = [dialog.vpn.itemText(i) for i in range(dialog.vpn.count())]
     assert labels[0] == "(none)" and "mv1 (mullvad)" in labels and "ovpn (openvpn)" in labels and "tor (tor)" in labels
-    assert list(dialog.members) == ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"]
+    assert list(dialog.members) == list(team_page.AGENTS)
+    # sandbox-ai's own team.AGENTS: every agent of the app since 0.1.98 (OpenCode 2, OpenHands, nanobot, Letta Code and
+    # Pi are team members too)
+    assert team_page.AGENTS == tuple(env[0].module("team").AGENTS) and set(backend.AGENTS) == set(team_page.AGENTS)
     assert dialog.options.isVisibleTo(dialog), "the free Options field stays"
     dialog.deleteLater()
 

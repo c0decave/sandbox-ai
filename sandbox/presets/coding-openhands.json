@@ -1,0 +1,35 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "coding-openhands",
+  "title": "Coding with OpenHands",
+  "description": "OpenHands' web UI (the Agent Canvas) on your project (in the sandbox's own browser with --browser), PyPI, npm and GitHub open for the project's packages and code, the agent's memory of this project kept between sessions; everything else stays closed.",
+  "translations": {
+    "de": {
+      "title": "Programmieren mit OpenHands",
+      "description": "Die Web-Oberfläche von OpenHands (der Agent Canvas) an Ihrem Projekt (im eigenen Browser der Sandbox mit --browser), PyPI, npm und GitHub offen für die Pakete und den Code des Projekts, das Gedächtnis des Agenten zu diesem Projekt bleibt zwischen den Sitzungen; alles andere bleibt zu."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "openhands"
+  ],
+  "options": [
+    "--allow-pypi",
+    "--allow-npm",
+    "--allow-github",
+    "--api-key",
+    "api.anthropic.com=ANTHROPIC_API_KEY",
+    "--model",
+    "anthropic/claude-sonnet-4-5"
+  ],
+  "notes": [
+    "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once); OpenHands sees a placeholder, the connection proxy puts the key in on the wire, and --model names the model (LiteLLM's anthropic/...). Another provider: --api-key api.openai.com=OPENAI_API_KEY or openrouter.ai=OPENROUTER_API_KEY with its --model, or a server of yours with --llm (the preset openhands-local-llm); OpenHands has no maker's model service of its own.",
+    "OpenHands' interactive surface is the Agent Canvas, its web UI on the sandbox's loopback (http://127.0.0.1:8000/): add --browser to see it in the sandbox's own browser, which starts on it (the app's Browser button; Podman). One task without the UI: sandbox-ai openhands -- task \"TASK\".",
+    "PyPI, npm and GitHub are open for the project's dependencies; everything else is refused or asked (--ask). Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy.",
+    "Memory: ~/.openhands/skills/AGENTS.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
+    "OpenHands asks before risky actions (its confirmation mode with the LLM security analyzer); -D turns that off. Its automation backend is off (--openhands-enable automations).",
+    "OpenHands' telemetry is always off and cannot be turned on (its kill switches pinned, its consent recorded as denied, its hosts refused by the proxy).",
+    "OpenHands is not live-tested yet (a start says so); its image first: sandbox-ai build openhands."
+  ]
+}

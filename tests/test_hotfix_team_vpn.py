@@ -334,7 +334,8 @@ def test_an_older_record_without_vpn_fields_still_loads(home):
 # --- hermes, qwen, dsh and goose as members ------------------------------------------------------------------
 
 def test_every_agent_can_be_a_member_with_its_first_prompt_in_its_own_form(home):
-    assert team.AGENTS == ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+    # Every agent of sandbox-ai (0.1.98: OpenHands, nanobot, Letta Code, OpenCode 2 and Pi too).
+    assert set(team.AGENTS) == set(team.load_module("launcher_for_team_agents", "agent_sandbox.py").AUTH_TARGETS)
     for agent in team.AGENTS:
         if agent != "dsh":  # the same forms as a preset's first task (presets.prompt_args)
             assert team.prompt_args(agent, "-x task") == presets.prompt_args({"prompt": "-x task"}, agent), agent

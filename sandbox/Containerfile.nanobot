@@ -1,0 +1,88 @@
+# nanobot (HKUDS/nanobot, MIT) as sandbox-ai's agent nanobot (sandbox-ai build nanobot).
+# Only the reviewed release (docs/NANOBOT_REVIEW.md, sandbox/nanobot.py): its PyPI wheel and every dependency
+# hash-pinned (Containerfile.nanobot.lock by scripts/nanobot_lock.py: files at least 14 days old) and installed from
+# pypi.org; CPython 3.12 from uv's own builds (their checksums are part of uv); the tokenizer's vocabulary fetched once
+# and checked against tiktoken's own SHA-256. Nothing is piped into a shell, nothing of nanobot's runs at install, and
+# nanobot cannot update itself: its install is read-only in the sandbox (a new release is reviewed, then built here).
+# uv ships as a static binary in its official image; COPY --from takes only it. Pinned: it also decides the CPython
+# build (MCP servers and kits use uvx as well).
+ARG UV_VERSION=0.13.5
+# Floating tag: the current Active LTS line with its newest patch release (the agents' common base: Node.js runs MCP
+# servers). Pin with --build-arg NODE_IMAGE=docker.io/library/node:<version>-bookworm-slim.
+ARG NODE_IMAGE=docker.io/library/node:lts-bookworm-slim
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+FROM ${NODE_IMAGE}
+
+# The reviewed release; another one is not in the lock (the version check below fails).
+ARG NANOBOT_VERSION=0.4.0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates bash git python3 python3-pip python3-venv firejail nftables ripgrep util-linux \
+    vim netcat-traditional bind9-dnsutils iputils-ping iproute2 traceroute curl wget tmux \
+    openssh-client jq openssl \
+    && rm -rf /var/lib/apt/lists/*
+# GitHub CLI from GitHub's own apt repository (Debian's gh is years behind), the key over HTTPS.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -nv -O /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+       https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+RUN gh --version
+# GUI base (--gui): virtual display, VNC over a Unix socket, fonts and the runtime libraries Playwright's Chromium
+# needs (fetched at run time, e.g. `uvx playwright install chromium`).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb x11vnc x11-utils fonts-liberation fonts-dejavu-core \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcairo-gobject2 libcups2 \
+    libdbus-1-3 libdbus-glib-1-2 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 \
+    libpango-1.0-0 libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 libxcomposite1 \
+    libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 libxtst6 \
+    libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxshmfence1 libxkbfile1 libfontconfig1 gdb \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /uvx /usr/local/bin/
+RUN python3 -m pip --version && uv --version
+COPY Containerfile.nanobot.lock /opt/nanobot/requirements.lock
+# CPython 3.12 beside Debian's python3, which sandbox-ai's setup keeps using; nanobot and its dependencies exactly as
+# locked (the wheel of this machine's architecture carries the terminal client), nothing else.
+ENV UV_PYTHON_INSTALL_DIR=/opt/nanobot/python UV_NO_CONFIG=1 UV_CACHE_DIR=/tmp/uv-cache
+RUN uv python install --no-bin 3.12 \
+    && uv venv --python 3.12 --python-preference only-managed /opt/nanobot/venv \
+    && uv pip install --python /opt/nanobot/venv/bin/python --require-hashes --no-deps \
+       --index-url https://pypi.org/simple -r /opt/nanobot/requirements.lock \
+    && rm -rf /tmp/uv-cache \
+    && test "$(/opt/nanobot/venv/bin/python -c 'import importlib.metadata as m; print(m.version("nanobot-ai"))')" \
+       = "${NANOBOT_VERSION}"
+# The tokenizer's vocabulary nanobot counts tokens with (tiktoken's cl100k_base): fetched here once, checked against
+# the SHA-256 tiktoken itself expects, kept under the name tiktoken looks for (the SHA-1 of its URL), so nanobot never
+# fetches it at run time.
+ENV TIKTOKEN_CACHE_DIR=/opt/nanobot/tiktoken
+RUN mkdir -p /opt/nanobot/tiktoken \
+    && curl -fsSL --proto '=https' --tlsv1.2 -o /opt/nanobot/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4 \
+       https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken \
+    && echo "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7  /opt/nanobot/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4" \
+       | sha256sum -c --strict \
+    && /opt/nanobot/venv/bin/python -c 'import tiktoken; assert tiktoken.get_encoding("cl100k_base").encode("ok")'
+# The nanobot command: sandbox-ai's settings for the start (/etc/nanobot, mounted read-only by the launcher) laid over
+# ~/.nanobot/config.json first (sandbox/nanobot.py: PIN_SCRIPT), then nanobot. Its terminal client is the wheel's,
+# never a download.
+ENV NANOBOT_TUI_NO_DOWNLOAD=1
+RUN printf '%s\n' '#!/bin/sh' \
+       'if [ -r /etc/nanobot/pin_config.py ]; then /opt/nanobot/venv/bin/python -I /etc/nanobot/pin_config.py || exit 1; fi' \
+       'exec /opt/nanobot/venv/bin/nanobot "$@"' > /usr/local/bin/nanobot \
+    && chmod 755 /usr/local/bin/nanobot \
+    && mkdir -p -m 755 /etc/nanobot \
+    && HOME=/tmp/nanobot-check nanobot --version | grep -qF "v${NANOBOT_VERSION}" \
+    && rm -rf /tmp/nanobot-check
+# sandbox-ai's telemetry guard (telemetry_guard.py): a .pth in the venv's site-packages runs it at the start of every
+# process of nanobot's Python (nanobot, its gateway, a script run with it). Whatever starts it in the sandbox, a
+# Langfuse key or host (its tracing) or an OpenTelemetry endpoint is refused and the opt-out variables pinned first; the
+# launcher mounts its current copies read-only over these.
+COPY telemetry_guard.py /usr/local/lib/sandbox-ai/telemetry_guard.py
+RUN python3 -IS /usr/local/lib/sandbox-ai/telemetry_guard.py --install nanobot
+RUN HOME=/tmp/nanobot-check nanobot --version | grep -qF "v${NANOBOT_VERSION}" \
+    && ! LANGFUSE_SECRET_KEY=sk-lf-check /opt/nanobot/venv/bin/python -c pass 2>/dev/null \
+    && rm -rf /tmp/nanobot-check
+ENV HOME=/root
+WORKDIR /work

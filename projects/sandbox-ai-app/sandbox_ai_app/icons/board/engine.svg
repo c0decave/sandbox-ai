@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<!-- sandbox-ai Board: engine: a gear (own drawing, MIT; drawn in currentColor) -->
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M18.74 9.46L21.23 9.74V14.26L18.74 14.54 18.56 14.97 20.12 16.93 16.93 20.12 14.97 18.56 14.54 18.74 14.26 21.23H9.74L9.46 18.74 9.03 18.56 7.07 20.12 3.88 16.93 5.44 14.97 5.26 14.54 2.77 14.26V9.74L5.26 9.46 5.44 9.03 3.88 7.07 7.07 3.88 9.03 5.44 9.46 5.26 9.74 2.77H14.26L14.54 5.26 14.97 5.44 16.93 3.88 20.12 7.07 18.56 9.03z"/>
+  <circle cx="12" cy="12" r="3"/>
+</g>
+</svg>

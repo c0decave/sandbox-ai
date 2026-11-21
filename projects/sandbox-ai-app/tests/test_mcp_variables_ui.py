@@ -254,6 +254,11 @@ def test_the_mcp_part_shows_variables_and_two_buttons_of_their_own_size(board_pa
     board_page.show()
     board_page.inspector_holder.show()
     qapp.processEvents()
+    # (an answer that came in meanwhile - the host's secrets, the catalog: slow on a loaded machine - may have
+    # rebuilt the inspector, its buttons with it: the ones shown now are measured)
+    buttons = {b.text(): b for b in board_page.inspector_holder.findChildren(QtWidgets.QPushButton)
+               if b.isVisible()}
+    reset, save = buttons["Use the server's limits"], buttons["Save as the server's defaults…"]
     for button in (reset, save):  # their own size: not as wide as the fields (they looked like the main action)
         assert button.width() <= button.sizeHint().width() + 4, (button.text(), button.width())
     assert any("These values hold for this board's starts only" in label.text()
@@ -341,7 +346,9 @@ def test_the_image_of_a_service_is_chosen_from_your_images(board_page, scenario)
         assert board_page.board.node(node.id).props["image"] == "ghcr.io/me/thing"
     else:
         assert combo.itemText(0).startswith("No images of yours yet") and not combo.model().item(0).isEnabled()
-        assert combo.itemText(1) == "Other…"
+        # (2026-11-19: why agent images are none of them, and the Images page, before Other…)
+        assert combo.itemText(1).startswith("Agent images and their variants are not service images")
+        assert combo.itemText(2) == "Add a service image (Images page)…" and combo.itemText(3) == "Other…"
 
 
 def test_the_guides_image_question_offers_your_images(board_page, qapp):

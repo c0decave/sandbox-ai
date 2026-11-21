@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -287,11 +288,13 @@ def test_show(scenario, tmp_path):
     if scenario == "happy":
         make_start("web", tmp_path, pid=41)
         st.show(st.entries(), lines.append)
-        assert lines[0].split() == ["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED", "(UTC)", "WORKSPACE"]
-        assert lines[1].split() == ["web", "session", "codex", "running", "kept", "2026-11-02", "09:30", "/srv/app"]
+        assert lines[0].split() == ["NAME", "KIND", "AGENT", "STATE", "STARTED", "HOME", "WORKSPACE"]
+        assert re.fullmatch(r"web +session +codex +running +(\d+|a|an) (minute|hour|day|week|month|year)s? ago +kept "
+                            r"+/srv/app", lines[1]), lines[1]
     elif scenario == "sad":
         st.show([], lines.append)
-        assert lines == ["nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode|hermes|dsh|qwen|goose"]
+        assert lines == ["Nothing runs and no start is kept. Start one with: sandbox-ai claude (or another agent: "
+                         "sandbox-ai --help)"]
     else:
         # Names and workspaces come from files the sandbox may have influenced: shown escaped.
         register("claude-1", name="evil\x1b[2Jname", workspace="/w/\x07bell")
@@ -334,7 +337,7 @@ def test_main_and_alias(scenario, tmp_path):
     command = {"happy": ["list"], "sad": ["list", "--bogus"], "edge": ["ps", "--json"]}[scenario]
     result = subprocess.run([str(ROOT / "sandbox-ai"), *command], capture_output=True, text=True, env=env)
     if scenario == "happy":
-        assert result.returncode == 0 and result.stdout.startswith("nothing runs")
+        assert result.returncode == 0 and result.stdout.startswith("Nothing runs and no start is kept. Start one")
     elif scenario == "sad":
         assert result.returncode == 2 and "unrecognized arguments" in result.stderr
     else:
@@ -643,7 +646,7 @@ def test_pause_run(scenario, tmp_path, monkeypatch):
     backend = "bwrap" if scenario == "edge" else "podman"
     directory = register("codex-1", name="task", backend=backend, pod="agent-codex-1" if scenario != "sad" else None)
     monkeypatch.setattr(net, "launcher_process", lambda record: (os.getpid(), 1))
-    run, tree = Mock(), Mock()
+    run, tree = Mock(return_value=Mock(returncode=0, stderr="")), Mock()
     monkeypatch.setattr(st.subprocess, "run", run)
     monkeypatch.setattr(sessions, "signal_tree", tree)
     if scenario == "sad":
@@ -805,6 +808,87 @@ def test_gc_expired_only_and_keep_days(tmp_path):
     assert [e["name"] for e in result["removed"]] == ["old"] and result["leftovers"] == [] and result["histories"] == []
     assert st.history_path("ancient").exists()
     assert st.gc()["days"] == 30  # keep_days when no age is given
+
+
+def days_ago(days):
+    return st.iso(time.time() - days * 86400)
+
+
+def move_notice(days):
+    """The default expiry's notice, as if it had been given DAYS days ago."""
+    path = st.state_root() / st.EXPIRY_FILE
+    data = json.loads(path.read_text())
+    for key in ("noticed", "said", "last_said"):
+        if key in data:
+            data[key] = days_ago(days)
+    path.write_text(json.dumps(data))
+
+
+def test_kept_starts_expire_by_default_after_a_notice_and_its_grace(tmp_path):
+    """No keep_days: kept starts unused for 90 days go - only stopped ones, and only once that was announced and 14 days
+    have passed since (gc says so the first time, and how to switch it off: keep_days 0)."""
+    make_start("old", started=days_ago(400), created=days_ago(400))
+    make_start("recent", started=days_ago(60), created=days_ago(60))
+    make_start("busy", tmp_path, pid=41, created=days_ago(400))
+    make_start("lent", tmp_path, pid=42, paused=True, created=days_ago(400))  # paused: in use
+    lines = []
+    assert st.main(["gc", "--no-compact"], out=lines.append) == 0
+    text = "\n".join(lines)
+    assert "kept starts unused for more than 90 days are removed" in text and "keep_days 0" in text
+    assert "the kept start old" in text and "will be removed from" in text
+    assert all(sessions.session_dir(key).exists() for key in ("old", "recent", "busy", "lent"))
+    notice = json.loads((st.state_root() / st.EXPIRY_FILE).read_text())
+    assert notice["days"] == 90 and notice["names"] == ["old"]
+    result = st.gc(compact=False)  # still within the grace: nothing goes
+    assert result["removed"] == [] and [e["name"] for e in result["expiring"]] == ["old"]
+    assert result["expiry"]["origin"] == "default" and result["expiry"]["days"] == 90
+    move_notice(15)
+    dry = st.gc(dry_run=True, compact=False)
+    assert [e["name"] for e in dry["removed"]] == ["old"] and sessions.session_dir("old").exists()
+    lines = []
+    assert st.main(["gc", "--no-compact"], out=lines.append) == 0
+    assert any(line.startswith("removed the kept start old with its HOME") for line in lines), lines
+    assert not sessions.session_dir("old").exists()
+    assert all(sessions.session_dir(key).exists() for key in ("recent", "busy", "lent"))
+
+
+def test_keep_days_0_switches_the_default_expiry_off(tmp_path):
+    (tmp_path / "config" / "sandbox-ai").mkdir(parents=True)
+    (tmp_path / "config" / "sandbox-ai" / "defaults.json").write_text(json.dumps({"version": 1, "keep_days": 0}))
+    make_start("old", started=days_ago(400), created=days_ago(400))
+    result = st.gc(compact=False)
+    assert result["removed"] == [] and result["expiring"] == [] and result["expiry"]["origin"] == "off"
+    assert not (st.state_root() / st.EXPIRY_FILE).exists()
+    assert st.expiry_setting() == (None, "off") and st.keep_days() is None
+
+
+def test_the_daily_pass_and_a_start_apply_and_announce_the_default(tmp_path):
+    make_start("old", started=days_ago(400), created=days_ago(400))
+    assert st.expiry_notice() is None  # nothing announced yet: a start says nothing
+    first = st.expire_by_default()  # the daily pass: found, nothing removed, nobody told yet
+    assert first["removed"] == [] and [e["name"] for e in first["expiring"]] == ["old"]
+    assert first["expiring"][0]["removed_from"] is None
+    move_notice(30)  # weeks of daily passes without a start, gc or the app: still nobody told, nothing goes
+    assert st.expire_by_default()["removed"] == [] and sessions.session_dir("old").exists()
+    said = st.expiry_notice()  # a start tells it: the grace begins now
+    assert "old" in said and "keep_days 0" in said and "90 days" in said
+    assert st.expiry_notice() is None  # once a day
+    move_notice(15)
+    done = st.expire_by_default()
+    assert [e["name"] for e in done["removed"]] == ["old"] and not sessions.session_dir("old").exists()
+    assert st.expiry_notice() is None  # after the grace a start says nothing more
+
+
+def test_usage_says_what_the_default_expiry_removes(tmp_path):
+    make_start("old", started=days_ago(400), created=days_ago(400))
+    found = st.usage()
+    expiry = found["would_free"]["expiry"]
+    assert expiry["origin"] == "default" and expiry["days"] == 90 and expiry["count"] == 1
+    assert expiry["names"] == ["old"] and expiry["removed_from"]
+    lines = []
+    st.show_usage(found, lines.append, colour=False)
+    said = " ".join(" ".join(lines).split())  # (the table wraps its last column)
+    assert "unused for more than 90 days" in said and "keep_days 0" in said, lines
 
 
 def test_resume_review_home(scenario, tmp_path):
@@ -969,16 +1053,31 @@ def test_attach_to_a_running_start_needs_its_restart(tmp_path, attaching, monkey
     entry = {e["name"]: e for e in listed()}["web"]
     assert entry["mcp"] == ["demo"] and entry["mcp_running"] == []
     # --restart: stopped and started again with it (the agent continues its conversation)
+    # Its new start is checked before the stop (one that would fail leaves it running), and the stop says why.
     done = []
-    monkeypatch.setattr(sessions, "stop", lambda key, *rest: done.append(("stop", key)))
+    monkeypatch.setattr(sessions, "check_restart", lambda key, mcp=(): done.append(("check", key, list(mcp))))
+    monkeypatch.setattr(sessions, "stop", lambda key, *rest, by=None: done.append(("stop", key, by)))
     monkeypatch.setattr(sessions, "resume_locked", lambda key, workspaces=(), mounts=(), mcp=(): done.append(
         ("resume", key, list(mcp))) or (0, True))
     result = mcp.attach("web-search", "web", restart=True, out=out)
-    assert result["attached"] == "restarted" and done == [("stop", "web"), ("resume", "web", ["web-search"])]
+    assert result["attached"] == "restarted" and done == [
+        ("check", "web", ["web-search"]),
+        ("stop", "web", "sandbox-ai mcp attach web-search web --restart (to start it again with the MCP server "
+                        "web-search)"),
+        ("resume", "web", ["web-search"])]
     # asked in a terminal: yes restarts, no keeps it for the next start
     done.clear()
     assert mcp.attach("demo", "web", ask=lambda question: True, out=out)["attached"] == "restarted"
-    assert done[0] == ("stop", "web")
+    assert done[1][:2] == ("stop", "web")
+    # A check that fails: not stopped.
+    done.clear()
+
+    def refused(key, mcp=()):
+        raise ValueError("web was not restarted (it runs on as it was): its image is not there")
+    monkeypatch.setattr(sessions, "check_restart", refused)
+    with pytest.raises(ValueError, match="runs on as it was"):
+        mcp.attach("demo", "web", restart=True, out=out)
+    assert done == []
 
 
 def test_what_cannot_be_attached(tmp_path, attaching, monkeypatch):
@@ -1080,20 +1179,21 @@ def shown(argv):
 
 def names_shown(lines):
     """The NAME column of a plain table's rows (tree markers included)."""
-    return [line[:line.index("  ")] for line in lines[1:]]
+    return [line[:line.index("  ")] for line in lines[1:] if not ANSI.sub("", line).startswith("Not shown:")]
 
 
-def old_show(found, out):
-    """sandbox-ai list's table before the grouped listing, uncoloured: what --flat must still print."""
+def flat_show(found, out):
+    """sandbox-ai list --flat, uncoloured: every entry a row of its own (none below another), running first and the
+    newest first, STARTED as how long ago, HOME as ~."""
     t = st.module("textout")
     printable = launcher.printable
     rows = [[printable(e["name"]), e["kind"], printable(e.get("agent") or "-"),
-             e["state"] + (", expired" if e.get("expired") else ""), e.get("home") or "-",
-             st.shown_time(e.get("started")),
-             printable(e.get("workspace") or ("serves " + ", ".join(e["serves"]) if e.get("serves") else "-"))]
-            for e in found]
-    t.table(["NAME", "KIND", "AGENT", "STATE", "HOME", "STARTED (UTC)", "WORKSPACE"], rows, out, indent=0,
-            colour=False, empty="nothing runs and no start is kept; start one with: sandbox-ai claude|codex|opencode|hermes|dsh|qwen|goose")
+             e["state"] + (", expired" if e.get("expired") else ""), t.ago(e.get("started")), e.get("home") or "-",
+             printable(t.home_short(e.get("workspace") or ("serves " + ", ".join(e["serves"]) if e.get("serves")
+                                                            else "-")))]
+            for e in sorted(found, key=st.newest_first)]
+    t.table(["NAME", "KIND", "AGENT", "STATE", "STARTED", "HOME", "WORKSPACE"], rows, out, indent=0,
+            colour=False, empty=st.EMPTY)
 
 
 def a_registry(tmp_path):
@@ -1112,7 +1212,7 @@ def a_registry(tmp_path):
 
 def test_list_colours_on_a_terminal_only(tmp_path, terminal, monkeypatch):
     a_registry(tmp_path)
-    coloured = shown(["list"])
+    coloured = shown(["list", "-a"])
     assert coloured[0].startswith("\x1b[1mNAME"), "the headers bold"
     row = next(line for line in coloured if line.startswith("\x1b[36mweb"))
     assert "\x1b[36msession\x1b[0m" in row and "\x1b[32mrunning\x1b[0m" in row, "a session cyan, running green"
@@ -1121,17 +1221,17 @@ def test_list_colours_on_a_terminal_only(tmp_path, terminal, monkeypatch):
     assert "\x1b[90mstopped\x1b[0m" in next(line for line in coloured if line.startswith("\x1b[36mold"))
     plain = [ANSI.sub("", line) for line in coloured]
     assert plain != coloured
-    assert shown(["ps", "--no-color"]) == plain and shown(["list", "-nc"]) == plain
-    assert shown(["list", "--color=never"]) == plain and shown(["list", "--color", "always", "--no-color"]) == plain
+    assert shown(["ps", "-a", "--no-color"]) == plain and shown(["list", "-a", "-nc"]) == plain
+    assert shown(["list", "-a", "--color=never"]) == plain and shown(["list", "-a", "--color", "always", "--no-color"]) == plain
     terminal.tty = False  # piped: none, unless asked for
-    assert shown(["list"]) == plain and shown(["list", "--color=auto"]) == plain
-    assert shown(["list", "--color=always"]) == coloured and shown(["list", "-nc", "--color=always"]) == coloured
+    assert shown(["list", "-a"]) == plain and shown(["list", "-a", "--color=auto"]) == plain
+    assert shown(["list", "-a", "--color=always"]) == coloured and shown(["list", "-a", "-nc", "--color=always"]) == coloured
     terminal.tty = True
     monkeypatch.setenv("NO_COLOR", "1")  # no-color.org
-    assert shown(["list"]) == plain and shown(["list", "--color=always"]) == coloured
+    assert shown(["list", "-a"]) == plain and shown(["list", "-a", "--color=always"]) == coloured
     monkeypatch.delenv("NO_COLOR")
     monkeypatch.setenv("TERM", "dumb")
-    assert shown(["list"]) == plain
+    assert shown(["list", "-a"]) == plain
     monkeypatch.setenv("TERM", "xterm")
     for argv in (["list", "--json"], ["ps", "--json", "--color=always"], ["list", "-a", "--json", "--flat"]):
         text = "\n".join(shown(argv))
@@ -1139,6 +1239,39 @@ def test_list_colours_on_a_terminal_only(tmp_path, terminal, monkeypatch):
     st.record("web", "start", "web", "session-web")
     assert shown(["list", "--history", "web", "--color=always"])[0].startswith("\x1b[1mTIME")
     assert all("\x1b" not in line for line in shown(["list", "--history", "web", "--no-color"]))
+
+
+def test_list_shows_what_runs_by_default_and_the_rest_on_request(tmp_path, terminal):
+    """The user's wish (2026-11-16): `sandbox-ai list` shows only what runs (as `docker ps`) - running, paused and
+    orphaned starts with their helpers; the MCP servers with --mcp, the stopped starts with --stopped, all of it with
+    --all (-a). A line below says what is not shown and the option that shows it; --json lists everything as before
+    (scripts, the app and the web interface read it)."""
+    a_registry(tmp_path)
+    register("claude-1234abcd", name="quick", mcp_servers=["helper-codex-0a1b2c3d"])
+    make_mcp(tmp_path, "helper-codex-0a1b2c3d", pid=47, helper="codex")
+    plain = [ANSI.sub("", line) for line in shown(["list", "-nc"])]
+    names = [name.split()[-1] for name in names_shown(plain)]
+    assert "web" in names and "api" in names and "quick" in names, plain
+    assert "mcp-helper-codex-0a1b2c3d" in names, "a helper belongs to its lead"
+    assert "old" not in names, "stopped: only with --stopped"
+    assert not any(name.startswith("mcp-") and "helper" not in name for name in names), "MCP servers: only with --mcp"
+    assert "Not shown:" in plain[-1] and "--stopped" in plain[-1] and "--mcp" in plain[-1] and "--all" in plain[-1]
+    stopped = [ANSI.sub("", line) for line in shown(["list", "-nc", "--stopped"])]
+    assert any(line.startswith("old ") for line in stopped)
+    assert not any(" mcp " in line and "helper" not in line for line in stopped)
+    with_mcp = "\n".join(shown(["list", "-nc", "--mcp"]))
+    assert "mcp-search" in with_mcp and "\nold " not in with_mcp
+    everything = "\n".join(shown(["list", "-nc", "-a"]))
+    assert "mcp-search" in everything and "\nold " in everything and "mcp-idle" in everything
+    assert "Not shown" not in everything
+    assert {entry["name"] for entry in listed()} >= {"web", "api", "old", "mcp-search"}, "--json: everything, as before"
+
+
+def test_list_with_nothing_running_says_what_is_kept(tmp_path, terminal):
+    make_start("old")
+    plain = [ANSI.sub("", line) for line in shown(["list", "-nc"])]
+    assert plain[0].startswith("Nothing runs") and any("1 stopped start" in line and "--stopped" in line
+                                                       for line in plain), plain
 
 
 def test_a_helper_and_a_run_have_colours_of_their_own(tmp_path, terminal):
@@ -1164,8 +1297,43 @@ def test_list_aligns_coloured_columns(tmp_path, terminal):
         header = plain[0]
         starts = [header.index(name) for name in ("KIND", "AGENT", "STATE", "HOME", "STARTED", "WORKSPACE")]
         for line in plain[1:]:
+            if line.startswith("Not shown:"):  # the line below the table: what the default leaves out
+                continue
             for column in starts:
                 assert line[column - 2:column] == "  " and line[column] != " ", (line, column)
+
+
+def test_list_is_a_readable_table_running_and_newest_first(tmp_path, terminal, monkeypatch):
+    """`sandbox-ai list` as `docker ps`: running first, the newest first; STARTED as how long ago; your HOME as ~; a
+    workspace too long for the terminal cut from the left with an ellipsis (whole with --no-trunc, or --wide); colour on
+    a terminal only; --json in the registry's order with its keys and full values."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("COLUMNS", "90")
+    terminal.encoding = "utf-8"
+    now = st.module("textout").utc_seconds(st.now())
+
+    def stamp(ago):
+        return st.time.strftime("%Y-%m-%dT%H:%M:%SZ", st.time.gmtime(now - ago))
+    long = str(tmp_path / "home" / "src" / ("a-long-folder-name-" * 4) / "app")
+    register("claude-0000aaaa", name="older", started=stamp(7200), workspace=str(tmp_path / "home" / "src" / "x"))
+    register("claude-1111bbbb", name="newer", started=stamp(300), workspace=long)
+    make_start("kept", started=stamp(86400 * 3))
+    lines = shown(["list", "-a", "-nc"])
+    assert names_shown(lines) == ["newer", "older", "kept"]
+    assert lines[0].split() == ["NAME", "KIND", "AGENT", "STATE", "STARTED", "HOME", "WORKSPACE"]
+    assert re.search(r"  5 minutes ago  +discarded  +\u2026", lines[1]) and lines[1].endswith("/app"), lines[1]
+    assert all(len(line) <= 90 for line in lines), lines
+    assert re.search(r"  2 hours ago  +discarded  +~/src/x$", lines[2]) and "  3 days ago  " in lines[3]
+    for flag in ("--no-trunc", "--wide"):
+        whole = "\n".join(shown(["list", "-a", "-nc", flag]))
+        assert "\u2026" not in whole and "~/src/a-long-folder-name-" in whole
+    assert names_shown(shown(["list", "-a", "-nc", "--flat"])) == ["newer", "older", "kept"]
+    terminal.tty = False
+    assert "\x1b" not in "".join(shown(["list", "-a"])), "no colour in a pipe"
+    found = listed()
+    assert [e["name"] for e in found] == ["older", "newer", "kept"], "--json keeps the registry's order"
+    assert next(e for e in found if e["name"] == "newer")["workspace"] == long and \
+        next(e for e in found if e["name"] == "newer")["started"] == stamp(300)
 
 
 def test_list_groups_what_belongs_to_a_start(tmp_path, terminal):
@@ -1173,12 +1341,12 @@ def test_list_groups_what_belongs_to_a_start(tmp_path, terminal):
     the other; a server of an older version (no started_for) below the start that uses it; one no listed start uses
     after the starts. --json says where each row is shown and what each server was started for."""
     a_registry(tmp_path)
-    lines = shown(["ps", "--no-color"])
+    lines = shown(["ps", "-a", "--no-color"])
     assert names_shown(lines) == ["api", "└─ mcp-legacy", "web", "├─ mcp-fetch", "└─ mcp-search", "old", "mcp-idle"]
     fetch = next(line for line in lines if "mcp-fetch" in line)
     assert fetch.endswith("  also serves api"), "no workspace of its own (its run is not listed): who else uses it"
     terminal.encoding = "ascii"  # no box drawing where the output cannot carry it
-    assert names_shown(shown(["list", "-nc"]))[1:5] == ["`- mcp-legacy", "web", "|- mcp-fetch", "`- mcp-search"]
+    assert names_shown(shown(["list", "-a", "-nc"]))[1:5] == ["`- mcp-legacy", "web", "|- mcp-fetch", "`- mcp-search"]
     found = {e["name"]: e for e in listed()}
     assert found["mcp-fetch"]["serves"] == ["web", "api"] and found["mcp-fetch"]["started_for"] == "web"
     assert found["mcp-fetch"]["listed_under"] == "web" and found["mcp-search"]["listed_under"] == "web"
@@ -1187,7 +1355,7 @@ def test_list_groups_what_belongs_to_a_start(tmp_path, terminal):
     assert found["mcp-idle"]["serves"] == []
     assert all(found[name]["listed_under"] is None for name in ("api", "web", "old"))
     # The flat listing names every user, the one it was started for first.
-    assert next(line for line in shown(["list", "--flat", "-nc"]) if "mcp-fetch" in line).endswith("serves web, api")
+    assert next(line for line in shown(["list", "-a", "--flat", "-nc"]) if "mcp-fetch" in line).endswith("serves web, api")
     # With a workspace of its own, the others in brackets after it.
     entry = {**found["mcp-fetch"], "workspace": "/srv/fetch"}
     assert st.row(entry, False, "", "web")[-1] == "/srv/fetch  (also serves api)"
@@ -1201,7 +1369,7 @@ def test_list_puts_a_helper_below_its_lead(tmp_path, terminal):
     make_mcp(tmp_path, "legacy", pid=45)
     register("claude-lead0001", mcp_servers=["idle"])
     register("codex-helper99", helper_of="claude-lead0001", mcp_servers=["legacy"], started="2026-11-03T09:00:00Z")
-    assert names_shown(shown(["list", "--no-color"])) == [  # below it in start order, as listed
+    assert names_shown(shown(["list", "-a", "--no-color"])) == [  # below it in start order, as listed
         "claude-lead0001", "├─ mcp-idle", "├─ mcp-legacy", "└─ codex-helper99"]
     assert {e["name"]: e["listed_under"] for e in listed()} == {
         "claude-lead0001": None, "codex-helper99": "claude-lead0001", "mcp-idle": "claude-lead0001",
@@ -1227,7 +1395,7 @@ def test_list_puts_a_teams_members_below_its_lead(tmp_path, terminal):
     assert found["rev-claude"]["lead"] is None and found["rev-claude"]["listed_under"] is None
     assert found["work"]["lead"] is None and found["work"]["listed_under"] is None
     assert found["mcp-team-rev"]["listed_under"] == "rev-claude" and found["mcp-team-rev"]["owner_recorded"] is True
-    assert names_shown(shown(["list", "--no-color"]))[:3] == ["rev-claude", "├─ rev-codex", "└─ mcp-team-rev"]
+    assert names_shown(shown(["list", "-a", "--no-color"]))[:3] == ["rev-claude", "├─ rev-codex", "└─ mcp-team-rev"]
     record.write_text("{damaged")
     found = {e["name"]: e for e in listed()}
     assert found["rev-codex"]["lead"] is None and found["rev-codex"]["listed_under"] is None
@@ -1242,23 +1410,22 @@ def test_an_mcp_server_says_whether_it_recorded_its_start():
     assert found["mcp-alone"]["owner_recorded"] is True and found["mcp-legacy"]["owner_recorded"] is False
 
 
-def test_list_flat_is_the_table_of_before(tmp_path, terminal):
-    """--flat: one row per entry in the listed order, exactly the table of earlier versions (colour aside)."""
+def test_list_flat_is_one_row_per_entry(tmp_path, terminal):
+    """--flat: one row per entry, nothing below another; running first, the newest first (colour aside)."""
     a_registry(tmp_path)
     register("claude-1234abcd", name="quick", workspace="/w/q")
     make_mcp(tmp_path, "gone")  # stopped: --all
-    for argv in ([], ["--all"]):
-        expected = []
-        old_show(st.entries(bool(argv)), expected.append)
-        assert shown(["list", "--flat", "--no-color", *argv]) == expected
-        assert [ANSI.sub("", line) for line in shown(["list", "--flat", "--color=always", *argv])] == expected
-    assert names_shown(expected) != names_shown(shown(["list", "-nc", "--all"])), "grouped by default"
+    expected = []  # (the default leaves stopped starts and MCP servers out: test_list_shows_what_runs_by_default...)
+    flat_show(st.entries(True), expected.append)
+    assert shown(["list", "-a", "--flat", "--no-color"]) == expected
+    assert [ANSI.sub("", line) for line in shown(["list", "-a", "--flat", "--color=always"])] == expected
+    assert names_shown(expected) != names_shown(shown(["list", "-a", "-nc"])), "grouped by default"
     expected = []
-    old_show([], expected.append)
+    flat_show([], expected.append)
     shutil.rmtree(sessions.root())
     shutil.rmtree(st.state_root() / "mcp")
     shutil.rmtree(launcher.runs_dir())
-    assert shown(["list", "--flat", "-nc"]) == expected == shown(["list", "-nc"])
+    assert shown(["list", "-a", "--flat", "-nc"]) == expected == shown(["list", "-a", "-nc"])
 
 
 def test_parents_one_level_and_circles(scenario):
@@ -1323,7 +1490,7 @@ def test_every_alias_names_itself_in_its_help(command, tmp_path):
            "XDG_CONFIG_HOME": str(tmp_path / "config")}
     result = subprocess.run([str(ROOT / "sandbox-ai"), command, "--help"], capture_output=True, text=True, env=env,
                             timeout=120)
-    assert result.returncode == 0 and result.stdout.startswith(f"usage: sandbox-ai {command} "), result.stdout[:200]
+    assert result.returncode == 0 and result.stdout.startswith(f"Usage:  sandbox-ai {command} "), result.stdout[:200]
     assert "ps" in shared_commands() and "list" in shared_commands()
 
 
@@ -1341,3 +1508,190 @@ def test_list_names_the_app_tab_a_running_start_was_started_in(tmp_path):
     make_start("old", app_tab="fedcba9876543210")  # stopped: no tab to attach any more
     found = {e["name"]: e for e in listed()}
     assert found["web"]["app_tab"] == "0123456789abcdef" and found["old"]["app_tab"] is None
+
+
+def test_usage_summary_counts_podman_and_explains_its_reclaimable():
+    """The summary of gc --usage: sandbox-ai's parts and Podman's, sorted by size, each share of the whole; what gc
+    frees per part (Podman's own "reclaimable" counts every software's images: said in HOW, not counted)."""
+    result = {"total": 3 << 30, "parts": {"starts": {"bytes": 2 << 30}, "logs": {"bytes": 1 << 30},
+                                          "mcp": {"bytes": 0}, "data": {"bytes": 0}},
+              "podman": {"images": {"total": 842, "active": 3, "bytes": 59 << 30, "reclaimable": 56 << 30},
+                         "volumes": {"total": 85, "active": 0, "bytes": 1 << 30, "reclaimable": 1 << 30},
+                         "dangling": {"total": 8, "bytes": 10 << 30, "images": []}},
+              "would_free": {"leftovers": {"count": 0, "bytes": 0}, "compress": {"bytes": 400, "saves": 300},
+                             "expiry": {"origin": "default", "due": {"count": 0, "bytes": 0}},
+                             "caches": {"count": 2, "bytes": 1 << 30}, "rootfs": {"count": 0, "bytes": 0},
+                             "images": {"count": 8, "bytes": 10 << 30}}}
+    summary = st.usage_summary(result)
+    keys = [row["key"] for row in summary["rows"]]
+    assert keys[:3] == ["podman_images", "starts", "logs"] and "mcp" not in keys  # empty parts are left out
+    rows = {row["key"]: row for row in summary["rows"]}
+    assert summary["total"] == (3 << 30) + (60 << 30)
+    assert rows["podman_images"]["reclaimable"] == 10 << 30 and "56.0 GiB" in rows["podman_images"]["how"]
+    assert rows["starts"]["reclaimable"] == 1 << 30 and "--caches" in rows["starts"]["how"]
+    assert rows["logs"]["reclaimable"] == 300
+    assert rows["podman_volumes"]["reclaimable"] == 0 and "podman volume prune" in rows["podman_volumes"]["how"]
+    # without Podman: only sandbox-ai's parts; nothing at all: no division by zero
+    assert [row["key"] for row in st.usage_summary({**result, "podman": None})["rows"]] == ["starts", "logs"]
+    empty = st.usage_summary({"total": 0, "parts": {}, "podman": None, "would_free": {}})
+    assert empty == {"rows": [], "total": 0, "reclaimable": 0}
+
+
+def test_show_usage_tables_and_colour(tmp_path):
+    make_start("old", started=days_ago(400), created=days_ago(400))
+    home = sessions.session_dir("old") / "home"
+    (home / ".cache/pip").mkdir(parents=True)
+    (home / ".cache/pip/w").write_bytes(b"x" * 300_000)
+    found = st.usage()
+    item = found["parts"]["starts"]["items"][0]
+    assert item["expires_why"] == "default" and item["expires"]
+    plain, coloured = [], []
+    st.show_usage(found, plain.append, colour=False)
+    st.show_usage(found, coloured.append, colour=True)
+    assert not any("\033" in line for line in plain) and any("\033[" in line for line in coloured)
+    row = next(line for line in plain if line.lstrip().startswith("old "))
+    assert "stopped, kept" in row and "ago" in row
+    assert any("Total" in line and "sandbox-ai gc --caches --images" in line for line in plain)
+    lines = []
+    st.show_usage(found, lines.append, as_json=True)
+    assert json.loads("\n".join(lines))["summary"]["rows"]
+
+
+def test_a_packed_home_is_unpacked_before_any_start_uses_it(tmp_path, monkeypatch):
+    """gc --pack's archive: launch (every start and resume) and --restore-home unpack it first, under the start's
+    lock - never an empty HOME in its place; one that cannot be unpacked stops the start, the archive stays."""
+    make_start("web", started="2026-11-01T00:00:00Z", keep=True)
+    directory = sessions.session_dir("web")
+    (directory / "home/notes.md").write_text("mine\n")
+    packs = sessions.homepack()
+    monkeypatch.setattr(packs, "zstd", lambda: None)
+    packs.pack(directory)
+    assert not (directory / "home").exists()
+    data = sessions.load("web")
+    data.pop("pod", None)
+    seen = []
+
+    def popen(*args, **kwargs):
+        seen.append((directory / "home/notes.md").read_text())
+        raise RuntimeError("stop before the supervisor")
+    monkeypatch.setattr(sessions.subprocess, "Popen", popen)
+    with pytest.raises(RuntimeError, match="stop before"):
+        sessions.launch("web", data, [], SimpleNamespace(backend="podman", podman_url=None, binary=False))
+    assert seen == ["mine\n"] and not packs.packed(directory)
+    # --restore-home: unpacked first (then: no record of its HOME to restore from)
+    packs.pack(directory)
+    with pytest.raises(ValueError, match="no record of its HOME"):
+        sessions.restore_home("web", yes=True)
+    assert (directory / "home/notes.md").read_text() == "mine\n"
+    # damaged: the start stops, the archive stays, no empty HOME
+    record = packs.pack(directory)
+    (directory / record["archive"]).write_bytes(b"broken")
+    with pytest.raises(ValueError, match="could not be unpacked"):
+        sessions.launch("web", data, [], SimpleNamespace(backend="podman", podman_url=None, binary=False))
+    assert not (directory / "home").exists() and (directory / record["archive"]).exists()
+
+
+# -- list --folders: the host folders of the starts (the desktop app's Files page reads it per host) --
+
+def folders_listed(argv=()):
+    lines = []
+    assert st.main(["list", "--folders", "--json", *argv], out=lines.append) == 0
+    return json.loads("\n".join(lines))
+
+
+def test_list_folders_names_each_running_and_kept_starts_workspaces_and_home(tmp_path):
+    """Contract of `sandbox-ai list --folders --json` (the app's backend.host_file_roots reads it over SSH): a list of
+    {kind, name, id, path}; kinds as the Files page names them; each folder once, links resolved, only those there."""
+    ws = {name: tmp_path / name for name in ("web-ws", "web-extra", "run-ws", "run-home", "old-ws", "old-extra")}
+    for path in ws.values():
+        path.mkdir()
+    (tmp_path / "link-to-run-ws").symlink_to(ws["run-ws"])
+    # A running session (its run registered with the start's id), its workspaces as the launcher checked them.
+    make_start("web", tmp_path, pid=41, workspace=str(ws["web-ws"]))
+    register("session-web", start="web", agent_home=str(sessions.session_dir("web") / "home"),
+             workspace=str(ws["web-ws"]),
+             workspace_checks={"workspaces": [{"host": str(ws["web-ws"]), "sandbox": "/work", "mode": "rw"},
+                                              {"host": str(ws["web-extra"]), "sandbox": "/workspaces/web-extra",
+                                               "mode": "rw"}]})
+    # A plain run (no start directory), its workspace given through a link, its HOME of its own.
+    register("claude-1234abcd", name="quick", workspace=str(tmp_path / "link-to-run-ws"),
+             agent_home=str(ws["run-home"]))
+    # A stopped kept session: its workspace, another of its options, its HOME; one whose workspace is gone.
+    make_start("old", workspace=str(ws["old-ws"]), cwd=str(tmp_path),
+               options=["--backend", "podman", "--workspace", f"{ws['old-ws']},{ws['old-extra']}"])
+    make_start("gone", workspace=str(tmp_path / "deleted"))
+    # An MCP server's sandbox is no start of an agent: not listed.
+    register("mcp-demo", workspace=str(ws["run-ws"]), kind="mcp")
+    found = folders_listed()
+    assert all(set(entry) == {"kind", "name", "id", "path"} for entry in found), found
+    assert all(entry["kind"] in st.FOLDER_KINDS for entry in found)
+    shown = [(entry["kind"], entry["name"], entry["path"]) for entry in found]
+    assert ("run", "web", str(ws["web-ws"])) in shown and ("run", "web", str(ws["web-extra"])) in shown
+    assert ("session-home", "web", str(sessions.session_dir("web") / "home")) in shown
+    assert ("run", "quick", str(ws["run-ws"])) in shown, "a link resolved"
+    assert ("run-home", "quick", str(ws["run-home"])) in shown
+    assert ("session", "old", str(ws["old-ws"])) in shown and ("session", "old", str(ws["old-extra"])) in shown
+    assert ("session-home", "old", str(sessions.session_dir("old") / "home")) in shown
+    assert ("session", "gone", str(tmp_path / "deleted")) not in shown, "a folder that is not there"
+    assert ("session-home", "gone", str(sessions.session_dir("gone") / "home")) in shown
+    assert len({entry["path"] for entry in found}) == len(found), "each folder once"
+    assert {entry["id"] for entry in found} == {"web", "claude-1234abcd", "old", "gone"}
+    # The table for a human: one row per folder.
+    lines = []
+    assert st.main(["list", "--folders"], out=lines.append) == 0
+    assert lines[0].split() == ["NAME", "KIND", "FOLDER"] and len(lines) == len(found) + 1
+
+
+def test_list_folders_builds_the_launchers_parser_once_per_agent_not_once_per_start(tmp_path, monkeypatch):
+    """Each kept start's options are read as the launcher reads them (workspaces.next_start_targets: parse_args), and
+    each reading built the launcher's whole parser anew, 150 options: 4 ms a start, most of `list --folders` (1000
+    kept starts: 4.2 s). One parser per agent for the listing, the same folders."""
+    workspaces = st.module("workspaces")
+    made, expected = {}, []
+    for index in range(12):
+        agent = ("codex", "claude", "opencode")[index % 3]
+        folders = [tmp_path / f"ws-{index}", tmp_path / f"extra-{index}", tmp_path / f"named-{index}"]
+        for folder in folders:
+            folder.mkdir()
+        options = ["--backend", "podman", "--workspace", f"{folders[0]},{folders[1]}", "--workspace", str(folders[2]),
+                   "--workspace-name", f"given{index}={folders[2]}", "--preset", "github", "--allow-host", "example.org"]
+        made[f"s{index:02d}"] = make_start(f"s{index:02d}", agent=agent, workspace=str(folders[0]), cwd=str(tmp_path),
+                                           options=options)
+        expected += [("session", f"s{index:02d}", str(folder)) for folder in folders]
+        expected.append(("session-home", f"s{index:02d}", str(sessions.session_dir(f"s{index:02d}") / "home")))
+    (tmp_path / "broken-ws").mkdir()
+    make_start("broken", agent="codex", workspace=str(tmp_path / "broken-ws"), cwd=str(tmp_path),
+               options=["--no-such-option", "--workspace", str(tmp_path)])  # (not readable: its workspace alone)
+    one_by_one = {key: workspaces.next_start_targets(data, data["options"]) for key, data in made.items()}
+    l = workspaces.module("agent_sandbox")
+    built, real = [], l.build_parser
+
+    def build_parser(agent=None):
+        built.append(agent)
+        return real(agent)
+    monkeypatch.setattr(l, "build_parser", build_parser)
+    found = folders_listed()
+    assert sorted(built) == ["claude", "codex", "opencode"], built
+    assert [(entry["kind"], entry["name"], entry["path"]) for entry in found if entry["name"] != "broken"] == expected
+    assert [(entry["kind"], entry["path"]) for entry in found if entry["name"] == "broken"] == [
+        ("session", str(tmp_path / "broken-ws")), ("session-home", str(sessions.session_dir("broken") / "home"))]
+    # The same reading with a parser used again as with one of its own, for every start.
+    shared = {}
+    assert {key: workspaces.next_start_targets(data, data["options"], shared) for key, data in made.items()} == one_by_one
+    assert sorted(shared) == ["claude", "codex", "opencode"]
+    assert one_by_one["s04"][2][1] == "/workspaces/given4"
+
+
+def test_list_folders_reads_only_and_says_what_it_goes_without(tmp_path, capsys):
+    assert folders_listed() == []
+    lines = []
+    assert st.main(["list", "--folders"], out=lines.append) == 0 and lines == ["No folders: nothing runs or is kept here."]
+    # Read only: an ended start without a HOME stays for list to prune (list --folders removes nothing).
+    make_start("done", keep=False)
+    (sessions.session_dir("done") / "exit.json").write_text(json.dumps({"ended": "2026-11-01T00:00:00Z"}))
+    shutil.rmtree(sessions.session_dir("done") / "home")
+    folders_listed()
+    assert sessions.session_dir("done").is_dir()
+    for extra in (["--history", "web"], ["--all"], ["--flat"], ["--all-users"]):
+        assert st.main(["list", "--folders", *extra], out=lambda line: None) == 1
+        assert "--folders goes without" in capsys.readouterr().err

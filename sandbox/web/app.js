@@ -21,15 +21,15 @@ const state = {
   // safeguards: the records seen per host (the first look only notes them), every other poll asks the host
   safeguardsSeen: new Set(), safeguardsPrimed: new Set(), safeguardTick: 0, safeguardsNotifier: null, safeguardMuted: {},
 };
-const AGENTS = ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"];
+const AGENTS = ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"];
 const PAGES = [
   ["starts", N_("Starts and sessions")], ["approvals", N_("Approvals")], ["terminals", N_("Terminals")],
-  ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["safeguards", N_("Safeguards")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
-  ["presets", N_("Presets")], ["teams", N_("Teams")], ["images", N_("Images and tools")], ["activity", N_("Activity")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
+  ["doctor", N_("Doctor")], ["logs", N_("Logs")], ["llm", N_("LLM servers")], ["vpn", N_("VPN profiles")], ["bridges", N_("Bridges")], ["kits", N_("Kits")], ["canaries", N_("Canaries")], ["safeguards", N_("Safeguards")], ["reviews", N_("Workspace review")], ["pins", N_("MCP tool pins")], ["secrets", N_("Secrets")], ["logins", N_("Logins")], ["projects", N_("Projects")], ["mcp", N_("MCP servers")],
+  ["presets", N_("Presets")], ["teams", N_("Teams")], ["images", N_("Images and tools")], ["activity", N_("Activity")], ["monitor", N_("System monitor")], ["settings", N_("Defaults")], ["hosts", N_("Hosts")],
   ["help", N_("Help")],
 ];
 // The pages that show one host's things: the address names the host too (#doctor@ct101).
-const HOST_PAGES = ["starts", "doctor", "logs", "llm", "vpn", "kits", "canaries", "secrets", "logins", "projects", "mcp", "presets", "teams", "images", "activity", "settings"];
+const HOST_PAGES = ["starts", "doctor", "logs", "llm", "vpn", "kits", "canaries", "reviews", "pins", "secrets", "logins", "projects", "mcp", "presets", "teams", "images", "activity", "monitor", "settings"];
 
 // --- small helpers ---------------------------------------------------------------------------------------
 
@@ -80,6 +80,7 @@ const ERROR_TEXTS = {
   "nothing-checked": N_("Nothing was checked on {host}: there is no all-clear."),
   "host-too-old": N_("sandbox-ai {version} on {host} does not know {what} yet: update it on the page Hosts (Update, or Update from this machine's copy)."),
   "mcp-unsigned-catalog": N_("{entry} was not added on {host}: its catalog is not signed by a trusted key."),
+  "shared-wildcard": N_("{wildcards} lies below {suffix}, a shared service where anyone can rent a name: the agent could open any server anyone rents below {suffix}, and send data there."),
 };
 
 // E's text in the page's language: the page's own words for a known code, else its message.
@@ -352,6 +353,45 @@ function rowButton(label, name, host, attrs) {
   return el("button", Object.assign({ "aria-label": t("{action} {name} on {host}", { action: label, name, host }) }, attrs || {}), label);
 }
 
+// --- icon buttons: the desktop app's drawings of the Sessions page's rows (button_icons.py SVGS - the same lines on a
+// 24x24 grid in currentColor; its tests check that they are the same), made as SVG elements, never as markup. A
+// button shows its icon alone by default, its text the first line of its tooltip and inside its accessible name;
+// "Show button texts beside the icons" (kept in this browser, as the app's setting button_texts) shows the texts too.
+const BUTTON_ICONS = {"attach":[["rect",{"x":"2.5","y":"7.5","width":"13","height":"13","rx":"2"}],["path",{"d":"M5.5 11.5l2.5 2-2.5 2M10 16h3"}],["path",{"d":"M14 3.5h6.5V10M20.5 3.5L13 11"}]],"shell":[["path",{"d":"M4 6l6 6-6 6"}],["path",{"d":"M12.5 18.5h8"}]],"pause":[["path",{"d":"M8.5 5.5v13M15.5 5.5v13"}]],"resume":[["path",{"d":"M7.5 5l11 7-11 7z"}]],"delete":[["path",{"d":"M4 6.5h16M9.5 6.5V4h5v2.5"}],["path",{"d":"M6 6.5l1 13.5h10l1-13.5"}],["path",{"d":"M10 10.5v6M14 10.5v6"}]],"resume-with":[["path",{"d":"M3.5 5l10 7-10 7z"}],["path",{"d":"M20 9v6M17 12h6"}]],"export":[["path",{"d":"M12 15V3.5M7 8.5l5-5 5 5"}],["path",{"d":"M4 13.5V19a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-5.5"}]],"checkpoints":[["path",{"d":"M3.5 12A8.5 8.5 0 1 0 6 6"}],["path",{"d":"M3 3.5V8h4.5"}],["path",{"d":"M12 7.5V12l3 2"}]],"memory":[["path",{"d":"M5 5.5A2.5 2.5 0 0 1 7.5 3H19v15H7.5A2.5 2.5 0 0 0 5 20.5z"}],["path",{"d":"M5 20.5A2.5 2.5 0 0 1 7.5 18"}],["path",{"d":"M11 3v7l2-1.5 2 1.5V3"}]],"files":[["path",{"d":"M13.5 2.5H6A1.5 1.5 0 0 0 4.5 4v16A1.5 1.5 0 0 0 6 21.5h12a1.5 1.5 0 0 0 1.5-1.5V8.5z"}],["path",{"d":"M13.5 2.5v6h6"}],["path",{"d":"M8 13h8M8 17h5"}]],"storage":[["ellipse",{"cx":"12","cy":"5.5","rx":"7.5","ry":"2.5"}],["path",{"d":"M4.5 5.5v13c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-13"}],["path",{"d":"M4.5 12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5"}]],"optimize":[["path",{"d":"M15.5 2.5L11 11.5"}],["path",{"d":"M6 11.5h9.5l1.5 9H4.5z"}],["path",{"d":"M8.5 15v5.5M12.5 15v5.5"}]],"allow":[["circle",{"cx":"9","cy":"12","r":"6.5"}],["path",{"d":"M2.5 12h13"}],["path",{"d":"M9 5.5c2.2 2.2 2.2 10.8 0 13M9 5.5c-2.2 2.2-2.2 10.8 0 13"}],["path",{"d":"M20 9v6M17 12h6"}]],"limits":[["path",{"d":"M3.5 6h9M17.5 6h3M3.5 12h3M11.5 12h9M3.5 18h11M19.5 18h1"}],["circle",{"cx":"15","cy":"6","r":"2.2"}],["circle",{"cx":"9","cy":"12","r":"2.2"}],["circle",{"cx":"17","cy":"18","r":"2.2"}]]};
+const BUTTON_TEXTS_STORE = "sandbox-ai-button-texts";
+function buttonTextsShown() { try { return localStorage.getItem(BUTTON_TEXTS_STORE) === "1"; } catch (e) { return false; } }
+function showButtonTexts(on) {
+  try { localStorage.setItem(BUTTON_TEXTS_STORE, on ? "1" : ""); } catch (e) { /* this page only */ }
+  document.body.classList.toggle("button-texts", Boolean(on));
+}
+function svgIcon(key) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  for (const [k, v] of [["viewBox", "0 0 24 24"], ["width", "18"], ["height", "18"], ["aria-hidden", "true"], ["focusable", "false"], ["class", "button-icon"]]) svg.setAttribute(k, v);
+  const lines = document.createElementNS(SVG_NS, "g");
+  for (const [k, v] of [["fill", "none"], ["stroke", "currentColor"], ["stroke-width", "2"], ["stroke-linecap", "round"], ["stroke-linejoin", "round"]]) lines.setAttribute(k, v);
+  for (const [tag, attrs] of BUTTON_ICONS[key] || []) {
+    const part = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) part.setAttribute(k, v);
+    lines.append(part);
+  }
+  svg.append(lines);
+  return svg;
+}
+// KEY's icon in BUTTON (made with its LABEL as text): the label beside it only with the texts shown; the tooltip
+// starts with the label, above what it does (TIP).
+function withIcon(button, key, label, tip) {
+  button.setAttribute("title", tip ? `${label}\n${tip}` : label);
+  button.setAttribute("data-icon", key);
+  button.classList.add("icon-button");
+  clear(button).append(svgIcon(key), el("span", { class: "button-text" }, label));
+  return button;
+}
+// A start's row button with KEY's icon (rowButton's accessible name; ATTRS.title: what it does).
+function iconRowButton(key, label, name, host, attrs) {
+  const tip = attrs && attrs.title;
+  return withIcon(rowButton(label, name, host, attrs), key, label, tip);
+}
+
 // A field where a secret's VALUE is typed (an API key, a token, a VPN key: kept on a host): shown while it is typed,
 // so a typo is seen before it is kept, with "Show value" beside it to hide it (someone looking on, a shared screen).
 // The choice is remembered in this browser for every such field (SECRET_SHOWN_STORE). Only what is typed now is ever
@@ -394,13 +434,24 @@ const TOAST_SECONDS = 8;
 const TOAST_MAX = 4;
 const TOAST_LEVELS = { info: [N_("Information"), "i"], success: [N_("Done"), "✓"], warning: [N_("Warning"), "!"], error: [N_("Error"), "×"] };
 
+// What a command that succeeded said: its output, as a success - or, when the launcher warned (you decide what a
+// sandbox gets: a host path you chose with a risk, HOME, sandbox-ai's own folders, a kernel tree, is given and the
+// launcher says what it means), its warnings first, as a warning that stays until it is closed.
+function doneToast(title, r) {
+  const warnings = r && Array.isArray(r.warnings) ? r.warnings.map(String) : [];
+  const output = (r && r.output) || "";
+  if (!warnings.length) { toast("success", title, output); return; }
+  toast("warning", title, `${t("You decide what a sandbox gets: it is given, and the launcher says what it means (read-only is the safer choice):")}\n${warnings.map(w => `• ${w}`).join("\n")}${output ? `\n\n${output}` : ""}`, { seconds: 0 });
+}
+
 function toast(level, title, text, options) {
   if (!Object.prototype.hasOwnProperty.call(TOAST_LEVELS, level)) level = "info";
   const opts = options || {};
   let box = document.getElementById("toasts");
   if (!box) { box = el("div", { id: "toasts", class: "toasts" }); document.body.append(box); }  // each toast has its own role
   const [name, sign] = TOAST_LEVELS[level];
-  const seconds = level === "error" ? 0 : (opts.seconds ?? TOAST_SECONDS);
+  // An error stays until closed, unless its caller says how long (an approval's: a short notice, also in its page)
+  const seconds = level === "error" && opts.seconds === undefined ? 0 : (opts.seconds ?? TOAST_SECONDS);
   let timer = null;
   const item = el("div", { class: `toast ${level}` });
   const dismiss = () => { clearTimeout(timer); item.remove(); };
@@ -472,6 +523,10 @@ const SAFEGUARD_TITLES = {
   "supervisor-memory": N_("the supervisor dropped its caches"), guard: N_("a safety check failed"), canary: N_("a canary went off"),
   oom: N_("out of memory: the kernel ended a process"),
   "mcp-server": N_("an MCP server's process ended or failed"), loop: N_("loop guard intervened"),
+  resources: N_("resource warning"), "hidden-text": N_("hidden text in what the agent reads"),
+  "workspace-review": N_("the agent changed a file your host runs or trusts"),
+  package: N_("package guard"),
+  "secret-send": N_("a secret on its way to another host"), "secret-context": N_("a secret entered the model's context"),
 };
 const SAFEGUARD_GROUPED = {
   firewall: N_("{count} connections to {target} dropped by the firewall in the last minute"),
@@ -481,6 +536,11 @@ const SAFEGUARD_GROUPED = {
   "approval-timeout": N_("{count} questions about {target} refused without an answer in the last minute"),
   push: N_("{count} pushes to {target} refused in the last minute"),
   publish: N_("{count} publishing requests to {target} refused in the last minute"),
+  "hidden-text": N_("hidden text found {count} times in the last minute ({target})"),
+  "workspace-review": N_("{count} workspace reviews with changes in the last minute ({target})"),
+  package: N_("{count} package guard findings ({target}) in the last minute"),
+  "secret-send": N_("{count} requests carried a secret to {target} in the last minute"),
+  "secret-context": N_("secrets entered the model's context {count} times in the last minute ({target})"),
 };
 
 function safeguardTitle(kind) { return SAFEGUARD_TITLES[kind] ? t(SAFEGUARD_TITLES[kind]) : String(kind); }
@@ -596,6 +656,20 @@ function contrast(a, b) {
   return (high + 0.05) / (low + 0.05);
 }
 
+// the INDEXth of a set of colours apart from each other: ACCENT first, then its hue turned on by the golden angle
+function seriesColour(accent, index, dark) {
+  if (index === 0) return accent;
+  const hex = String(accent).replace("#", "");
+  const [r, g, b] = [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const high = Math.max(r, g, b), low = Math.min(r, g, b);
+  let hue = 0.6;
+  if (high !== low && [r, g, b].every(Number.isFinite)) {
+    const d = high - low;
+    hue = (high === r ? (g - b) / d + (g < b ? 6 : 0) : high === g ? (b - r) / d + 2 : (r - g) / d + 4) / 6;
+  }
+  return `hsl(${Math.round(((hue + index * 0.382) % 1) * 360)}, 65%, ${dark ? 66 : 38}%)`;
+}
+
 function readableOn(background, candidates) {
   return candidates.filter(Boolean).reduce((best, c) => (contrast(c, background) > contrast(best, background) ? c : best));
 }
@@ -619,6 +693,8 @@ function applyTheme(name) {
   if (theme.font && theme.font.size) root.setProperty("--size", `${Math.round(theme.font.size * 1.4)}px`);
   document.body.classList.toggle("bevel", Boolean(theme.bevel));
   document.documentElement.style.colorScheme = theme.dark ? "dark" : "light";
+  // the charts' series (the system monitor): the accent first, then its hue turned on, readable on the background
+  for (let i = 0; i < 8; i++) root.setProperty(`--series${i}`, seriesColour(colors.accent || "#2563eb", i, Boolean(theme.dark)));
   for (const entry of state.terminals) entry.term.options.theme = terminalTheme();
   applyFonts();
 }
@@ -720,7 +796,7 @@ function loginView(message) {
   // by others) and not remembered with the secret fields' choice; "Show value" beside it all the same
   const [password, passwordField] = secretInput({ id: "password", required: true, "aria-label": t("Password") },
     { shown: false, remember: false, hiddenAutocomplete: "current-password" });
-  const code = el("input", { id: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, required: true, "aria-label": t("Code") });
+  const code = el("input", { id: "code", inputmode: "numeric", autocomplete: "one-time-code", pattern: "[0-9]{6}", maxlength: 6, "aria-label": t("Code") });  // empty: a login without TOTP (web user add --no-totp)
   const status = el("div");
   if (message) status.append(notice(message, "error"));
   const form = el("form", {
@@ -728,10 +804,12 @@ function loginView(message) {
       event.preventDefault();
       clear(status);
       try {
-        state.me = await api("POST", "/api/login", { user: user.value, password: password.value, code: code.value });
+        const answer = await api("POST", "/api/login", { user: user.value, password: password.value, code: code.value });
         state.me = await api("GET", "/api/me");
         password.value = "";
         render();
+        // A login made without TOTP (your choice): said at each login.
+        if (answer && answer.second_factor === false) toast("warning", t("Login without a second factor"), t("This login has no TOTP: whoever learns its password can do everything here. Add one on the server: {command}", { command: `sandbox-ai web user reset ${user.value}` }));
       } catch (e) {
         password.value = ""; code.value = "";
         status.append(errorNotice(e));
@@ -743,7 +821,7 @@ function loginView(message) {
   el("div", { class: "form" },
     el("label", { for: "user" }, t("User")), user,
     el("label", { for: "password" }, t("Password")), passwordField,
-    el("label", { for: "code" }, t("Code from your TOTP app")), code,
+    el("label", { for: "code" }, t("Code from your TOTP app (empty for a login without one)")), code,
     el("label", { for: "language" }, t("Language")), languageSelect("language"),
     el("button", { class: "primary", type: "submit" }, t("Log in"))),
   el("p", { class: "hint" }, t("A login is made on the server: {command}", { command: "sandbox-ai web user add NAME" })));
@@ -772,6 +850,7 @@ async function render() {
   try { state.policy = await api("GET", "/api/policy"); } catch (e) { state.policy = null; }  // without it: every prompt is asked
   if (run !== state.renders || !state.me) return;
   const root = clear(document.getElementById("app"));
+  document.body.classList.toggle("button-texts", buttonTextsShown());  // (the icon buttons' texts, as chosen here)
   if (!state.hosts.some(h => h.name === state.host)) state.host = "local";
   const where = addressOf();
   state.page = where.page || state.page;
@@ -1012,7 +1091,10 @@ function show(page) {
   pages[page](main).then(() => {
     if (token !== state.renderToken) return;
     addHelpLink(main, page);
-    if (moved && page !== "terminals" && state.page === page) focusHeading(main);
+    // (a row the page focused itself - the start the system monitor's Session led to - keeps the focus)
+    const kept = state.rowFocused;
+    state.rowFocused = false;
+    if (moved && page !== "terminals" && state.page === page && !kept) focusHeading(main);
   },
     e => { if (token !== state.renderToken) return; clear(main); main.append(errorNotice(e)); if (moved) focusHeading(main); });
 }
@@ -1075,6 +1157,8 @@ const startsView = { main: null, host: null, body: null, rows: new Map(), loadin
 const START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,47}$/;  // a start's name or id
 const NEW_START_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$/;  // a name given to a start (--name, rename): the launcher's
 const WORKSPACE_AS = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;  // workspace add --name NAME
+// a folder of another machine (sandbox-ai's remotefs.py): sshfs://, nfs:// or smb://..., mounted by that host
+const REMOTE_SOURCE = /^(sshfs|nfs|smb):\/\/[^\s,]+$/i;
 const MCP_SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 
 // A start's identity: its id (list --json; it stays when the start is renamed), else its name (an older sandbox-ai).
@@ -1110,21 +1194,24 @@ function startRow(s, starts, main, all) {
       if (state.page === "starts") refreshStarts(main, true);
     } catch (e) { failed(t(RUN_FAILED[action], { name: s.name, host }))(e); }
   });
-  const act = (label, action, extra) => rowButton(label, s.name, host, Object.assign({ onclick: (event) => run(event.target, action) }, extra || {}));
+  // (the icon of each is its action's: pause, resume)
+  const act = (label, action, extra) => iconRowButton(action, label, s.name, host, Object.assign({ onclick: (event) => run(event.currentTarget || event.target, action) }, extra || {}));
   const mcp = s.kind === "mcp";
   const stopText = mcp ? t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: s.name, host })
     : t("Stop {name} on {host}? What runs in it ends; {home}", { name: s.name, host,
       home: s.keep ? t("its HOME is kept: Resume starts it again.") : s.home === "own" ? t("its HOME is a directory of its own, which stays.") : t("its HOME is not kept: it is discarded with the start.") });
   const stop = rowButton(t("Stop"), s.name, host, { onclick: () => confirmIn(actions, stopText, t("Yes, stop it"), () => run(stop, "stop", { confirm: true }), { trigger: stop }) });
-  if (s.attachable) actions.append(rowButton(t("Attach"), s.name, host, { class: "primary", onclick: () => openTerminal({ kind: "attach", name: s.name, host }, `${s.name}`) }));
-  if (s.state === "running" && !mcp) actions.append(act(t("Pause"), "pause"), stop,
-    rowButton(t("Network…"), s.name, host, { onclick: () => networkCard(main, s) }),
-    rowButton(t("Resources…"), s.name, host, { title: t("workspaces, devices and resource limits while it runs"), onclick: () => resourcesCard(main, s) }));
+  if (s.attachable) actions.append(iconRowButton("attach", t("Attach"), s.name, host, { class: "primary", title: t("its terminal, in a tab of this page (detach: Ctrl-b d)"), onclick: () => openTerminal({ kind: "attach", name: s.name, host }, `${s.name}`) }));
+  // A shell of yours in it, under the agent's rules (sandbox-ai shell): a tab of its own each time.
+  if (s.attachable && s.state === "running") actions.append(iconRowButton("shell", t("Shell"), s.name, host, { title: t("a shell of yours in this sandbox, under the agent's rules (sandbox-ai shell)"), onclick: () => openTerminal({ kind: "shell", name: s.name, host }, t("shell: {name}", { name: s.name })) }));
+  if (s.state === "running" && !mcp) actions.append(act(t("Pause"), "pause", { title: t("freeze it as it is (sandbox-ai pause)") }), stop,
+    iconRowButton("allow", t("Network…"), s.name, host, { title: t("what it may reach now: allow, revoke, what was allowed and refused during the run"), onclick: () => networkCard(main, s) }),
+    iconRowButton("limits", t("Resources…"), s.name, host, { title: t("workspaces, devices and resource limits while it runs"), onclick: () => resourcesCard(main, s) }));
   else if (s.state === "running" || (s.state === "paused" && mcp)) actions.append(stop);
-  if (s.state === "paused" && !mcp) actions.append(act(t("Resume"), "resume"), stop);
+  if (s.state === "paused" && !mcp) actions.append(act(t("Resume"), "resume", { title: t("thaw it (sandbox-ai resume)") }), stop);
   if (s.state === "stopped" && s.keep) {
-    const resume = rowButton(t("Resume"), s.name, host, { onclick: () => reviewThenResume(main, s, resume) });
-    const remove = rowButton(t("Delete"), s.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Delete {name} on {host} with its kept HOME? What is in that HOME is gone for good.", { name: s.name, host }),
+    const resume = iconRowButton("resume", t("Resume"), s.name, host, { title: t("start it again with its kept HOME (sandbox-ai resume)"), onclick: () => reviewThenResume(main, s, resume) });
+    const remove = iconRowButton("delete", t("Delete"), s.name, host, { class: "danger", title: t("remove it with its kept HOME; asked first (sandbox-ai delete)"), onclick: () => confirmIn(actions, t("Delete {name} on {host} with its kept HOME? What is in that HOME is gone for good.", { name: s.name, host }),
       t("Yes, delete it"), () => run(remove, "delete", { confirm: true }), { trigger: remove }) });
     actions.append(resume, remove);
   }
@@ -1133,11 +1220,28 @@ function startRow(s, starts, main, all) {
     const rename = rowButton(t("Rename…"), s.name, host, { onclick: () => askRename(actions, s, main, rename) });
     actions.append(rename);
   }
+  // A kept start (a session), running or not, as one self-sufficient file (sandbox-ai board export): downloaded
+  if (!mcp && s.keep && ["running", "paused", "stopped"].includes(s.state)) {
+    const exported = iconRowButton("export", t("Export"), s.name, host, { title: t("one file another machine imports: its options, MCP and LLM servers, rulesets, kits, presets and image recipes - folders as placeholders, secrets by name only (sandbox-ai board export)"),
+      onclick: () => exportSession(s, exported) });
+    actions.append(exported);
+  }
   // More… starts it again with more only when it keeps its start (a run without one has nothing to start again
   // with: the CLI refuses); a running or paused one without it still gets the longer stop
   if (!mcp && (s.keep ? ["running", "paused", "stopped"].includes(s.state) : ["running", "paused"].includes(s.state)))
-    actions.append(rowButton(t("More…"), s.name, host, { title: s.keep ? t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait") : t("stop with a longer wait"), onclick: () => moreCard(main, s) }));
+    actions.append(iconRowButton("resume-with", t("More…"), s.name, host, { title: s.keep ? t("resume with directories, mounts or MCP servers added, restart, stop with a longer wait") : t("stop with a longer wait"), onclick: () => moreCard(main, s) }));
   actions.append(rowButton(t("History"), s.name, host, { onclick: () => historyCard(main, s) }));
+  // its workspaces as they were (sandbox-ai checkpoint): listed, taken now, compared, restored after a preview
+  if (!mcp && s.state !== "damaged") actions.append(iconRowButton("checkpoints", t("Checkpoints…"), s.name, host, { title: t("the workspaces as they were when it started (and later): what changed, put back (sandbox-ai checkpoint)"), onclick: () => checkpointsCard(main, s) }));
+  // its agent's memory and the agents' session files, read only (sandbox-ai session memory|files): while it runs, or
+  // once stopped with its HOME kept
+  if (!mcp && (["running", "paused", "orphaned"].includes(s.state) || (s.state === "stopped" && s.keep))) {
+    actions.append(iconRowButton("memory", t("Memory…"), s.name, host, { title: t("its agent's memory file and auto memory: the live copy while it runs, else what went back to the project's memory store (sandbox-ai session memory)"), onclick: () => inspectCard(main, s, "memory") }),
+      iconRowButton("files", t("Session files…"), s.name, host, { title: t("the agents' own session files in its HOME, one shown as a conversation; the start's folder as one archive (sandbox-ai session files, export)"), onclick: () => inspectCard(main, s, "files") }));
+  }
+  // its storage (sandbox-ai gc --check --home NAME): its HOME by kind, its project's logs and checkpoints, what can
+  // be done with it, each with its saving and command
+  if (!mcp && s.keep && s.state !== "damaged") actions.append(iconRowButton("storage", t("Storage…"), s.name, host, { title: t("its HOME by kind, the logs and checkpoints of its project, its growth, and what can be freed - each with its command (sandbox-ai gc --check --home NAME)"), onclick: () => storageCard(main, host, s.name) }));
   // the LLM server it works with (--llm NAME[:MODEL]): what that server has loaded and uses now, while it runs
   const llm = !mcp && typeof s.llm === "string" && LLM_CHOICE.test(s.llm) ? s.llm : null;
   if (llm && ["running", "paused"].includes(s.state)) actions.append(rowButton(t("LLM status"), s.name, host, { title: t("what the LLM server {value} has loaded and uses now", { value: llm }), onclick: () => llmStatusCard(main, s) }));
@@ -1189,6 +1293,100 @@ function llmStatusCard(main, s) {
   return card;
 }
 
+// A session as one file (sandbox-ai board export --session NAME on its host): offered as a download. It holds the
+// host's folder paths and names, never a secret's value (said in the toast).
+async function exportSession(s, button) {
+  await busy(button, async () => {
+    let r;
+    try { r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/export`, s.host), {}); }
+    catch (e) { failed(t("Could not export {name} on {host}", { name: s.name, host: s.host }))(e); return; }
+    const text = JSON.stringify((r && r.bundle) || {}, null, 1);
+    const link = el("a", { href: URL.createObjectURL(new Blob([text], { type: "application/json" })), download: (r && r.file) || "session.sandbox-ai-bundle.json" });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    toast("success", t("{name} on {host} exported", { name: s.name, host: s.host }),
+      t("The file holds the host's folder paths and names - never a secret's value: pass it on knowingly."));
+  });
+}
+
+// A bundle taken in on HOST (sandbox-ai board import): Check shows its plan (nothing written) - each folder with the
+// bundle's path as its default, the values it withheld, what is created, reused, replaced and missing -, Import (asked
+// first: board-import) writes its parts and keeps the board (never started).
+function importCard(main, host) {
+  const old = document.getElementById("import-card");
+  if (old) dropCard(old);
+  const file = el("input", { id: "import-file", type: "file", accept: ".json,application/json" });
+  const name = el("input", { id: "import-as", class: "mono", size: 20, placeholder: t("the bundle's") });
+  const replace = el("input", { type: "checkbox", id: "import-replace" });
+  const unsigned = el("input", { type: "checkbox", id: "import-unsigned" });
+  const inputs = el("div"), result = el("div"), actions = el("div", { class: "row" });
+  let bundle = null, plan = null;
+  const folders = new Map(), values = new Map();
+  const body = (check) => {
+    const map = {}, given = {};
+    for (const [marker, input] of folders) if (input.value.trim()) map[marker] = input.value.trim();
+    for (const [key, input] of values) if (input.value) given[key] = input.value;
+    const replaced = [];
+    if (replace.checked && plan) for (const p of plan.problems || []) for (const m of String(p.fix || "").matchAll(/--replace ([a-z]+:[A-Za-z0-9][A-Za-z0-9_.@-]{0,63})/g)) replaced.push(m[1].split("@")[0]);
+    return { bundle, check, map, values: given, as: name.value.trim() || null, replace: [...new Set(replaced)], unsigned: unsigned.checked, ...(check ? {} : { confirm: true }) };
+  };
+  const draw = (r) => {
+    plan = r;
+    clear(inputs); folders.clear(); values.clear();
+    for (const f of r.folders || []) {
+      const id = `import-folder-${folders.size}`;
+      const input = el("input", { id, class: "mono", size: 40, value: f.to || f.default || "" });
+      folders.set(f.marker, input);
+      inputs.append(el("div", { class: "row" }, el("label", { for: id }, t("Folder {marker} ({label})", { marker: f.marker, label: f.label || "" })), input));
+    }
+    for (const v of r.values || []) {
+      const key = String(v.marker || "").replace(/^<text:|>$/g, "");
+      const id = `import-value-${values.size}`;
+      const [input, field] = secretInput({ id, size: 30 });
+      values.set(key, input);
+      inputs.append(el("div", { class: "row" }, el("label", { for: id }, t("Value {marker} ({label})", { marker: v.marker, label: v.label || "" })), field));
+    }
+    const items = [];
+    for (const [title, key] of [[t("Created"), "create"], [t("Reused (the same is here)"), "reuse"], [t("Replaced"), "replace"]])
+      if ((r[key] || []).length) items.push(`${title}: ${r[key].map(x => `${x.kind} ${x.name}`).join(", ")}`);
+    for (const [kind, list] of Object.entries(r.missing || {})) for (const m of list || []) items.push(t("Missing here ({kind}): {name} - {fix}", { kind, name: m.name, fix: m.fix }));
+    for (const w of r.withheld || []) items.push(t("Not in the bundle: {what}", { what: w }));
+    for (const n of r.notes || []) items.push(t("Note: {text}", { text: n }));
+    for (const w of r.warnings || []) items.push(t("Warning: {text}", { text: w }));
+    if (r.command) items.push(t("Starts as: {command}", { command: r.command }));
+    clear(result).append(el("ul", {}, items.map(line => el("li", {}, line))));
+    if ((r.problems || []).length) result.append(notice(t("Not importable as it is: {problems}", { problems: r.problems.map(p => p.text + (p.fix ? ` (${p.fix})` : "")).join("; ") }), "warn"));
+  };
+  const check = async (event) => busy(event.target, async () => {
+    clear(actions);
+    const chosen = file.files && file.files[0];
+    if (!chosen) { toast("warning", t("Which bundle?"), t("Choose the bundle's file first.")); return; }
+    try { bundle = JSON.parse(await chosen.text()); } catch (e) { clear(result).append(notice(t("Not a bundle: its JSON cannot be read (an archive with images is imported with sandbox-ai board import)."), "warn")); return; }
+    let r;
+    try { r = await api("POST", hostPath("/board-import", host), body(true)); } catch (e) { clear(result).append(errorNotice(e)); return; }
+    draw(r || {});
+    if ((r.problems || []).length) return;
+    actions.append(el("button", { class: "primary", onclick: (go) => confirmIn(actions, t("Import the board on {host}: write its parts there (MCP and LLM servers, kits, presets, rulesets, image recipes) and keep the board? It is not started.", { host }), t("Yes, import it"), async () => {
+      try {
+        const done = await api("POST", hostPath("/board-import", host), body(false));
+        draw(done || {});
+        toast("success", t("Imported as {name} on {host}", { name: (done && done.board) || "", host }), t("Not started: start it with the desktop app's Board, or: {command}", { command: (done && done.command) || "" }));
+      } catch (e) { clear(result).append(errorNotice(e)); }
+    }, { trigger: go.target }) }, t("Import")));
+  });
+  const card = el("div", { class: "card", id: "import-card" }, el("h2", {}, t("Import a board on {host}", { host })),
+    el("p", { class: "hint" }, t("A bundle from elsewhere is passed on, not yours: what a passed-on preset may not carry is refused, and nothing is written before you see its plan and confirm it.")),
+    el("div", { class: "row" }, el("label", { for: "import-file" }, t("Bundle file")), file),
+    el("div", { class: "row" }, el("label", { for: "import-as" }, t("Board's name")), name),
+    el("label", {}, replace, " ", t("Replace the parts of the same name here")),
+    el("label", {}, unsigned, " ", t("Take MCP servers of an unsigned catalog")), inputs,
+    el("div", { class: "row" }, el("button", { onclick: check }, t("Check")), el("button", { onclick: () => dropCard(card) }, t("Close"))),
+    actions, result);
+  openCard(main, card);
+  return card;
+}
+
 // Another name for a start (sandbox-ai rename OLD NEW), asked in its row; the run id stays.
 function askRename(actions, s, main, trigger) {
   const id = `rename-${s.host}-${s.name}`.replace(/[^A-Za-z0-9_-]/g, "_");
@@ -1237,6 +1435,305 @@ function revealCard(card) {
   if (typeof card.scrollIntoView === "function") card.scrollIntoView({ block: "nearest" });
   const heading = typeof card.querySelector === "function" ? card.querySelector("h2") : null;
   if (heading && typeof heading.focus === "function") { heading.setAttribute("tabindex", "-1"); heading.focus(); }
+}
+
+// The checkpoints of a start's workspaces (sandbox-ai checkpoint on its host): taken when it began, every few minutes
+// or here (Take one now); Changes shows what changed since one, Restore… its preview (sandbox-ai checkpoint restore
+// --dry-run) and then, confirmed in place (checkpoint-restore), puts it back - a checkpoint of the state before is
+// taken first, so a restore is undone by restoring that one. Delete is confirmed too (checkpoint-delete).
+function sizeText(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = n / 1024, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+const CHECKPOINT_KINDS = { start: N_("at the start"), manual: N_("taken by hand"), periodic: N_("periodic"), restore: N_("before a restore") };
+function changesView(found) {
+  const counts = (found && found.counts) || {};
+  const box = el("div", {}, el("p", {}, t("{changed} changed, {added} added, {deleted} deleted", { changed: counts.changed || 0, added: counts.added || 0, deleted: counts.deleted || 0 })));
+  for (const root of (found && Array.isArray(found.roots)) ? found.roots : []) {
+    const base = String(root.sandbox || root.host || "");
+    const join = (rel) => rel ? `${base.replace(/\/$/, "")}/${rel}` : base;
+    const lines = [];
+    for (const [key, mark] of [["changed", "M"], ["added", "A"], ["deleted", "D"]]) {
+      for (const item of (Array.isArray(root[key]) ? root[key] : []).slice(0, 200)) {
+        const [rel, what] = Array.isArray(item) ? item : [item, null];
+        lines.push(`${mark} ${join(String(rel))}${what && what !== "content" ? ` (${what})` : ""}`);
+      }
+      const more = (Array.isArray(root[key]) ? Math.max(0, root[key].length - 200) : 0) + ((root.more || {})[key] || 0);
+      if (more) lines.push(t("… and {count} more", { count: more }));
+    }
+    box.append(el("h3", {}, `${base} (${String(root.host || "")})`), lines.length ? el("pre", { class: "mono" }, lines.join("\n")) : el("p", { class: "hint" }, t("No change.")));
+  }
+  return box;
+}
+function checkpointsCard(main, s) {
+  const host = s.host;
+  const old = document.getElementById("checkpoints-card");
+  if (old) dropCard(old);
+  const body = el("div", {}, el("p", { class: "hint" }, t("Loading…"))), detail = el("div", { class: "wide" });
+  const label = el("input", { id: "checkpoint-label", class: "mono", size: 30, placeholder: t("why (optional)") });
+  const take = el("button", { class: "primary", onclick: () => busy(take, async () => {
+    try { await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/checkpoints`, host), { label: label.value.trim() }); }
+    catch (e) { failed(t("Could not take a checkpoint of {name} on {host}", { name: s.name, host }))(e); return; }
+    label.value = "";
+    toast("success", t("Checkpoint of {name} on {host} taken", { name: s.name, host }));
+    load();
+  }) }, t("Take one now"));
+  const card = el("div", { class: "card", id: "checkpoints-card" }, el("h2", {}, t("Checkpoints of {name} on {host}", { name: s.name, host })),
+    el("p", { class: "hint" }, t("Taken on the host, where the sandbox cannot reach them: one when a start begins, others every few minutes or by hand. A restore shows what changes first and takes a checkpoint of the state now before it writes.")),
+    el("div", { class: "row" }, el("label", { for: "checkpoint-label" }, t("Label"), " "), label, take), body, detail,
+    el("button", { onclick: () => dropCard(card) }, t("Close")));
+  openCard(main, card, s);
+  const showChanges = (c, button) => busy(button, async () => {
+    clear(detail).append(el("p", { class: "hint" }, t("Loading…")));
+    let found;
+    try { found = await api("GET", hostPath(`/checkpoints/${encodeURIComponent(c.id)}/diff`, host)); }
+    catch (e) { clear(detail).append(errorNotice(e)); return; }
+    clear(detail).append(el("h3", {}, t("Changed since {id}", { id: c.id })), changesView(found));
+  });
+  const restore = (c, button, actions) => busy(button, async () => {
+    clear(detail).append(el("p", { class: "hint" }, t("Loading…")));
+    let preview;
+    try { preview = await api("GET", hostPath(`/checkpoints/${encodeURIComponent(c.id)}/restore`, host)); }
+    catch (e) { clear(detail).append(errorNotice(e)); return; }
+    const counts = preview.counts || {};
+    clear(detail).append(el("h3", {}, t("Restoring {id} changes", { id: c.id })), changesView(preview));
+    if (!(counts.changed || counts.added || counts.deleted)) { detail.append(notice(t("Nothing to restore: the folders are as they were."), "info")); return; }
+    const running = ["running", "paused"].includes(s.state) ? " " + t("{name} runs: its agent may write while the restore runs (pause it first).", { name: s.name }) : "";
+    confirmIn(actions, t("Put the workspaces of {name} on {host} back as they were at {time}? {changed} changed files get their content of then back, {added} files added since are removed and {deleted} deleted files are put back; a checkpoint of the state now is taken first.", { name: s.name, host, time: String(c.created || "").replace("T", " ").replace("Z", ""), changed: counts.changed || 0, added: counts.added || 0, deleted: counts.deleted || 0 }) + running,
+      t("Yes, restore"), async () => {
+        let done;
+        try { done = await api("POST", hostPath(`/checkpoints/${encodeURIComponent(c.id)}/restore`, host), { confirm: true }); }
+        catch (e) { failed(t("Could not restore {id} on {host}", { id: c.id, host }))(e); return; }
+        toast("success", t("{id} restored on {host}", { id: c.id, host }), t("Undo it by restoring {id}.", { id: done && done.before ? done.before : "?" }));
+        clear(detail);
+        load();
+      }, { trigger: button });
+  });
+  const remove = (c, button, actions) => confirmIn(actions, t("Delete the checkpoint {id} of {name} on {host}? What only it holds is gone for good.", { id: c.id, name: s.name, host }), t("Yes, delete it"), async () => {
+    try { await api("POST", hostPath(`/checkpoints/${encodeURIComponent(c.id)}/delete`, host), { confirm: true }); }
+    catch (e) { failed(t("Could not delete {id} on {host}", { id: c.id, host }))(e); return; }
+    load();
+  }, { trigger: button });
+  async function load() {
+    let found;
+    try { found = await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/checkpoints`, host)); }
+    catch (e) { clear(body).append(errorNotice(e)); return; }
+    if (!card.isConnected) return;
+    const rows = (Array.isArray(found) ? found : []).filter(c => c && typeof c.id === "string").map(c => {
+      const actions = el("td", { class: "actions" });
+      const changes = el("button", { onclick: () => showChanges(c, changes) }, t("Changes"));
+      const back = el("button", { onclick: () => restore(c, back, actions) }, t("Restore…"));
+      const gone = el("button", { class: "danger", onclick: () => remove(c, gone, actions) }, t("Delete"));
+      actions.append(changes, back, gone);
+      return el("tr", {}, el("td", { class: "mono" }, c.id), el("td", {}, String(c.created || "").replace("T", " ").replace("Z", "")),
+        el("td", {}, t(CHECKPOINT_KINDS[c.kind] || String(c.kind || ""))), el("td", {}, String(c.files || 0)), el("td", {}, sizeText(c.bytes)),
+        el("td", {}, String(c.label || (c.roots || []).map(r => r.sandbox || r.host).join(", "))), actions);
+    });
+    clear(body).append(table([t("Checkpoint"), t("Taken"), t("Why"), t("Files"), t("Size"), t("Label / folders"), ""], rows,
+      t("No checkpoints of {name} yet.", { name: s.name }), t("Checkpoints of {name} on {host}", { name: s.name, host })));
+  }
+  load();
+  return card;
+}
+
+// A start's agent memory and the agents' session files (sandbox-ai session memory|files on its host), read only: the
+// files on the left, the chosen one's text on the right (Search keeps the lines that hold a text), and the start's
+// folder written as one archive on its host (sandbox-ai session export, confirmed in place: session-export). The
+// files are written by the agent: every name and text is put in as text (el(), textContent), never as markup.
+// A file marked as a login or key (its "secret": why) is listed like the others, with the why; its text is shown only
+// after a question in place (show-secret-file: POST .../secret). The host's default hide_secrets (Settings) leaves
+// such files out, and the list says how many. An export leaves them out unless "With logins and keys" is ticked
+// (asked first: session-export-secrets); the names left out are listed.
+const SECRET_WHY = { "an agent's login": N_("an agent's login"), "a login, token or key (by its name)": N_("a login, token or key (by its name)"),
+  "an agent's provider keys": N_("an agent's provider keys"), "holds a private key": N_("holds a private key"),
+  "holds a placeholder of a secret the launcher gave": N_("holds a placeholder of a secret the launcher gave") };
+function secretWhy(why) { return SECRET_WHY[why] ? t(SECRET_WHY[why]) : String(why || ""); }
+const ROLE_TITLES = { user: N_("user"), assistant: N_("assistant"), system: N_("system"), reasoning: N_("reasoning"), "tool-call": N_("tool call"), "tool-result": N_("tool result"), event: N_("event") };
+function shownTime(value) { return String(value || "").replace("T", " ").replace("Z", "").slice(0, 19); }
+function conversationText(found) {
+  const messages = Array.isArray(found && found.messages) ? found.messages : [];
+  if (!messages.length) return t("Nothing to show as a conversation.");
+  return messages.map(m => `== ${shownTime(m.time) || "-"}  ${t(ROLE_TITLES[m.role] || String(m.role || ""))}${m.tool ? ": " + String(m.tool) : ""}${m.error ? " (" + t("error") + ")" : ""}\n${String(m.text || "")}`).join("\n\n");
+}
+function inspectCard(main, s, kind) {
+  const host = s.host, memory = kind === "memory", id = memory ? "memory-card" : "session-files-card";
+  const old = document.getElementById(id);
+  if (old) dropCard(old);
+  const title = memory ? t("Memory of {name} on {host}", { name: s.name, host }) : t("Session files of {name} on {host}", { name: s.name, host });
+  const where = el("p", { class: "hint" }), list = el("div", { class: "inspect-list" }, el("p", { class: "hint" }, t("Loading…")));
+  const text = el("pre", { class: "mono inspect-text", tabindex: "0", "aria-label": t("Text") }, t("Choose a file."));
+  const notes = el("div", { class: "hint" });
+  const asking = el("div", { class: "row" });
+  let shown = "", current = null, source = "auto";
+  const allowed = new Set();  // the marked files shown after the question, while the card is open
+  const search = el("input", { type: "search", class: "mono", size: 24, placeholder: t("Search"), "aria-label": t("Search in the text"), oninput: () => mark() });
+  const full = memory ? null : el("input", { type: "checkbox", id: "session-files-full", onchange: () => { if (current) open(current); } });
+  const from = memory ? el("select", { "aria-label": t("Which copy"), onchange: () => { source = from.value; load(); } },
+    el("option", { value: "auto" }, t("automatic: the HOME while it runs, else the store")), el("option", { value: "home" }, t("the copy in its HOME")),
+    el("option", { value: "store" }, t("the project's memory store"))) : null;
+  function mark() {
+    const needle = search.value.trim().toLowerCase();
+    if (!needle) { text.textContent = shown; return; }
+    const lines = shown.split("\n").filter(line => line.toLowerCase().includes(needle));
+    text.textContent = lines.length ? lines.join("\n") : t("No line holds {text}.", { text: search.value.trim() });
+  }
+  const path = el("input", { id: `${id}-path`, class: "mono", size: 40, placeholder: t("/home/you/{name}.tar.gz", { name: s.name }) });
+  const exportRow = el("div", { class: "row" });
+  const withSecrets = el("input", { type: "checkbox", id: `${id}-secrets` });
+  const exported = el("button", { onclick: () => {
+    const value = path.value.trim();
+    if (!value.startsWith("/")) { toast("error", t("Name the archive with its full path on {host}.", { host })); return; }
+    const include = withSecrets.checked;
+    confirmIn(exportRow, include
+      ? t("Write the folder of {name} - its records and its HOME as its agent left it, WITH its logins, keys and secrets - into {path} on {host}? Whoever has the archive can log in as you with them.", { name: s.name, path: value, host })
+      : t("Write the folder of {name} - its records and its HOME as its agent left it (transcripts, memory, what it kept) - into {path} on {host}? Logins and keys are left out.", { name: s.name, path: value, host }),
+      include ? t("Yes, export with logins and keys") : t("Yes, export"), () => busy(exported, async () => {
+        let done;
+        try { done = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/session-export`, host), Object.assign({ path: value, confirm: true }, include ? { include_secrets: true } : {})); }
+        catch (e) { failed(t("Could not export {name} on {host}", { name: s.name, host }))(e); return; }
+        withSecrets.checked = false;  // (each export with logins and keys is chosen anew)
+        const left = Array.isArray(done && done.left_out) ? done.left_out : [];
+        const secrets = left.filter(item => item && item.secret), others = left.filter(item => item && !item.secret);
+        toast("success", t("{name} exported to {path} on {host}", { name: s.name, path: String(done.path || value), host }), t("{count} files; {left} left out.", { count: done.files || 0, left: left.length }));
+        clear(notes);
+        if (secrets.length) notes.append(el("div", {}, t("Logins, keys and secrets left out ({count}) - the archive is made to be passed on; tick With logins and keys to take them in:", { count: secrets.length })),
+          ...secrets.slice(0, 200).map(item => el("div", { class: "mono" }, `${String(item.path)} (${secretWhy(item.why)})`)));
+        else if (done && done.include_secrets) notes.append(el("div", { class: "status-warn" }, t("Its logins, keys and secrets are in the archive: whoever has it can log in as you.")));
+        notes.append(...others.slice(0, 200).map(item => el("div", { class: "mono" }, `${t("left out")}: ${String(item.path)} (${String(item.why)})`)));
+      }), { trigger: exported });
+  } }, t("Export…"));
+  exportRow.append(el("label", { for: `${id}-path` }, t("Archive"), " "), path,
+    el("label", { title: t("Take the logins, keys and secrets of its HOME into the archive too (asked first; --include-secrets)") }, withSecrets, " ", t("With logins and keys")), exported);
+  // A search in the session files (sandbox-ai session files --search on the start's host), as the desktop app's file
+  // manager searches: the names by a pattern (* ? [abc], ** for any folders, a part of the name without a wildcard),
+  // and the files whose text holds what is typed - each with its line; bounded there, a login or key never looked into
+  const finder = memory ? null : filesSearch(s, (item) => open(item), (found) => showFound(found), () => load());
+  const card = el("div", { class: "card", id }, el("h2", {}, title), where, finder ? finder.row : null,
+    el("div", { class: "row" }, from, full ? el("label", {}, full, " ", t("tool input and output in full")) : null, search),
+    el("div", { class: "inspect" }, list, text), asking, notes,
+    s.keep ? exportRow : null,
+    el("button", { onclick: () => dropCard(card) }, t("Close")));
+  openCard(main, card, s);
+  function open(item) {
+    current = item;
+    if (!item.secret || allowed.has(item.name) || !needsConfirm("show-secret-file")) { read(item); return; }
+    text.textContent = t("{file} is marked as a login or key ({why}): its text is shown only when you ask.", { file: item.name, why: secretWhy(item.secret) });
+    confirmIn(asking, t("Show the text of {file} ({why})? Anyone who sees this screen can read the login or key in it.", { file: item.name, why: secretWhy(item.secret) }),
+      t("Yes, show it"), () => { allowed.add(item.name); if (current === item) read(item); });
+  }
+  async function read(item) {
+    text.textContent = t("Loading…");
+    const name = encodeURIComponent(item.name);
+    const secret = Boolean(item.secret);
+    let found;
+    try {
+      found = secret ? (memory ? await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/memory/${source}/${name}/secret`, host), { confirm: true })
+        : await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/session-files/${name}/secret`, host), { confirm: true, full: Boolean(full && full.checked) }))
+        : memory ? await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/memory/${source}/${name}`, host))
+        : full && full.checked ? await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/session-files/${name}/full`, host))
+          : await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/session-files/${name}`, host));
+    } catch (e) { clear(text).append(errorNotice(e)); return; }
+    if (!card.isConnected || current !== item) return;
+    if (memory) {
+      const file = (Array.isArray(found.files) ? found.files : [])[0] || {};
+      shown = file.binary ? t("(binary: not shown)") : String(file.text === null || file.text === undefined ? t("(not shown)") : file.text);
+    } else shown = conversationText(found);
+    if (secret) shown = t("Warning: it holds a login or key ({why}) - do not pass this on.", { why: secretWhy(item.secret) }) + "\n\n" + shown;
+    clear(notes).append(...(Array.isArray(found.notes) ? found.notes : []).map(note => el("div", {}, String(note))));
+    mark();
+  }
+  // What a search found, in the list's place: each file with its line and the part of it where the text is.
+  function showFound(found) {
+    if (!card.isConnected) return;
+    if (found instanceof Error) { clear(list).append(errorNotice(found)); return; }
+    const report = found.search || {}, files = Array.isArray(found.files) ? found.files : [];
+    const withText = Boolean(report.text);
+    const rows = files.filter(f => f && typeof f.name === "string").map(f => el("tr", {},
+      el("td", {}, el("button", { class: "mono", onclick: () => open(f) }, f.name)), el("td", {}, String(f.agent || "")),
+      withText ? el("td", { class: "num" }, String(f.line || "")) : null,
+      withText ? el("td", { class: "mono" }, String(f.excerpt || "")) : null,
+      el("td", {}, sizeText(f.size)), el("td", {}, shownTime(f.modified)),
+      el("td", { class: f.secret ? "status-warn" : "" }, f.secret ? secretWhy(f.secret) : "")));
+    clear(list).append(el("p", { class: "hint", role: "status" }, filesFoundText(report, files.length)),
+      table([t("File"), t("Agent"), ...(withText ? [t("Line"), t("Found")] : []), t("Size"), t("Modified"), t("Login or key")], rows,
+        t("No session file matches."), title));
+    const said = filesSearchNotes(report);
+    if (said.length) list.append(...said.map(line => el("p", { class: "hint" }, line)));
+  }
+  async function load() {
+    let found;
+    try {
+      found = memory ? await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/memory/${source}`, host))
+        : await api("GET", hostPath(`/starts/${encodeURIComponent(s.name)}/session-files`, host));
+    } catch (e) { clear(list).append(errorNotice(e)); return; }
+    if (!card.isConnected) return;
+    where.textContent = memory ? (found.source === "home" ? t("Its memory as the agent has it now, in its HOME: {path}", { path: String(found.path || "") })
+      : t("What went back to the project's memory store: {path}", { path: String(found.path || "") }))
+      : t("The agents' session files in its HOME: {path}", { path: String(found.home || "") });
+    const files = Array.isArray(found.files) ? found.files : [];
+    const rows = files.filter(f => f && typeof f.name === "string").map(f => {
+      const pick = el("button", { class: "mono", onclick: () => open(f) }, f.name);
+      return el("tr", {}, el("td", {}, pick), memory ? null : el("td", {}, String(f.agent || "") + (f.verified === false ? " *" : "")),
+        el("td", {}, sizeText(f.size)), el("td", {}, shownTime(f.modified)),
+        el("td", { class: f.secret ? "status-warn" : "" }, f.secret ? secretWhy(f.secret) : ""));
+    });
+    clear(list).append(table([t("File"), ...(memory ? [] : [t("Agent")]), t("Size"), t("Modified"), t("Login or key")], rows,
+      memory ? t("No memory files yet.") : t("No session files yet."), title));
+    if (found.hidden) list.append(el("p", { class: "hint" }, t("{count} files that hold a login or key are not listed (Settings: Hide logins and keys in file views).", { count: found.hidden })));
+    if (!memory && files.some(f => f && f.verified === false)) list.append(el("p", { class: "hint" }, t("* where this agent keeps its sessions is not verified against its source: its files are listed as they look")));
+    clear(notes).append(...(Array.isArray(found.notes) ? found.notes : []).map(note => el("div", {}, String(note))));
+  }
+  load();
+  return card;
+}
+
+// The search row of a start's session files: PATTERN, TEXT, Match case, Search and Show all. SHOW(found or an Error)
+// shows what was found; ALL() lists every file again.
+function filesSearch(s, open, show, all) {
+  const pattern = el("input", { type: "search", class: "mono", size: 22, id: "files-search-pattern", placeholder: "*.jsonl, **/rollout-*",
+    "aria-label": t("File name or pattern"), title: t(FILES_PATTERN_HELP) });
+  const text = el("input", { type: "search", size: 22, id: "files-search-text", placeholder: t("Text in the files"), "aria-label": t("Text in the files"),
+    title: t("Only the files whose text holds this (each with its line); a file marked as a login or key is never looked into") });
+  const caseBox = el("input", { type: "checkbox", id: "files-search-case" });
+  const go = el("button", { type: "submit" }, t("Search"));
+  const again = el("button", { type: "button", onclick: () => { pattern.value = ""; text.value = ""; all(); } }, t("Show all"));
+  const run = () => busy(go, async () => {
+    const body = { pattern: pattern.value.trim() };
+    if (text.value.trim()) body.text = text.value;
+    if (caseBox.checked) body.case = true;
+    let found;
+    try { found = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/session-files-search`, s.host), body); }
+    catch (e) { found = e; }
+    show(found);
+  });
+  const row = el("form", { class: "row files-search", role: "search", "aria-label": t("Search the session files"), onsubmit: (event) => { event.preventDefault(); run(); } },
+    pattern, text, el("label", { title: t("Letter case counts in the name and the text") }, caseBox, " ", t("Match case")), go, again);
+  return { row, pattern, text, caseBox, run };
+}
+const FILES_PATTERN_HELP = N_("The file's name, or with a / its path in the HOME: * any characters, ? one, [abc] one of them, ** any folders (.claude/**/*.jsonl); without a wildcard a part of the name. Empty: every file.");
+
+// "N files found", with what was searched for.
+function filesFoundText(report, count) {
+  const pattern = String(report.pattern || ""), text = report.text ? String(report.text) : "";
+  if (pattern && text) return t("{count} files named {pattern} that hold {text}", { count, pattern, text });
+  if (text) return t("{count} files that hold {text}", { count, text });
+  return t("{count} files named {pattern}", { count, pattern: pattern || "*" });
+}
+
+// What a search left out or could not do, each in a line: binary files, files read only in part, logins and keys
+// (found by name only), files not readable, the limits reached (the host's own words).
+function filesSearchNotes(report) {
+  const lines = [];
+  if (report.binary) lines.push(t("{count} files are not text (binary): not looked into.", { count: report.binary }));
+  if (report.partly) lines.push(t("{count} files are larger than the search reads of one file: only their start was looked into.", { count: report.partly }));
+  if (report.secret) lines.push(t("{count} files marked as a login or key: found by their name only, never looked into.", { count: report.secret }));
+  for (const entry of Array.isArray(report.unreadable) ? report.unreadable : []) lines.push(t("Not read: {why}", { why: String(entry) }));
+  for (const entry of Array.isArray(report.limits) ? report.limits : []) lines.push(String(entry));
+  return lines;
 }
 
 // What happened to a start (sandbox-ai list --history NAME on its host).
@@ -1302,7 +1799,7 @@ function moreCard(main, s) {
     if (live && added && !body.restart) throw new Error(t("{name} is {state}: it takes directories, mounts and MCP servers only at a start. Tick “Restart it now”.", { name, state: stateText(s.state) }));
     return body;
   };
-  const done = (r) => { toast("success", t("{name} on {host} resumed", { name, host }), (r && r.output) || ""); dropCard(card); if (state.page === "starts") refreshStarts(main, true); };
+  const done = (r) => { doneToast(t("{name} on {host} resumed", { name, host }), r); dropCard(card); if (state.page === "starts") refreshStarts(main, true); };
   const resume = (event) => {
     clear(status);
     let body;
@@ -1379,7 +1876,7 @@ async function reviewThenResume(main, s, button, withMore) {
       const card = document.getElementById("review-card");
       if (card) dropCard(card);
       if (withMore) { withMore.done(r); return; }
-      toast("success", t("{name} on {host} resumed", { name: s.name, host }), (r && r.output) || "");
+      doneToast(t("{name} on {host} resumed", { name: s.name, host }), r);
       if (state.page === "starts") refreshStarts(main, true);
     } catch (e) { if (withMore) withMore.fail(e); else failed(t("Could not resume {name} on {host}", { name: s.name, host }))(e); }
   };
@@ -1436,6 +1933,7 @@ function updateStartRows(view, starts, main, stale) {
     view.rows.set(startKey(s), { signature, row, start: s, stale: false });
   }
   layoutStarts(view, main, [...starts.map(s => view.rows.get(startKey(s))), ...[...view.rows.values()].filter(e => e.stale)]);
+  if (view.focused) markFocused(view);
 }
 
 // --- the starts, grouped: by host (a header row each: where it is, its counts, whether it answers), and in a host
@@ -1689,6 +2187,33 @@ function layoutStarts(view, main, entries) {
   if (view.folds) for (const button of view.folds) button.disabled = !view.rows.size;
 }
 
+// The start the system monitor's Session asked for (state.startsFocus): its row unfolded, marked, scrolled to and
+// focused (marked again when a poll draws it anew); not listed (it ended): said.
+function focusStart(view, main) {
+  const wanted = state.startsFocus;
+  if (!wanted) return;
+  state.startsFocus = null;
+  const entries = [...view.rows.values()].filter(e => e.start.host === wanted.host);
+  const entry = entries.find(e => wanted.run && e.start.run === wanted.run) || entries.find(e => e.start.name === wanted.name || e.start.id === wanted.name);
+  if (!entry) { toast("warning", t("Session"), t("{name} is not listed among the starts of {host}: it has ended.", { name: wanted.name, host: wanted.host })); return; }
+  setOpen(hostOpenKey(wanted.host), true);
+  const tree = startTree(entries.map(e => e.start));
+  for (const root of tree.roots) if ((tree.children.get(startKey(root)) || []).some(kid => startKey(kid) === startKey(entry.start))) setOpen(startOpenKey(root), true);
+  layoutStarts(view, main);
+  view.focused = startKey(entry.start);
+  markFocused(view);
+  if (entry.row.scrollIntoView) entry.row.scrollIntoView({ block: "center" });
+  entry.row.focus();
+  state.rowFocused = true;
+}
+
+function markFocused(view) {
+  for (const [key, entry] of view.rows) {
+    entry.row.classList.toggle("focused", key === view.focused);
+    if (key === view.focused) entry.row.setAttribute("tabindex", "-1");
+  }
+}
+
 // Unfold (OPEN) or fold every host and start shown.
 function foldAll(view, main, open) {
   for (const entry of view.rows.values()) { setOpen(hostOpenKey(entry.start.host), open); setOpen(startOpenKey(entry.start), open); }
@@ -1800,16 +2325,200 @@ pages.starts = async (main) => {
   } });
   const tools = el("div", { class: "row" }, el("label", { for: "starts-host" }, t("Host")), chooser,
     el("label", {}, every, " ", t("MCP servers that do not run too")),
-    all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")), ...view.folds);
-  clear(main).append(el("h1", {}, title()), tools, view.slot, view.status, el("div", { class: "table-scroll" }, view.table), view.empty);
+    all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")),
+    all ? null : withIcon(el("button", { "aria-label": t("Optimize…"), onclick: () => storageCard(main, host, null) }, t("Optimize…")), "optimize", t("Optimize…"), t("what could be freed, each with how much, its command and whether it is safe while starts run; tick and apply (sandbox-ai gc --check)")),
+    all ? null : el("button", { onclick: () => importCard(main, host) }, t("Import a board…")), ...view.folds,
+    el("label", { title: t(BUTTON_TEXTS_HELP) }, el("input", { type: "checkbox", id: "button-texts", checked: buttonTextsShown(), onchange: (event) => showButtonTexts(event.target.checked) }), " ", t("Show button texts beside the icons")));
+  // Two tabs, as the desktop app's Sessions page has them: the starts (with a new start's form) and the schedules
+  const parts = { starts: el("div", { id: "starts-panel", role: "tabpanel", "aria-label": t("Sessions & sandboxes") }),
+    schedules: el("div", { id: "schedules-panel", role: "tabpanel", "aria-label": t("Schedules") }) };
+  const tabs = el("div", { class: "tabs", role: "tablist", "aria-label": t("Starts and sessions") }, STARTS_TABS.map(([key, label]) =>
+    el("button", { role: "tab", "data-tab": key, "aria-controls": parts[key].id, disabled: key === "schedules" && all, title: key === "schedules" && all ? t("Choose a host: schedules are each host's own.") : undefined,
+      onclick: () => { chooseStartsTab(key); drawStartsTabs(tabs, parts, all); } }, t(label))));
+  clear(main).append(el("h1", {}, title()), tabs, parts.starts, parts.schedules);
+  parts.starts.append(tools, view.slot, view.status, el("div", { class: "table-scroll" }, view.table), view.empty);
+  drawStartsTabs(tabs, parts, all);
+  view.focused = null;
   applyStarts(view, found, main);
+  focusStart(view, main);
   // a new start: in a terminal of the page, detachable like every start (Ctrl-b d), on the host chosen in its form
   const target = state.formHost && state.hosts.some(h => h.name === state.formHost) ? state.formHost : all ? state.host : host;
   const heading = el("h2", {}, t("New start on {host}", { host: target }));
   const form = el("div", { class: "card", id: "new-start" });
-  main.append(heading, form);
+  parts.starts.append(heading, form);
   await drawStartForm(form, heading, target);
+  if (!all && live()) await schedulesSection(parts.schedules, host, live);
 };
+
+// The starts page's tabs: [key, label]; the one chosen is kept in this browser (a page with every host shows the
+// starts: schedules are each host's own).
+const STARTS_TABS = [["starts", N_("Sessions & sandboxes")], ["schedules", N_("Schedules")]];
+const STARTS_TAB_STORE = "sandbox-ai-starts-tab";
+const BUTTON_TEXTS_HELP = N_("On: the icon buttons of the starts' rows show their texts too. Off (default): the icons alone, each button's text first in its tooltip. Kept in this browser.");
+function startsTab() {
+  let chosen = null;
+  try { chosen = localStorage.getItem(STARTS_TAB_STORE); } catch (e) { chosen = null; }
+  return STARTS_TABS.some(([key]) => key === chosen) ? chosen : "starts";
+}
+function chooseStartsTab(key) { try { localStorage.setItem(STARTS_TAB_STORE, key); } catch (e) { /* this page only */ } state.startsTab = key; }
+function drawStartsTabs(tabs, parts, all) {
+  const shown = all ? "starts" : (state.startsTab || startsTab());
+  for (const tab of tabs.children) {
+    const key = tab.getAttribute("data-tab");
+    tab.setAttribute("aria-selected", String(key === shown));
+    tab.className = key === shown ? "active" : "";
+  }
+  parts.starts.hidden = shown !== "starts";
+  parts.schedules.hidden = shown !== "schedules";
+}
+
+// Scheduled runs of a host (sandbox-ai schedule there): each schedule with when it runs, the agent, its ask mode, the
+// next and the last run; Run now, Pause/Resume, Edit, History (each run's report) and Remove… per row; a form to add
+// one (Edit fills it: saved under the same name it replaces it, its history stays); the timer of that host on or off.
+// Add, Remove… and the timer are asked first (schedule-add, schedule-remove, schedule-timer).
+// (the schedule's --ask: an object, its keys in this order)
+const SCHEDULE_ASK = { off: N_("off: refused, nobody answers (the default)"), allow: N_("allow: every question allowed and recorded"),
+  on: N_("on: questions wait for an answer") };
+const SCHEDULE_WHEN = [["every", N_("every (30m, 2h, 1d)")], ["at", N_("at (HH:MM daily, or YYYY-MM-DD HH:MM once)")], ["cron", N_("cron (M H DOM MON DOW)")], ["", N_("only on push")]];
+
+async function schedulesSection(main, host, live) {
+  const box = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
+  main.append(el("h2", { id: "schedules" }, t("Schedules on {host}", { host })), box);
+  let data;
+  try { data = await api("GET", hostPath("/schedules", host)); } catch (e) { if (live()) clear(box).append(errorNotice(e)); return; }
+  if (!live()) return;
+  const schedules = Array.isArray(data && data.schedules) ? data.schedules.filter(x => x && typeof x.name === "string") : [];
+  const timer = (data && data.timer) || {};
+  const result = el("div", { class: "wide check-result" });
+  const history = el("div");
+  const shown = (seconds) => (typeof seconds === "number" ? new Date(seconds * 1000).toLocaleString() : "-");
+  // the form
+  const field = (id, attrs) => el("input", Object.assign({ id, class: "mono", autocomplete: "off", spellcheck: "false" }, attrs || {}));
+  const name = field("schedule-name", { placeholder: "nightly" });
+  const whenKind = el("select", { id: "schedule-when" }, SCHEDULE_WHEN.map(([key, label]) => el("option", { value: key }, t(label))));
+  const whenValue = field("schedule-when-value", { placeholder: "02:30", "aria-label": t("When") });
+  const onPush = field("schedule-on-push", { placeholder: "/home/you/src/app" });
+  const agent = el("select", { id: "schedule-agent" }, el("option", { value: "" }, t("(the board's)")), AGENTS.map(a => el("option", { value: a }, a)));
+  agent.value = "claude";
+  const options = field("schedule-options", { placeholder: "--offline -w /home/you/src/app" });
+  const prompt = el("textarea", { id: "schedule-prompt", rows: 3, placeholder: t("Review yesterday's commits") });
+  const agentArgs = field("schedule-agent-args", { placeholder: "exec \"review\"" });
+  const preset = field("schedule-preset");
+  const board = field("schedule-board");
+  const workdir = field("schedule-workdir", { placeholder: "/home/you/src/app" });
+  const ask = el("select", { id: "schedule-ask" }, Object.entries(SCHEDULE_ASK).map(([key, label]) => el("option", { value: key }, t(label))));
+  const limit = field("schedule-limit", { placeholder: "60m" });
+  const missed = el("select", { id: "schedule-missed" }, el("option", { value: "once" }, t("once on wake")), el("option", { value: "skip" }, t("skip them")));
+  const commit = field("schedule-commit", { placeholder: "nightly-result" });
+  const push = field("schedule-push", { placeholder: "origin" });
+  const notify = el("input", { type: "checkbox", id: "schedule-notify", checked: true });
+  let replace = false;
+  const fill = (x) => {  // a schedule into the form (Edit), or an empty form (New)
+    replace = Boolean(x);
+    const timing = (x && x.timing) || null;
+    name.value = x ? x.name : ""; whenKind.value = timing ? timing.kind : x ? "" : "every"; whenValue.value = timing ? String(timing.value) : "";
+    onPush.value = (x && x.on_push) || ""; agent.value = x ? (x.board ? "" : x.agent || "") : "claude";
+    options.value = x && Array.isArray(x.options) ? x.options.map(o => (/[\s"']/.test(o) ? JSON.stringify(o) : o)).join(" ") : "";
+    agentArgs.value = x && Array.isArray(x.agent_args) ? x.agent_args.map(o => (/[\s"']/.test(o) ? JSON.stringify(o) : o)).join(" ") : "";
+    prompt.value = (x && x.prompt) || ""; preset.value = (x && x.preset) || ""; board.value = (x && x.board) || "";
+    workdir.value = (x && x.workdir) || ""; ask.value = (x && x.ask) || "off";
+    limit.value = x && x.limit ? `${Math.round(x.limit / 60)}m` : ""; missed.value = (x && x.missed) || "once";
+    commit.value = (x && x.commit) || ""; push.value = (x && x.push) || ""; notify.checked = x ? x.notify !== false : true;
+    name.focus();
+  };
+  const body = () => {
+    const b = { name: name.value.trim(), ask: ask.value, missed: missed.value, notify: notify.checked, replace };
+    if (whenKind.value && whenValue.value.trim()) b[whenKind.value] = whenValue.value.trim();
+    for (const [key, input] of [["on_push", onPush], ["agent", agent], ["options", options], ["agent_args", agentArgs], ["prompt", prompt],
+      ["preset", preset], ["board", board], ["workdir", workdir], ["limit", limit], ["commit", commit], ["push", push]]) {
+      const v = input.value.trim(); if (v) b[key] = v;
+    }
+    return b;
+  };
+  const row = el("div", { class: "row" });
+  const save = (event) => busy(event.target, async () => {
+    clear(result);
+    const b = body();
+    try { await api("POST", hostPath("/schedules", host), Object.assign({}, b, { check_only: true })); }
+    catch (e) { result.append(errorNotice(e, t("The schedule was not saved"))); return; }
+    const send = async () => {
+      try { const r = await api("POST", hostPath("/schedules", host), Object.assign({}, b, { confirm: true })); doneToast(t("Saved"), r); show("starts"); }
+      catch (e) { result.append(errorNotice(e, t("The schedule was not saved"))); }
+    };
+    if (!needsConfirm("schedule-add")) { await send(); return; }
+    confirmIn(row, t("Let {host} start {agent} by itself as the schedule {name} says? Each run is a normal start under its rules; its questions: {ask}.", { host, agent: b.agent || t("(the board's)"), name: b.name, ask: b.ask }), t("Yes, save it"), send, { kind: "primary", trigger: event.target });
+  });
+  row.append(el("button", { class: "primary", onclick: save }, t("Save schedule…")), el("button", { onclick: () => { fill(null); clear(result); } }, t("New")));
+  // the history of one schedule, with each run's report (its summary and the start's sandbox-ai report, Markdown)
+  const showHistory = async (x) => {
+    clear(history).append(el("p", { class: "hint" }, t("Loading…")));
+    let found;
+    try { found = await api("GET", hostPath(`/schedules/${encodeURIComponent(x.name)}/history`, host)); } catch (e) { clear(history).append(errorNotice(e)); return; }
+    const report = el("div");
+    const runs = (Array.isArray(found && found.runs) ? found.runs : []).slice().reverse().map(r => {
+      const open = r.summary || r.report ? rowButton(t("Report"), String(r.run), host, { onclick: (event) => busy(event.target, async () => {
+        clear(report);
+        try { const m = await api("GET", hostPath(`/schedules/${encodeURIComponent(x.name)}/report/${encodeURIComponent(r.run)}`, host)); report.append(el("pre", { class: "report" }, String(m.markdown || ""))); }
+        catch (e) { report.append(errorNotice(e)); }
+      }) }) : el("span", { class: "hint" }, String(r.note || ""));
+      const changed = r.changes ? t("{files} file(s), {commits} commit(s)", { files: r.changes.files, commits: r.changes.commits }) : "-";
+      return el("tr", {}, el("td", { class: "mono" }, String(r.run || "")), el("td", {}, String(r.reason || "")), el("td", {}, shown(r.started)),
+        el("td", {}, String(r.status || "")), el("td", {}, `${Math.round(r.seconds || 0)} s`), el("td", {}, changed), el("td", { class: "actions" }, open));
+    });
+    clear(history).append(el("h3", {}, t("History of {name}", { name: x.name })),
+      table([t("Run"), t("Why"), t("Started"), t("Status"), t("Duration"), t("Changed"), ""], runs, t("No runs yet.")), report);
+  };
+  const act = (x, path, title) => (event) => busy(event.target, async () => {
+    try { const r = await api("POST", hostPath(`/schedules/${encodeURIComponent(x.name)}/${path}`, host), {}); doneToast(title, r); show("starts"); }
+    catch (e) { failed(title)(e); }
+  });
+  const rows = schedules.map(x => {
+    const actions = el("td", { class: "actions" });
+    const remove = rowButton(t("Remove…"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the schedule {name} on {host}? It starts nothing any more; its history and reports go too.", { name: x.name, host }), t("Yes, remove it"), async () => {
+      try { await api("POST", hostPath(`/schedules/${encodeURIComponent(x.name)}/remove`, host), { confirm: true }); show("starts"); } catch (e) { failed(t("Could not remove it"))(e); }
+    }, { trigger: remove }) });
+    actions.append(
+      rowButton(t("Run now"), x.name, host, { onclick: act(x, "run", t("Started: {name}", { name: x.name })), disabled: x.running }),
+      x.paused ? rowButton(t("Resume"), x.name, host, { onclick: act(x, "resume", t("Resumed: {name}", { name: x.name })) })
+        : rowButton(t("Pause"), x.name, host, { onclick: act(x, "pause", t("Paused: {name}", { name: x.name })) }),
+      rowButton(t("Edit"), x.name, host, { onclick: () => fill(x) }),
+      rowButton(t("History"), x.name, host, { onclick: () => showHistory(x) }), remove);
+    const last = x.last ? `${x.last.status} ${shown(x.last.started)}` : "-";
+    return el("tr", {}, el("td", { class: "mono" }, x.name), el("td", {}, String(x.when || "")), el("td", {}, String(x.board ? `${x.agent} (${x.board})` : x.agent || "")),
+      el("td", {}, String(x.ask || "")), el("td", {}, shown(x.next)), el("td", {}, last), el("td", {}, stateText(x.state)), actions);
+  });
+  const timerOn = Boolean(timer.installed) && timer.active !== false;
+  const timerRow = el("div", { class: "row" });
+  const timerButton = el("button", { onclick: (event) => confirmIn(timerRow, timerOn ? t("Turn the timer of {host} off? No schedule starts by itself until it is on again.", { host })
+    : t("Turn the timer of {host} on? It runs sandbox-ai schedule tick every minute as that host's user (a systemd user timer or a LaunchAgent).", { host }),
+  timerOn ? t("Yes, turn it off") : t("Yes, turn it on"), async () => {
+    try { const r = await api("POST", hostPath("/schedules-timer", host), { on: !timerOn, confirm: true }); doneToast(t("Timer"), r); show("starts"); } catch (e) { failed(t("Timer"))(e); }
+  }, { trigger: event.target }) }, timerOn ? t("Turn the timer off…") : t("Turn the timer on…"));
+  timerRow.append(el("span", {}, timerOn ? t("Timer: on") : t("Timer: off - nothing starts by itself")), timerButton);
+  const form = el("div", { class: "form" },
+    el("label", { for: "schedule-name" }, t("Name")), name,
+    el("label", { for: "schedule-when" }, t("When")), el("div", { class: "row" }, whenKind, whenValue),
+    el("label", { for: "schedule-on-push" }, t("Also on a push to (a repository of that host)")), onPush,
+    el("label", { for: "schedule-agent" }, t("Agent")), agent,
+    el("label", { for: "schedule-prompt" }, t("Task")), prompt,
+    el("label", { for: "schedule-options" }, t("Start options")), options,
+    el("label", { for: "schedule-agent-args" }, t("Agent arguments (its one-shot form, without a task)")), agentArgs,
+    el("label", { for: "schedule-preset" }, t("Preset")), preset,
+    el("label", { for: "schedule-board" }, t("Board (kept on that host)")), board,
+    el("label", { for: "schedule-workdir" }, t("Workspace")), workdir,
+    el("label", { for: "schedule-ask" }, t("Questions")), ask,
+    el("label", { for: "schedule-limit" }, t("Time limit")), limit,
+    el("label", { for: "schedule-missed" }, t("Runs missed while off")), missed,
+    el("label", { for: "schedule-commit" }, t("Commit the changes to the branch")), commit,
+    el("label", { for: "schedule-push" }, t("Then push it to the remote")), push,
+    el("label", { for: "schedule-notify" }, t("Notify when a run ends")), notify,
+    el("span"), row, result);
+  clear(box).append(
+    el("p", { class: "hint" }, t("An agent started on a timetable or a trigger, with a report of each run. Nobody answers questions at night: the ask mode off refuses what is not allowed.")),
+    timerRow,
+    table([t("Name"), t("When"), t("Agent"), t("Questions"), t("Next run"), t("Last run"), t("State"), ""], rows, t("No schedules on this host.")),
+    history, el("div", { class: "card" }, form));
+}
 
 // The preset categories of a sandbox-ai without `presets categories` (before 0.1.94), in the page's words. A newer
 // host says its own (presets.CATEGORY_INFO: the one list, with English and German titles): presetGroups.
@@ -1883,14 +2592,58 @@ async function drawStartForm(card, heading, host) {
   const modelFilter = el("input", { type: "search", id: "start-model-filter", class: "mono", placeholder: t("Filter"), "aria-label": t("Filter the models"), autocomplete: "off", hidden: true });
   // as the app's wizard has it: a server chosen, nothing else (no cloud provider) unless unticked
   const onlyServer = el("input", { type: "checkbox", id: "start-only-server", checked: true });
+  // Claude Code at a server of your own: the tools the proxy keeps in its requests (--llm-tools; core by default)
+  const claudeTools = el("select", { id: "start-llm-tools", "aria-label": t("Claude Code's tools for the local model") },
+    el("option", { value: "" }, t("those local models use (core)")), el("option", { value: "all" }, t("all of Claude Code's tools")));
+  const claudeToolsRow = el("label", { hidden: true, title: t("Claude Code's tools that local models never used (Agent, Monitor, Workflow, Cron ...: ~10k tokens per request) are left out; Bash, Read, Edit, Write, Glob, Grep, TodoWrite and every MCP tool stay. Other lists: --llm-tools core,TOOL in the options.") },
+    t("Claude Code's tools:"), " ", claudeTools);
   const modelHint = el("span", { class: "hint" });
+  // the effort (--effort): the levels the cloud model chosen takes (sandbox-ai models --json of that host: the same
+  // table the launcher refuses by), else the agent's; a level the next model does not take is reset, said below it
+  const effort = el("select", { id: "start-effort", "aria-describedby": "start-effort-hint" });
+  const effortHint = el("span", { class: "hint", id: "start-effort-hint" });
+  let cloud = null;  // that host's table of cloud models (models --json), null: an older sandbox-ai without it
+  // the use case (llm recommend --json on that host): picks the agent and a model of that host's servers, measured best
+  // for it, and starts with --use-case (its settings for that model in that agent over the model profile, under yours)
+  const useCase = el("select", { id: "start-use-case", "aria-describedby": "start-use-case-hint" },
+    el("option", { value: "" }, t("none: choose the agent and the model yourself")));
+  const useCaseHint = el("div", { class: "hint", id: "start-use-case-hint" });
+  const useCaseKnown = el("ul", { class: "use-case-known", id: "start-use-case-known", "aria-label": t("What we know") });
+  // its pairs: every model of the chosen server with the agent it was measured best in, best first (not measured and
+  // unsafe ones too, with why); "Use this pair" sets the agent and the model
+  const useCasePairs = el("ul", { class: "use-case-pairs", id: "start-use-case-pairs", "aria-label": t("Recommended pairs") });
+  let recommended = null;
   const servers = [], profiles = [], mcpNames = new Set();
   let presets = [], presetCategories = [], chosen = null, fields = [];
   const presetsLoaded = { done: false, error: null };
-  const syncOnly = () => { onlyServer.disabled = !model.value || model.disabled; if (onlyServer.disabled && !model.value) onlyServer.title = t("only with a server of its own: the cloud is the agent's provider"); else onlyServer.removeAttribute("title"); };
+  const cloudOf = () => { const value = String(model.value || ""); return value.startsWith(CLOUD_MARK) ? value.slice(CLOUD_MARK.length) : ""; };
+  const syncOnly = () => {
+    const server = Boolean(model.value) && !cloudOf();
+    onlyServer.disabled = !server || model.disabled;
+    if (onlyServer.disabled && !server) onlyServer.title = t("only with a server of its own: the cloud is the agent's provider"); else onlyServer.removeAttribute("title");
+    claudeToolsRow.hidden = !(agentOf() === "claude" && server && !model.disabled);
+  };
+  const drawEfforts = (note) => {
+    const was = effort.value;
+    const entry = cloudAgent(cloud, agentOf());
+    const levels = cloudEfforts(cloud, agentOf(), cloudOf());
+    const listed = cloudModel(cloud, agentOf(), cloudOf());
+    const fallback = listed && listed.default_effort ? t("the agent's own default ({level} for this model)", { level: listed.default_effort }) : t("the agent's own default");
+    clear(effort).append(el("option", { value: "" }, fallback), ...levels.map(level => el("option", { value: level }, level)));
+    effort.value = levels.includes(was) ? was : "";
+    effort.disabled = !levels.length;
+    effort.title = !entry ? t("this host's sandbox-ai has no table of cloud models yet: --effort in the options")
+      : !(entry.efforts || []).length ? `${t("{agent} sets its effort per model in its own configuration", { agent: agentOf() })}${entry.effort_note ? `: ${entry.effort_note}` : ""}` : "";
+    effortHint.textContent = note && was && !effort.value ? t("The effort {level} was reset: {model} does not take it.", { level: was, model: cloudOf() || t("the agent's default model") }) : "";
+  };
   const drawModels = () => {
     const was = model.value;
     clear(model).append(el("option", { value: "" }, t("the agent's provider (cloud)")));
+    // the agent's cloud models, grouped by provider (sandbox-ai models --json of that host)
+    for (const [provider, rows] of cloudGroups(cloud, agentOf())) {
+      model.append(el("optgroup", { label: t("Cloud: {provider}", { provider }) }, rows.map(m =>
+        el("option", { value: CLOUD_MARK + m.id, title: cloudTitle(m) }, `${m.name} — ${m.id}`))));
+    }
     for (const server of servers) {
       const why = modelProblem(server, agentOf());
       const label = `${server.name}${server.model ? ` (${server.model})` : ""}${why ? ` — ${why}` : ""}`;
@@ -1898,12 +2651,14 @@ async function drawStartForm(card, heading, host) {
       for (const m of server.models || []) {
         const about = (server.about || {})[m] || {};
         const extra = [about.loaded === true ? t("loaded") : null, wholeNumber(about.size) ? gbText(about.size) : null].filter(Boolean);
-        model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || null }, `${server.name}:${m}${extra.length ? `  (${extra.join(", ")})` : ""}`));
+        const light = supportOf(about.support);  // the research's traffic light, in words (a select has no colours)
+        model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || (light ? lightSummary(light) : null) },
+          `${server.name}:${m}${extra.length ? `  (${extra.join(", ")})` : ""}${lightSuffix(light)}`));
       }
     }
-    const still = [...model.children].find(o => o.value === was && !o.disabled);
+    const still = [...model.querySelectorAll("option")].find(o => o.value === was && !o.disabled);
     model.value = still ? was : "";
-    modelFilter.hidden = model.children.length <= 15;
+    modelFilter.hidden = model.querySelectorAll("option").length <= 15;
     filterModels();
     // a preset that names the LLM server itself: the model is its value
     const byPreset = fields.some(f => f.spec.kind === "llm");
@@ -1911,12 +2666,14 @@ async function drawStartForm(card, heading, host) {
     if (byPreset) model.value = "";
     modelHint.textContent = byPreset ? t("the preset chooses the LLM server (below)") : "";
     syncOnly();
+    drawEfforts(false);
     for (const f of fields) if (f.spec.kind === "llm") f.redraw();
   };
-  model.addEventListener("change", syncOnly);
+  model.addEventListener("change", () => { syncOnly(); drawEfforts(true); });
+  effort.addEventListener("change", () => { effortHint.textContent = ""; });
   function filterModels() {
     const words = String(modelFilter.value || "").trim().toLowerCase();
-    for (const option of model.children) option.hidden = Boolean(words) && Boolean(option.value) && option.value !== model.value && !option.value.toLowerCase().includes(words);
+    for (const option of model.querySelectorAll("option")) option.hidden = Boolean(words) && Boolean(option.value) && option.value !== model.value && !option.value.toLowerCase().includes(words) && !option.textContent.toLowerCase().includes(words);
   }
   modelFilter.addEventListener("input", filterModels);
   const preset = el("select", { id: "preset" });
@@ -1952,7 +2709,10 @@ async function drawStartForm(card, heading, host) {
         if (kind === "llm") for (const server of servers) {
           const why = modelProblem(server, agentOf());
           input.append(el("option", { value: server.name, disabled: Boolean(why), title: why || null }, `${server.name}${why ? ` — ${why}` : ""}`));
-          for (const m of server.models || []) input.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why) }, `${server.name}:${m}`));
+          for (const m of server.models || []) {
+            const light = supportOf(((server.about || {})[m] || {}).support);
+            input.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: light ? lightSummary(light) : null }, `${server.name}:${m}${lightSuffix(light)}`));
+          }
         } else for (const p of profiles.filter(x => !torValue(key, spec) || x.type === "tor")) input.append(el("option", { value: p.profile }, `${p.profile} (${p.type || "?"})`));
         const still = [...input.children].find(o => o.value === was && !o.disabled);
         input.value = still ? was : "";
@@ -1998,7 +2758,94 @@ async function drawStartForm(card, heading, host) {
     drawModels();
   };
   preset.addEventListener("change", choosePreset);
-  agent.addEventListener("change", () => { drawModels(); drawPresets(); });
+  const drawUseCases = () => {
+    const was = useCase.value;
+    clear(useCase).append(el("option", { value: "" }, t("none: choose the agent and the model yourself")));
+    for (const found of recommended || []) {
+      useCase.append(el("option", { value: found.use_case, title: String(found.about || "") || null },
+        `${t(String(found.label || found.use_case))} — ${t(USE_CASE_STATUS[found.status] || String(found.status || ""))}`));
+    }
+    useCase.value = [...useCase.children].some(o => o.value === was) ? was : "";
+  };
+  // the agent chosen and what that model's support says of it (llm models --json's "support": model_profiles.support)
+  const supportFor = (pair) => {
+    const about = ((servers.find(x => x.name === pair.server) || {}).about || {})[pair.model];
+    return supportOf(about && about.support);
+  };
+  // what is known of PAIR's model in AGENTNAME, as the app says it: the use case table's rank of it there (llm
+  // recommend --json's in_agents: "rank 3, from other tasks"), else the profile's status (llm models --json's support,
+  // else in_agents' own), else untested
+  const statusIn = (pair, agentName) => {
+    const known = pair.in_agents && typeof pair.in_agents === "object" ? pair.in_agents[agentName] : null;
+    const rank = known && Number.isInteger(known.rank) && known.rank > 0 ? known.rank : null;
+    if (rank) return known.measured ? t("rank {rank}, measured", { rank }) : t("rank {rank}, from other tasks", { rank });
+    const s = supportFor(pair);
+    const own = s && Array.isArray(s.harnesses) ? s.harnesses.find(h => h && h.agent === agentName) : null;
+    const status = own ? own.status : s && textList(s.untested).includes(agentName) && s.status ? s.status
+      : known && typeof known.status === "string" && known.status ? known.status : "untested";
+    return STATUS_WORDS[status] ? t(STATUS_WORDS[status]) : String(status);
+  };
+  // the agent's name as that host's sandbox-ai says it (support's "names", else the use case's harness_names), else
+  // its id
+  const agentLabel = (pair, agentName, found) => {
+    const s = supportFor(pair);
+    if (s && typeof namesOf(s)[agentName] === "string") return namesOf(s)[agentName];
+    const names = found && found.harness_names && typeof found.harness_names === "object" ? found.harness_names : {};
+    return typeof names[agentName] === "string" ? names[agentName] : agentName;
+  };
+  const drawPairs = () => {
+    clear(useCasePairs);
+    const found = (recommended || []).find(r => r.use_case === useCase.value);
+    if (!found) return;
+    const chosenServer = String(model.value || "").startsWith(CLOUD_MARK) ? "" : String(model.value || "").split(":")[0];
+    const pairs = (Array.isArray(found.pairs) ? found.pairs : []).filter(p => p && typeof p.model === "string" && typeof p.server === "string"
+      && (!chosenServer || p.server === chosenServer));
+    for (const p of pairs) {
+      const harness = String(p.harness_name || p.harness || "") || t("any agent");
+      const where = p.unsafe ? t("⚠ unsafe for this use case") : p.source === "table"
+        ? (p.basis === "measured" ? t("rank {rank}, measured", { rank: p.rank }) : t("rank {rank}, from other tasks", { rank: p.rank }))
+        : t("not measured for this use case");
+      const lines = [el("strong", {}, `${p.model} × ${harness}`), ` — ${where}${p.fit_text ? ` · ${p.fit_text}` : ""}`];
+      const why = p.unsafe ? t("Unsafe for this use case: {reason}", { reason: String(p.unsafe) }) : String(p.why || "");
+      const more = [why, p.evidence ? t("Measured: {evidence}", { evidence: [p.evidence, p.date].filter(Boolean).join(", ") }) : ""];
+      if (p.harness && agent.value !== p.harness) {
+        more.push(p.source === "not measured"
+          ? t("{model} is not measured for this use case, best by its traffic light in {harness}; in {agent}: {status}", { model: p.model, harness, agent: agentLabel(p, agent.value, found), status: statusIn(p, agent.value) })
+          : t("{model} is measured best in {harness}; in {agent}: {status}", { model: p.model, harness, agent: agentLabel(p, agent.value, found), status: statusIn(p, agent.value) }));
+      }
+      const value = `${p.server}:${p.model}`;
+      const take = () => {
+        if (p.harness && AGENTS.includes(p.harness) && agent.value !== p.harness) { agent.value = p.harness; drawModels(); drawPresets(); }
+        if ([...model.children].some(o => o.value === value && !o.disabled)) { model.value = value; syncOnly(); }
+        drawPairs();
+      };
+      // an unsafe pair: asked in place first, with why (Cancel puts the button back)
+      const holder = el("span", { class: "row" });
+      holder.append(el("button", { class: "small", type: "button", onclick: () => (p.unsafe
+        ? confirmIn(holder, t("The research marks {model} unsafe for this use case: {reason}. With untrusted input it may follow a planted instruction again. Use it anyway?", { model: p.model, reason: String(p.unsafe) }), t("Use it anyway"), take)
+        : take()) }, t("Use this pair")));
+      useCasePairs.append(el("li", { class: p.unsafe ? "status-warn" : p.source === "table" ? null : "muted" }, ...lines,
+        el("div", { class: "hint" }, more.filter(Boolean).join(" · ")), holder));
+    }
+  };
+  const chooseUseCase = () => {
+    const found = (recommended || []).find(r => r.use_case === useCase.value);
+    clear(useCaseKnown); useCaseHint.textContent = "";
+    if (!found) { drawPairs(); return; }
+    const c = found.choice;
+    if (c) {
+      if (AGENTS.includes(c.harness) && agent.value !== c.harness) { agent.value = c.harness; drawModels(); drawPresets(); }
+      const value = `${c.server}:${c.model}`;
+      if ([...model.children].some(o => o.value === value && !o.disabled)) { model.value = value; syncOnly(); }
+    }
+    useCaseHint.textContent = useCaseText(found);
+    for (const [sign, texts] of [["✗", [...((c && c.fails) || []), ...(found.fails || [])]], ["?", found.unknown || []]])
+      for (const text of texts) useCaseKnown.append(el("li", { class: sign === "✗" ? "status-warn" : null }, `${sign} ${text}`));
+    drawPairs();
+  };
+  useCase.addEventListener("change", chooseUseCase);
+  agent.addEventListener("change", () => { drawModels(); drawPresets(); drawPairs(); });
+  model.addEventListener("change", () => drawPairs());
   drawModels(); drawPresets();
   // what that host has: its LLM servers (and their models), presets, VPN profiles and MCP servers, asked at once
   const asked = [
@@ -2008,7 +2855,7 @@ async function drawStartForm(card, heading, host) {
         api("GET", hostPath(`/llm/${encodeURIComponent(server.name)}/models`, host)).then((models) => {
           const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string" && m.name);
           server.models = listed.map(m => m.name);  // every one of them, however many
-          server.about = Object.fromEntries(listed.map(m => [m.name, { size: m.size, loaded: m.loaded }]));
+          server.about = Object.fromEntries(listed.map(m => [m.name, { size: m.size, loaded: m.loaded, support: m.support }]));
           if (card.isConnected) drawModels();
         }).catch(() => {});
       }
@@ -2020,7 +2867,17 @@ async function drawStartForm(card, heading, host) {
       .catch(() => {}),
     api("GET", hostPath("/vpn", host)).then((list) => { for (const p of (Array.isArray(list) ? list : []).filter(x => x && typeof x.profile === "string")) profiles.push(p); }).catch(() => {}),
     api("GET", hostPath("/mcp", host)).then((list) => { for (const x of (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string")) mcpNames.add(x.name); }).catch(() => {}),
+    // its table of cloud models (an older sandbox-ai has none: the agent's provider only, --model in the options)
+    api("GET", hostPath("/models", host)).then((found) => { cloud = found && typeof found === "object" && found.agents && typeof found.agents === "object" ? found : null; }).catch(() => {}),
   ];
+  // (not awaited with the rest: it asks every server of that host, a few seconds each)
+  useCaseHint.textContent = t("Asking the model servers what they have (sandbox-ai llm recommend)…");
+  api("GET", hostPath("/llm-recommend", host), undefined, { background: true }).then((found) => {
+    recommended = (found && Array.isArray(found.use_cases) ? found.use_cases : []).filter(r => r && typeof r.use_case === "string");
+    if (!card.isConnected) return;
+    useCaseHint.textContent = "";
+    drawUseCases(); chooseUseCase();
+  }).catch(() => { if (card.isConnected) useCaseHint.textContent = t("This host's sandbox-ai has no use cases yet (sandbox-ai llm recommend): update it."); });
   const name = el("input", { id: "name", placeholder: t("empty: a codename like brisk-otter-lantern"), pattern: NEW_START_NAME.source.slice(1, -1) });
   const workspace = el("input", { id: "workspace", placeholder: "/home/you/src/project", class: "mono", required: true, "aria-describedby": "workspace-hint" });
   const options = el("textarea", { id: "options", rows: 3, class: "mono", placeholder: "--mode high\n--allow-pypi\n-mm sonnet", "aria-describedby": "options-hint" });
@@ -2060,19 +2917,30 @@ async function drawStartForm(card, heading, host) {
       if (typeof workspace.focus === "function") workspace.focus();
       return;
     }
-    const server = model.disabled ? "" : model.value;  // "only this server" means nothing for the cloud
+    const chosenCloud = model.disabled ? "" : cloudOf();
+    const server = model.disabled || chosenCloud ? "" : model.value;  // "only this server" means nothing for the cloud
+    if (useCase.value && !server && !fields.some(f => f.spec.kind === "llm" && f.value())) {
+      startStatus.append(notice(t("A use case chooses among the models of a server of yours: choose a model server (Model), or no use case."), "error"));
+      return;
+    }
     // the chooser's --ask first: an --ask of the options comes later and wins, as on a command line
     list = withModel([...presetArgs, ...(["off", "allow"].includes(ask.value) ? ["--ask", ask.value] : []), ...list], server, onlyServer.checked && Boolean(server));
+    if (server && agentOf() === "claude" && claudeTools.value) list = withOption(list, ["--llm-tools", claudeTools.value]);
+    if (useCase.value) list = withOption(list, ["--use-case", useCase.value]);
+    if (chosenCloud || (effort.value && !effort.disabled)) list = withCloudModel(list, chosenCloud, effort.disabled ? "" : effort.value);
     openTerminal({ kind: "start", host, agent: agentOf(), name: textOf(name), workspace: textOf(workspace), options: JSON.stringify(list) }, textOf(name) || t("new {agent}", { agent: agentOf() }));
   }) }, t("Start in a terminal"));
   card.append(el("div", { class: "form" },
     el("label", { for: "start-host" }, t("Host")), hostChoice,
+    el("label", { for: "start-use-case" }, t("Use case")), el("div", {}, useCase, useCaseHint, useCaseKnown, useCasePairs),
     el("label", { for: "agent" }, t("Agent")), agent,
     el("label", { for: "start-model" }, t("Model")), el("div", { class: "row" }, model,
-      modelFilter, el("label", {}, onlyServer, " ", t("only this server")), el("button", { class: "small", onclick: () => { state.host = host; show("llm"); } }, t("Add a model server…")), modelHint),
+      modelFilter, el("label", {}, onlyServer, " ", t("only this server")), claudeToolsRow, el("button", { class: "small", onclick: () => { state.host = host; show("llm"); } }, t("Add a model server…")), modelHint),
+    el("label", { for: "start-effort" }, t("Effort")), el("div", { class: "row" }, effort, effortHint),
     el("label", { for: "name" }, t("Name")), name,
     el("label", { for: "workspace" }, t("Workspace")), el("div", {}, workspace,
-      el("div", { class: "hint", id: "workspace-hint" }, t("Required: the folder on that host the agent works on, as /work (an absolute path, or ~/…). The folder this service runs in is never taken instead."))),
+      el("div", { class: "hint", id: "workspace-hint" }, t("Required: the folder on that host the agent works on, as /work (an absolute path, or ~/…). The folder this service runs in is never taken instead."),
+        " ", t("A folder of another machine: sshfs://USER@MACHINE/PATH - that host mounts it with sshfs (its SSH keys and ~/.ssh/config), the agent gets only the files."))),
     el("label", { for: "preset" }, t("Preset")), el("div", {}, preset, " ", presetHint),
     presetValues, presetMcp,
     el("label", { for: "start-ask" }, t("Questions")), el("div", {}, ask, askHint),
@@ -2084,6 +2952,27 @@ async function drawStartForm(card, heading, host) {
   await Promise.all(asked);
   if (!live() || !card.isConnected) return;
   drawModels(); drawPresets();
+}
+
+// The use cases' statuses (llm recommend --json: model_usecases.STATUS_TEXT) and the table's labels, in the page's
+// language; a label the table has that is not here is shown as it comes.
+const USE_CASE_STATUS = { measured: N_("measured on this use case's tasks"), indirect: N_("from other tasks than this use case's own"), "not tested": N_("not tested yet") };
+const USE_CASE_LABELS = [N_("Coding and debugging"), N_("Sandbox behaviour"), N_("Untrusted input"), N_("Web research"), N_("Code review"),
+  N_("Security and reverse engineering"), N_("Large codebase"), N_("Building from a spec"), N_("Ops: containers, CI, shell"),
+  N_("Small fast jobs"), N_("Vision"), N_("Teams and helpers"), N_("Recovery: compaction and resume")];
+
+// What FOUND (one use case of llm recommend --json) chose and why, in one text: the choice, its rank or where it comes
+// from, why, the evidence and what fits; or that nothing was found (not tested yet, or nothing of its table there).
+function useCaseText(found) {
+  const c = found.choice;
+  if (!c) return found.status === "not tested" ? t("Not tested yet, and no model of this host's servers to go by: choose the model yourself.") : t("Nothing of this use case's table is on this host's servers: choose the model yourself.");
+  const where = c.rank ? t("rank {rank}", { rank: c.rank }) : c.related ? t("nearest: the choice for {use_case}", { use_case: c.related }) : t("nearest: by the traffic light, nothing measured for it");
+  const parts = [t("Choice: {model} in {harness} ({where})", { model: `${c.server}:${c.model}`, harness: c.harness_name || c.harness, where }), String(c.why || "")];
+  if (c.evidence) parts.push(t("Measured: {evidence}", { evidence: [c.evidence, c.date].filter(Boolean).join(", ") }));
+  if (c.settings_text) parts.push(t("Settings over the model profile: {settings}", { settings: c.settings_text }));
+  if (c.fit_text) parts.push(String(c.fit_text));
+  if (c.note) parts.push(String(c.note));
+  return parts.filter(Boolean).join(" · ");
 }
 
 // Whether the options LIST (before a "--") name a workspace: --workspace DIR, --workspace=DIR, -w DIR, -wDIR.
@@ -2118,6 +3007,73 @@ function withModel(list, choice, only) {
   const added = ["--llm", choice, ...(only ? ["--no-provider-defaults"] : [])];
   if (at < 0) out.push(...added); else out.splice(at, 0, ...added);
   return out;
+}
+
+// The value of a cloud model in the start form's Model choice (an LLM server's name never starts with it).
+const CLOUD_MARK = "=";
+
+// AGENT's part of that host's table of cloud models (sandbox-ai models --json), or null.
+function cloudAgent(cloud, agent) {
+  const entry = cloud && cloud.agents ? cloud.agents[agent] : null;
+  return entry && typeof entry === "object" && Array.isArray(entry.models) ? entry : null;
+}
+
+// AGENT's listed model MODEL, or null (not listed: it is passed on as it is).
+function cloudModel(cloud, agent, model) {
+  const entry = cloudAgent(cloud, agent);
+  return entry && model ? entry.models.find(m => m && m.id === model) || null : null;
+}
+
+// The effort levels to offer for AGENT with MODEL: the model's own where the table knows them (a list), else the
+// agent's (a model not listed, or one whose levels are not known per model): cloud_models.efforts, as the app has it.
+function cloudEfforts(cloud, agent, model) {
+  const entry = cloudAgent(cloud, agent);
+  if (!entry) return [];
+  const listed = cloudModel(cloud, agent, model);
+  const levels = listed && Array.isArray(listed.efforts) ? listed.efforts : entry.efforts;
+  return (Array.isArray(levels) ? levels : []).filter(level => typeof level === "string");
+}
+
+// [[provider, models]] of AGENT's cloud models, in the table's order.
+function cloudGroups(cloud, agent) {
+  const entry = cloudAgent(cloud, agent);
+  const groups = new Map();
+  for (const m of entry ? entry.models : []) {
+    if (!m || typeof m.id !== "string" || typeof m.name !== "string") continue;
+    const provider = String(m.provider || "?");
+    if (!groups.has(provider)) groups.set(provider, []);
+    groups.get(provider).push(m);
+  }
+  return [...groups.entries()];
+}
+
+// What a cloud model's option says on hover: its levels and context.
+function cloudTitle(m) {
+  const levels = m.efforts === null ? t("the agent's levels") : (m.efforts || []).length ? m.efforts.join(", ") : t("none");
+  const parts = [t("Effort: {levels}", { levels }) + (m.default_effort ? ` (${t("default {level}", { level: m.default_effort })})` : "")];
+  if (Number.isInteger(m.context) && m.context > 0) parts.push(t("Context: {tokens} tokens", { tokens: m.context >= 1e6 ? `${Math.floor(m.context / 1e6)}M` : `${Math.round(m.context / 1000)}k` }));
+  return parts.join("\n");
+}
+
+// The options LIST with the cloud MODEL (--model) and EFFORT (--effort) chosen in the form: those of the options go
+// (the form's choice wins), the new ones before "--" (the agent's own arguments stay as they are).
+function withCloudModel(list, model, effort) {
+  const drop = new Set([...(model ? ["--model", "-mm"] : []), ...(effort ? ["--effort", "-ef"] : [])]);
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const word = list[i];
+    if (word === "--") { out.push(...list.slice(i)); break; }
+    if (drop.has(word)) { i++; continue; }
+    if ([...drop].some(option => word.startsWith(`${option}=`))) continue;
+    out.push(word);
+  }
+  return withOption(out, [...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : [])]);
+}
+
+// The options LIST with ADDED before its "--" (the agent's own arguments stay last).
+function withOption(list, added) {
+  const at = list.indexOf("--");
+  return at < 0 ? [...list, ...added] : [...list.slice(0, at), ...added, ...list.slice(at)];
 }
 
 // sandbox-ai gc on a host: first what it would remove (--dry-run), then that, asked first.
@@ -2175,6 +3131,72 @@ function gcCard(main, host) {
   openCard(main, card, null);
 }
 
+// The storage check of a host (NAME: of one start): what could be freed, each item with how much, its exact command
+// and whether it is safe while starts run; ticked items applied one by one, asked first (storage-apply).
+const STORAGE_KINDS = { caches: N_("Empty the download caches (filled again when needed)"), build: N_("Remove the build output and temp folders (made again by a build)"), toolchains: N_("Remove the toolchains (installed again by their tools)"), transcripts: N_("Remove old transcripts for good (never the newest)"), pack: N_("Pack the HOME into one archive (unpacked again when resumed)"), unpack: N_("Unpack the HOME now"), compact: N_("Compact old transcripts in place (read as before)"), logs: N_("Remove the old log files of its project"), gc: N_("What Clean up… does (leftovers, logs compressed, expired starts)"), images: N_("Remove sandbox-ai's Podman images without a name"), log_folders: N_("Remove the log folders not written for half a year") };
+function storageSize(value) {
+  let size = Number(value) || 0;
+  for (const [unit, shift] of [["TiB", 40], ["GiB", 30], ["MiB", 20], ["KiB", 10]]) {
+    if (Math.abs(size) >= 2 ** shift) { const n = size / 2 ** shift; return `${Math.abs(n) < 100 ? n.toFixed(1) : n.toFixed(0)} ${unit}`; }
+  }
+  return `${size} B`;
+}
+function storageCard(main, host, name) {
+  const old = document.getElementById("storage-card");
+  if (old) dropCard(old);
+  const result = el("div"), actions = el("div", { class: "row" });
+  const path = name ? `/gc/check/${encodeURIComponent(name)}` : "/gc/check";
+  const load = async () => {
+    clear(result); clear(actions);
+    result.append(el("p", { class: "hint" }, t("Measuring…")));
+    let r;
+    try { r = await api("GET", hostPath(path, host)); } catch (e) { clear(result).append(errorNotice(e)); return; }
+    r = r && typeof r === "object" ? r : {};
+    const plan = (Array.isArray(r.plan) ? r.plan : []).filter(item => item && Array.isArray(item.argv) && item.argv.every(part => typeof part === "string"));
+    clear(result);
+    if (name) {
+      const start = ((r.detail || {}).starts || [])[0] || {};
+      const kinds = Object.entries(start.kinds || {}).filter(([, v]) => Number(v) > 0).sort((a, b) => b[1] - a[1]);
+      result.append(el("p", {}, t("Its HOME: {size} ({state})", { size: storageSize(start.bytes), state: String(start.state || "?") })),
+        kinds.length ? el("p", { class: "hint" }, kinds.map(([k, v]) => `${k} ${storageSize(v)}`).join(", ")) : null,
+        el("p", { class: "hint" }, t("The logs of its project: {size}; the workspace checkpoints of its project: {count}, {checkpoints}", { size: storageSize((r.logs || {}).bytes), count: Number((r.checkpoints || {}).count) || 0, checkpoints: storageSize((r.checkpoints || {}).bytes) })));
+      for (const entry of r.starts || []) if (entry && typeof entry.growth === "number") result.append(el("p", { class: "hint" }, t("Since the last check: {growth}", { growth: (entry.growth >= 0 ? "+" : "-") + storageSize(Math.abs(entry.growth)) })));
+    } else {
+      result.append(el("p", {}, t("{size} could be freed (the notice comes above {threshold}).", { size: storageSize(r.total), threshold: storageSize(r.threshold) })));
+      for (const entry of r.grew || []) if (entry) result.append(el("p", { class: "hint" }, t("{name} grew by {size} since the last check.", { name: String(entry.name), size: storageSize(entry.bytes) })));
+    }
+    if (!plan.length) { result.append(el("p", { class: "hint" }, t("Nothing could be freed."))); return; }
+    const boxes = plan.map(item => el("input", { type: "checkbox", checked: item.checked === true }));
+    const rows = plan.map((item, i) => el("tr", { title: `${String(item.what || "")}\n${String(item.command || "")}` },
+      el("td", {}, el("label", {}, boxes[i], " ", STORAGE_KINDS[item.kind] ? t(STORAGE_KINDS[item.kind]) : String(item.what || ""))),
+      el("td", { class: "num" }, (item.estimate ? t("about {size}", { size: storageSize(item.bytes) }) : storageSize(item.bytes))),
+      el("td", {}, String(item.start || "-")),
+      el("td", {}, item.safe_running ? t("safe") : t("only while it is stopped")),
+      el("td", { class: "mono" }, String(item.command || ""))));
+    result.append(el("div", { class: "table-scroll" }, el("table", {}, el("thead", {}, el("tr", {}, ...[t("What"), t("Frees"), t("Name"), t("While it runs"), t("Command")].map(h => el("th", {}, h)))), el("tbody", {}, ...rows))));
+    const go = el("button", { class: "danger", onclick: () => {
+      const chosen = plan.filter((item, i) => boxes[i].checked);
+      if (!chosen.length) { toast("info", t("Tick what to do first."), ""); return; }
+      confirmIn(actions, t("Run these {count} command(s) on {host}? What they remove is gone for good (caches and build output are made again when needed; compacted transcripts and packed HOMEs are read as before).", { count: chosen.length, host }), t("Yes, apply them"), async () => {
+        let done = 0;
+        for (const item of chosen) {
+          try { await api("POST", hostPath("/gc/apply", host), { argv: item.argv, confirm: true }); done += 1; }
+          catch (e) { failed(t("Not done: {command}", { command: String(item.command || "") }))(e); }
+        }
+        toast("success", t("Applied {count} item(s).", { count: done }), "");
+        load();
+      }, { trigger: go });
+    } }, t("Apply selected…"));
+    actions.append(go);
+  };
+  const card = el("div", { class: "card", id: "storage-card" }, el("h2", {}, name ? t("Storage of {name} on {host}", { name, host }) : t("Optimize on {host}", { host })),
+    el("p", { class: "hint" }, t("What could be freed, each with how much, whether it is safe while starts run, and the exact command. Tick what to do and Apply selected: it is asked first, then each command runs on its own. Nothing is removed before.")),
+    el("div", { class: "row" }, el("button", { onclick: (event) => busy(event.target, load) }, t("Check again")), el("button", { onclick: () => dropCard(card) }, t("Close"))),
+    result, actions);
+  openCard(main, card, null);
+  load();
+}
+
 // A card about one start (its network, its resources while it runs; More, its history): switched off once the start
 // is in a state the card does not fit (REF.alive; for network and resources: no longer running) or goes (a later
 // listing says so), with a notice and its Close.
@@ -2214,6 +3236,31 @@ function cardRef(s, getName, setName, heading, title, alive) {
 }
 
 const NET_PRESETS = ["pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm"];
+// The names each preset opens (agent_sandbox.PRESETS, a test agrees): a preset the run has all of is shown ticked
+const NET_PRESET_HOSTS = {"pypi": ["pypi.org", "files.pythonhosted.org"], "github": ["github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"], "gitlab": ["gitlab.com", "registry.gitlab.com"], "kernel-org": ["kernel.org", "www.kernel.org", "git.kernel.org", "cdn.kernel.org", "mirrors.kernel.org", "lore.kernel.org"], "duckduckgo": ["duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com", "links.duckduckgo.com", "api.duckduckgo.com"], "npm": ["registry.npmjs.org"]};
+
+// What a card's form keeps of what was typed and not sent - the desktop app's rule (sandbox_ai_app/drafts.py): a
+// card closed (Network… or Resources… of another start, Close, a refusal) and opened again for the same start fills
+// it in again; in this page's memory only (never in the browser's storage), dropped once sent and taken. No field
+// kept here holds a secret's value: a Git login and an API key name where the token is (a variable, a secret, a
+// file), never the token.
+const DRAFTS = new Map();
+function cardDraft(key, inputs) {
+  const isBox = (input) => input.getAttribute("type") === "checkbox";
+  const read = (input) => (isBox(input) ? Boolean(input.checked) : String(input.value || ""));
+  const initial = Object.fromEntries(Object.entries(inputs).map(([id, input]) => [id, read(input)]));
+  const kept = DRAFTS.get(key);
+  if (kept) for (const [id, input] of Object.entries(inputs)) {
+    if (!(id in kept) || input.disabled) continue;
+    if (isBox(input)) input.checked = kept[id]; else input.value = kept[id];
+  }
+  const save = () => {
+    const now = Object.fromEntries(Object.entries(inputs).map(([id, input]) => [id, read(input)]));
+    if (Object.keys(now).every(id => now[id] === initial[id])) DRAFTS.delete(key); else DRAFTS.set(key, now);
+  };
+  for (const input of Object.values(inputs)) { input.addEventListener("input", save); input.addEventListener("change", save); }
+  return { restored: Boolean(kept), save, drop: () => DRAFTS.delete(key) };
+}
 
 // the network of a running start (sandbox-ai net allow|revoke|show|untaint on its host): what widens it is asked
 // first (it applies at once: real DNS, ports on the host, wildcards, Git logins)
@@ -2228,17 +3275,26 @@ function networkCard(main, s) {
   const gitUrl = field("net-git-url", "https://git.example.org"), gitRef = field("net-git-ref", "GITEA_TOKEN");
   const gitKind = el("select", { id: "net-git-kind" }, el("option", { value: "env" }, t("variable")), el("option", { value: "secret" }, t("secret")), el("option", { value: "file" }, t("file (its path)")));
   const networks = field("net-allow", "192.0.2.0/24 2001:db8::/64"), nameservers = field("net-nameservers", "192.0.2.53");
+  // a secret of that host as an API key its proxy puts in for one server (net allow --api-key HOST=NAME=SECRET)
+  const keyHost = field("net-key-host", "api.example.com"), keyName = field("net-key-name", "EXAMPLE_KEY"), keySecret = field("net-key-secret", "EXAMPLE_KEY");
+  const blockedList = el("div", { class: "net-blocked" });
   const presetBoxes = NET_PRESETS.map(p => el("input", { type: "checkbox", id: `net-preset-${p}`, value: p }));
   const keep = el("input", { id: "net-keep", type: "checkbox" });
   const shown = el("div", { class: "net-shown" });
   const notes = el("div");
-  const words = (input) => String(input.value || "").split(/\s+/).filter(Boolean);
+  // what was typed and not sent for this start (cardDraft): filled in again
+  const draft = cardDraft(`net ${host} ${startId(s)}`, { hosts, tcp, ports, dns, gitUrl, gitRef, gitKind, networks, nameservers, keyHost, keyName, keySecret, keep,
+    ...Object.fromEntries(presetBoxes.map(b => [`preset-${b.value}`, b])) });
+  // several in a field, separated by commas or spaces (as the launcher's list options take them), each once
+  const words = (input) => [...new Set(String(input.value || "").split(/[\s,]+/).filter(Boolean))];
   const body = (op) => {
     const request = { op, allow_host: words(hosts), allow_tcp: words(tcp), host_ports: words(ports).map(Number), dns: dns.checked };
     // the further options only when given (the requests stay as small as what was asked)
-    const more = { allow: words(networks), presets: presetBoxes.filter(b => b.checked).map(b => b.value), nameservers: words(nameservers) };
+    const more = { allow: words(networks), presets: presetBoxes.filter(b => b.checked && !b.disabled).map(b => b.value), nameservers: words(nameservers) };
     for (const [key, value] of Object.entries(more)) if (value.length) request[key] = value;
     if (gitUrl.value.trim() && gitRef.value.trim()) request.git_login = { url: gitUrl.value.trim(), kind: gitKind.value, ref: gitRef.value.trim() };
+    const text = (input) => String(input.value || "").trim();
+    if (op === "allow" && text(keyHost) && text(keySecret)) request.api_key = { host: text(keyHost).toLowerCase(), name: text(keyName) || text(keySecret), secret: text(keySecret) };
     if (op === "allow" && keep.checked) request.keep = true;
     return request;
   };
@@ -2253,6 +3309,13 @@ function networkCard(main, s) {
   const draw = (data) => {
     const d = data && typeof data === "object" ? data : {};
     const list = (value) => (Array.isArray(value) ? value : []);
+    // a preset the run has every name of: ticked and greyed, never sent again (opened again, the card shows it)
+    const have = new Set([...list(d.host_wildcards).map(String), ...[...list(d.https), ...list(d.tcp)].flatMap(e => list(e && e.names).map(String))]);
+    presetBoxes.forEach((box, i) => {
+      const given = NET_PRESET_HOSTS[NET_PRESETS[i]].every(h => have.has(h));
+      if (given) { box.checked = true; box.disabled = true; box.title = t("allowed already during this run"); }
+      else if (box.disabled) { box.disabled = false; box.checked = false; box.title = ""; }
+    });
     const rows = [];
     const add = (kind, what, detail, request) => rows.push(el("tr", {}, el("td", {}, kind), el("td", { class: "mono" }, what), el("td", { class: "hint" }, detail || ""),
       el("td", { class: "actions" }, request ? el("button", { onclick: revoke(request, what), "aria-label": t("Revoke {what}", { what }) }, t("Revoke")) : el("span", { class: "hint" }, t("on that host: {command}", { command: "sandbox-ai net revoke" })))));
@@ -2267,8 +3330,10 @@ function networkCard(main, s) {
     }
     for (const port of list(d.host_ports)) add(t("Port on the host"), `127.0.0.1:${port}`, t("through a relay"), { host_ports: [Number(port)] });
     if (list(d.dns).length) add(t("Real DNS"), list(d.dns).join(", "), t("every lookup logged"), { dns: true });
-    for (const g of list(d.git)) add(t("Git login"), String(g && g.url), g && g.user ? t("user {user}", { user: g.user }) : "", { git_login: { url: String(g && g.url), kind: "env", ref: "REVOKE" } });
+    for (const g of list(d.git)) add(t("Git login"), String(g && g.url), [g && g.user ? t("user {user}", { user: g.user }) : "", g && g.in_sandbox ? t("token in the sandbox (the agent can read it)") : t("with its proxy")].filter(Boolean).join(", "), { git_login: { url: String(g && g.url), kind: "env", ref: "REVOKE" } });
     for (const n of list(d.all_ports)) add(t("All ports"), String(n), t("every protocol and port"), { allow: [String(n)] });  // net revoke --allow
+    // an API key given during the run: taken back by its variable (net revoke --api-key NAME); its host stays allowed
+    for (const k of list(d.api_keys)) add(t("API key"), String(k && k.host), t("as {name}", { name: String(k && k.name) }), k && k.name ? { api_key: { name: String(k.name) } } : null);
     let taint = null;
     if (d.taint && typeof d.taint === "object" && d.taint.tainted) {
       const holder = el("span", { class: "inline-ask" });
@@ -2284,17 +3349,55 @@ function networkCard(main, s) {
     }
     clear(shown).append(taint || "", table([t("Kind"), t("What"), "", ""], rows, t("Nothing was allowed during this run."), t("Allowed during this run")));
   };
+  // approvals blocked NAME --json there: what it was refused and why; a destination can be allowed for the run
+  const drawBlocked = (data) => {
+    const rows = (Array.isArray(data) ? data : []).slice(0, 50).map((b) => {
+      const target = b && typeof b.target === "object" && b.target ? b.target : {};
+      const request = target.host ? { allow_host: [String(target.host)] } : target.tcp ? { allow_tcp: [String(target.tcp)] } : null;
+      const holder = el("span", { class: "inline-ask" });
+      const allowed = (Array.isArray(b && b.actions) ? b.actions : []).includes("allow-run");
+      if (request && allowed) {
+        const button = el("button", { onclick: () => confirmIn(holder, t("Allow {what} for {name} on {host} now? It applies at once, until the sandbox ends (or you revoke it).", { what: String(b.what || ""), name, host }),
+          t("Yes, allow it"), () => send("allow", Object.assign({ op: "allow", allow_host: [], allow_tcp: [], host_ports: [], dns: false }, request), true), { kind: "primary", trigger: button }) }, t("Allow…"));
+        holder.append(button);
+      }
+      return el("tr", {}, el("td", { class: "mono" }, String((b && b.time) || "").slice(0, 19).replace("T", " ")), el("td", {}, String((b && b.kind) || "")),
+        el("td", { class: "mono" }, String((b && b.what) || "")), el("td", { class: "hint" }, String((b && b.why) || "")), el("td", { class: "actions" }, holder));
+    });
+    clear(blockedList).append(table([t("Time"), t("Kind"), t("What"), t("Why"), ""], rows, t("Nothing was refused."), t("Refused during this run")));
+  };
   const refresh = async () => {
     try { draw(await api("GET", hostPath(`/net/${encodeURIComponent(name)}`, host))); }
     catch (e) { clear(shown).append(errorNotice(e)); }
+    try { drawBlocked(await api("GET", hostPath(`/blocked/${encodeURIComponent(name)}`, host))); }
+    catch (e) { clear(blockedList).append(errorNotice(e)); }
   };
   const send = async (op, request, confirm) => {
     try {
       const r = await api("POST", hostPath(`/net/${encodeURIComponent(name)}`, host), Object.assign({}, request, confirm ? { confirm: true } : {}));
+      draft.drop();  // taken: what was typed is done with
       toast("success", op === "allow" ? t("Allowed for {name} on {host}", { name, host }) : t("Revoked for {name} on {host}", { name, host }), (r && r.output) || "");
       await refresh();
     } catch (e) {
+      // A wildcard below a shared service (*.blob.core.windows.net): asked by itself, with its risk and the shared
+      // suffix named; only that yes sends {confirm_shared_wildcard: true} (then as --allow-shared-wildcard).
+      if (op === "allow" && confirmable(e) === "shared-wildcard" && !request.confirm_shared_wildcard) {
+        const p = e.params || {};
+        confirmIn(actions, t("{wildcards} lies below {suffix}, a shared service where anyone can rent a name: the agent could open any server anyone rents below {suffix}, and send data there. Allow it for {name} on {host} anyway?",
+          { wildcards: String(p.wildcards || ""), suffix: String(p.suffix || ""), name, host }),
+          t("Yes, allow anyway"), () => send(op, Object.assign({}, request, { confirm_shared_wildcard: true }), true));
+        return;
+      }
       if (!confirm && confirmable(e)) { askRefused(actions, e, () => send(op, request, true)); return; }
+      // A Git login the run's connection proxy cannot use (no proxy, a server it does not inspect, an older start):
+      // refused by sandbox-ai, which names the only other way - into the sandbox, where the agent can read the
+      // token. That is asked about by itself, saying so; only that yes sends {in_sandbox: true}.
+      const said = [errorText(e), errorDetail(e)].filter(Boolean).join("\n");
+      if (op === "allow" && request.git_login && !request.git_login.in_sandbox && said.includes("--in-sandbox")) {
+        confirmIn(actions, t("{name} on {host} cannot be given the Git login for {url} through its connection proxy. The only other way puts the token into the sandbox's session directory for its Git: the agent can read it there. Give it so?", { name, host, url: request.git_login.url }) + "\n" + said,
+          t("Yes, into the sandbox"), () => send(op, Object.assign({}, request, { git_login: Object.assign({}, request.git_login, { in_sandbox: true }) }), true));
+        return;
+      }
       failed(t("Could not change the network of {name} on {host}", { name, host }))(e);
     }
   };
@@ -2307,10 +3410,11 @@ function networkCard(main, s) {
     (r.allow || []).length ? t("every protocol and port of {networks}", { networks: r.allow.join(", ") }) : null,
     (r.presets || []).length ? t("the hosts of {presets}", { presets: r.presets.join(", ") }) : null,
     (r.nameservers || []).length ? t("the resolvers {servers} (real DNS)", { servers: r.nameservers.join(", ") }) : null,
-    r.git_login ? t("a Git login for {url}", { url: r.git_login.url }) : null].filter(Boolean);
+    r.git_login ? t("a Git login for {url}", { url: r.git_login.url }) : null,
+    r.api_key ? t("the secret {secret} as the API key {name} for {server}", { secret: r.api_key.secret, name: r.api_key.name, server: r.api_key.host }) : null].filter(Boolean);
   const allow = el("button", { class: "primary", onclick: () => {
     const request = body("allow"), what = widened(request);
-    if (!what.length) { toast("warning", t("Nothing to allow"), t("Name host names, addresses, ports, real DNS or a Git login first.")); return; }
+    if (!what.length) { toast("warning", t("Nothing to allow"), t("Name host names, addresses, ports, real DNS, a Git login or an API key first.")); return; }
     if (!needsConfirm("net-allow")) { send("allow", request, false); return; }
     confirmIn(actions, request.keep ? t("Allow {what} for {name} on {host} now, and keep it in its project's configuration for every later start?", { what: what.join(t(" and ")), name, host })
       : t("Allow {what} for {name} on {host} now? It applies at once, until the sandbox ends (or you revoke it).", { what: what.join(t(" and ")), name, host }),
@@ -2331,7 +3435,9 @@ function networkCard(main, s) {
   const heading = el("h2", {}, title());
   const card = el("div", { class: "card", id: "network-card" }, heading, notes,
     el("p", { class: "hint" }, t("Until the sandbox ends. Ports on the host go through a relay only you start; a Git login names where its token is, never the token.")),
+    el("p", { class: "hint" }, t("Host names, IP:PORT, ports, networks and resolvers: one or more each, separated by commas or spaces.")),
     el("h3", {}, t("Allowed during this run")), shown,
+    el("h3", {}, t("Refused during this run")), blockedList,
     el("div", { class: "form" },
       el("label", { for: "net-hosts" }, t("Host names (TCP/443)")), hosts,
       el("label", { for: "net-tcp" }, "IP:PORT (TCP)"), tcp,
@@ -2339,6 +3445,9 @@ function networkCard(main, s) {
       el("label", { for: "net-dns" }, t("Real DNS")), dns,
       el("label", { for: "net-git-url" }, t("Git login: server")), gitUrl,
       el("label", { for: "net-git-kind" }, t("Git login: token in")), el("div", {}, gitKind, " ", gitRef),
+      el("label", { for: "net-key-host" }, t("API key: server")), keyHost,
+      el("label", { for: "net-key-secret" }, t("API key: secret of {host}", { host })), keySecret,
+      el("label", { for: "net-key-name" }, t("API key: variable (the agent sends its placeholder)")), keyName,
       el("label", { for: "net-allow" }, t("Networks (every port)")), networks,
       el("span", {}, t("Known hosts")), el("div", { class: "row" }, presetBoxes.map((b, i) => el("label", {}, b, " ", NET_PRESETS[i]))),
       el("label", { for: "net-nameservers" }, t("Resolvers (real DNS)")), nameservers,
@@ -2415,7 +3524,9 @@ function resourcesCard(main, s) {
       el("td", {}, w.kind === "file" ? t("file") : t("folder")),
       el("td", { class: "mono" }, added ? at : "-", added && w.named ? el("span", { class: "hint" }, " ", t("(chosen)")) : null),
       el("td", {}, w.mode || "-"),
-      el("td", {}, `${w.source || ""}${w.kept ? t(", kept for the session") : ""}`), el("td", { class: "mono" }, w.host || ""), actions);
+      el("td", {}, `${w.source || ""}${w.kept ? t(", kept for the session") : ""}`),
+      // a folder of another machine (sshfs://): its source, and where this host mounted it
+      el("td", { class: "mono" }, w.remote ? String(w.remote) : (w.host || ""), w.remote ? el("div", { class: "hint" }, t("mounted with sshfs at {path}", { path: String(w.host || "") })) : null), actions);
   };
   const loadWorkspaces = async () => {
     let list;
@@ -2428,25 +3539,30 @@ function resourcesCard(main, s) {
   };
   // a folder or a single regular file of that host (workspace add PATH [--name NAME] [--ro]); a writable one asked
   // first. What Yes sends is what the question named.
-  const directory = el("input", { id: "ws-dir", class: "mono", placeholder: t("{path} (on that host)", { path: "/home/you/src/other" }) });
+  const directory = el("input", { id: "ws-dir", class: "mono", size: 40, placeholder: t("{path} (on that host) or {remote}", { path: "/home/you/src/other", remote: "sshfs://you@machine/srv/project" }) });
   const wsName = el("input", { id: "ws-name", class: "mono", size: 16, placeholder: t("its own name"), pattern: WORKSPACE_AS.source.slice(1, -1) });
   const readOnly = el("input", { id: "ws-ro", type: "checkbox", checked: true });
   const wsActions = el("div", { class: "row" });
+  const wsDraft = cardDraft(`workspace ${host} ${startId(s)}`, { directory, wsName, readOnly });  // kept until sent
   const addWorkspace = (path, as, ro) => async (event) => busy(event.target, async () => {
     const sent = Object.assign({ path, read_only: ro }, as ? { name: as } : {}, ro ? {} : { confirm: true });
     try {
       const r = await api("POST", hostPath(`/workspaces/${encodeURIComponent(name)}`, host), sent);
-      toast("success", t("Added {what} to {where}", { what: path, where }), (r && r.output) || "");
-      directory.value = ""; wsName.value = ""; loadWorkspaces();
+      doneToast(t("Added {what} to {where}", { what: path, where }), r);
+      directory.value = ""; wsName.value = ""; wsDraft.drop(); loadWorkspaces();
     } catch (e) { failed(t("Could not add {what} to {where}", { what: path, where }))(e); }
     wsButtons();
   });
   const wsButtons = () => clear(wsActions).append(el("button", { class: "primary", onclick: (event) => {
     const path = directory.value.trim(), as = wsName.value.trim();
-    if (!path.startsWith("/")) { toast("warning", t("Which file or folder?"), t("An absolute path on {host}.", { host })); return; }
+    const remote = REMOTE_SOURCE.test(path);
+    if (!path.startsWith("/") && !remote) { toast("warning", t("Which file or folder?"), t("An absolute path on {host}, or a folder of another machine: sshfs://USER@MACHINE/PATH.", { host })); return; }
     if (as && !WORKSPACE_AS.test(as)) { toast("warning", t("Which name?"), t("1-64 letters, digits, '_', '.' or '-', starting with a letter or digit.")); return; }
     if (readOnly.checked) { addWorkspace(path, as, true)(event); return; }
-    clear(wsActions).append(...ask(t("Give {name} write access to {path} on {host}, at {at}? The agent can change and delete what is in it, until you remove it (a folder is kept for the session's next start).", { name, path, host, at: `/workspaces/${as || path.split("/").filter(Boolean).pop() || ""}` }),
+    const at = `/workspaces/${as || path.split("/").filter(Boolean).pop() || ""}`;
+    clear(wsActions).append(...ask(remote
+      ? t("Give {name} write access to {path}, a folder of another machine that {host} mounts (sshfs, NFS or SMB), at {at}? The agent changes and deletes the files on that machine, until you remove it; their traffic does not pass the sandbox's proxy.", { name, path, host, at })
+      : t("Give {name} write access to {path} on {host}, at {at}? The agent can change and delete what is in it, until you remove it (a folder is kept for the session's next start).", { name, path, host, at }),
       t("Yes, writable"), addWorkspace(path, as, false), () => { wsButtons(); focusFirst(wsActions); }));
     focusCancel(wsActions);
   } }, t("Add workspace")), el("span", { class: "hint" }, t("at /workspaces/NAME (its own name unless one is given)")));
@@ -2460,7 +3576,7 @@ function resourcesCard(main, s) {
   const mcpTable = el("table", {}, el("caption", { class: "sr-only" }, t("MCP servers of {where}", { where })), head([t("Server"), ""]), mcpBody);
   const mcpChoice = el("select", { id: "mcp-live-server" });
   const mcpActions = el("div", { class: "row" });
-  const helperOf = (server) => { const m = /^helper-(claude|codex|opencode|hermes|dsh|qwen|goose)-[0-9a-f]{8}$/.exec(server); return m ? m[1] : null; };
+  const helperOf = (server) => { const m = /^helper-(claude|codex|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi)-[0-9a-f]{8}$/.exec(server); return m ? m[1] : null; };
   const which = (value) => (value.startsWith("helper:") ? { helper: value.slice("helper:".length) } : { server: value });
   const shownServer = (body) => (body.helper ? t("{agent} as a helper", { agent: body.helper }) : body.server);
   const restartAgent = () => {
@@ -2530,6 +3646,181 @@ function resourcesCard(main, s) {
   } }, t("Add now…"));
   mcpActions.append(addMcp);
 
+  // Skills, subagents, commands and plugins while it runs (sandbox-ai kits|plugins attach|detach): copied into the
+  // sandbox's read-only kit folders on that host (a plugin: from the plugin store), each asked first. What the agent
+  // needs to see one is in the answer (reload): nothing, a command typed in it, or its restart inside the sandbox -
+  // offered then, asked first too (kits restart-agent: the sandbox, network and MCP servers stay).
+  const kitKinds = [["kit", t("A kit")], ["skill", t("A skill folder")], ["command", t("A command file")],
+    ["agent_file", t("A subagent file")], ["plugin", t("A plugin (NAME@MARKETPLACE)")]];
+  const kitKind = el("select", { id: "kits-live-kind" }, ...kitKinds.map(([value, label]) => el("option", { value }, label)));
+  const kitValue = el("input", { id: "kits-live-value", placeholder: t("a kit's name, a path on that host, or NAME@MARKETPLACE"), autocomplete: "off", spellcheck: "false" });
+  const kitKeep = el("input", { id: "kits-live-keep", type: "checkbox" });
+  const kitFindings = el("input", { id: "kits-live-findings", type: "checkbox" });
+  const kitActions = el("div", { class: "row" }), kitResult = el("div");
+  const kitGone = el("input", { id: "kits-live-remove", placeholder: t("a skill, command, subagent or kit; or NAME@MARKETPLACE"), autocomplete: "off", spellcheck: "false" });
+  const kitGoneActions = el("div", { class: "row" });
+  const restartInside = () => {
+    const holder = el("div", { class: "row" });
+    const again = el("button", { class: "primary", onclick: () => confirmIn(holder, t("Start the agent of {name} on {host} again, inside its sandbox? What it does now ends; its conversation continues, the sandbox, its network and MCP servers stay.", { name, host }), t("Yes, start it again"), async () => {
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/agent-restart`, host), { confirm: true });
+        toast("success", t("The agent of {name} on {host} started again", { name, host }), (r && r.message) || "");
+        holder.hidden = true;
+      } catch (e) { failed(t("Could not start the agent of {name} on {host} again", { name, host }))(e); }
+    }, { kind: "primary", trigger: again }) }, t("Start the agent again (the conversation goes on)"));
+    holder.append(again);
+    return holder;
+  };
+  const kitShow = (r) => {
+    clear(kitResult).append(el("p", { class: "hint" }, String((r && r.message) || "")));
+    const reloads = r && Array.isArray(r.reload) ? r.reload : [];
+    if (reloads.some(x => x && x.reload === "restart")) kitResult.append(restartInside());
+  };
+  const addKit = el("button", { class: "primary", onclick: () => {
+    const kind = kitKind.value, value = kitValue.value.trim();
+    if (!value) { toast("warning", t("What to give?"), t("A kit's name, a path on {host}, or a plugin as NAME@MARKETPLACE.", { host })); return; }
+    const body = { [kind]: value, keep: kitKeep.checked, allow_findings: kitFindings.checked };
+    const text = kind === "plugin"
+      ? t("Give the plugin {what} to {name} on {host} now, while it runs? It is installed into the plugin store if needed; its code runs as the agent, its hooks only once approved.", { what: value, name, host })
+      : t("Give {what} to {name} on {host} now, while it runs? Its agent gets it read-only at once; a kit's hooks are not given.", { what: value, name, host });
+    confirmIn(kitActions, text, t("Yes, give it now"), async () => {
+      clear(kitResult);
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/kits-live`, host), Object.assign({}, body, { confirm: true }));
+        toast("success", t("{what} → {where}", { what: value, where }), (r && r.message) || "");
+        kitShow(r);
+      } catch (e) { failed(t("Could not give {what} to {where}", { what: value, where }))(e); }
+    }, { kind: "primary", trigger: addKit });
+  } }, t("Give now…"));
+  kitActions.append(addKit);
+  const removeKit = el("button", { class: "danger", onclick: () => {
+    const value = kitGone.value.trim();
+    if (!value) { toast("warning", t("What to take out?"), t("What was given: its name, or a plugin as NAME@MARKETPLACE.")); return; }
+    const body = value.includes("@") && !value.startsWith("@") ? { plugin: value } : { name: value };
+    confirmIn(kitGoneActions, t("Take {what} out of {name} on {host} now (and out of its later starts where it was kept)?", { what: value, name, host }), t("Yes, take it out"), async () => {
+      try {
+        const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/kits-live/remove`, host), Object.assign({}, body, { confirm: true }));
+        toast("success", t("{what} taken out of {where}", { what: value, where }), (r && r.message) || "");
+        kitShow(r);
+      } catch (e) { failed(t("Could not take {what} out of {where}", { what: value, where }))(e); }
+    }, { trigger: removeKit });
+  } }, t("Take out…"));
+  kitGoneActions.append(removeKit);
+
+  // MCP servers of another host (sandbox-ai mcp copy, run by the service's machine, which reaches both hosts): the other
+  // hosts' servers of their own, read in the background; Check is a dry run - what is copied (a catalog server added
+  // from its catalog there, never copied raw), what changes, and what this host cannot take as it is: each folder of
+  // the other host gets a folder of this one or is left out, a missing secret is named (set it on the Secrets page
+  // of this host), an image is pulled here or sent. Copy and add now… is asked first and attaches them to this start.
+  const copyChoice = el("select", { id: "mcp-copy-server" });
+  const copyAs = el("input", { id: "mcp-copy-as", placeholder: t("the same name"), autocomplete: "off", spellcheck: "false" });
+  const copyImage = el("select", { id: "mcp-copy-image" },
+    el("option", { value: "" }, t("as needed (a catalog's is pulled here)")),
+    el("option", { value: "pull" }, t("pull it here by its digest")),
+    el("option", { value: "copy" }, t("send it from the other host")));
+  const copyFlag = (id, text) => { const box = el("input", { type: "checkbox", id }); return { box, label: el("label", { for: id }, text) }; };
+  const copyFlags = {
+    secrets_later: copyFlag("mcp-copy-secrets-later", t("copy although a secret it uses is missing here")),
+    no_vpn: copyFlag("mcp-copy-no-vpn", t("without its VPN profile")),
+    current_pin: copyFlag("mcp-copy-pin", t("the image the catalog here pins")),
+    unsigned: copyFlag("mcp-copy-unsigned", t("unsigned, as the other host took it")),
+    replace: copyFlag("mcp-copy-replace", t("replace a server of that name here")),
+  };
+  const copyPaths = el("div"), copyPlan = el("div"), copyActions = el("div", { class: "row" });
+  const pathFields = new Map();  // the other host's folder -> { input, drop }
+  let copyChecked = null;  // the request whose check found nothing left to resolve
+  const copySource = () => { try { return JSON.parse(copyChoice.value || "null"); } catch (e) { return null; } };
+  const loadCopySources = async () => {
+    clear(copyChoice).append(el("option", { value: "" }, t("Reading the servers of the other hosts…")));
+    const others = (Array.isArray(state.hosts) ? state.hosts : []).map(h => h && h.name).filter(n => typeof n === "string" && n !== host);
+    const found = await Promise.all(others.map(async (other) => {
+      try {
+        const servers = await api("GET", hostPath("/mcp", other), undefined, { background: true });
+        return (Array.isArray(servers) ? servers : []).filter(d => d && typeof d === "object" && MCP_SERVER_NAME.test(String(d.name)) && d.own !== false && d.catalog !== "built-in")
+          .map(d => ({ from: other, name: String(d.name), kind: String(d.kind || "") }));
+      } catch (e) { return []; }
+    }));
+    const options = found.flat().map(o => el("option", { value: JSON.stringify({ from: o.from, name: o.name }) }, `${o.name} (${o.from})`));
+    clear(copyChoice).append(...(options.length ? options : [el("option", { value: "" }, t("No other host has a server of its own."))]));
+  };
+  const copyBody = (dryRun) => {
+    const chosen = copySource();
+    if (!chosen) return null;
+    const paths = {}, drop = [];
+    for (const [old, field] of pathFields) {
+      if (field.drop.checked) drop.push(old);
+      else if (field.input.value.trim()) paths[old] = field.input.value.trim();
+    }
+    const body = { from: chosen.from, names: [chosen.name], paths, drop_paths: drop, dry_run: dryRun };
+    if (copyAs.value.trim()) body.as = copyAs.value.trim();
+    if (copyImage.value === "pull") body.pull_image = true;
+    if (copyImage.value === "copy") body.copy_image = true;
+    for (const [key, f] of Object.entries(copyFlags)) if (f.box.checked) body[key] = true;
+    if (!dryRun) body.attach = name;
+    return body;
+  };
+  const showCopyPlan = (result) => {
+    const plans = result && Array.isArray(result.servers) ? result.servers : [];
+    clear(copyPlan);
+    clear(copyPaths);
+    for (const plan of plans) {
+      const lines = [];
+      lines.push(el("p", {}, plan.how === "catalog" ? t("{server}: added from its catalog here (the same pinned image), never copied as it is.", { server: String(plan.server) })
+        : t("{server}: its definition is checked here as an own server's is.", { server: String(plan.server) })));
+      for (const text of [...(plan.copied || []), ...(plan.changes || []).map(c => t("changed: {what}", { what: c })), ...(plan.notes || [])])
+        lines.push(el("p", { class: "hint", lang: "en" }, String(text)));
+      for (const text of plan.warnings || []) lines.push(notice(String(text), "warn"));
+      const secrets = plan.secrets && Array.isArray(plan.secrets.missing) ? plan.secrets.missing : [];
+      if (secrets.length) lines.push(notice(t("{host} has no secret {names}: keep it on the page Secrets of {host} (its value is typed there, never copied), or copy it anyway.", { host, names: secrets.join(", ") }), "warn"));
+      for (const problem of plan.problems || []) lines.push(notice(`${problem.text}${problem.fix ? ` — ${problem.fix}` : ""}`, "error"));
+      copyPlan.append(...lines);
+      for (const path of plan.paths || []) {
+        const old = String(path.path || "");
+        if (!old) continue;
+        const kept = pathFields.get(old);
+        const input = el("input", { class: "mono", placeholder: t("a folder of {host}", { host }), value: kept ? kept.input.value : (path.to || ""), "aria-label": t("Folder of {host} for {path}", { host, path: old }) });
+        const drop = el("input", { type: "checkbox", "aria-label": t("leave out {path}", { path: old }) });
+        drop.checked = kept ? kept.drop.checked : !!path.dropped;
+        pathFields.set(old, { input, drop });
+        const label = path.kind === "mount" ? t("{target} in the container (on {from}: {path})", { target: String(path.target || ""), from: String(result.from || ""), path: old }) : t("{path} (on {from})", { path: old, from: String(result.from || "") });
+        copyPaths.append(el("div", { class: "form" }, el("label", {}, label), input, el("label", {}, drop, " ", t("leave out"))));
+      }
+    }
+    if (copyPaths.children.length) copyPlan.append(el("p", { class: "hint" }, t("A folder of the other host is never mounted here unasked: give each one a folder of {host} (the same path keeps it), or leave it out; then check again.", { host })));
+  };
+  const checkCopy = el("button", { onclick: (event) => busy(event.target, async () => {
+    const body = copyBody(true);
+    if (!body) { toast("warning", t("Which MCP server?"), t("Choose a server of another host.")); return; }
+    clear(copyPlan).append(el("p", { class: "hint" }, t("Checking…")));
+    try {
+      const result = await api("POST", hostPath("/mcp-copy", host), body);
+      showCopyPlan(result);
+      const blocked = (result.servers || []).some(p => (p.problems || []).length);
+      copyChecked = blocked ? null : JSON.stringify(copyBody(true));
+      copyNow.disabled = blocked;
+    } catch (e) { clear(copyPlan).append(errorNotice(e)); copyChecked = null; copyNow.disabled = true; }
+  }) }, t("Check"));
+  const copyNow = el("button", { class: "primary", disabled: true, onclick: () => {
+    if (copyChecked !== JSON.stringify(copyBody(true))) { copyNow.disabled = true; toast("warning", t("Check again"), t("The choices changed since the check.")); return; }
+    const body = copyBody(false);
+    confirmIn(copyActions, t("Copy {server} from {from} to {host} and give it to {name} now, while it runs? It is defined on {host} with the folders, variables and network shown above.", { server: body.names[0], from: body.from, host, name }) + (body.replace ? " " + t("The server of that name on {host} is replaced.", { host }) : ""), t("Yes, copy and add it"), async () => {
+      try {
+        const r = await api("POST", hostPath("/mcp-copy", host), Object.assign({}, body, { confirm: true }));
+        const attached = (r && Array.isArray(r.attached) ? r.attached : [])[0] || {};
+        if (r && (r.servers || []).some(p => (p.problems || []).length)) { showCopyPlan(r); toast("warning", t("Not copied"), t("Resolve what is said, then check again.")); return; }
+        toast(attached.error ? "warning" : "success", t("{server} → {where}", { server: body.as || body.names[0], where }), String(attached.error || attached.message || ""));
+        copyNow.disabled = true;
+        copyChecked = null;
+        loadMcp();
+        loadCopySources();
+      } catch (e) { failed(t("Could not copy {server} to {host}", { server: body.names[0], host }))(e); }
+    }, { kind: "primary", trigger: copyNow });
+  } }, t("Copy and add now…"));
+  copyActions.append(checkCopy, copyNow);
+  for (const control of [copyChoice, copyAs, copyImage, ...Object.values(copyFlags).map(f => f.box)])
+    control.addEventListener("change", () => { copyNow.disabled = true; });
+  copyChoice.addEventListener("change", () => { pathFields.clear(); clear(copyPaths); clear(copyPlan); });
+
   // devices: given at the start (they stay) or added (Remove); adding asks first
   const devBody = el("tbody"), devStatus = el("div");
   const devTable = el("table", {}, el("caption", { class: "sr-only" }, t("Devices of {where}", { where })), head(["ID", t("State"), t("Nodes"), t("Device"), t("Rule"), t("Given"), ""]), devBody);
@@ -2556,14 +3847,56 @@ function resourcesCard(main, s) {
     clear(devStatus).append(list.length ? "" : el("p", { class: "hint" }, t("No devices given to it.")));
     clear(devBody).append(...list.map(deviceRow));
     devTable.hidden = !list.length;
+    devHeld = list;
+    showDetected();
   };
   const device = el("input", { id: "dev-value", class: "mono", placeholder: t("{path} or {usb}", { path: "/dev/ttyUSB0", usb: "usb:2e8a:000a" }) });
+  // the devices that host has (sandbox-ai devices scan there, never this machine's for another host), grouped by
+  // kind, minus those the run has and those sandbox-ai refuses; one chosen goes into the field. A GPU kind is shown,
+  // not offered: --gpu cannot change while it runs.
+  const detected = el("select", { id: "dev-detected" });
+  const detectedNote = el("p", { class: "hint" });
+  let devHeld = [], devScan = null, devScanError = null;
+  const DEVICE_KINDS = [["usb", N_("USB devices")], ["serial", N_("Serial ports")], ["video", N_("Cameras and video")], ["render", N_("Render nodes")],
+    ["kvm", N_("Virtual machines")], ["sound", N_("Sound")], ["gpu", N_("GPU (--gpu)")]];
+  const showDetected = () => {
+    clear(detected);
+    if (devScanError) { detected.hidden = true; detectedNote.textContent = t("The devices of {host} could not be read: {error}. Type a path or usb:VENDOR:PRODUCT[:SERIAL].", { host, error: errorText(devScanError) }); return; }
+    if (!devScan) { detected.hidden = true; detectedNote.textContent = ""; return; }
+    const active = devHeld.filter(d => ["attached", "held", "gone"].includes(d.state));
+    const values = new Set(active.map(d => d.value)), nodes = new Set(active.flatMap(d => Array.isArray(d.nodes) ? d.nodes : []));
+    const has = (d) => values.has(d.value) || (Array.isArray(d.nodes) ? d.nodes : []).some(n => nodes.has(n));
+    const offered = devScan.filter(d => !d.refused && !has(d));
+    detected.append(el("option", { value: "" }, t("Choose a detected device…")));
+    for (const [kind, title] of DEVICE_KINDS) {
+      const group = offered.filter(d => d.kind === kind);
+      if (!group.length) continue;
+      detected.append(el("optgroup", { label: t(title) }, ...group.map(d => d.option === "--gpu"
+        ? el("option", { value: "", disabled: true, title: t("--gpu cannot change while it runs: set it on the part and start again") }, `${d.label} (${t("restart needed")})`)
+        : el("option", { value: d.value, title: d.note || d.value }, d.label))));
+    }
+    detected.hidden = !offered.length;
+    const held = devScan.filter(d => !d.refused && has(d)).length, refused = devScan.filter(d => d.refused).length;
+    detectedNote.textContent = offered.length ? [t("{count} detected on {host}", { count: offered.length, host }), held ? t("{count} the run has already", { count: held }) : "",
+      refused ? t("{count} refused by sandbox-ai (input devices, keyboards ...), not offered", { count: refused }) : ""].filter(Boolean).join("; ")
+      : t("No devices detected on {host}: type a path or usb:VENDOR:PRODUCT[:SERIAL].", { host });
+  };
+  const scanDevices = async () => {
+    try {
+      const r = await api("GET", hostPath("/device-scan", host));
+      devScan = (r && Array.isArray(r.devices) ? r.devices : []).filter(d => d && typeof d === "object" && typeof d.value === "string" && typeof d.label === "string");
+      devScanError = null;
+    } catch (e) { devScan = null; devScanError = e; }
+    showDetected();
+  };
+  detected.addEventListener("change", () => { if (detected.value) device.value = detected.value; });
   const devActions = el("div", { class: "row" });
+  const devDraft = cardDraft(`device ${host} ${startId(s)}`, { device });  // kept until sent
   const addDevice = (value) => async (event) => busy(event.target, async () => {
     try {
       const r = await api("POST", hostPath(`/devices/${encodeURIComponent(name)}`, host), { device: value, confirm: true });
       toast("success", t("Gave {what} to {where}", { what: value, where }), (r && r.output) || "");
-      device.value = ""; loadDevices();
+      device.value = ""; devDraft.drop(); loadDevices();
     } catch (e) { failed(t("Could not give {what} to {where}", { what: value, where }))(e); }
     devButtons();
   });
@@ -2627,7 +3960,7 @@ function resourcesCard(main, s) {
       : t("Raise the {limits} limit of {where}? The agent can then use more of that host (a strict security mode keeps its cap).", { limits: names(raised), where });
     confirmIn(limActions, text, removed.length ? t("Yes, no limit") : t("Yes, raise it"), () => sendLimits(Object.assign(body, { confirm: true })), { trigger: apply });
   } }, t("Apply limits"));
-  limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadMcp(); loadDevices(); loadLimits(); } }, t("Refresh")));
+  limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadMcp(); loadDevices(); scanDevices(); loadLimits(); } }, t("Refresh")));
 
   const title = () => t("Workspaces, devices and limits of {where}", { where });
   const heading = el("h2", {}, title());
@@ -2640,8 +3973,25 @@ function resourcesCard(main, s) {
     el("h3", {}, t("MCP servers")), mcpStatus, mcpTable,
     el("div", { class: "form" }, el("label", { for: "mcp-live-server" }, t("Add an MCP server")), mcpChoice, el("span"), mcpActions),
     mcpResult,
+    el("h3", {}, t("Skills and plugins")),
+    el("p", { class: "hint" }, t("Given to its agent now, read-only (sandbox-ai kits attach, plugins attach on that host); whether the agent sees it by itself, after a command or after it started again, the answer says.")),
+    el("div", { class: "form" }, el("label", { for: "kits-live-kind" }, t("What")), kitKind,
+      el("label", { for: "kits-live-value" }, t("Which")), kitValue,
+      el("label", { for: "kits-live-keep" }, t("Also for its later starts")), kitKeep,
+      el("label", { for: "kits-live-findings" }, t("Also with hidden text (invisible characters, instructions to the model)")), kitFindings,
+      el("span"), kitActions,
+      el("label", { for: "kits-live-remove" }, t("Take out")), kitGone, el("span"), kitGoneActions),
+    kitResult,
+    el("h4", {}, t("From another host")),
+    el("p", { class: "hint" }, t("A server of another host copied to {host} (sandbox-ai mcp copy): checked first, then attached to {name} now.", { host, name })),
+    el("div", { class: "form" }, el("label", { for: "mcp-copy-server" }, t("MCP server")), copyChoice,
+      el("label", { for: "mcp-copy-as" }, t("Name here (optional)")), copyAs,
+      el("label", { for: "mcp-copy-image" }, t("Its image")), copyImage,
+      ...Object.values(copyFlags).flatMap(f => [f.label, f.box])),
+    copyPaths, copyPlan, copyActions,
     el("h3", {}, t("Devices")), devStatus, devTable,
-    el("div", { class: "form" }, el("label", { for: "dev-value" }, t("Device")), device, el("span"), devActions),
+    el("div", { class: "form" }, el("label", { for: "dev-detected" }, t("Detected on {host}", { host })), detected, el("span"), detectedNote,
+      el("label", { for: "dev-value" }, t("Device")), device, el("span"), devActions),
     el("h3", {}, t("Resource limits")), limitsNow,
     el("p", { class: "hint" }, t("Only a changed field is sent; a limit raised or taken away (none) is asked first. A strict security mode keeps its caps.")),
     el("div", { class: "form" },
@@ -2654,21 +4004,67 @@ function resourcesCard(main, s) {
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; where = t("{name} on {host}", { name, host }); }, heading, title));
   loadWorkspaces();
   loadMcp();
+  loadCopySources();
   loadDevices();
+  scanDevices();
   loadLimits();
 }
 
-// The open questions of every host. The table is kept between the polls: its rows are keyed by the host and the
-// question's id, a new question adds a row, an answered or expired one takes its row away, and every other row stays
-// as it is (the scope chosen in it, an Allow waiting for its confirmation, the pointer over it). Allow asks first,
-// in the row, naming the host, the sandbox, what it asks for and the scope; the answer goes to the question's own
-// host, its output (sandbox-ai approvals) is a toast. Each row counts down the time the question has left (from
-// when its host's list was read: the service says how old that is), and says it at 20 and 10 seconds; a row has the
-// focus with Tab, and a (allow) or d (deny) answer it there. A browser question is opened here: "Open here and
-// allow" opens its link in this browser, then allows it there without opening a browser on that host.
+// The questions of every host in one table, with tabs: Open (waiting for an answer, counting down), Allowed,
+// Refused, Timed out (nobody answered in time: still open - an answer counts for the request's next try) and All,
+// each with its count. The table is kept between the polls: its rows are keyed by the host and the question's id, a
+// row whose state changed is drawn anew, every other row stays as it is (the scope chosen in it, the pointer over
+// it). A click answers at once - no confirmation, not even for "always": a note offers to undo it for a few seconds.
+// The answer goes to the question's own host; what failed is a short notice that closes by itself (and stays in the
+// page's note line). Rows can be selected (their boxes) and answered together. An open row counts down the time its
+// question has left (from when its host's list was read: the service says how old that is), and says it at 20 and 10
+// seconds; a row has the focus with Tab, and a (allow once), r (always allow: this run), p (always, also for later
+// sessions: the project) or d (deny) answer it there. One button per scope (user 2026-11-19, as in the app): Allow once,
+// Always allow, Always, also for later sessions - a scope the question cannot get is a disabled button that says why.
+// A browser question is opened here: "Open here and allow" opens its link in this browser, then allows it there
+// without opening a browser on that host.
 const SCOPES = { once: N_("this once"), run: N_("for the rest of this run"), always: N_("always (remembered for the project)") };
 const SCOPE_ORDER = ["once", "run", "always"];
-const approvalsView = { main: null, body: null, rows: new Map() };
+// The Allow buttons: [scope, label, what it does, its key in a focused row], and the note after each.
+const ALLOW_BUTTONS = [["once", N_("Allow once"), N_("Allowed this time only: the next same request is asked again"), "a"],
+  ["run", N_("Always allow"), N_("Every same request of this run (this session) is allowed without a question"), "r"],
+  ["always", N_("Always, also for later sessions"), N_("Allowed now and remembered for the project: also at its later starts and resumed sessions, without a question (forget it under Remembered answers)"), "p"]];
+const ALLOWED_NOTES = { once: N_("Allowed once"), run: N_("Always allowed in this run (this session)"), always: N_("Always allowed, also for later sessions") };
+
+// Why question Q (still open, or answered: PAST) cannot be allowed with SCOPE, or null - as sandbox-ai caps it: a
+// canary's alarm and a page to open once; its max_scope (the policy, the run's security mode, the kind) otherwise.
+function scopeRefused(q, scope, past) {
+  if (q.max_scope === null) return q.allow_refused ? t("cannot be allowed: {why}", { why: String(q.allow_refused) }) : t("cannot be allowed here");
+  if (past && scope === "once") return t("Answered already: Always allow allows it for the rest of this run.");
+  if (scope === "once") return null;
+  if (q.kind === "canary") return t("A canary's alarm is answered this once: Allow once lets the sandbox go on, Deny stops it.");
+  if (q.kind === "browser") return t("A page is opened once: nothing is kept for it.");
+  // the package guard's question about a known malicious version (approvals list --json "package")
+  if (q.package && q.package.malicious) return t("A known malicious package version is allowed for this one download at most: never for the run or for later sessions.");
+  const max = SCOPE_ORDER.includes(q.max_scope) ? q.max_scope : (past ? "run" : "always");
+  return SCOPE_ORDER.indexOf(scope) > SCOPE_ORDER.indexOf(max) ? t("not for this question: at most {scope}", { scope: t(SCOPES[max]) }) : null;
+}
+// The package guard's question (approvals list --json "package": ecosystem, name, version, age_days, malicious,
+// new_name_days, allow): what it means, under the question's own line - as text, never markup.
+function packageNote(q) {
+  const p = q.package;
+  if (!p || typeof p !== "object" || !p.name) return null;
+  if (p.malicious) return el("div", { class: "hint status-bad" }, t("Package guard: this version is on the list of known malicious packages (advisory {advisory}). Deny it unless you know why you need it; an allow covers this one download only.", { advisory: String(p.malicious) }));
+  return el("div", { class: "hint" }, t("Package guard: a version this young, or a package this new, may be malware nobody has reported yet, or a made-up name somebody registered.") +
+    (typeof p.allow === "string" && p.allow ? " " + t("To allow the package in every run of the project: {command}", { command: p.allow }) : ""));
+}
+// The secret guard's question (approvals list --json "secret": host, found [{id, kind, label, where, encoding}],
+// allow): what it means, under the question's own line - as text, never markup; no value is in it.
+function secretNote(q) {
+  const s = q.secret;
+  if (!s || typeof s !== "object" || !Array.isArray(s.found) || !s.found.length) return null;
+  return el("div", { class: "hint status-warn" }, t("Secret guard: this request carries a secret to a host it was not given for. The value is never shown, only what kind it is. Deny it unless you know that it belongs there (a test fixture, a token of that host).") +
+    (typeof s.allow === "string" && s.allow ? " " + t("To allow that kind of value for that host in every run of the project: {command}", { command: s.allow }) : ""));
+}
+const APPROVAL_TABS = [["open", N_("state|Open")], ["allowed", N_("Allowed")], ["refused", N_("Refused")], ["timeout", N_("Timed out")], ["all", N_("All")]];
+const APPROVAL_STATES = { open: N_("open"), timeout: N_("timed out"), allowed: N_("allowed"), refused: N_("refused") };
+const UNDO_SECONDS = 8;
+const approvalsView = { main: null, body: null, rows: new Map(), tab: "open", selected: new Set(), all: null };
 
 // A link only for http(s) without a user part (https://bank.example@evil.example/ names another host than it
 // seems): what a sandbox names is never a javascript: or data: URL.
@@ -2686,7 +4082,7 @@ function webLink(url) {
 
 function countdownText(left) {
   if (left === null) return [t("no time limit"), ""];
-  if (left <= 0) return [t("expired"), "bad"];
+  if (left <= 0) return [t("timed out - still answerable"), "warn"];
   const text = left >= 60 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : t("{seconds} s", { seconds: left });
   return [text, left < 10 ? "bad" : left < 20 ? "warn" : ""];
 }
@@ -2695,17 +4091,108 @@ function countdownText(left) {
 function tickApprovals() {
   const view = approvalsView;
   if (!view.body || !view.body.isConnected) return;
-  for (const entry of view.rows.values()) entry.tick();
+  for (const entry of view.rows.values()) if (entry.tick) entry.tick();
 }
 
+// The state of question Q (an older sandbox-ai lists open ones without it).
+function approvalState(q) { return APPROVAL_STATES[q.state] ? q.state : "open"; }
+
+// Q still waits for its answer (open, or timed out and still answerable): answered as a question, not changed after.
+function stillOpen(q) { return q.answerable !== false && ["open", "timeout"].includes(approvalState(q)); }
+
+// How long an error notice stays: at least a second and a half (the user: "about a second"), longer for a long text.
+function noticeSeconds(text) { return Math.max(1.5, Math.min(12, 1 + String(text || "").length / 18)); }
+
+// What went wrong with an answer: a notice that closes by itself, and the same in the page's note line.
+function approvalError(view, title, e) {
+  const text = [errorText(e), errorDetail(e)].filter(Boolean).join("\n");
+  toast("error", title, text, { seconds: noticeSeconds(`${title} ${text}`) });
+  if (view.note) clear(view.note).append(el("span", { class: "status-bad" }, `${title}: ${text}`));
+}
+
+// Done: said in the note line with Undo for UNDO_SECONDS (several done together: one note, one Undo for them all).
+function approvalDone(view, text, undo) {
+  if (!view.note) return;
+  clearTimeout(view.undoTimer);
+  const button = undo ? el("button", { class: "small", onclick: (event) => busy(event.target, async () => {
+    clearTimeout(view.undoTimer);
+    clear(view.note).append(el("span", {}, t("Undoing…")));
+    await undo();
+  }) }, t("Undo")) : null;
+  clear(view.note).append(...[el("span", { class: "status-ok" }, text), button ? " " : null, button].filter(Boolean));
+  say(text);
+  view.undoTimer = setTimeout(() => { if (button && button.isConnected) button.remove(); }, UNDO_SECONDS * 1000);
+}
+
+// Send ACTION (allow, deny, ask-again) for question Q with SCOPE; the command's output, or an Error.
+async function approvalSend(q, action, scope, extra) {
+  const path = hostPath(`/approvals/${encodeURIComponent(q.id)}${action === "ask-again" ? "/ask-again" : ""}`, String(q.host));
+  const body = action === "ask-again" ? {} : Object.assign({ decision: action }, scope ? { scope } : {}, extra || {});
+  return api("POST", path, body);
+}
+
+// What takes back ACTION on Q (as it was before): a question that was still open is asked again (the run forgets the
+// answer; a connection allowed for the run is closed again), a changed answer is changed back.
+function approvalUndo(q, action) {
+  if (stillOpen(q)) return ["ask-again", null];
+  const before = (q.result && q.result.decision) || (approvalState(q) === "allowed" ? "allow" : "deny");
+  if (action === "ask-again") return [before, "run"];
+  return [action === "allow" ? "deny" : "allow", "run"];
+}
+
+// Do ACTION (with SCOPE) on every question of ITEMS ([q]) at once; one note with Undo for what was done.
+async function approvalAct(view, items, action, scope, extra, label) {
+  const done = [], failures = [], closed = [];
+  for (const q of items) {
+    try {
+      const result = await approvalSend(q, action, scope, extra);
+      // allowed, but its name does not exist: the question is closed (denied for the run), said in one line
+      if (result && typeof result.closed === "string" && result.closed) closed.push(result.closed); else done.push(q);
+      answered(q);
+    }
+    catch (e) { failures.push([q, e]); }
+  }
+  for (const [q, e] of failures) approvalError(view, t("Not done: {question} ({sandbox} on {host})", { question: q.question || q.kind || q.id, sandbox: q.sandbox || q.run || t("a sandbox"), host: q.host }), e);
+  if (done.length) {
+    const what = done.length === 1 ? (done[0].question || done[0].kind || done[0].id) : t("{count} questions", { count: done.length });
+    const always = scope === "always" && done.some(q => q.always) ? ` ${done.find(q => q.always).always}` : "";
+    // (a page opened has no Undo: the run decides nothing about it)
+    approvalDone(view, `${label}: ${what}${always}`, done.every(q => q.kind === "browser") ? null : async () => {
+      const undone = [];
+      for (const q of done) {
+        const [back, backScope] = approvalUndo(q, action);
+        try { await approvalSend(q, back, backScope); undone.push(q); } catch (e) { approvalError(view, t("Could not undo: {question}", { question: q.question || q.id }), e); }
+      }
+      if (undone.length) approvalDone(view, t("Undone: {count}", { count: undone.length }) + (scope === "always" ? ` ${t("(remembered always for the project: forget it under Remembered answers)")}` : ""), null);
+      refreshApprovals(view);
+    });
+  }
+  if (closed.length) {
+    const text = closed.map(why => t("Closed, not allowed: {why}", { why })).join(" ");
+    if (view.note) {
+      if (!done.length) clear(view.note);
+      view.note.append(done.length ? " " : "", el("span", { class: "approval-closed" }, text));
+    }
+    toast("info", t("Question closed"), text, { seconds: noticeSeconds(text) });
+    say(text);
+  }
+  for (const q of items) if (!failures.some(([f]) => f === q)) view.selected.delete(questionKey(q));
+  refreshApprovals(view);
+}
+
+// After an answer: the open questions (badge, toasts) and every state of this page read again.
+function refreshApprovals(view) {
+  view.all = null;
+  poll();
+}
+
+// A row of a question that still waits for its answer (open, or timed out and still answerable).
 function approvalRow(q, view) {
   const id = String(q.id), host = String(q.host), where = q.sandbox || q.run || t("a sandbox");
   // max_scope null: this question cannot be allowed here (allow_refused says why); missing (an older sandbox-ai): any
   const allowable = q.max_scope !== null;
   const max = SCOPE_ORDER.includes(q.max_scope) ? q.max_scope : "always";
   const widest = allowable ? SCOPE_ORDER.indexOf(max) : -1;
-  const scope = el("select", { "aria-label": t("Scope") }, SCOPE_ORDER.map((s, i) => el("option", { value: s, disabled: i > widest, title: i > widest ? t("not for this question: at most {scope}", { scope: t(SCOPES[max]) }) : null }, t(SCOPES[s]))));
-  const chosen = () => (SCOPE_ORDER.indexOf(scope.value) > widest || !scope.value ? "once" : scope.value);
   const actions = el("td", { class: "actions" });
   const left = el("td", { class: "countdown" });
   const browser = q.kind === "browser";
@@ -2723,17 +4210,21 @@ function approvalRow(q, view) {
     el("div", { class: "hint" }, t("As the call will send them (pretty-printed JSON; credentials redacted).")),
     el("pre", { class: "mono", tabindex: 0, "aria-label": t("The call's arguments in full") }, q.details)) : null;
   const question = el("td", {}, q.question, details, link ? el("div", {}, link) : null, destination, refused, tooOld,
+    packageNote(q), secretNote(q),
     q.url_truncated ? el("div", { class: "hint" }, t("the URL was cut")) : null,
     q.always ? el("div", { class: "hint" }, q.always) : null,
+    approvalState(q) === "timeout" ? el("div", { class: "hint" }, t("Nobody answered in time: the request failed, the question stays open. Allowed now, its next try goes through.")) : null,
     !allowable && q.allow_refused ? el("div", { class: "hint" }, t("cannot be allowed: {why}", { why: String(q.allow_refused) })) : null);
-  const row = el("tr", { "data-id": id, "data-host": host, tabindex: 0, "aria-keyshortcuts": "a d", title: t("a: allow, d: deny") },
-    el("td", { class: "mono" }, host), question, el("td", { class: "mono" }, where), left, actions);
-  const entry = { row, deadline: null, said: null };
+  const select = selectCell(q, view);
+  const row = el("tr", { "data-id": id, "data-host": host, "data-state": approvalState(q), tabindex: 0, "aria-keyshortcuts": "a r p d", title: t("a: allow once, r: always allow, p: always, also for later sessions, d: deny") },
+    select, el("td", { class: "mono" }, host), question, el("td", { class: "mono" }, where), left, actions);
+  row.box = select.box;
+  const entry = { row, q, deadline: null, said: null };
   // AGE: seconds since the host's list was read (its seconds_left were counted then)
   entry.update = (fresh, age) => {
+    entry.q = fresh;
     const seconds = fresh.seconds_left;
-    entry.deadline = typeof seconds === "number" && Number.isFinite(seconds) ? Date.now() + (seconds - (Number(age) || 0)) * 1000 : null;
-    if (entry.expired && (entry.deadline === null || entry.deadline > Date.now())) { entry.expired = false; buttons(); }  // the host says it is still open
+    entry.deadline = approvalState(fresh) === "timeout" ? Date.now() : typeof seconds === "number" && Number.isFinite(seconds) ? Date.now() + (seconds - (Number(age) || 0)) * 1000 : null;
     entry.tick();
   };
   entry.tick = () => {
@@ -2747,65 +4238,103 @@ function approvalRow(q, view) {
         say(t("{seconds} seconds left: {question} ({sandbox} on {host})", { seconds: mark, question: q.question || q.kind || "", sandbox: where, host }));
       }
     }
-    if (seconds === 0 && !entry.expired) {
-      entry.expired = true;
-      clear(actions).append(el("span", { class: "hint" }, t("refused: no answer in time")));
-    }
   };
-  const answer = (decision, body, label) => async (event) => busy(event.target, async () => {
-    try {
-      const r = await api("POST", hostPath(`/approvals/${encodeURIComponent(q.id)}`, host), Object.assign({ decision }, body));
-      toast("success", t("{answer}: {sandbox} on {host}", { answer: label, sandbox: where, host }), (r && r.output) || q.question || "");
-      row.remove(); view.rows.delete(questionKey(q));
-      answered(q);
-      poll();
-    } catch (e) { failed(decision === "allow" ? t("Could not allow the question of {sandbox} on {host}", { sandbox: where, host }) : t("Could not deny the question of {sandbox} on {host}", { sandbox: where, host }))(e); buttons(); }
+  const answer = (decision, body, label) => (event) => busy(event.target, async () => {
+    if (browser && decision === "allow" && typeof window.open === "function") window.open(url, "_blank", "noopener,noreferrer");  // in the click: no pop-up blocker
+    const { scope: chosenScope, ...extra } = body;
+    await approvalAct(view, [entry.q], decision, chosenScope, extra, label);
   });
-  // Deny: for the rest of the run (once when the user chose that, or all the question allows); always only as its own
-  // "Block always…", asked first. The button says which it is.
-  let picked = false;  // a scope chosen by the user (the first, "this once", is only the allow's default)
-  const denyScope = () => ((picked && chosen() === "once") || (allowable && widest < 1) ? "once" : "run");
-  const denyLabel = () => (denyScope() === "once" ? t("Deny once") : t("Deny for this run"));
-  let deny = null;
-  scope.addEventListener("change", () => { picked = true; if (deny) deny.textContent = denyLabel(); });
-  const denyNow = (event) => answer("deny", { scope: denyScope() }, t("Denied {scope}", { scope: t(SCOPES[denyScope()]) }))(event);
-  // Allow: a browser question is opened here (never on that host); one that cannot be allowed has no Allow.
-  const allowButton = !allowable || (browser && (!url || tooOld)) ? null : browser
-    ? el("button", { class: "primary", title: t("opens the link in this browser, then allows it on {host} without opening a browser there", { host }), onclick: () => askAllow() }, t("Open here and allow"))
-    : el("button", { class: "primary", onclick: () => askAllow() }, t("Allow"));
-  const buttons = () => {
-    if (entry.expired) return;
-    deny = el("button", { class: "danger", onclick: denyNow }, denyLabel());
-    clear(actions).append(...[allowable && !(browser && !url) ? scope : null, allowButton, deny,
-      widest >= 2 ? el("button", { class: "danger", onclick: () => askBlock() }, t("Block always…")) : null].filter(Boolean));
-  };
-  const cancel = () => { buttons(); focusFirst(actions); };
-  const askAllow = () => {
-    const always = chosen() === "always";
-    const text = browser ? t("Open {url} here and allow {sandbox} on {host}, {scope}? It opens in this browser; nothing opens on {host}.", { url: q.url_host || url, sandbox: where, host, scope: t(SCOPES[chosen()]) })
-      : t("Allow {sandbox} on {host}: {question}, {scope}{always}?", { sandbox: where, host, question: q.question || q.kind || t("this"), scope: t(SCOPES[chosen()]), always: always && q.always ? ` (${q.always})` : "" });
-    const body = Object.assign({ scope: chosen() }, browser ? { no_open: true } : {}, always ? { confirm: true } : {});
-    const yes = answer("allow", body, t("Allowed {scope}", { scope: t(SCOPES[chosen()]) }));
-    clear(actions).append(...ask(text, browser ? t("Yes, open and allow") : t("Yes, allow"), (event) => {
-      if (browser && typeof window.open === "function") window.open(url, "_blank", "noopener,noreferrer");  // in the click: no pop-up blocker
-      return yes(event);
-    }, cancel, "primary"));
-    focusCancel(actions);
-  };
-  const askBlock = () => {
-    clear(actions).append(...ask(
-      t("Block {sandbox} on {host} always: {question}? It is remembered for the project: every later question like it is refused without asking.", { sandbox: where, host, question: q.question || q.kind || t("this") }),
-      t("Yes, block always"), answer("deny", { scope: "always", confirm: true }, t("Blocked always")), cancel));
-    focusCancel(actions);
-  };
+  // Deny for this run and Deny once; where the question allows only once, the one Deny is once (all it allows).
+  // Block always is a deny remembered for the project.
+  const denyOnly = allowable && widest < 1;
+  const denyWith = (scope) => (event) => answer("deny", { scope }, t("Denied {scope}", { scope: t(SCOPES[scope]) }))(event);
+  const allowWith = (scope) => (event) => answer("allow", Object.assign({ scope }, browser ? { no_open: true } : {}), t(ALLOWED_NOTES[scope]))(event);
+  // Allow once, Always allow, Always, also for later sessions: a browser question is opened here (never on that host)
+  // and has no Allow at all where its link cannot be opened; a scope the question cannot get is off, saying why.
+  const allowButtons = browser && (!url || tooOld) ? [] : ALLOW_BUTTONS.map(([scope, label, what, key]) => {
+    const why = scopeRefused(q, scope, false);
+    const text = browser && scope === "once" ? t("Open here and allow") : t(label);
+    const title = why || (browser && scope === "once" ? t("opens the link in this browser, then allows it on {host} without opening a browser there", { host }) : `${t(what)} (${key})`);
+    return el("button", { class: scope === "once" ? "primary" : "", disabled: Boolean(why), title, "data-scope": scope, onclick: allowWith(scope) }, text);
+  });
+  const deny = el("button", { class: "danger", onclick: denyWith(denyOnly ? "once" : "run") }, denyOnly ? t("Deny once") : t("Deny for this run"));
+  const denyOnce = denyOnly ? null : el("button", { title: t("Refused this time only: the sandbox may ask again"), onclick: denyWith("once") }, t("Deny once"));
+  clear(actions).append(...[...allowButtons, deny, denyOnce,
+    widest >= 2 && ["connect", "dns"].includes(q.kind) ? el("button", { class: "danger", title: t("Refused now and at every later start of this project, without a question"), onclick: (event) => answer("deny", { scope: "always" }, t("Blocked always"))(event) }, t("Block always")) : null].filter(Boolean));
   row.addEventListener("keydown", (event) => {
-    if (event.target !== row || entry.expired || event.ctrlKey || event.metaKey || event.altKey) return;
-    if (event.key === "a" && allowButton) { event.preventDefault(); askAllow(); }
-    else if (event.key === "d") { event.preventDefault(); denyNow({ target: deny }); }
+    if (event.target !== row || event.ctrlKey || event.metaKey || event.altKey) return;
+    const index = ["a", "r", "p"].indexOf(event.key);
+    if (index >= 0 && allowButtons[index]) {
+      event.preventDefault();
+      const scope = ALLOW_BUTTONS[index][0];
+      if (!scopeRefused(q, scope, false)) allowWith(scope)({ target: allowButtons[index] });
+    } else if (event.key === "d") { event.preventDefault(); denyWith(denyOnly ? "once" : "run")({ target: deny }); }
   });
-  buttons();
   entry.update(q, 0);
   return entry;
+}
+
+// The box that selects Q's row for the answers to several at once.
+function selectCell(q, view) {
+  const box = el("input", { type: "checkbox", "aria-label": t("Select {question}", { question: q.question || q.kind || q.id }) });
+  box.checked = view.selected.has(questionKey(q));
+  box.addEventListener("change", () => { if (box.checked) view.selected.add(questionKey(q)); else view.selected.delete(questionKey(q)); drawBulk(view); });
+  const cell = el("td", { class: "select" }, box);
+  cell.box = box;
+  return cell;
+}
+
+// A row of a question answered already (allowed or refused; an older sandbox's refusal without an answer): what the
+// run decided can be changed from here - Always allow (for the run), Always, also for later sessions (where that is
+// kept; else off, saying why), Deny, Ask again.
+function pastRow(q, view) {
+  const host = String(q.host), where = q.sandbox || q.run || t("a sandbox");
+  const result = q.result && typeof q.result === "object" ? q.result : {};
+  const said = t(APPROVAL_STATES[approvalState(q)]) + (result.scope ? ` (${t(SCOPES[result.scope] || result.scope)})` : "") + (q.asked_again ? ` · ${t("asked again")}` : "");
+  const actions = el("td", { class: "actions" });
+  const offered = Array.isArray(q.actions) ? q.actions : [];
+  const widest = SCOPE_ORDER.indexOf(q.max_scope);
+  const run = (action, label, scope) => (event) => busy(event.target, async () => {
+    await approvalAct(view, [q], action, action === "allow" ? scope : action === "deny" ? "run" : null, null, label);
+  });
+  if (offered.includes("allow") && widest >= 1) {
+    actions.append(...ALLOW_BUTTONS.filter(([scope]) => scope !== "once").map(([scope, label, what]) => {
+      const why = scopeRefused(q, scope, true);
+      return el("button", { class: scope === "run" ? "primary" : "", disabled: Boolean(why), title: why || t(what), "data-scope": scope, onclick: run("allow", t(ALLOWED_NOTES[scope]), scope) }, t(label));
+    }));
+  }
+  if (offered.includes("deny")) actions.append(el("button", { class: "danger", onclick: run("deny", t("Denied for this run")) }, t("Deny for this run")));
+  if (offered.includes("ask-again")) actions.append(el("button", { title: t("Forget what the run decided: its next try is asked again"), onclick: run("ask-again", t("Asked again")) }, t("Ask again")));
+  const select = selectCell(q, view);
+  const row = el("tr", { "data-id": String(q.id), "data-host": host, "data-state": approvalState(q) },
+    select, el("td", { class: "mono" }, host),
+    el("td", {}, q.question, result.reason && result.reason !== "answered" ? el("div", { class: "hint" }, result.reason) : null),
+    el("td", { class: "mono" }, where),
+    el("td", { class: approvalState(q) === "allowed" ? "status-ok" : approvalState(q) === "refused" ? "status-bad" : "status-warn" }, said), actions);
+  row.box = select.box;
+  return { row, q, update: () => {}, tick: null };
+}
+
+// The answers to every row selected at once: Allow once (open questions), Always allow, Always, also for later
+// sessions, Deny, Ask again - each for the selected rows it fits (a scope a row cannot get leaves that row out).
+function drawBulk(view) {
+  if (!view.bulk) return;
+  const chosen = [...view.selected].map(key => view.rows.get(key)).filter(entry => entry && !entry.row.hidden).map(entry => entry.q);
+  // (a page to open is opened here one by one, in its own row: never allowed from the selection)
+  const fits = (action, scope) => chosen.filter(q => (stillOpen(q)
+    ? (action === "allow" ? q.kind !== "browser" && !scopeRefused(q, scope, false) : action === "deny")
+    : (q.actions || []).includes(action) && (action !== "allow" || (SCOPE_ORDER.indexOf(q.max_scope) >= 1 && !scopeRefused(q, scope, true)))));
+  const button = (action, label, scope, kind, note) => {
+    const items = fits(action, scope);
+    return el("button", { class: kind || "", disabled: !items.length, onclick: (event) => busy(event.target, async () => {
+      await approvalAct(view, fits(action, scope), action, scope, null, note || label);
+    }) }, `${label} (${items.length})`);
+  };
+  clear(view.bulk).append(...(chosen.length ? [el("span", { class: "hint" }, t("{count} selected", { count: chosen.length })),
+    ...ALLOW_BUTTONS.map(([scope, label], i) => button("allow", t(label), scope, i ? "" : "primary", t(ALLOWED_NOTES[scope]))),
+    button("deny", t("Deny for this run"), "run", "danger"), button("ask-again", t("Ask again"), null),
+    el("button", { onclick: () => { view.selected.clear(); for (const entry of view.rows.values()) if (entry.row.box) entry.row.box.checked = false; drawBulk(view); } }, t("Clear the selection"))] : []));
+  view.bulk.hidden = !chosen.length;
 }
 
 function notificationsButton() {
@@ -2821,18 +4350,10 @@ function notificationsButton() {
   return button;
 }
 
-// What a host remembers of its answers (approvals history, remembered, forget there): shown below the questions.
+// What a host remembers for its projects (approvals remembered, forget there): below the table.
 function approvalsRecords() {
   const hostChoice = el("select", { id: "records-host" }, state.hosts.map(h => el("option", { value: h.name, selected: h.name === state.host }, h.name)));
   const output = el("div");
-  const showHistory = (event) => busy(event.target, async () => {
-    const host = hostChoice.value;
-    clear(output);
-    try {
-      const r = await api("GET", hostPath("/approvals-history", host));
-      output.append(el("h3", {}, t("Answered questions on {host}", { host })), el("pre", {}, (r && r.output) || ""));
-    } catch (e) { output.append(errorNotice(e)); }
-  });
   const showRemembered = (event) => busy(event.target, async () => {
     const host = hostChoice.value;
     clear(output);
@@ -2862,25 +4383,72 @@ function approvalsRecords() {
     output.append(el("h3", {}, t("Remembered answers on {host}", { host })),
       table([t("Project"), t("Answer"), t("What"), ""], rows, t("Nothing is allowed or blocked always on this host."), t("Remembered answers on {host}", { host })));
   });
-  return el("div", { class: "card" }, el("h2", {}, t("Answers given before")),
+  return el("div", { class: "card" }, el("h2", {}, t("Remembered for the projects")),
+    el("p", { class: "hint" }, t("What was allowed or blocked always: every later start of the project keeps to it.")),
     el("div", { class: "row" }, el("label", { for: "records-host" }, t("Host")), hostChoice,
-      el("button", { onclick: showHistory }, t("History")), el("button", { onclick: showRemembered }, t("Remembered answers"))), output);
+      el("button", { onclick: showRemembered }, t("Remembered answers"))), output);
+}
+
+// The page's frame: the tabs with their counts, the bulk answers, the note line (what was done, with Undo; what
+// failed), the table.
+function approvalsFrame(view, main) {
+  view.main = main; view.rows = new Map(); view.selected = new Set(); view.all = null;
+  view.status = el("div"); view.body = el("tbody");
+  view.note = el("p", { class: "approval-note", role: "status", "aria-live": "polite" });
+  view.bulk = el("div", { class: "row bulk" });
+  view.bulk.hidden = true;
+  view.tabs = el("div", { class: "tabs", role: "tablist", "aria-label": t("Approvals") }, APPROVAL_TABS.map(([key, label]) => {
+    const tab = el("button", { role: "tab", "data-tab": key, "aria-selected": String(view.tab === key), onclick: () => { view.tab = key; drawApprovalTabs(view); } }, t(label));
+    tab.label = t(label);
+    tab.key = key;
+    return tab;
+  }));
+  const all = el("input", { type: "checkbox", "aria-label": t("Select every row shown") });
+  all.addEventListener("change", () => {
+    for (const [key, entry] of view.rows) {
+      if (entry.row.hidden) continue;
+      if (all.checked) view.selected.add(key); else view.selected.delete(key);
+      if (entry.row.box) entry.row.box.checked = all.checked;
+    }
+    drawBulk(view);
+  });
+  view.table = el("table", {}, el("caption", { class: "sr-only" }, t("Questions of every host")),
+    el("thead", {}, el("tr", {}, el("th", {}, all), ...[t("Host"), t("Question"), t("Sandbox"), t("State"), ""].map(c => el("th", {}, c)))), view.body);
+  view.empty = el("p", { class: "hint" }, t("No open questions."));
+  clear(main).append(el("h1", {}, t("Approvals")),
+    el("p", { class: "hint" }, t("What the sandboxes of every host ask, and what was answered. A click answers at once (Undo takes it back for a few seconds). A question nobody answered in time stays open under Timed out: allowed later, the request's next try goes through. In a row: a allows, d denies.")),
+    el("div", { class: "row" }, notificationsButton()),
+    view.tabs, view.status, view.note, view.bulk, view.table, view.empty, approvalsRecords());
+  view.table.hidden = true; view.empty.hidden = true;
+}
+
+// The tabs' counts and which rows the chosen tab shows.
+function drawApprovalTabs(view) {
+  const counts = { open: 0, allowed: 0, refused: 0, timeout: 0, all: 0 };
+  for (const entry of view.rows.values()) { counts[approvalState(entry.q)] += 1; counts.all += 1; }
+  for (const tab of view.tabs.children) {
+    const key = tab.key;
+    tab.textContent = `${tab.label} (${counts[key]})`;
+    tab.setAttribute("aria-selected", String(view.tab === key));
+    tab.className = view.tab === key ? "active" : "";
+  }
+  let shown = 0;
+  for (const entry of view.rows.values()) {
+    entry.row.hidden = view.tab !== "all" && approvalState(entry.q) !== view.tab;
+    if (!entry.row.hidden) shown += 1;
+  }
+  view.table.hidden = !shown;
+  view.empty.hidden = Boolean(shown);
+  view.empty.textContent = view.tab === "open" ? t("No open questions.") : view.tab === "all" ? t("No questions.") : t("Nothing here.");
+  drawBulk(view);
 }
 
 // KNOWN: what poll() fetched already ({questions, errors, age}, or the Error of a failed check); else fetched here.
+// Every state is read too (GET /api/approvals/all), one read at a time.
 pages.approvals = async (main, known) => {
   const view = approvalsView;
   if (known === undefined || view.main !== main || !view.body || !view.body.isConnected) {
-    view.main = main; view.rows = new Map();
-    view.status = el("div"); view.body = el("tbody");
-    view.table = el("table", {}, el("caption", { class: "sr-only" }, t("Open questions of every host")),
-      el("thead", {}, el("tr", {}, [t("Host"), t("Question"), t("Sandbox"), t("Time left"), ""].map(c => el("th", {}, c)))), view.body);
-    view.empty = el("p", { class: "hint" }, t("No open questions."));
-    clear(main).append(el("h1", {}, t("Approvals")),
-      el("p", { class: "hint" }, t("What the sandboxes of every host ask. A question without an answer in its time is refused. In a row: a allows, d denies.")),
-      el("div", { class: "row" }, notificationsButton()),
-      view.status, view.table, view.empty, approvalsRecords());
-    view.table.hidden = true; view.empty.hidden = true;
+    if (view.main !== main || !view.body || !view.body.isConnected) approvalsFrame(view, main);
   }
   let found = known;
   if (found === undefined && state.polling) {
@@ -2895,6 +4463,13 @@ pages.approvals = async (main, known) => {
     } catch (e) { found = e; }
     noteApprovals(found);
   }
+  if (!view.reading) {
+    view.reading = true;
+    try {
+      const all = await api("GET", "/api/approvals/all", undefined, { background: true });
+      view.all = all && Array.isArray(all.questions) ? all : null;
+    } catch (e) { view.all = null; } finally { view.reading = false; }
+  }
   if (state.page !== "approvals" || view.main !== main) return;
   clear(view.status);
   if (found instanceof Error || !found || !Array.isArray(found.questions)) {  // the rows shown stay: a failed check is no answer to them
@@ -2905,22 +4480,31 @@ pages.approvals = async (main, known) => {
   const errors = found.errors && typeof found.errors === "object" ? found.errors : {};
   for (const [host, why] of Object.entries(errors)) view.status.append(notice(host === "hosts.json" ? t("The list of hosts could not be read: {error}", { error: why }) : t("Could not check {host}: {error}", { host, error: why }), "error"));
   const ages = found.age && typeof found.age === "object" ? found.age : {};
-
+  // The open questions (the poll's, freshest), then every other state (answered here: never back with live buttons).
   const questions = openQuestions(found);
   const keys = new Set(questions.map(questionKey));
+  for (const q of view.all ? view.all.questions : []) {
+    if (!q || typeof q !== "object" || q.id === undefined || typeof q.host !== "string" || keys.has(questionKey(q))) continue;
+    if (stillOpen(q) && state.answered.has(questionKey(q))) continue;
+    questions.push(q);
+    keys.add(questionKey(q));
+  }
   for (const [key, entry] of view.rows) {
     // a host that could not be asked keeps its rows: no answer from it is no answer to them
-    if (!keys.has(key) && !notAsked(errors, key.split(" ")[0])) { entry.row.remove(); view.rows.delete(key); }
+    if (!keys.has(key) && !notAsked(errors, key.split(" ")[0])) { entry.row.remove(); view.rows.delete(key); view.selected.delete(key); }
   }
   for (const q of questions) {
-    const existing = view.rows.get(questionKey(q));
-    if (existing) { existing.update(q, ages[q.host]); continue; }
-    const entry = approvalRow(q, view);
+    const key = questionKey(q);
+    const existing = view.rows.get(key);
+    const kind = stillOpen(q) ? "open" : `${approvalState(q)} ${JSON.stringify(q.result || {})} ${(q.actions || []).join(",")}`;
+    if (existing && existing.kind === kind) { existing.update(q, ages[q.host]); continue; }
+    const entry = stillOpen(q) ? approvalRow(q, view) : pastRow(q, view);
+    entry.kind = kind;
     entry.update(q, ages[q.host]);
-    view.rows.set(questionKey(q), entry);
-    view.body.append(entry.row);
+    if (existing) existing.row.replaceWith(entry.row); else view.body.append(entry.row);
+    view.rows.set(key, entry);
   }
-  view.table.hidden = !view.rows.size; view.empty.hidden = Boolean(view.rows.size) || Boolean(Object.keys(errors).length);
+  drawApprovalTabs(view);
 };
 
 // --- the doctor, for a human: the desktop app's view (projects/sandbox-ai-app/sandbox_ai_app/doctor_view.py) ----
@@ -3103,7 +4687,46 @@ pages.doctor = async (main) => {
     el("div", { class: "row" }, el("label", { for: "doctor-backend" }, t("Backend")), choice),
     el("p", { class: "hint" }, t("Each command is only shown to copy: run it yourself in a terminal on {host}.", { host })),
     doctorView(results, { level: 2, host, known: (state.hostVersions || {})[host] }));
+  if (live()) await updatesSection(main, host, live);
 };
+
+// The update mode of a host (sandbox-ai update mode): the mode, the last check and a newer version; a change is asked
+// first (update-mode) and sent as a confirmed POST.
+const UPDATE_MODES = [["off", N_("off - nothing is checked unless asked")], ["notify", N_("notify - a newer signed release is announced")],
+  ["download", N_("download - also fetched and checked, installed when you say")], ["auto", N_("auto - also installed in the window while nothing runs")]];
+
+async function updatesSection(main, host, live) {
+  const box = el("div", { class: "card", id: "updates" });
+  main.append(el("h2", {}, t("Updates on {host}", { host })), box);
+  let data;
+  try { data = await api("GET", hostPath("/update-mode", host)); } catch (e) { if (live()) box.append(errorNotice(e)); return; }
+  if (!live() || !data || typeof data !== "object") return;
+  const result = data.result && typeof data.result === "object" ? data.result : null;
+  const when = (seconds) => typeof seconds === "number" ? new Date(seconds * 1000).toLocaleString() : t("never");
+  const found = !result ? t("not checked yet") : result.error ? t("failed: {error}", { error: String(result.error) })
+    : result.newer ? t("{available} is available (installed: {installed})", { available: String(result.available), installed: String(result.installed) })
+    : t("up to date ({installed})", { installed: String(result.installed || data.installed || "") });
+  const lines = [[t("Mode"), String(data.mode) + (data.chosen ? "" : " " + t("(the default)"))],
+    [t("Last check"), `${when(data.last_check)}: ${found}`],
+    [t("Next check"), data.mode === "off" ? t("none") : when(data.next_check)]];
+  if (data.mode === "auto") lines.push([t("Update window"), String(data.window || "")]);
+  if (data.downloaded) lines.push([t("Downloaded"), String(data.downloaded)]);
+  if (data.waiting && data.waiting.text) lines.push([t("Waiting"), String(data.waiting.text)]);
+  if (data.manual) lines.push([t("This copy"), String(data.manual)]);
+  const mode = el("select", { id: "update-mode" }, UPDATE_MODES.map(([value, label]) => el("option", {
+    value, selected: value === data.mode, disabled: Boolean((data.refused || {})[value]) }, t(label))));
+  const windowField = el("input", { id: "update-window", value: String(data.window || "03:00-05:00"), size: 12, placeholder: "03:00-05:00" });
+  const row = el("div", { class: "row" });
+  const save = el("button", { onclick: (event) => {
+    const body = { mode: mode.value, confirm: true };
+    if (mode.value === "auto" && windowField.value.trim()) body.at = windowField.value.trim();
+    confirmIn(row, t("Set the update mode of {host} to {mode}?", { host, mode: mode.value }), t("Yes, set it"), async () => {
+      try { await api("POST", hostPath("/update-mode", host), body); doneToast(t("Update mode"), { output: mode.value }); show("doctor"); } catch (e) { failed(t("Update mode"))(e); }
+    }, { trigger: event.target });
+  } }, t("Set…"));
+  row.append(el("label", { for: "update-mode" }, t("Update mode")), mode, el("label", { for: "update-window" }, t("Window (auto)")), windowField, save);
+  box.append(el("dl", { class: "details" }, ...lines.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])), row);
+}
 
 // The logs of a host (sandbox-ai logs --json DIR | --project PATH): a log directory, a project's (its default log
 // directory), or one of that host's starts (its workspace is its project). Never the directory the service (or the
@@ -3152,6 +4775,9 @@ pages.logs = async (main) => {
       el("p", {}, t("{denied} refused connection(s), {events} file event(s)", { denied: s.denied ?? 0, events: s.file_events ?? 0 })),
       (s.targets || []).length ? table([t("Refused destination"), t("Count")], s.targets.slice(0, 20).map(([target, n]) => el("tr", {}, el("td", { class: "mono" }, target), el("td", {}, n)))) : null,
       (s.suggestions || []).length ? el("div", {}, el("h2", {}, t("To allow them")), table([t("Option"), t("Why"), t("Count")], s.suggestions.map(x => el("tr", {}, el("td", { class: "mono" }, x.option), el("td", {}, x.why), el("td", {}, x.count))))) : null,
+      s.telemetry && s.telemetry.spend && s.telemetry.spend.total ? el("div", { class: "spend-summary" }, el("h2", {}, t("Model spend")),
+        el("p", {}, t("In all: {cost} (sandbox-ai spend)", { cost: s.telemetry.spend.total.cost || "-" })),
+        table([t("Model"), t("Cost"), t("Requests")], (s.telemetry.spend.models || []).map(m => el("tr", {}, el("td", { class: "mono" }, m.key || "?"), el("td", {}, m.cost || "-"), el("td", { class: "num" }, String(m.requests || 0)))))) : null,
       el("details", {}, el("summary", {}, t("All of it (JSON)")), el("pre", {}, JSON.stringify(s, null, 2)))));
   }
 };
@@ -3193,6 +4819,128 @@ function privacyCard(main, host) {
     }) }, t("Check")), result)));
 }
 
+// --- session bridges ----------------------------------------------------------------------------------------------
+// The bridges of the service's machine and of its hosts (sandbox-ai bridge list --hosts there; each bridge once,
+// HOST:ID for one of a host): Show, Resume (a suspended one) and Revoke act where the bridge is. New bridge: two
+// running sessions of any host (HOST:NAME), what A may do to B, checked first by the launcher's dry run, whose
+// warnings are confirmed before it is made. Every request goes to the service's own sandbox-ai ("local"), which
+// reaches the hosts over SSH.
+const BRIDGE_HOST = "local";
+const BRIDGE_ACTIONS = [["alert", N_("Alert you")], ["hint", N_("Hint")], ["net-cut", N_("Cut B's network")], ["pause", N_("Pause B")]];
+const BRIDGE_DO = { resume: "resume", revoke: "revoke" };  // the actions on a bridge (the route's last part)
+const BRIDGE_ASK = [["first", N_("the first call of each tool")], ["each", N_("every call")], ["never", N_("never (writes are asked all the same)")]];
+function bridgeId(b) { return b.host ? `${b.host}:${b.id}` : String(b.id); }
+function bridgeHostOf(name) {
+  const text = String(name || ""), at = text.indexOf(":");
+  const host = at > 0 ? text.slice(0, at) : null;
+  return host === "local" ? null : host;
+}
+// What the launcher does with A and B when both run on other hosts (null: one of them runs here).
+function bridgePlacement(a, b) {
+  const ha = bridgeHostOf(a), hb = bridgeHostOf(b);
+  if (!ha || !hb) return null;
+  return ha === hb ? t("Both sessions run on {host}: the bridge is made there (no hop through this machine) and listed here as {host}:ID.", { host: ha })
+    : t("The sessions run on {a} and {b}: each host runs its half of the bridge, and this machine passes their messages on over two SSH connections (the hosts never connect to each other). When this machine sleeps or loses a host, it re-establishes the bridge with the same grant once both sessions still run (sandbox-ai 0.1.99 or later on both; else it ends); both need sandbox-ai 0.1.98 or later.", { a: ha, b: hb });
+}
+// The running agent sessions of every host as bridge add names them: this machine's NAME, a host's HOST:NAME.
+function bridgeSessions(starts) {
+  return (Array.isArray(starts) ? starts : []).filter(s => s && s.state === "running" && (s.kind === "session" || s.kind === "run") && !s.helper_of && typeof s.name === "string")
+    .map(s => ({ value: s.host && s.host !== "local" ? `${s.host}:${s.name}` : s.name, agent: String(s.agent || "") }))
+    .sort((x, y) => (bridgeHostOf(x.value) ? 1 : 0) - (bridgeHostOf(y.value) ? 1 : 0) || (x.value < y.value ? -1 : x.value > y.value ? 1 : 0));
+}
+
+pages.bridges = async (main) => {
+  const live = pageLive();
+  let rows = [], problem = null, starts = [];
+  try { rows = await api("GET", hostPath("/bridges", BRIDGE_HOST)); } catch (e) { problem = e; }
+  try { const all = await api("GET", "/api/starts"); starts = all && Array.isArray(all.starts) ? all.starts : []; } catch (e) { starts = []; }
+  if (!live()) return;
+  clear(main).append(el("h1", {}, t("Bridges")),
+    el("p", { class: "hint" }, t("A bridge lets one running session reach another (messages, questions, files, observing) through a broker on their host, never a path between the sandboxes. A session of one of your hosts is HOST:NAME: two of one host are bridged there, two of two hosts through this machine. Only you make, widen or end one.")));
+  if (problem) main.append(errorNotice(problem));
+  const shown = el("div");
+  const list = (Array.isArray(rows) ? rows : []).filter(b => b && typeof b.id === "string");
+  const trs = list.map(b => {
+    const ident = bridgeId(b), actions = el("td", { class: "actions" });
+    const act = (action, title) => async () => {
+      try { await api("POST", hostPath(`/bridges/${encodeURIComponent(ident)}/${action}`, BRIDGE_HOST), { confirm: true }); show("bridges"); } catch (e) { failed(title)(e); }
+    };
+    actions.append(rowButton(t("Show"), ident, BRIDGE_HOST, { onclick: (event) => busy(event.target, async () => {
+      try { clear(shown).append(el("h3", {}, t("Bridge {id}", { id: ident })), dataView(await api("GET", hostPath(`/bridges/${encodeURIComponent(ident)}`, BRIDGE_HOST)))); } catch (e) { clear(shown).append(errorNotice(e)); } }) }));
+    if (b.state === "suspended") {
+      const resume = rowButton(t("Resume"), ident, BRIDGE_HOST, { onclick: () => confirmIn(actions, t("Resume bridge {id} between {a} and {b}? They reach each other again as it allows.", { id: ident, a: b.a, b: b.b }), t("Yes, resume it"),
+        act(BRIDGE_DO.resume, t("Could not resume bridge {id}", { id: ident })), { kind: "primary", trigger: resume }) });
+      actions.append(resume);
+    }
+    const revoke = rowButton(t("Revoke"), ident, BRIDGE_HOST, { class: "danger", onclick: () => confirmIn(actions, t("Revoke bridge {id} between {a} and {b}? Both lose it at once.", { id: ident, a: b.a, b: b.b }), t("Yes, revoke it"),
+      act(BRIDGE_DO.revoke, t("Could not revoke bridge {id}", { id: ident })), { trigger: revoke }) });
+    actions.append(revoke);
+    const both = b.b_to_a && b.b_to_a !== "-";
+    return el("tr", {}, el("td", { class: "mono" }, ident), el("td", {}, `${b.a} ${both ? "⇄" : "→"} ${b.b}`), el("td", { class: "mono" }, b.a_to_b || "-"),
+      el("td", { class: "mono" }, b.b_to_a || "-"), el("td", {}, stateText(b.state) + (b.reconnecting === true ? " " + t("(reconnecting)") : "")), el("td", {}, b.until || "-"), actions);
+  });
+  main.append(table([t("Bridge"), t("Between"), t("A may"), t("B may"), t("State"), t("Until"), ""], trs, t("No bridge between running sessions.")), shown);
+  // New bridge
+  const sessions = bridgeSessions(starts);
+  const options = () => sessions.map(s => el("option", { value: s.value }, s.agent ? `${s.value} (${s.agent})` : s.value));
+  const a = el("select", { id: "bridge-a" }, options()), b = el("select", { id: "bridge-b" }, options());
+  if (sessions.length > 1) b.selectedIndex = 1;
+  const box = (id) => el("input", { id, type: "checkbox" });
+  const message = box("bridge-message"), ask = box("bridge-ask"), watch = box("bridge-watch"), both = box("bridge-both");
+  const reads = el("textarea", { id: "bridge-read", rows: 2, class: "mono", placeholder: t("one path per line, relative to its workspace (. for all of it)") });
+  const writes = el("textarea", { id: "bridge-write", rows: 2, class: "mono", placeholder: t("one path per line, relative to its workspace (. for all of it)") });
+  const until = el("input", { id: "bridge-until", placeholder: t("30m, 2h, 1d, HH:MM or an ISO time; empty: until either session ends") });
+  const askMode = el("select", { id: "bridge-ask-mode" }, BRIDGE_ASK.map(([v, label]) => el("option", { value: v }, t(label))));
+  const observer = Object.fromEntries(BRIDGE_ACTIONS.map(([key]) => [key, el("input", { type: "checkbox", id: `bridge-${key}`, checked: key === "alert" })]));
+  const note = el("p", { class: "hint" }), result = el("div", { class: "wide" }), addRow = el("div", { class: "row" });
+  const confirmBox = el("div", { class: "wide" });  // (the question below the plan: confirmIn replaces what it is put in)
+  const update = () => {
+    note.textContent = bridgePlacement(a.value, b.value) || "";
+    for (const input of Object.values(observer)) input.disabled = !watch.checked;
+  };
+  for (const input of [a, b, watch]) input.addEventListener("change", update);
+  update();
+  const bodyOf = () => {
+    const allow = [message.checked ? "message" : null, ask.checked ? "ask" : null, ...linesOf(writes.value).map(x => `files:rw:${x}`),
+      ...linesOf(reads.value).map(x => `files:ro:${x}`), watch.checked ? "watch" : null].filter(Boolean);
+    return { a: a.value, b: b.value, allow, both: both.checked === true, until: textOf(until), ask: askMode.value || "first",
+      observer_actions: watch.checked ? BRIDGE_ACTIONS.map(([key]) => key).filter(key => observer[key].checked) : null };
+  };
+  addRow.append(el("button", { class: "primary", onclick: (event) => busy(event.target, async () => {
+    const body = bodyOf();
+    clear(confirmBox);
+    if (!body.a || !body.b || body.a === body.b) { clear(result).append(el("p", { class: "notice error" }, t("Choose two different running sessions."))); return; }
+    if (!body.allow.length) { clear(result).append(el("p", { class: "notice error" }, t("Choose at least one capability."))); return; }
+    let plan;
+    try { plan = await api("POST", hostPath("/bridges", BRIDGE_HOST), Object.assign({}, body, { dry_run: true })); } catch (e) { clear(result).append(errorNotice(e)); return; }
+    const warnings = (plan && Array.isArray(plan.warnings) ? plan.warnings : []).map(w => el("li", {}, `⚠ ${w}`));
+    const notes = (plan && Array.isArray(plan.notes) ? plan.notes : []).map(n => el("li", {}, n));
+    clear(result).append(el("p", {}, t("{a} may reach {b}: {caps}", { a: body.a, b: body.b, caps: body.allow.join(",") })),
+      ...(body.both ? [el("p", {}, t("{a} may reach {b}: {caps}", { a: body.b, b: body.a, caps: body.allow.join(",") }))] : []),
+      warnings.length ? el("ul", {}, warnings) : el("span"), notes.length ? el("ul", { class: "hint" }, notes) : el("span"));
+    confirmIn(confirmBox, t("Create this bridge?"), t("Yes, create it"), async () => {
+      try {
+        const made = await api("POST", hostPath("/bridges", BRIDGE_HOST), Object.assign({}, body, { confirm: true }));
+        const ident = made && made.host ? `${made.host}:${made.id}` : (made && made.id) || "?";
+        toast("success", t("Bridge {id} is active", { id: ident }), (made && Array.isArray(made.notes) ? made.notes : []).join("\n"));
+        show("bridges");
+      } catch (e) { failed(t("Not bridged"))(e); }
+    }, { kind: "primary", trigger: event.target });
+  }) }, t("Check and create…")));
+  const actionsRow = el("div", { class: "row" }, BRIDGE_ACTIONS.map(([key, label]) => el("label", {}, observer[key], " ", t(label))));
+  const form = el("div", { class: "form" },
+    el("label", { for: "bridge-a" }, t("Session A (reaches B)")), a, el("label", { for: "bridge-b" }, t("Session B")), b,
+    el("span"), note,
+    el("span", {}, t("What A may do to B")), el("div", { class: "row" }, el("label", {}, message, " ", t("Send messages (message)")), el("label", {}, ask, " ", t("Ask questions and wait for the answer (ask)")), el("label", {}, watch, " ", t("Observe B (watch)"))),
+    el("label", { for: "bridge-read" }, t("Read files (files:ro)")), reads, el("label", { for: "bridge-write" }, t("Write files (files:rw)")), writes,
+    el("span", {}, t("The observer may")), actionsRow,
+    el("span"), el("label", {}, both, " ", t("Both directions (B may do the same to A)")),
+    el("label", { for: "bridge-until" }, t("Until")), until, el("label", { for: "bridge-ask-mode" }, t("Ask you about")), askMode,
+    el("span"), el("p", { class: "hint" }, t("Every write is asked on the Approvals page, with its diff, whatever the ask mode says. .git is never reached.")),
+    el("span"), addRow, result, confirmBox);
+  main.append(el("h2", {}, t("New bridge")), sessions.length < 2 ? el("p", { class: "hint" }, t("A bridge joins two running sessions, here or on your hosts; {count} run now.", { count: sessions.length })) : el("span"), el("div", { class: "card" }, form));
+};
+
 pages.vpn = async (main) => {
   const live = pageLive();
   const profiles = await api("GET", hostPath("/vpn"));
@@ -3214,7 +4962,26 @@ pages.vpn = async (main) => {
       rowButton(t("Check"), p.profile, host, { onclick: async (event) => busy(event.target, async () => {
         try { toast("success", t("{profile} works on {host}", { profile: p.profile, host }), (await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/check`, host), {})).output || "ok"); }
         catch (e) { failed(t("The check of {profile} on {host} failed", { profile: p.profile, host }))(e); } }) }),
-      remove);
+      // Edit…: the profile's settings (vpn show: "settings" - names of secrets, hosts, countries; never a key), changed
+      // in place with vpn set; an emptied field clears the setting
+      rowButton(t("Edit…"), p.profile, host, { onclick: async (event) => busy(event.target, async () => {
+        let facts;
+        try { facts = await api("GET", hostPath(`/vpn/${encodeURIComponent(p.profile)}`, host)); } catch (e) { clear(shownProfile).append(errorNotice(e)); return; }
+        const settings = facts && typeof facts.settings === "object" && facts.settings;
+        if (!settings) { clear(shownProfile).append(el("p", { class: "hint" }, t("The sandbox-ai on {host} is older and cannot change a profile in place: update it, or add the profile again.", { host }))); return; }
+        const keys = Object.keys(settings);
+        rowEditor(shownProfile, t("Edit the VPN profile {profile}", { profile: p.profile }), keys.map(key => ({ key, label: `--${key}`, value: settings[key] === null ? "" : String(settings[key]), kind: key.endsWith("secret") ? "secret" : "" })),
+          (v, row, result, trigger) => {
+            const changed = {};
+            for (const key of keys) { const before = settings[key] === null ? "" : String(settings[key]); if (v[key] !== before) changed[key] = v[key] || (key.startsWith("bootstrap-") ? "default" : "none"); }
+            if (!Object.keys(changed).length) { clear(result).append(el("p", { class: "hint" }, t("Nothing changed."))); return; }
+            confirmIn(row, t("Change the VPN profile {profile} on {host}? It is for the starts from now on: a sandbox that runs keeps the VPN it was started with.", { profile: p.profile, host }), t("Yes, change it"), async () => {
+              try { const r = await api("POST", hostPath(`/vpn/${encodeURIComponent(p.profile)}/set`, host), { settings: changed, confirm: true }); toast("success", t("The VPN profile {profile} was changed on {host}", { profile: p.profile, host }), (r && r.output) || ""); show("vpn"); }
+              catch (e) { clear(result).append(errorNotice(e, t("The profile was not changed"))); }
+            }, { trigger });
+          }, host);
+      }) }),
+      remove, notWhileRunning("vpn", p.profile, host));
     return el("tr", {}, el("td", { class: "mono" }, p.profile), el("td", {}, p.type || ""), el("td", {}, p.provider || ""), actions);
   });
   main.append(table([t("Profile"), t("Kind"), t("Provider"), ""], rows, t("No VPN profiles on this host.")), shownProfile);
@@ -3298,8 +5065,84 @@ function llmBodyOf(view, changes) {
   if (v.vpn) body.vpn = v.vpn;
   if (v.anthropic) body.anthropic = true;
   if (v.insecure_http) body.insecure_http = true;
+  if (typeof v.memory_gb === "number" && v.memory_gb > 0) body.memory_gb = v.memory_gb;
   return Object.assign(body, changes || {});
 }
+
+// The traffic light of the local-model research (llm models --json's and wizard models --json's "support": sandbox-ai's
+// model_profiles.support, read from model_profiles.json on that host at run time): per model and agent green
+// (verified), yellow (partly working: partial or smoke test only), red (failing or known not to work), grey (not
+// tested); the model's colour is its best agent's. Colour, a symbol of its own and words: never the colour alone.
+// The details: per agent what worked (✓) and what failed (✗), the recommended settings, the speed, the round and its
+// date; "no data yet" when nothing is known. The app's words (model_profile.py).
+const LIGHTS = ["green", "yellow", "red", "grey"];
+const LIGHT_WORDS = { green: N_("verified"), yellow: N_("partly working"), red: N_("does not work"), grey: N_("not tested") };
+const LIGHT_SYMBOLS = { green: "✓", yellow: "~", red: "✗", grey: "?" };
+const LIGHT_CLASSES = { green: "light light-green", yellow: "light light-yellow", red: "light light-red", grey: "light light-grey" };
+const STATUS_WORDS = { verified: N_("verified"), "smoke-only": N_("smoke test only"), partial: N_("partly working"), failing: N_("failing"),
+  "known-bad": N_("known not to work"), untested: N_("this pair untested") };
+const supportOf = (s) => (s && typeof s === "object" && LIGHTS.includes(s.light) ? s : null);
+const textList = (v) => (Array.isArray(v) ? v.filter(x => typeof x === "string") : []);
+// an agent's name as the host's sandbox-ai names it (support's "names"), else its id
+const namesOf = (s) => (s.names && typeof s.names === "object" ? s.names : {});
+function agentsOf(s, colour) { const names = namesOf(s); return textList(s.by_light && s.by_light[colour]).map(a => (typeof names[a] === "string" ? names[a] : a)); }
+function namesIn(s, agents) { const names = namesOf(s); return textList(agents).map(a => (typeof names[a] === "string" ? names[a] : a)); }
+function lightSummary(s) {
+  const parts = ["green", "yellow", "red"].filter(c => agentsOf(s, c).length)
+    .map(c => t("{words} in {agents}", { words: t(LIGHT_WORDS[c]), agents: agentsOf(s, c).join(", ") }));
+  if ((s.status === "failing" || s.status === "known-bad") && textList(s.untested).length)
+    parts.push((Array.isArray(s.harnesses) && s.harnesses.length ? t("{words} in every other agent", { words: t(LIGHT_WORDS.red) }) : t("{words} in every agent", { words: t(LIGHT_WORDS.red) })));
+  return parts.join("; ") || t("not tested: no data yet");
+}
+function lightLabel(s) {
+  const agents = agentsOf(s, s.light), words = t(LIGHT_WORDS[s.light]);
+  if (!agents.length) return `${LIGHT_SYMBOLS[s.light]} ${words}${s.light !== "grey" ? `: ${t("every agent")}` : ""}`;
+  return `${LIGHT_SYMBOLS[s.light]} ${words}: ${agents.slice(0, 3).join(", ")}${agents.length > 3 ? ` +${agents.length - 3}` : ""}`;
+}
+// a derived pair's evidence where its status is shown: "(49 runs, 13 use cases, rounds 4-6)" (none: hand-written)
+function measuredText(counts) {
+  if (!counts || typeof counts !== "object" || !wholeNumber(counts.runs)) return "";
+  const parts = [counts.runs === 1 ? t("1 run") : t("{runs} runs", { runs: counts.runs })];
+  if (wholeNumber(counts.use_cases) && counts.use_cases > 0)
+    parts.push(counts.use_cases === 1 ? t("1 use case") : t("{use_cases} use cases", { use_cases: counts.use_cases }));
+  if (typeof counts.rounds === "string" && counts.rounds) parts.push(counts.rounds);
+  return ` (${parts.join(", ")})`;
+}
+function supportDetails(s) {
+  const box = el("div", { class: "support-details" });
+  if (!s.family) return box.append(el("p", {}, t("No data yet: no model family of sandbox-ai's research matches this name."))), box;
+  const line = (text) => el("li", {}, text);
+  box.append(el("p", {}, t("Model family: {label}", { label: String(s.label || s.family) })));
+  if ((s.status === "failing" || s.status === "known-bad") && s.reason) box.append(el("p", { class: "status-bad" }, t("Known not to work: {reason}", { reason: String(s.reason) })));
+  if (s.speed) box.append(el("p", {}, t("Measured speed: {speed}", { speed: String(s.speed) })));
+  if (s.settings_text) box.append(el("p", {}, t("Recommended for every agent: {settings}", { settings: String(s.settings_text) })));
+  for (const pair of Array.isArray(s.harnesses) ? s.harnesses.filter(x => x && typeof x === "object") : []) {
+    const colour = LIGHTS.includes(pair.light) ? pair.light : "grey";
+    const when = [textList(pair.rounds).join(", "), typeof pair.date === "string" ? pair.date : ""].filter(Boolean).join(", ");
+    const items = [when ? line(t("Evidence of {when}", { when })) : null,
+      pair.reason ? line(t("Why: {reason}", { reason: String(pair.reason) })) : null,
+      pair.evidence ? line(t("Measured: {evidence}", { evidence: String(pair.evidence) })) : null,
+      wholeNumber(pair.runs) && wholeNumber(pair.solved) ? line(t("{solved} of {runs} runs solved", { solved: pair.solved, runs: pair.runs })) : null,
+      pair.settings_text ? line(t("Recommended settings: {settings}", { settings: String(pair.settings_text) })) : null,
+      pair.speed ? line(t("Measured speed: {speed}", { speed: String(pair.speed) })) : null,
+      ...textList(pair.works).map(x => el("li", { class: "status-ok" }, `✓ ${x}`)),
+      ...textList(pair.fails).map(x => el("li", { class: "status-bad" }, `✗ ${x}`))].filter(Boolean);
+    box.append(el("h4", {}, el("span", { class: LIGHT_CLASSES[colour], "aria-hidden": "true" }, LIGHT_SYMBOLS[colour]), " ",
+      `${namesIn(s, [pair.agent])[0] || ""}: ${STATUS_WORDS[pair.status] ? t(STATUS_WORDS[pair.status]) : String(pair.status || "")}${measuredText(pair.measured_counts)}`), el("ul", {}, items));
+  }
+  if (textList(s.untested).length) box.append(el("p", { class: "hint" }, t("Not tested in: {agents}", { agents: namesIn(s, s.untested).join(", ") })));
+  return box;
+}
+// a model's light in a table's cell: the symbol in its colour and the words; a click opens the details below it
+function supportCell(s, model) {
+  const summary = lightSummary(s);
+  return el("details", { class: "support" },
+    el("summary", { title: summary, "aria-label": t("Support of {model}: {summary}", { model, summary }) },
+      el("span", { class: LIGHT_CLASSES[s.light], "aria-hidden": "true" }, LIGHT_SYMBOLS[s.light]), " ", lightLabel(s).slice(2)),
+    supportDetails(s));
+}
+// an <option>'s words for a model's light (a select has no colours): " — ✓ verified: OpenCode, …", and its title
+const lightSuffix = (s) => (s ? `  — ${lightLabel(s)}` : "");
 
 // llm models --json: [{name, size, loaded, details, type?, arch?, parameters?, quantization?, context?}] as a table:
 // only the columns some model has a value for; loaded first, then by name; a long name cut (the whole one in its
@@ -3320,6 +5163,7 @@ function modelsTable(server, models, actions) {
     ["quantization", N_("Quant"), m => String(m.quantization ?? "")],
     ["context", N_("Context"), m => (typeof m.context === "number" ? contextOf(m.context) : "")],
     ["size", N_("Size"), m => (typeof m.size === "number" ? readableSize(m.size) : "")],
+    ["support", N_("Support"), m => (supportOf(m.support) ? supportCell(m.support, m.name) : ""), m => Boolean(supportOf(m.support))],
   ].filter(([key, , , any]) => list.some(m => (any ? any(m) : has(m[key]))));
   const rows = list.map(m => {
     const cut = m.name.length > MODEL_NAME_WIDTH ? `${m.name.slice(0, MODEL_NAME_WIDTH - 1)}…` : m.name;
@@ -3525,6 +5369,9 @@ pages.llm = async (main) => {
   const caNote = el("div", { class: "wide hint", id: "llm-ca-note" });
   const vpn = offerNames(el("input", { id: "llm-vpn", class: "mono", placeholder: "home" }), "vpn", host);
   const anthropic = el("input", { id: "llm-anthropic", type: "checkbox" }), replace = el("input", { id: "llm-replace", type: "checkbox" }), insecure = el("input", { id: "llm-insecure", type: "checkbox" });
+  // the server's memory for what fits it (llm recommend, a start's --use-case); empty: not said (its own host's for
+  // a server on that host's loopback)
+  const memory = el("input", { id: "llm-memory", type: "number", min: 1, max: 65536, step: "any", placeholder: t("optional, e.g. {name}", { name: "128" }) });
   const heading = el("h2", { id: "llm-form-title" }, t("Add a server"));
   const addRow = el("div", { class: "row" });
   let editing = null;  // {name, ca, saved}: the server the form changes (Edit…), as llm show said and as last saved
@@ -3548,13 +5395,17 @@ pages.llm = async (main) => {
     const body = Object.assign({ name: name.value.trim(), kind: kind.value, url: url.value.trim(), model: model.value.trim() }, secret ? { api_key_secret: secret } : {});
     const more = { header_secrets: headers.length ? headers : null, ca: textOf(ca), vpn: textOf(vpn), anthropic: anthropic.checked, replace: replace.checked, insecure_http: insecure.checked };
     for (const [key, value] of Object.entries(more)) if (value) body[key] = value;
+    const gb = String(memory.value || "").trim();
+    if (gb && !(Number(gb) >= 1 && Number(gb) <= 65536)) { status.append(notice(t("The server's memory: 1 to 65536 GB, or empty."), "error")); return null; }
+    if (gb) body.memory_gb = Number(gb);
+    else if (editing && editing.memory) body.memory_gb = 0;  // emptied: forgotten
     return body;
   };
   // what is asked first: plain http outside the local networks, a server of that name replaced
   const asksOf = (body) => [body.insecure_http ? t("Send the prompts to {url} over plain http, unencrypted, from {host}? Whoever is on the way can read them, the answers and the key.", { url: body.url, host }) : null,
     body.replace ? t("Replace the LLM server {name} on {host}? Every start that uses it sends its prompts (and its key) to {url} from then on.", { name: body.name, host, url: body.url }) : null].filter(Boolean);
   const setEditing = (view) => {
-    editing = view ? { name: view.name, ca: view.ca || null } : null;
+    editing = view ? { name: view.name, ca: view.ca || null, memory: view.memory_gb || null } : null;
     heading.textContent = editing ? t("Change the server {name}", { name: editing.name }) : t("Add a server");
     save.textContent = editing ? t("Save") : t("Add");
     cancelEdit.hidden = !editing;
@@ -3569,6 +5420,7 @@ pages.llm = async (main) => {
     name.value = view.name; kind.value = view.kind || "openai-compatible"; url.value = view.url || ""; model.value = view.model || "";
     keySecret.value = view.api_key_secret || ""; headerSecrets.value = (body.header_secrets || []).map(h => `${h.header}=${h.secret}`).join(" ");
     ca.value = ""; vpn.value = view.vpn || ""; anthropic.checked = Boolean(view.anthropic); insecure.checked = Boolean(view.insecure_http); replace.checked = true;
+    memory.value = typeof view.memory_gb === "number" ? String(view.memory_gb) : "";
     fillModels(Array.isArray(view.models) ? view.models.map(m => ({ name: m })) : []);
     clear(status); clear(testBox); checkName();
     setEditing(view);
@@ -3576,9 +5428,13 @@ pages.llm = async (main) => {
   };
   // the Default-model select, from what a test (or llm show's last check) listed
   const fillModels = (models) => {
-    const names = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string")
-      .sort((a, b) => ({ true: 0, false: 1 }[String(a.loaded)] ?? 2) - ({ true: 0, false: 1 }[String(b.loaded)] ?? 2) || (a.name < b.name ? -1 : 1)).map(m => m.name);
-    clear(modelPick).append(el("option", { value: "" }, t("a listed model…")), ...names.map(n => el("option", { value: n, selected: n === model.value.trim() }, n)));
+    const listed = (Array.isArray(models) ? models : []).filter(m => m && typeof m.name === "string")
+      .sort((a, b) => ({ true: 0, false: 1 }[String(a.loaded)] ?? 2) - ({ true: 0, false: 1 }[String(b.loaded)] ?? 2) || (a.name < b.name ? -1 : 1));
+    const names = listed.map(m => m.name);
+    clear(modelPick).append(el("option", { value: "" }, t("a listed model…")), ...listed.map(m => {
+      const light = supportOf(m.support);  // the research's traffic light, in words
+      return el("option", { value: m.name, selected: m.name === model.value.trim(), title: light ? lightSummary(light) : null }, `${m.name}${lightSuffix(light)}`);
+    }));
     modelPick.value = names.includes(model.value.trim()) ? model.value.trim() : "";
     modelPick.hidden = !names.length; modelPickLabel.hidden = !names.length;
   };
@@ -3680,6 +5536,7 @@ pages.llm = async (main) => {
     el("label", { for: "llm-key-value" }, t("API key (the value, optional)")), keyField,
     el("label", { for: "llm-headers" }, t("Headers from secrets (HEADER=SECRET)")), headerSecrets, el("label", { for: "llm-ca" }, t("CA certificate")), ca, caNote,
     el("label", { for: "llm-vpn" }, t("VPN profile")), vpn, el("label", { for: "llm-anthropic" }, t("Also the Anthropic Messages API")), anthropic,
+    el("label", { for: "llm-memory", title: t("For what fits the server: the model's size and a quarter more against three quarters of it (sandbox-ai llm set NAME --memory GB)") }, t("Memory (GB)")), memory,
     el("label", { for: "llm-replace" }, t("Replace one of that name")), replace, el("label", { for: "llm-insecure" }, t("Plain http outside the local networks")), insecure,
     el("span"), addRow, status, testBox),
     el("p", { class: "hint", id: "llm-hint" }, t("Then start an agent with {option} (Options of a new start). A server that wants a key: name the secret it is kept as, and type the key once here (or keep it on the page Secrets of that host).", { option: "--llm NAME" }), " ",
@@ -3713,6 +5570,84 @@ function marketPluginState(p) {
 // After a kit change: the Kits page again, only while it still shows that host (never pulled back from elsewhere).
 function kitsAgain(host) {
   if (state.page === "kits" && state.host === host) show("kits");
+}
+
+// What the agents on that host have set up themselves (sandbox-ai kits host-list there): read only, grouped by agent
+// and kind. The parts ticked go into a kit of yours (kits host-import --kit, asked first: kit-add) or into a project's
+// memory there (--project, asked first: memory-add); nothing without a choice. Hooks, plugins, marketplaces and MCP
+// servers are shown only; a part with secret-looking lines, or with what the hidden-text checker finds, is refused unless
+// that box is ticked too.
+async function agentParts(section, host, live, mine) {
+  const heading = () => el("h2", {}, t("From the agents on {host}", { host }));
+  clear(section).append(heading(), el("p", { class: "hint" }, t("Loading…")));
+  let data;
+  try { data = await api("GET", hostPath("/agent-parts", host)); }
+  catch (e) { if (live()) clear(section).append(heading(), errorNotice(e)); return; }
+  if (!live()) return;
+  const parts = (Array.isArray(data.parts) ? data.parts : []).filter(p => p && typeof p.id === "string" && typeof p.kind === "string");
+  const agents = (Array.isArray(data.agents) ? data.agents : []).filter(a => a && typeof a.agent === "string");
+  const preview = el("div"), status = el("div"), ask = el("div", { class: "row" });
+  const ticked = new Set();
+  const flagsOf = (p) => [p.scripts && p.scripts.length ? t("scripts: {names}", { names: p.scripts.slice(0, 3).join(", ") }) : null,
+    p.secrets ? t("{count} secret-looking line(s)", { count: p.secrets }) : null,
+    p.findings ? t("{count} hidden-text finding(s)", { count: p.findings }) : null, p.private ? t("private") : null,
+    p.hooks ? t("own hooks: taken out on import") : null, !p.importable ? (p.why || t("shown only")) : null].filter(Boolean).join("; ");
+  const rows = [];
+  for (const agent of agents) {
+    for (const p of parts.filter(x => x.agent === agent.agent)) {
+      const box = el("input", { type: "checkbox", id: `part-${rows.length}`, disabled: !p.importable, "aria-label": t("Choose {part}", { part: p.id }) });
+      box.addEventListener("change", () => { if (box.checked) ticked.add(p.id); else ticked.delete(p.id); });
+      const show = rowButton(t("Show"), p.id, host, { onclick: (ev) => busy(ev.target, async () => {
+        try { clear(preview).append(el("h3", { class: "mono" }, p.id), dataView(await api("GET", hostPath(`/agent-parts/${encodeURIComponent(p.id)}`, host)))); }
+        catch (e) { clear(preview).append(errorNotice(e)); }
+      }) });
+      rows.push(el("tr", {}, el("td", {}, box), el("td", {}, agent.title || agent.agent), el("td", {}, p.kind),
+        el("td", { class: "mono" }, p.name), el("td", {}, p.description || "", p.description ? el("br") : null, el("span", { class: "hint" }, flagsOf(p))),
+        el("td", { class: "actions" }, show)));
+    }
+  }
+  const target = el("select", { id: "parts-kit" }, mine.map(n => el("option", { value: n }, n)), el("option", { value: "" }, t("a new kit…")));
+  const targetName = el("input", { id: "parts-kit-name", placeholder: "my-kit", value: mine.length ? "" : "my-kit" });
+  const project = el("input", { id: "parts-project", class: "mono", placeholder: t("{path} (on that host: the project's folder)", { path: "/home/you/project" }) });
+  const secrets = el("input", { type: "checkbox", id: "parts-secrets" });
+  const findings = el("input", { type: "checkbox", id: "parts-findings" });
+  const agentBoxes = el("div", { class: "row" }, AGENTS.map(a => el("label", {}, el("input", { type: "checkbox", value: a, id: `parts-agent-${a}` }), " ", a)));
+  const chosenAgents = () => [...agentBoxes.querySelectorAll("input[type=checkbox]")].filter(b => b.checked).map(b => b.value);
+  const run = (ev, into) => {
+    clear(status);
+    const chosen = parts.filter(p => ticked.has(p.id)).map(p => p.id);
+    if (!chosen.length) { status.append(notice(t("Tick the parts to import first: nothing is imported without a choice."), "warn")); return; }
+    const fresh = target.value === "";
+    const kit = fresh ? targetName.value.trim() : target.value;
+    const body = into === "kit" ? { parts: chosen, kit, new: fresh } : { parts: chosen, project: project.value.trim() };
+    Object.assign(body, { agents: chosenAgents(), allow_secrets: secrets.checked, allow_findings: findings.checked, confirm: true });
+    const go = () => busy(ev.target, async () => {
+      try {
+        const r = await api("POST", hostPath("/agent-parts-import", host), body);
+        clear(status).append(notice(t("Imported"), "ok"), el("pre", {}, (r && r.output) || ""));
+        toast("success", t("Imported"), "");
+        if (into === "kit") kitsAgain(host);
+      } catch (e) { status.append(errorNotice(e)); }
+    });
+    const key = into === "kit" ? "kit-add" : "memory-add";
+    if (!needsConfirm(key)) { go(); return; }
+    confirmIn(ask, into === "kit" ? t("Copy {parts} into the kit {kit} on {host}? Every later start with that kit gets them.", { parts: chosen.join(", "), kit, host })
+      : t("Add {parts} to the memory of {project} on {host}? Every later start of that project gets them; memory may hold private notes.", { parts: chosen.join(", "), project: body.project, host }),
+    t("Yes, import them"), go, { kind: "primary", trigger: ev.target });
+  };
+  clear(section).append(heading(),
+    el("p", { class: "hint" }, t("What the agents on {host} have set up themselves: skills, commands, prompts, subagents, memory files and auto memory, hooks, plugins, marketplaces and MCP servers. Read only; nothing is imported until you tick parts and choose where they go. Hooks, plugins, marketplaces and MCP servers are shown only. Memory and instructions files may hold private notes.", { host })),
+    table(["", t("Agent"), t("Kind"), t("Name"), t("About"), ""], rows, t("The agents on this host have no parts of their own.")),
+    preview,
+    el("div", { class: "card" }, el("div", { class: "form" },
+      el("label", { for: "parts-kit" }, t("Kit")), target, el("label", { for: "parts-kit-name" }, t("New kit's name")), targetName,
+      el("span"), el("button", { class: "primary", onclick: (ev) => run(ev, "kit") }, t("Import into the kit")),
+      el("label", { for: "parts-project" }, t("Project")), project,
+      el("span"), el("button", { onclick: (ev) => run(ev, "project") }, t("Add to the project's memory")),
+      el("span", {}, t("For (empty: each part's own agent)")), agentBoxes,
+      el("label", { for: "parts-secrets" }, t("Also with secret-looking lines")), secrets,
+      el("label", { for: "parts-findings" }, t("Also with hidden text (invisible characters, instructions to the model)")), findings,
+      ask, status)));
 }
 
 async function kitMarketplaces(section, host, live) {
@@ -3850,7 +5785,7 @@ function renderMarketplaces(section, host, data, live, focus) {
         el("td", {}, marketPluginState(p) || el("span", { class: "hint" }, t("in no kit"))), actions);
     });
     section.append(...[el("h3", { id: "market-plugins", tabindex: "-1" }, t("Plugins of {marketplace} ({agent})", { marketplace: picked.name, agent: picked.agent })),
-      picked.agent === "codex" ? el("p", { class: "hint" }, t("sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.")) : null,
+      picked.agent === "codex" ? el("p", { class: "hint" }, t("Codex's own marketplace, as Codex has it on that host: kits give Codex plugins of the marketplaces in Claude's format.")) : null,
       picked.agent === "claude" && !marketDeclared && !picked.importable ? el("p", { class: "hint" }, t("Its plugins cannot go into a kit: {why}", { why: picked.problem || "?" })) : null,
       picked.listed_from ? null : el("p", { class: "hint" }, t("Its plugin list is not fetched yet: only the plugins a kit or the agent names are shown.")),
       table([t("Plugin"), t("Description"), t("State"), ""], pluginRows, t("No plugins known."))].filter(Boolean));
@@ -3949,6 +5884,9 @@ pages.kits = async (main) => {
   const marketSection = el("section", { id: "kit-marketplaces" });
   main.append(marketSection);
   kitMarketplaces(marketSection, host, live);  // its own request: an older host's refusal stays in that section
+  const partsSection = el("section", { id: "kit-agent-parts" });
+  main.append(partsSection);
+  agentParts(partsSection, host, live, mine);  // the same: its own request, its own refusal
 
   // a new kit
   const newName = el("input", { id: "kit-new-name", placeholder: "my-kit", pattern: "[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" });
@@ -4083,6 +6021,608 @@ async function canaryRun(main, run, slot) {
   try { clear(body).append(dataView(await api("GET", hostPath(`/canaries/${encodeURIComponent(run)}/list`, host)))); } catch (e) { clear(body).append(errorNotice(e)); }
 }
 
+// The system monitor: what the running sandboxes of the host use now (GET .../monitor: sandbox-ai top, as the
+// collectors recorded it) grouped by project, with a trend of the last 15 minutes, the host's totals, the warnings
+// with what helps (raise a limit, stop an idle run: asked first, in place) and the history of the run chosen or of
+// the host over a window (GET .../monitor/usage/24h: sandbox-ai stats usage). Read again every MONITOR_EVERY ms while
+// the page is shown, in place; never while another page is.
+const MONITOR_EVERY = 10000;
+const MONITOR_WINDOWS = [["15m", N_("15 minutes")], ["1h", N_("1 hour")], ["24h", N_("24 hours")], ["7d", N_("7 days")], ["30d", N_("30 days")]];
+const MONITOR_TITLES = {
+  memory: N_("memory near the limit"), oom: N_("out of memory: the kernel ended processes"), cpu: N_("held back by the CPU limit"),
+  io: N_("waiting for the disk (IO pressure)"), idle: N_("idle, holding memory"), pids: N_("processes and threads near the limit"),
+  "host-memory": N_("the host is low on memory"), "host-swap": N_("the host is swapping"),
+};
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs, ...children) {
+  const node = document.createElementNS ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) if (value !== null && value !== undefined) node.setAttribute(key, String(value));
+  for (const child of children) if (child) node.append(child);
+  return node;
+}
+
+function monitorTitle(kind) { return MONITOR_TITLES[kind] ? t(MONITOR_TITLES[kind]) : String(kind || ""); }
+// The seconds between two samples of the runs shown (each recorder's own: monitor_interval; 10 unless changed).
+function monitorSeconds(data) {
+  const found = [...new Set(((data && data.runs) || []).map(r => monitorNumber(r.interval)).filter(v => v))].sort((a, b) => a - b);
+  return found.length ? found.join("/") : "10";
+}
+function monitorNumber(value) { return typeof value === "number" && Number.isFinite(value) ? value : null; }
+function gibText(value) { return ((monitorNumber(value) || 0) / 1073741824).toFixed(1); }
+function rateText(value) { return `${readableSize(Math.round(monitorNumber(value) || 0))}/s`; }
+
+// POINTS ([[t, cpu, mem, io, net], ...]) as a small SVG: memory as a filled area, CPU as a line, each to its own top.
+function trendSvg(points, width, height, label, columns) {
+  const svg = svgEl("svg", { width, height, viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": label, class: "trend" });
+  const rows = (Array.isArray(points) ? points : []).filter(p => Array.isArray(p) && p.length >= 3);
+  if (rows.length < 2) return svg;
+  const [line, area] = columns || [1, 2];
+  const t0 = rows[0][0], span = Math.max(1, rows[rows.length - 1][0] - t0);
+  const xy = (column) => {
+    const top = Math.max(...rows.map(r => monitorNumber(r[column]) || 0)) || 1;
+    return rows.map(r => [((r[0] - t0) / span) * (width - 2) + 1, height - 1 - ((monitorNumber(r[column]) || 0) / top) * (height - 2)]);
+  };
+  const filled = xy(area);
+  svg.append(svgEl("polygon", { points: [[1, height - 1], ...filled, [width - 1, height - 1]].map(p => p.join(",")).join(" "), class: "trend-memory" }));
+  svg.append(svgEl("polyline", { points: xy(line).map(p => p.join(",")).join(" "), class: "trend-cpu" }));
+  return svg;
+}
+
+// The charts and gauges of the run chosen (nothing chosen: the host), as the desktop app's (monitor_charts.py): its
+// CPU, memory (the 92 % where the sandbox is slowed down, the limit where the kernel ends processes), disk IO, network
+// and processes over the window - the history's detail (stats usage --series) and every look at top since (a bounded
+// ring per run and the host) - and every run's CPU and memory stacked. Lines break where samples are missing (a gap);
+// pointing at a chart shows the exact values at that time. Inline SVG, coloured by the theme's variables (--series0
+// ... set by applyTheme): a change of the theme is followed without drawing again.
+const MONITOR_SLOW = 0.92;        // agent_sandbox.MEMORY_HIGH: memory.high at this share of the limit
+const MONITOR_NEAR = 0.90;        // monitor.MEMORY_NEAR, PIDS_NEAR: the warnings start here
+const MONITOR_THROTTLE = 50;      // monitor.THROTTLE_RATIO
+const MONITOR_HOST_LOW = 0.10;    // monitor.HOST_MEMORY_LOW
+const MONITOR_RING = 720;         // looks kept per run and for the host
+const MONITOR_SLOTS = 240;        // monitor.SERIES_POINTS: the time slots of a window
+const MONITOR_STACKED = 8;        // runs stacked on their own; the others as one
+const MONITOR_GAP = 2.5;          // a step this many times the usual one is a gap
+const MONITOR_SECONDS = { "15m": 900, "1h": 3600, "24h": 86400, "7d": 604800, "30d": 2592000 };
+
+function monitorPointsOfDetail(detail) {
+  if (!detail || !Array.isArray(detail.t)) return [];
+  const columns = Object.entries(detail).filter(([key, values]) => key !== "t" && Array.isArray(values) && values.length === detail.t.length);
+  const points = [];
+  detail.t.forEach((when, index) => {
+    if (monitorNumber(when) === null) return;
+    const point = { t: when };
+    for (const [key, values] of columns) if (monitorNumber(values[index]) !== null) point[key] = values[index];
+    points.push(point);
+  });
+  return points.sort((a, b) => a.t - b.t);
+}
+
+function monitorPointsOfSeries(rows, keys) {
+  return (Array.isArray(rows) ? rows : []).filter(r => Array.isArray(r) && r.length === keys.length + 1 && monitorNumber(r[0]) !== null)
+    .map(r => { const point = { t: r[0] }; keys.forEach((key, i) => { if (monitorNumber(r[i + 1]) !== null) point[key] = r[i + 1]; }); return point; })
+    .sort((a, b) => a.t - b.t);
+}
+
+function monitorMerged(history, recent, since) {
+  const found = history.filter(p => p.t >= since);
+  const last = found.length ? found[found.length - 1].t : -Infinity;
+  return found.concat(recent.filter(p => p.t > last && p.t >= since));
+}
+
+// {slot: {key: value}} of POINTS in slots of STEP seconds: averages (memory, processes and limits: the highest)
+function monitorSlots(points, step) {
+  const sums = new Map();
+  for (const p of points) {
+    const slot = Math.floor(p.t / step);
+    if (!sums.has(slot)) sums.set(slot, {});
+    const values = sums.get(slot);
+    for (const [key, value] of Object.entries(p)) {
+      if (key === "t" || monitorNumber(value) === null) continue;
+      const highest = key === "mem" || key === "pids" || key.endsWith("_lim");
+      const had = values[key] || [0, 0];
+      values[key] = highest ? [Math.max(had[0], value), 1] : [had[0] + value, had[1] + 1];
+    }
+  }
+  const found = new Map();
+  for (const [slot, values] of sums) found.set(slot, Object.fromEntries(Object.entries(values).map(([k, [v, n]]) => [k, v / n])));
+  return found;
+}
+
+// several runs' points added up per slot (a limit only where every run of the slot has one)
+function monitorTotal(series, step) {
+  const each = series.map(points => monitorSlots(points, step));
+  const slots = [...new Set(each.flatMap(m => [...m.keys()]))].sort((a, b) => a - b);
+  return slots.map(slot => {
+    const present = each.filter(m => m.has(slot)).map(m => m.get(slot));
+    const point = { t: (slot + 1) * step };
+    for (const key of new Set(present.flatMap(v => Object.keys(v)))) {
+      if (key.endsWith("_lim") && present.some(v => !(key in v))) continue;
+      point[key] = present.reduce((sum, v) => sum + (v[key] || 0), 0);
+    }
+    return point;
+  });
+}
+
+// SERIES ({run: points}) as one list of points {t, run: KEY's value} per slot (every run stacked)
+function monitorJoined(series, key, step) {
+  const slots = new Map();
+  for (const [run, points] of Object.entries(series)) {
+    for (const [slot, values] of monitorSlots(points, step)) {
+      if (!(key in values)) continue;
+      if (!slots.has(slot)) slots.set(slot, {});
+      slots.get(slot)[run] = values[key];
+    }
+  }
+  return [...slots.entries()].sort((a, b) => a[0] - b[0]).map(([slot, values]) => Object.assign({ t: (slot + 1) * step }, values));
+}
+
+// a line of a chart: LABEL, VALUE (a key or point => number), COLOUR (a CSS variable's name), KIND (line, area,
+// stack, limit)
+function chartLine(label, value, colour, kind) {
+  const get = typeof value === "function" ? value : (p => monitorNumber(p[value]));
+  return { label, value: (p) => { const v = get(p); return monitorNumber(v); }, colour, kind: kind || "line" };
+}
+
+function chartTime(seconds, span, exact) {
+  const d = new Date(seconds * 1000);
+  const two = (n) => String(n).padStart(2, "0");
+  const clock = `${two(d.getHours())}:${two(d.getMinutes())}` + (exact ? `:${two(d.getSeconds())}` : "");
+  return span >= 86400 ? `${two(d.getDate())}.${two(d.getMonth() + 1)}. ${clock}` : clock;
+}
+
+// the chart (see above): TITLE, POINTS ([{t, key: value}]), LINES (chartLine), UNIT (a value's text), SPAN ([start,
+// end] seconds), EMPTY (said without a value), NAME (its data-chart)
+function chartSvg(name, title, points, lines, unit, span, empty) {
+  const W = 480, H = 160, left = 56, right = 8, top = 24, bottom = 18;
+  const area = { x: left, y: top, w: W - left - right, h: H - top - bottom };
+  const latest = lines.map(line => { const v = points.map(line.value).filter(x => x !== null); return v.length ? [line, v[v.length - 1]] : null; }).filter(Boolean);
+  const summary = `${title}: ` + (latest.length ? latest.map(([line, v]) => `${line.label} ${unit(v)}`).join(", ") : empty);
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": summary, class: "chart", "data-chart": name });
+  svg.append(svgEl("title", {}, document.createTextNode(summary)));
+  svg.append(svgEl("text", { x: 4, y: 15, class: "chart-title" }, document.createTextNode(title)));
+  let x = W - right;
+  for (const [line, v] of latest.slice().reverse()) {
+    const words = `${line.label} ${unit(v)}`;
+    x -= words.length * 6.2 + 10;
+    if (x < W * 0.45) break;
+    svg.append(svgEl("text", { x: Math.round(x), y: 15, class: "chart-legend", style: `fill:var(--${line.colour})`, "data-line": line.label }, document.createTextNode(words)));
+  }
+  const figure = el("figure", { class: "monitor-chart" }, svg);
+  if (!latest.length) {
+    svg.append(svgEl("text", { x: W / 2, y: H / 2, class: "chart-empty", "text-anchor": "middle" }, document.createTextNode(empty)));
+    return figure;
+  }
+  const [start, end] = span[1] > span[0] ? span : [span[0] - 30, span[0] + 30];
+  const stacks = new Map(), below = points.map(() => 0);
+  lines.forEach((line, index) => {
+    if (line.kind !== "stack") return;
+    stacks.set(index, points.map((p, i) => { const low = below[i]; below[i] += line.value(p) || 0; return [low, below[i]]; }));
+  });
+  let highest = 0;
+  lines.forEach((line, index) => {
+    for (const [i, p] of points.entries()) highest = Math.max(highest, stacks.has(index) ? stacks.get(index)[i][1] : line.value(p) || 0);
+  });
+  const roof = highest * 1.1 || 1;
+  const X = (t) => area.x + area.w * (t - start) / Math.max(1e-9, end - start);
+  const Y = (v) => area.y + area.h - area.h * Math.min(Math.max(v, 0), roof) / roof;
+  const steps = points.slice(1).map((p, i) => p.t - points[i].t).filter(s => s > 0).sort((a, b) => a - b);
+  const gap = steps.length ? MONITOR_GAP * steps[Math.floor(steps.length / 2)] : Infinity;
+  svg.append(svgEl("rect", { x: area.x, y: area.y, width: area.w, height: area.h, class: "chart-frame" }));
+  svg.append(svgEl("text", { x: area.x - 4, y: Y(highest) + 4, class: "chart-axis", "text-anchor": "end" }, document.createTextNode(unit(highest))));
+  svg.append(svgEl("text", { x: area.x - 4, y: area.y + area.h, class: "chart-axis", "text-anchor": "end" }, document.createTextNode(unit(0))));
+  svg.append(svgEl("text", { x: area.x, y: H - 3, class: "chart-axis" }, document.createTextNode(chartTime(start, end - start))));
+  svg.append(svgEl("text", { x: area.x + area.w, y: H - 3, class: "chart-axis", "text-anchor": "end" }, document.createTextNode(chartTime(end, end - start))));
+  lines.forEach((line, index) => {
+    const pieces = [];
+    let piece = [], before = null;
+    points.forEach((p, i) => {
+      const v = stacks.has(index) ? stacks.get(index)[i][1] : line.value(p);
+      if (v === null || (before !== null && p.t - before > gap)) { if (piece.length) pieces.push(piece); piece = []; }
+      if (v !== null) piece.push([i, X(p.t), Y(v)]);
+      before = p.t;
+    });
+    if (piece.length) pieces.push(piece);
+    const colour = `var(--${line.colour})`;
+    for (const part of pieces) {
+      const xy = (list) => list.map(([, px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`).join(" ");
+      if (line.kind === "area") {
+        svg.append(svgEl("polygon", { points: `${part[0][1].toFixed(1)},${area.y + area.h} ${xy(part)} ${part[part.length - 1][1].toFixed(1)},${area.y + area.h}`, class: "chart-area", style: `fill: ${colour}` }));
+      } else if (line.kind === "stack") {
+        const base = part.slice().reverse().map(([i, px]) => `${px.toFixed(1)},${Y(stacks.get(index)[i][0]).toFixed(1)}`).join(" ");
+        svg.append(svgEl("polygon", { points: `${xy(part)} ${base}`, class: "chart-stack", style: `fill: ${colour}` }));
+      }
+      if (part.length === 1) svg.append(svgEl("circle", { cx: part[0][1].toFixed(1), cy: part[0][2].toFixed(1), r: 2.5, style: `fill: ${colour}`, class: "chart-dot" }));
+      else svg.append(svgEl("polyline", { points: xy(part), class: line.kind === "limit" ? "chart-limit" : "chart-line", style: `stroke: ${colour}`, "data-line": line.label }));
+    }
+  });
+  // the exact values at the time pointed at
+  const cursor = svgEl("line", { x1: 0, x2: 0, y1: area.y, y2: area.y + area.h, class: "chart-cursor", visibility: "hidden" });
+  const tip = svgEl("g", { class: "chart-tip", visibility: "hidden" });
+  svg.append(cursor, tip);
+  const tipAt = (offsetX, width) => {
+    const at = area.x + Math.max(0, Math.min(1, ((offsetX * W / (width || W)) - area.x) / area.w)) * area.w;
+    let nearest = 0;
+    points.forEach((p, i) => { if (Math.abs(X(p.t) - at) < Math.abs(X(points[nearest].t) - at)) nearest = i; });
+    const p = points[nearest];
+    const rows = [chartTime(p.t, end - start, end - start < 86400)].concat(lines.map(line => [line, line.value(p)]).filter(([, v]) => v !== null).map(([line, v]) => `${line.label}: ${unit(v)}`));
+    return { x: X(p.t), rows };
+  };
+  const show = (event) => {
+    const { x: px, rows } = tipAt(event.offsetX || 0, svg.clientWidth);
+    cursor.setAttribute("x1", px.toFixed(1)); cursor.setAttribute("x2", px.toFixed(1)); cursor.setAttribute("visibility", "visible");
+    while (tip.firstChild) tip.removeChild(tip.firstChild);
+    const width = Math.max(...rows.map(r => r.length)) * 6.2 + 10, height = rows.length * 13 + 6;
+    const tx = px + width + 8 > W ? px - width - 6 : px + 6;
+    tip.append(svgEl("rect", { x: tx.toFixed(1), y: area.y + 2, width: width.toFixed(1), height, class: "chart-tip-box" }));
+    rows.forEach((row, i) => tip.append(svgEl("text", { x: (tx + 5).toFixed(1), y: area.y + 15 + i * 13, class: "chart-tip-text" }, document.createTextNode(row))));
+    tip.setAttribute("visibility", "visible");
+    figure.setAttribute("data-tip", rows.join("\n"));
+  };
+  svg.addEventListener("mousemove", show);
+  svg.addEventListener("mouseleave", () => { cursor.setAttribute("visibility", "hidden"); tip.setAttribute("visibility", "hidden"); });
+  return figure;
+}
+
+// a bar of what is used now of its limit: LEVEL ok, warn (the warning's share), bad (where the kernel steps in), muted
+function monitorLevel(share, warn, bad, warned) {
+  const found = share === null ? "muted" : share >= bad ? "bad" : share >= warn ? "warn" : "ok";
+  if (warned === "error") return "bad";
+  return warned && (found === "ok" || found === "muted") ? "warn" : found;
+}
+
+function gaugeBar(label, share, text, level) {
+  const shown = share === null ? 0 : Math.max(0, Math.min(1, share));
+  const svg = svgEl("svg", { viewBox: "0 0 200 10", preserveAspectRatio: "none", class: "gauge-bar", "aria-hidden": "true" },
+    svgEl("rect", { x: 0.5, y: 0.5, width: 199, height: 9, rx: 2, class: "gauge-edge" }),
+    svgEl("rect", { x: 1, y: 1, width: (198 * shown).toFixed(1), height: 8, rx: 2, class: "gauge-fill" }));
+  return el("div", { class: ["gauge", `level-${level}`].join(" "), role: "meter", "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(shown * 100), "aria-label": `${label}: ${text}`, title: `${label}: ${text}` },
+    el("span", { class: "gauge-text" }, `${label}: ${text}`), svg);
+}
+
+function monitorGauges(row, hostData) {
+  if (!row) {
+    const s = (hostData && hostData.sample) || {}, kinds = new Set(((hostData && hostData.warnings) || []).map(w => w.kind));
+    const busy = monitorNumber(s.cpu_pct), total = monitorNumber(s.mem_total), free = monitorNumber(s.mem_avail);
+    const swap = monitorNumber(s.swap_used), swapTotal = monitorNumber(s.swap_total);
+    const used = total && free !== null ? 1 - free / total : null;
+    return el("div", { class: "gauges" },
+      gaugeBar(t("CPU"), busy === null ? null : busy / 100, busy === null ? "-" : t("{percent} % busy of {cpus}", { percent: Math.round(busy), cpus: s.cpus || "?" }), monitorLevel(busy === null ? null : busy / 100, 0.9, 0.98)),
+      gaugeBar(t("Memory"), used, used === null ? "-" : t("{used} of {total} GiB used, {free} GiB free", { used: gibText(total - free), total: gibText(total), free: gibText(free) }), monitorLevel(used, 0.85, 1 - MONITOR_HOST_LOW, kinds.has("host-memory") ? "warning" : null)),
+      swapTotal ? gaugeBar(t("Swap"), (swap || 0) / swapTotal, t("{used} of {total} GiB", { used: gibText(swap), total: gibText(swapTotal) }), monitorLevel((swap || 0) / swapTotal, 0.5, 0.9, kinds.has("host-swap") ? "warning" : null))
+        : gaugeBar(t("Swap"), null, t("none"), "muted"));
+  }
+  const s = row.sample || {}, warned = {};
+  for (const w of row.warnings || []) { const kind = w.kind === "oom" ? "memory" : w.kind; warned[kind] = w.level === "error" ? "error" : warned[kind] || "warning"; }
+  const cpu = monitorNumber(s.cpu), cpuLim = monitorNumber(s.cpu_lim), mem = monitorNumber(s.mem), memLim = monitorNumber(s.mem_lim);
+  const pids = monitorNumber(s.pids), pidsLim = monitorNumber(s.pids_lim), thr = monitorNumber(s.thr) || 0;
+  const percent = (share) => Math.round(share * 100);
+  return el("div", { class: "gauges" },
+    cpu === null ? gaugeBar(t("CPU"), null, "-", "muted") : cpuLim
+      ? gaugeBar(t("CPU"), cpu / cpuLim, t("{used} of {limit} CPUs ({percent} %)", { used: cpu.toFixed(2), limit: cpuLim, percent: percent(cpu / cpuLim) }), thr >= MONITOR_THROTTLE ? "bad" : monitorLevel(cpu / cpuLim, 0.9, 2, warned.cpu))
+      : gaugeBar(t("CPU"), (monitorNumber(s.cpu_pct) || 0) / 100, t("{used} CPUs, no limit", { used: cpu.toFixed(2) }), monitorLevel(null, 1, 1, warned.cpu)),
+    mem === null ? gaugeBar(t("Memory"), null, "-", "muted") : memLim
+      ? gaugeBar(t("Memory"), mem / memLim, t("{used} of {limit} GiB ({percent} %)", { used: gibText(mem), limit: gibText(memLim), percent: percent(mem / memLim) }), monitorLevel(mem / memLim, MONITOR_NEAR, MONITOR_SLOW, warned.memory))
+      : gaugeBar(t("Memory"), null, t("{used} GiB, no limit", { used: gibText(mem) }), monitorLevel(null, 1, 1, warned.memory)),
+    pids === null ? gaugeBar(t("Processes"), null, "-", "muted") : pidsLim
+      ? gaugeBar(t("Processes"), pids / pidsLim, t("{current} of {limit} ({percent} %)", { current: pids, limit: pidsLim, percent: percent(pids / pidsLim) }), monitorLevel(pids / pidsLim, MONITOR_NEAR, 0.98, warned.pids))
+      : gaugeBar(t("Processes"), null, t("{current}, no limit", { current: pids }), monitorLevel(null, 1, 1, warned.pids)));
+}
+
+// the charts of a run (or the host: HOST true) over SPAN, from POINTS
+function monitorCharts(name, points, span, windowLabel, host) {
+  const title = (what) => t("{name}: {what}, the last {window}", { name, what, window: windowLabel });
+  const has = (...keys) => points.some(p => keys.some(k => k in p));
+  const gibUnit = (v) => `${gibText(v)} GiB`, count = (v) => String(Math.round(v)), cpus = (v) => t("{value} CPUs", { value: v.toFixed(2) });
+  const ioNet = (key, what, split, summed, words, both) => {
+    const lines = has(...split) || !has(summed) ? [chartLine(words[0], split[0], "series0"), chartLine(words[1], split[1], "series2")] : [];
+    if (has(summed)) lines.push(chartLine(both, summed, "series4"));
+    return chartSvg(key, title(what), points, lines, rateText, span, host ? t("Not recorded there: an older sandbox-ai there does not record this of the host (sandbox-ai hosts update).") : t("No samples in this window yet."));
+  };
+  const empty = t("No samples in this window yet.");
+  const used = (p) => (monitorNumber(p.mem_total) !== null && monitorNumber(p.mem_avail) !== null ? p.mem_total - p.mem_avail : null);
+  return [
+    host ? chartSvg("cpu", title(t("CPU busy")), points, [chartLine(t("CPU busy"), "cpu_pct", "accent", "area"), chartLine(t("all CPUs"), () => 100, "bad", "limit")], (v) => `${Math.round(v)} %`, span, empty)
+      : chartSvg("cpu", title(t("CPUs")), points, [chartLine(t("CPU"), "cpu", "accent", "area"), chartLine(t("CPU limit"), "cpu_lim", "bad", "limit")], cpus, span, empty),
+    host ? chartSvg("memory", title(t("memory")), points, has("mem_total") ? [chartLine(t("used"), used, "series1", "area"),
+      chartLine(t("low (warning)"), (p) => (monitorNumber(p.mem_total) !== null ? p.mem_total * (1 - MONITOR_HOST_LOW) : null), "warn", "limit"),
+      chartLine(t("total"), "mem_total", "bad", "limit"), chartLine(t("swap used"), "swap_used", "series4")] : [chartLine(t("Free memory"), "mem_avail", "series1", "area")], gibUnit, span, empty)
+      : chartSvg("memory", title(t("memory")), points, [chartLine(t("Memory"), "mem", "series1", "area"),
+        chartLine(t("slowed down from (92 %)"), (p) => (monitorNumber(p.mem_lim) ? p.mem_lim * MONITOR_SLOW : null), "warn", "limit"),
+        chartLine(t("limit (processes ended)"), "mem_lim", "bad", "limit")], gibUnit, span, empty),
+    ioNet("io", t("disk IO"), ["rd", "wr"], "io", [t("read"), t("written")], t("read + written")),
+    ioNet("network", t("network"), ["rx", "tx"], "net", [t("received"), t("sent")], t("received + sent")),
+    chartSvg("processes", title(t("processes and threads")), points, host ? [chartLine(t("processes and threads"), "pids", "series3", "area")]
+      : [chartLine(t("processes and threads"), "pids", "series3", "area"), chartLine(t("warning (90 %)"), (p) => (monitorNumber(p.pids_lim) ? p.pids_lim * MONITOR_NEAR : null), "warn", "limit"),
+        chartLine(t("limit"), "pids_lim", "bad", "limit")], count, span, host ? t("Not recorded there: an older sandbox-ai there does not record this of the host (sandbox-ai hosts update).") : empty),
+  ];
+}
+
+// every run's CPUs and memory, stacked (the MONITOR_STACKED heaviest on their own)
+function monitorAllCharts(series, names, hostSample, span, step, windowLabel) {
+  return [["cpu", t("Every run's CPUs"), (v) => t("{value} CPUs", { value: v.toFixed(2) }), t("the host's CPUs"), monitorNumber(hostSample.cpus)],
+    ["mem", t("Every run's memory"), (v) => `${gibText(v)} GiB`, t("the host's memory"), monitorNumber(hostSample.mem_total)]].map(([key, what, unit, limitLabel, limit]) => {
+    const points = monitorJoined(series, key, step);
+    const latest = (run) => { for (let i = points.length - 1; i >= 0; i--) if (run in points[i]) return points[i][run]; return 0; };
+    const order = Object.keys(series).sort((a, b) => latest(b) - latest(a));
+    const own = order.slice(0, MONITOR_STACKED), rest = order.slice(MONITOR_STACKED);
+    if (rest.length) for (const p of points) p.__others = rest.reduce((sum, run) => sum + (p[run] || 0), 0);
+    const lines = own.map((run, i) => chartLine(names[run] || run, run, `series${i}`, "stack"));
+    if (rest.length) lines.push(chartLine(t("{count} others", { count: rest.length }), "__others", "muted", "stack"));
+    if (limit) lines.push(chartLine(limitLabel, () => limit, "bad", "limit"));
+    return chartSvg(`all-${key}`, t("{what}, the last {window}", { what, window: windowLabel }), points, lines, unit, span, t("No sandbox is running."));
+  });
+}
+
+// a sparkline in a cell (CPU, memory) of the spark's COLUMN, scaled to LIMIT (else its highest); no text of its own
+function cellSpark(points, column, limit, label) {
+  const rows = (Array.isArray(points) ? points : []).filter(p => Array.isArray(p) && p.length > column);
+  if (rows.length < 2) return null;
+  const width = 44, height = 16;
+  const roof = Math.max(monitorNumber(limit) || 0, ...rows.map(r => monitorNumber(r[column]) || 0)) || 1;
+  const xy = rows.map((r, i) => `${(i * (width - 2) / (rows.length - 1) + 1).toFixed(1)},${(height - 1 - Math.min(monitorNumber(r[column]) || 0, roof) / roof * (height - 2)).toFixed(1)}`).join(" ");
+  return svgEl("svg", { width, height, viewBox: `0 0 ${width} ${height}`, class: `cell-spark ${column === 2 ? "memory" : "cpu"}`, role: "img", "aria-label": label },
+    column === 2 ? svgEl("polygon", { points: `1,${height - 1} ${xy} ${width - 1},${height - 1}` }) : svgEl("polyline", { points: xy }));
+}
+
+// What a run's model requests cost so far and its budgets (GET .../spend/RUN: sandbox-ai spend run), each budget as a
+// bar; Raise budget lets it spend more (asked first, in place: sandbox-ai spend raise).
+function spendCost(entry) {
+  if (!entry) return "-";
+  const parts = [];
+  if (entry.usd || (entry.requests || 0) > (entry.subscription || 0) + (entry.local || 0) + (entry.unknown || 0)) parts.push(`USD ${Number(entry.usd || 0).toFixed(2)}`);
+  if (entry.unknown) parts.push(t("{count} of unknown cost", { count: entry.unknown }));
+  if (entry.subscription) parts.push(t("subscription"));
+  if (!parts.length && entry.local) parts.push(t("0 (local)"));
+  return parts.join(" + ") || "USD 0.00";
+}
+
+function spendPanel(host, run, name, refresh) {
+  const box = el("div", { class: "spend-panel" }, el("p", { class: "hint" }, t("Loading…")));
+  (async () => {
+    let s;
+    try { s = await api("GET", hostPath(`/spend/${encodeURIComponent(run)}`, host)); }
+    catch (e) { clear(box).append(el("p", { class: "hint" }, t("No model request of {name} counted yet (the connection proxy counts them).", { name }))); return; }
+    const rows = (s.budgets || []).map(b => {
+      const percent = Math.round((b.share || 0) * 100);
+      return el("div", { class: "budget" }, el("progress", { max: 100, value: Math.min(100, percent), "aria-label": t("{label}: {percent} % used", { label: b.label, percent }) }),
+        " ", t("{percent} % of USD {usd} - {label}", { percent, usd: Number(b.usd).toFixed(2), label: b.label }));
+    });
+    const actions = el("div", { class: "row" });
+    const amount = el("input", { type: "number", min: "0.01", step: "0.01", value: "5", id: "spend-raise-usd", "aria-label": t("USD more") });
+    const raise = el("button", { onclick: () => {
+      const usd = amount.value;
+      if (!(Number(usd) > 0)) { toast("error", t("Raise budget"), t("Give a number of USD above 0.")); return; }
+      confirmIn(actions, t("Let {name} on {host} spend USD {usd} more than its budgets? Its refused model requests go again.", { name, host, usd }), t("Yes, raise it"), async () => {
+        try { const r = await api("POST", hostPath(`/spend/${encodeURIComponent(run)}/raise`, host), { usd, confirm: true }); toast("success", t("Budget of {name} raised", { name }), (r && r.output) || ""); refresh(); }
+        catch (e) { failed(t("Could not raise the budget of {name}", { name }))(e); }
+      }, { trigger: raise });
+    } }, t("Raise budget…"));
+    actions.append(el("label", { for: "spend-raise-usd" }, t("USD more"), " "), amount, raise);
+    clear(box).append(...[el("h3", {}, t("Model spend of {name}", { name })),
+      el("p", {}, t("{cost} so far - {count} model requests", { cost: spendCost(s), count: s.requests || 0 })),
+      ...(rows.length ? rows : [el("p", { class: "hint" }, t("No budget: --budget USD at the start, or sandbox-ai spend limit set."))]),
+      s.refused ? notice(t("A budget is used up: its model requests are refused until it is raised."), "error") : null,
+      (s.unknown_models || []).length ? el("p", { class: "hint" }, t("No price for {models}: counted in tokens only.", { models: s.unknown_models.join(", ") })) : null,
+      // Under a budget a model without a price is counted at the table's highest prices (sandbox-ai spend run).
+      s.fallback && s.fallback_price ? el("p", { class: "hint" }, t("{count} request(s) at the fallback price USD {price_in} in / USD {price_out} out per million tokens: no price for {models}.", { count: s.fallback, price_in: Number(s.fallback_price.in || 0).toFixed(2), price_out: Number(s.fallback_price.out || 0).toFixed(2), models: (s.fallback_models || []).join(", ") })) : null,
+      actions].filter(Boolean));
+  })();
+  return box;
+}
+
+// A run's way on (as the desktop app's right click on it: Go to Terminals, Go to Sessions): Terminal attaches it in a
+// tab of this page (one per start: an open one is shown) or says why it has no terminal; Session shows the starts
+// page of its host with its row marked. An MCP server's sandbox has neither (no terminal, listed below its start).
+function monitorGoto(host, row) {
+  if (row.kind === "mcp") return el("td", {});
+  const name = row.name || row.run;
+  return el("td", { class: "actions" },
+    rowButton(t("Terminal"), name, host, { title: t("its terminal tab: attached when none is open"), onclick: () => monitorTerminal(host, row) }),
+    rowButton(t("Session"), name, host, { title: t("its row on the starts page, marked"), onclick: () => monitorSession(host, row) }));
+}
+
+// The start of a host's list (GET .../starts) that the monitor's ROW is: by its run, else by its name.
+function monitorStart(starts, row) {
+  const list = (Array.isArray(starts) ? starts : []).filter(s => s && typeof s === "object");
+  return list.find(s => row.run && s.run === row.run) || list.find(s => row.name && (s.name === row.name || s.id === row.name)) || null;
+}
+
+async function monitorTerminal(host, row) {
+  const name = row.name || row.run;
+  let starts;
+  try { starts = await api("GET", hostPath("/starts", host)); }
+  catch (e) { failed(t("Could not list the starts of {host}", { host }))(e); return; }
+  const s = monitorStart(starts, row);
+  if (!s) { toast("warning", t("Terminal"), t("{name} is not listed among the starts of {host}: it has ended.", { name, host })); return; }
+  if (!s.attachable) { toast("warning", t("Terminal"), t("{name} on {host} has no terminal to attach to: {why}", { name: s.name, host, why: attachWhy(s) })); return; }
+  openTerminal({ kind: "attach", name: s.name, host }, s.name);
+}
+
+function monitorSession(host, row) {
+  if (state.startsHost !== "all") state.startsHost = host;  // (every host shown there: it is among them)
+  state.startsFocus = { host, run: row.run || "", name: row.name || row.run || "" };
+  show("starts");
+}
+
+function monitorWarningRow(main, host, row, w, refresh) {
+  const name = row ? row.name : host;
+  const actions = el("td", { class: "actions" });
+  const argv = Array.isArray(w.argv) ? w.argv : [];
+  if (row && argv[0] === "limits" && ["--memory", "--cpus", "--pids"].includes(argv[2]) && argv[3]) {
+    const key = argv[2].slice(2), value = String(argv[3]);
+    const raise = el("button", { onclick: () => confirmIn(actions, t("Raise {option} of {name} on {host} to {value} for the rest of its run? It may then use more of that host.", { option: argv[2], name, host, value }), t("Yes, raise it"), async () => {
+      try { const r = await api("POST", hostPath(`/limits/${encodeURIComponent(row.run)}`, host), { [key]: value, confirm: true }); toast("success", t("Limits of {where}", { where: name }), (r && r.output) || ""); refresh(); }
+      catch (e) { failed(t("Could not change the limits of {where}", { where: name }))(e); }
+    }, { trigger: raise }) }, t("Raise to {value}", { value }));
+    actions.append(raise);
+  }
+  if (row && argv[0] === "stop") {  // (an idle MCP server or helper offers none: stopping it breaks its users)
+    const stop = el("button", { onclick: () => confirmIn(actions, t("Stop {name} on {host}? What runs in it ends.", { name, host }), t("Yes, stop it"), async () => {
+      try { const r = await api("POST", hostPath(`/starts/${encodeURIComponent(row.name)}/stop`, host), { confirm: true }); toast("success", t("{name} on {host} stopped", { name, host }), (r && r.output) || ""); refresh(); }
+      catch (e) { failed(t("Could not stop {name} on {host}", { name, host }))(e); }
+    }, { trigger: stop }) }, t("Stop"));
+    actions.append(stop);
+  }
+  const since = monitorNumber(w.since);
+  return el("tr", { class: `monitor-warning ${w.level === "error" ? "error" : "warning"}` },
+    el("td", {}, since ? new Date(since * 1000).toLocaleTimeString() : ""), el("td", { class: "mono" }, name || ""),
+    el("td", { class: w.level === "error" ? "status-bad" : "status-warn" }, monitorTitle(w.kind)),
+    el("td", {}, w.text || ""), el("td", { class: "mono" }, w.advice || ""), actions);
+}
+
+pages.monitor = async (main) => {
+  const host = state.host;
+  const live = pageLive();
+  main.append(el("h1", {}, t("System monitor on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  state.monitorWindow = state.monitorWindow || "24h";
+  const hostLine = el("p", { class: "monitor-host" }), runsBox = el("div"), warningsBox = el("div"), historyBox = el("div");
+  const windowSelect = el("select", { id: "monitor-window", "aria-label": t("History") },
+    MONITOR_WINDOWS.map(([key, label]) => el("option", { value: key, selected: key === state.monitorWindow }, t(label))));
+  let data = null, history = null;
+  // every look at top per run and for the host (MONITOR_RING each; a run no longer listed is let go): the charts'
+  // points after the history's
+  const ring = new Map(), historyPoints = new Map();
+  const record = (found) => {
+    const now = Date.now() / 1000, listed = new Set(["host"]);
+    const add = (key, sample) => {
+      if (!sample || typeof sample !== "object") return;
+      const list = ring.get(key) || [];
+      const point = { t: monitorNumber(sample.t) !== null ? sample.t : now };
+      for (const [k, v] of Object.entries(sample)) if (k !== "t" && monitorNumber(v) !== null) point[k] = v;
+      if (list.length && list[list.length - 1].t >= point.t) return;
+      list.push(point);
+      if (list.length > MONITOR_RING) list.splice(0, list.length - MONITOR_RING);
+      ring.set(key, list);
+    };
+    for (const row of (found && found.runs) || []) {
+      if (!row || typeof row.run !== "string") continue;
+      listed.add(row.run);
+      if (!ring.has(row.run)) for (const p of monitorPointsOfSeries(row.spark, ["cpu", "mem", "io", "net"])) add(row.run, { t: p.t, cpu: p.cpu, mem: p.mem });
+      add(row.run, row.sample);
+    }
+    add("host", found && found.host && found.host.sample);
+    for (const key of [...ring.keys()]) if (!listed.has(key)) ring.delete(key);
+  };
+  const pointsOf = (run, since) => {
+    if (!historyPoints.has(run)) {
+      const rows = (history && Array.isArray(history.runs)) ? history.runs : [];
+      const hostRow = (history && history.host) || {};
+      const row = run === "host" ? hostRow : rows.find(r => r.run === run) || {};
+      const found = monitorPointsOfDetail(row.detail);
+      historyPoints.set(run, found.length ? found : monitorPointsOfSeries(row.series, run === "host" ? ["cpu_pct", "mem_avail", "io", "load1"] : ["cpu", "mem", "io", "net"]));
+    }
+    return monitorMerged(historyPoints.get(run), ring.get(run) || [], since);
+  };
+  // the gauges and charts: drawn anew at every look at top (the rest of the history only when it is read again)
+  const chartsHolder = el("div", { class: "monitor-now" });
+  const drawCharts = () => {
+    const runs = (history && Array.isArray(history.runs)) ? history.runs : [];
+    const chosen = state.monitorRun && runs.find(r => r.run === state.monitorRun);
+    const running = state.monitorRun && data && (data.runs || []).find(r => r.run === state.monitorRun);
+    const windowLabel = t((MONITOR_WINDOWS.find(([key]) => key === state.monitorWindow) || MONITOR_WINDOWS[2])[1]);
+    const seconds = MONITOR_SECONDS[state.monitorWindow] || 86400, now = Date.now() / 1000, span = [now - seconds, now];
+    const step = Math.max(10, seconds / MONITOR_SLOTS);
+    const listed = ((data && data.runs) || []).filter(r => r && typeof r.run === "string");
+    const name = running ? running.name || running.run : chosen ? chosen.name || chosen.run : host;
+    clear(chartsHolder).append(
+      el("p", { class: "hint" }, t("The bars: what the run chosen (nothing chosen: the host) uses now of its limits, in the colours of the warnings. The charts: the window chosen, from the history and every look since; point at one for the exact values at that time.")),
+      monitorGauges(running || null, data && data.host),
+      el("div", { class: "monitor-charts" },
+        ...monitorCharts(name, pointsOf(running || chosen ? state.monitorRun : "host", span[0]), span, windowLabel, !(running || chosen)),
+        ...monitorAllCharts(Object.fromEntries(listed.map(r => [r.run, pointsOf(r.run, span[0])])), Object.fromEntries(listed.map(r => [r.run, r.name || r.run])), (data && data.host && data.host.sample) || {}, span, step, windowLabel)));
+  };
+  const drawHistory = () => {
+    const runs = (history && Array.isArray(history.runs)) ? history.runs : [];
+    const chosen = state.monitorRun && runs.find(r => r.run === state.monitorRun);
+    const windowLabel = t((MONITOR_WINDOWS.find(([key]) => key === state.monitorWindow) || MONITOR_WINDOWS[2])[1]);
+    const caption = chosen ? t("{name}: CPUs and memory, the last {window}", { name: chosen.name || chosen.run, window: windowLabel })
+      : t("{host}: CPU busy and free memory, the last {window}", { host, window: windowLabel });
+    const points = chosen ? chosen.series : (history && history.host && history.host.series) || [];
+    const running = state.monitorRun && data && (data.runs || []).find(r => r.run === state.monitorRun);
+    const spent = history && history.spend;
+    drawCharts();
+    clear(historyBox).append(...[el("p", {}, caption),
+      points && points.length > 1 ? trendSvg(points, 640, 140, caption) : el("p", { class: "hint" }, t("No history recorded in this window yet.")),
+      chartsHolder,
+      running ? spendPanel(host, running.run, running.name || running.run, refresh)
+        : spent && spent.total && spent.total.requests ? el("p", {}, t("Model requests of this window: {cost} ({count} requests; sandbox-ai spend)", { cost: spendCost(spent.total), count: spent.total.requests })) : null].filter(Boolean));
+  };
+  let historyAsked = 0, historyAt = 0;  // only the window chosen last is drawn (an earlier, slower answer is dropped)
+  const loadHistory = async () => {
+    const ticket = ++historyAsked;
+    historyAt = Date.now();
+    let found = null;
+    try { found = await api("GET", hostPath(`/monitor/usage/${state.monitorWindow}`, host)); } catch (e) { found = null; }
+    if (ticket !== historyAsked) return;
+    history = found;
+    historyPoints.clear();
+    if (live()) { draw(); drawHistory(); }
+  };
+  const draw = () => {
+    const s = (data && data.host && data.host.sample) || {};
+    const parts = [];
+    if (monitorNumber(s.cpu_pct) !== null) parts.push(t("CPU {percent} % of {cpus}", { percent: s.cpu_pct, cpus: s.cpus || "?" }));
+    if (monitorNumber(s.load1) !== null) parts.push(t("load {load}", { load: s.load1 }));
+    if (monitorNumber(s.mem_total)) parts.push(t("memory free {free} of {total} GiB", { free: gibText(s.mem_avail), total: gibText(s.mem_total) }));
+    if (monitorNumber(s.swap_total)) parts.push(t("swap {used} of {total} GiB", { used: gibText(s.swap_used), total: gibText(s.swap_total) }));
+    if (monitorNumber(s.rd) !== null) parts.push(t("disk {read} read, {written} written", { read: rateText(s.rd), written: rateText(s.wr) }));
+    hostLine.textContent = parts.join(" · ");
+    const runs = (data && Array.isArray(data.runs)) ? data.runs : [];
+    const groups = new Map();
+    for (const row of runs) { const key = row.project || ""; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(row); }
+    const rows = [];
+    for (const [project, members] of groups) {
+      rows.push(el("tr", { class: "monitor-project" }, el("th", { colspan: 10, scope: "rowgroup", title: project }, project ? project.split("/").filter(Boolean).pop() : t("(no project)"))));
+      for (const row of members) {
+        const m = row.sample || {};
+        const cpu = monitorNumber(m.cpu) !== null ? `${m.cpu.toFixed(2)} (${Math.round(m.cpu_pct || 0)} %)` : "-";
+        const memory = monitorNumber(m.mem) === null ? "-" : monitorNumber(m.mem_lim) ? `${gibText(m.mem)} / ${gibText(m.mem_lim)} GiB` : `${gibText(m.mem)} GiB`;
+        const choose = el("button", { class: "link", "aria-pressed": String(state.monitorRun === row.run), onclick: () => { state.monitorRun = state.monitorRun === row.run ? null : row.run; draw(); drawHistory(); } }, `${row.parent ? "↳ " : ""}${row.name || row.run}`);
+        rows.push(el("tr", { class: state.monitorRun === row.run ? "selected" : "" },
+          el("td", {}, choose), el("td", {}, row.agent || ""),
+          el("td", { class: "num" }, cpu, cellSpark(row.spark, 1, m.cpu_lim, t("CPU trend of {name}", { name: row.name || row.run }))),
+          el("td", { class: "num" }, memory, cellSpark(row.spark, 2, m.mem_lim, t("Memory trend of {name}", { name: row.name || row.run }))),
+          el("td", { class: "num" }, monitorNumber(m.rd) !== null ? `${rateText(m.rd)} / ${rateText(m.wr)}` : "-"),
+          el("td", { class: "num" }, monitorNumber(m.rx) !== null ? `${rateText(m.rx)} / ${rateText(m.tx)}` : "-"),
+          el("td", { class: "num" }, monitorNumber(m.pids) !== null ? String(m.pids) : "-"),
+          el("td", {}, trendSvg(row.spark, 120, 26, t("Trend of {name}", { name: row.name || row.run }))),
+          el("td", { class: (row.warnings || []).some(w => w.level === "error") ? "status-bad" : "status-warn" }, (row.warnings || []).map(w => monitorTitle(w.kind)).join(", ")),
+          el("td", { class: "num" }, spendCost(history && history.spend && history.spend.runs && history.spend.runs[row.run])),
+          monitorGoto(host, row)));
+      }
+    }
+    clear(runsBox).append(table([t("Run"), t("Agent"), t("CPU"), t("Memory"), t("Disk IO"), t("Network"), t("Processes"), t("Trend"), t("Warnings"), t("Cost"), ""], rows, t("No sandbox is running on this host.")));
+    const warningRows = [];
+    for (const row of runs) for (const w of row.warnings || []) warningRows.push(monitorWarningRow(main, host, row, w, refresh));
+    for (const w of (data && data.host && data.host.warnings) || []) warningRows.push(monitorWarningRow(main, host, null, w, refresh));
+    clear(warningsBox).append(el("h2", {}, t("Warnings")), table([t("Since"), t("Run"), t("Warning"), t("What"), t("What to do"), ""], warningRows, t("No warning on this host.")));
+  };
+  const refresh = async () => {
+    try { data = await api("GET", hostPath("/monitor", host)); record(data); }
+    catch (e) {
+      if (!live()) return;
+      clear(runsBox).append(e.status === 502 ? notice(t("{error} (an older sandbox-ai there has no system monitor: sandbox-ai update)", { error: e.message }), "error") : errorNotice(e));
+      return;
+    }
+    if (live()) { draw(); if (history) drawCharts(); }
+  };
+  windowSelect.addEventListener("change", () => { state.monitorWindow = windowSelect.value; loadHistory(); });
+  await refresh();
+  if (!live()) return;
+  clear(main).append(el("h1", {}, t("System monitor on {host}", { host })),
+    el("p", { class: "hint" }, t("What the running sandboxes use, recorded every {seconds} seconds by each run's launcher: CPU (of its limit), memory of its limit, disk IO, network and processes, grouped by project; an MCP server or helper under the start it serves. Choose a run for its history.", { seconds: monitorSeconds(data) })),
+    hostLine, runsBox, el("h2", {}, t("History")), el("div", { class: "row" }, el("label", { for: "monitor-window" }, t("Time span"), " "), windowSelect), historyBox, warningsBox);
+  loadHistory();
+  const again = () => setTimeout(async () => {
+    if (!live() || state.page !== "monitor" || document.hidden) { if (live() && state.page === "monitor") again(); return; }
+    await refresh();
+    if (live() && Date.now() - historyAt >= 6 * MONITOR_EVERY) loadHistory();  // (the cost of the runs with it)
+    if (live()) again();
+  }, MONITOR_EVERY);
+  again();
+};
+
 pages.canaries = async (main) => {
   main.append(el("h1", {}, t("Canaries on {host}", { host: state.host })), el("p", { class: "hint" }, t("Loading…")));
   let logs;
@@ -4149,6 +6689,111 @@ pages.safeguards = async (main, known) => {
   main.append(el("div", { class: "row" }, el("label", { for: "safeguard-kind" }, t("Kind"), " "), filter), body);
   fill();
 };
+// The workspace review (sandbox-ai workspace review --all on that host): what each run changed in files the host runs
+// or trusts, newest first. Diff shows the change and the hidden-text findings; Keep records it as wanted; Restore…,
+// asked in place, puts the file back as it was at the start from the before-state kept outside every sandbox (an
+// added file is removed). A change without one (binary, larger, a run before 0.1.133) offers Keep only, and says why.
+const REVIEW_CHANGES = { added: N_("added"), changed: N_("changed"), removed: N_("removed") };
+const REVIEW_DECISIONS = { kept: N_("decision|kept"), restored: N_("restored") };
+const PIN_CHANGES = { new: N_("new"), changed: N_("changed"), gone: N_("gone") };
+pages.reviews = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("Workspace review on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
+  let reviews;
+  try { reviews = await api("GET", hostPath("/workspace-review", host)); } catch (e) { reviews = e; }
+  if (!live()) return;
+  clear(main).append(el("h1", {}, t("Workspace review on {host}", { host })),
+    el("p", { class: "hint" }, t("What each run changed in files your host runs or trusts: Git hooks and configuration, editor tasks, agent settings, build scripts, CI workflows, instruction files. Nothing is reverted on its own: keep each change, or restore the file as it was at the start.")));
+  if (reviews instanceof Error) { main.append(errorNotice(reviews)); return; }
+  const detail = el("div", { id: "review-detail" });
+  const rows = [];
+  for (const review of (Array.isArray(reviews) ? reviews : []).slice().reverse()) {
+    for (const c of Array.isArray(review.changes) ? review.changes : []) {
+      const file = `${String(c.sandbox || "").replace(/\/$/, "")}/${c.path}`;
+      const decided = c.decision && REVIEW_DECISIONS[c.decision.decision] ? `${t(REVIEW_DECISIONS[c.decision.decision])} ${String(c.decision.time || "").replace("T", " ").replace("Z", "")}` : null;
+      const actions = el("td", { class: "actions" });
+      const target = { log_dir: review.log_dir, run: review.run, path: file };
+      const showDiff = () => clear(detail).append(el("div", { class: "card" }, el("h2", {}, file),
+        el("p", { class: "hint" }, `${t("Run")}: ${review.run} · ${c.why || ""}`),
+        c.restorable ? null : notice(t("No before-state recorded: {why}. Keep it, or restore the start's checkpoint.", { why: c.why_not || "" }), "warn"),
+        el("pre", { class: "mono" }, (Array.isArray(c.diff) ? c.diff : []).join("\n")),
+        Array.isArray(c.findings) && c.findings.length ? el("pre", { class: "mono status-warn" }, [t("Hidden-text findings:"), ...c.findings].join("\n")) : null));
+      actions.append(rowButton(t("Diff"), file, host, { onclick: showDiff }));
+      if (!decided) actions.append(rowButton(t("Keep"), file, host, { title: t("Record that this change is wanted (nothing is written)"), onclick: async () => {
+        try { await api("POST", hostPath("/workspace-review/keep", host), target); toast("success", t("{path}: kept as the agent left it", { path: file })); show("reviews"); }
+        catch (e) { failed(t("Could not keep {path} on {host}", { path: file, host }))(e); }
+      } }));
+      if (c.restorable && !(c.decision && c.decision.decision === "restored")) {
+        const restore = rowButton(t("Restore…"), file, host, { onclick: () => confirmIn(actions, c.change === "added"
+          ? t("{path} was added by the agent: restoring removes it. Go ahead on {host}?", { path: file, host })
+          : t("Put {path} back as it was at the start of run {run} on {host}? What the agent wrote there is replaced.", { path: file, run: review.run, host }),
+        t("Yes, restore"), async () => {
+          try { await api("POST", hostPath("/workspace-review/restore", host), Object.assign({ confirm: true }, target)); toast("success", t("{path}: restored as it was at the start", { path: file })); show("reviews"); }
+          catch (e) { failed(t("Could not restore {path} on {host}", { path: file, host }))(e); }
+        }, { trigger: restore }) });
+        actions.append(restore);
+      }
+      rows.push(el("tr", {}, el("td", {}, String(review.time || "").replace("T", " ").replace("Z", "")), el("td", { class: "mono" }, review.run || ""),
+        el("td", {}, REVIEW_CHANGES[c.change] ? t(REVIEW_CHANGES[c.change]) : String(c.change || "")), el("td", { class: "mono" }, file),
+        el("td", {}, c.why || ""), el("td", { class: decided ? "" : "status-warn" }, decided || (c.restorable ? t("open") : t("open (Keep only)"))), actions));
+    }
+  }
+  main.append(table([t("Time"), t("Run"), t("Change"), t("File"), t("Why it matters"), t("Decision"), ""], rows, t("No run changed a file the host runs or trusts.")), detail);
+};
+
+// The MCP tool definitions pinned per project (sandbox-ai mcp tools --all on that host), and whether the list each
+// server gave last differs. Definitions shows them with what changed; Re-pin… (asked in place) makes the list seen
+// last the pin (that host refuses one with hidden text); Forget… drops the pin (the next list is pinned anew).
+pages.pins = async (main) => {
+  const host = state.host;
+  main.append(el("h1", {}, t("MCP tool pins on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
+  const live = pageLive();
+  let pins;
+  try { pins = await api("GET", hostPath("/mcp-tools", host)); } catch (e) { pins = e; }
+  if (!live()) return;
+  clear(main).append(el("h1", {}, t("MCP tool pins on {host}", { host })),
+    el("p", { class: "hint" }, t("What each MCP server's tools told the model when the project trusted them: a later change is asked about. Here the definitions, whether the list seen last differs, and re-pinning it.")));
+  if (pins instanceof Error) { main.append(errorNotice(pins)); return; }
+  const detail = el("div", { id: "pin-detail" });
+  const rows = (Array.isArray(pins) ? pins : []).filter(x => x && typeof x.server === "string").map(x => {
+    const actions = el("td", { class: "actions" });
+    const target = { project: x.project, server: x.server };
+    const seen = !x.seen ? t("not seen since") : x.differs ? t("{time}: {count} differ", { time: String(x.seen).replace("T", " ").replace("Z", ""), count: x.differs }) : t("{time}: as pinned", { time: String(x.seen).replace("T", " ").replace("Z", "") });
+    if (x.project) {
+      actions.append(rowButton(t("Definitions"), x.server, host, { onclick: async () => {
+        let pin;
+        try { pin = await api("POST", hostPath("/mcp-tools/show", host), target); } catch (e) { clear(detail).append(errorNotice(e)); return; }
+        const lines = [];
+        for (const change of (pin && Array.isArray(pin.changes) ? pin.changes : [])) lines.push(`${change.tool}: ${PIN_CHANGES[change.change] ? t(PIN_CHANGES[change.change]) : String(change.change)}`);
+        const seenTools = pin && pin.seen && pin.seen.tools ? pin.seen.tools : {};
+        for (const [name, item] of Object.entries(pin && pin.tools ? pin.tools : {})) {
+          lines.push("", `${name}  sha256 ${String(item.digest || "").slice(0, 16)}`, `  ${t("pinned")}: ${item.definition || ""}`);
+          if (seenTools[name] && seenTools[name].digest !== item.digest) lines.push(`  ${t("seen last")}: ${seenTools[name].definition || ""}`);
+        }
+        for (const [name, item] of Object.entries(seenTools)) if (!(pin.tools || {})[name]) lines.push("", `${name} (${t("new")})`, `  ${t("seen last")}: ${item.definition || ""}`);
+        clear(detail).append(el("div", { class: "card" }, el("h2", {}, t("{server} in {project}", { server: x.server, project: x.project })), el("pre", { class: "mono" }, lines.join("\n"))));
+      } }));
+      if (x.differs) {
+        const repin = rowButton(t("Re-pin…"), x.server, host, { onclick: () => confirmIn(actions, t("Pin the list MCP server {server} gave last for {project} on {host}? Its later lists are compared with it: what changed in it is no longer asked about.", { server: x.server, project: x.project, host }), t("Yes, re-pin"), async () => {
+          try { await api("POST", hostPath("/mcp-tools/repin", host), Object.assign({ confirm: true }, target)); toast("success", t("{server}: the list seen last is pinned now", { server: x.server })); show("pins"); }
+          catch (e) { failed(t("Could not re-pin {server} on {host}", { server: x.server, host }))(e); }
+        }, { trigger: repin }) });
+        actions.append(repin);
+      }
+      const forget = rowButton(t("Forget…"), x.server, host, { class: "danger", onclick: () => confirmIn(actions, t("Drop the pin of MCP server {server} for {project} on {host}? Its next list is pinned without a question.", { server: x.server, project: x.project, host }), t("Yes, forget it"), async () => {
+        try { await api("POST", hostPath("/mcp-tools/forget", host), Object.assign({ confirm: true }, target)); toast("success", t("{server}: pin dropped", { server: x.server })); show("pins"); }
+        catch (e) { failed(t("Could not forget the pin of {server} on {host}", { server: x.server, host }))(e); }
+      }, { trigger: forget }) });
+      actions.append(forget);
+    }
+    return el("tr", {}, el("td", { class: "mono" }, x.project || t("(not named: pinned before 0.1.133)")), el("td", { class: "mono" }, x.server),
+      el("td", {}, String(x.tools ?? "")), el("td", {}, String(x.pinned || "").replace("T", " ").replace("Z", "")), el("td", {}, x.how || ""),
+      el("td", { class: x.differs ? "status-warn" : "" }, seen), actions);
+  });
+  main.append(table([t("Project"), t("Server"), t("Tools"), t("Pinned"), t("How"), t("Last seen"), ""], rows, t("No MCP tool definitions pinned yet (a server's first list is pinned after its run).")), detail);
+};
+
 // What lowers the protection of every later start on a host is asked first, in place, naming the host; Cancel puts
 // the control back. Lowering is any step down from what the host has now: the mode (lax < low < medium < high <
 // paranoid), the agents' telemetry (off < strict; it is always off), fewer canary categories. The service compares the same way
@@ -4236,7 +6881,15 @@ pages.settings = async (main) => {
     if (state.safeguardsNotifier && host === state.host) state.safeguardsNotifier.muted = state.safeguardMuted[host];
     save("safeguard_mute", silenced.length ? silenced : null);
   });
+  // the file views (Memory, Session files): logins and keys listed and marked by default; ticked, left out (hide_secrets)
+  const hideSecrets = el("input", { type: "checkbox", id: "hide-secrets", checked: values.hide_secrets === true });
+  hideSecrets.addEventListener("change", async () => {
+    const on = hideSecrets.checked;
+    if (await save("hide_secrets", on ? true : null) !== true) hideSecrets.checked = !on;
+  });
   main.append(status, el("div", { class: "card" }, el("div", { class: "form" },
+    el("label", { for: "hide-secrets" }, t("Hide logins and keys in file views")),
+    el("div", {}, hideSecrets, el("p", { class: "hint" }, t("Off (the default): files that look like logins or keys (~/.git-credentials, an agent's login, a private key) are listed in Memory and Session files and marked; their text is shown only when you ask. On: they are left out of those lists (hide_secrets). An export leaves them out either way unless you take them in."))),
     el("label", { for: "telemetry" }, t("Telemetry of the agents")), telemetry, el("span"), telemetryAsk,
     el("label", { for: "mode" }, t("Security mode")), mode, el("span"), modeAsk,
     el("span", {}, t("Canary files")), el("div", { class: "row" }, boxes.map((b, i) => el("label", {}, b, " ", categories[i]))), el("span"), canaryAsk,
@@ -4245,9 +6898,11 @@ pages.settings = async (main) => {
     el("p", { class: "hint mono" }, data.path || ""),
     el("p", { class: "hint" }, t("For every start on this host; an option given at a start wins."))));
   // keep_days, preset_dirs, subnet, subnet6, name_style: saved with Save; what lowers the protection the service asks first
-  const more = [["keep_days", N_("Kept starts unused this many days are removed (empty: never)"), "30"], ["preset_dirs", N_("Extra preset directories (one per line)"), "/home/you/presets"],
+  const more = [["keep_days", N_("Kept starts unused this many days are removed (empty: 90, the default; 0: never)"), "30"], ["preset_dirs", N_("Extra preset directories (one per line)"), "/home/you/presets"],
     ["subnet", N_("Network of the starts (IPv4)"), "10.89.0.0/24"], ["subnet6", N_("Network of the starts (IPv6)"), "fd00:89::/64"],
-    ["name_style", N_("Names of new starts: codename or project (empty: codename)"), "project"]];
+    ["name_style", N_("Names of new starts: codename or project (empty: codename)"), "project"],
+    ["ask_timeout", N_("Seconds a request waits for the answer to its question, 5-3600 (empty: 60); unanswered, the question stays open"), "120"],
+    ["package_min_age_days", N_("Days a package version must be old before the package guard lets it through without asking, 0-3650 (empty: 14; 0: no age check)"), "14"]];
   const asking = el("div", { class: "row" });
   const fields = more.map(([key, label, example]) => {
     const now = values[key];
@@ -4256,7 +6911,7 @@ pages.settings = async (main) => {
     const valueOf = () => {
       const text = input.value.trim();
       if (!text) return null;
-      if (key === "keep_days") return Number(text);
+      if (key === "keep_days" || key === "ask_timeout" || key === "package_min_age_days") return Number(text);
       return key === "preset_dirs" ? linesOf(text) : text;
     };
     const saveButton = el("button", { onclick: async (event) => {
@@ -4268,7 +6923,206 @@ pages.settings = async (main) => {
     return [el("label", { for: input.id }, t(label)), el("div", { class: "row" }, input, saveButton)];
   });
   main.append(el("h2", {}, t("More defaults")), el("div", { class: "card" }, el("div", { class: "form" }, fields, el("span"), asking)));
+  // the storage check (sandbox-ai gc --check) and its automatic rules: each saved at once, a rule off when empty
+  const storageFields = [
+    ["storage_check", N_("Storage check (off, weekly, daily)"), "weekly"], ["storage_threshold_gb", N_("Notice above (GB)"), "5"],
+    ["storage_growth_gb", N_("Name a start that grew more than (GB)"), "2"],
+    ["storage_caches_days", N_("Empty the caches of starts unused for (days)"), ""], ["storage_compact_days", N_("Compact transcripts older than (days)"), ""],
+    ["storage_pack_days", N_("Pack stopped starts unused for (days)"), ""], ["storage_logs_days", N_("Remove log folders not written for (days)"), ""],
+  ].map(([key, label, placeholder]) => {
+    const input = el("input", { id: `default-${key}`, value: values[key] === undefined || values[key] === null ? "" : String(values[key]), placeholder, size: 8 });
+    const saveButton = el("button", { onclick: async () => {
+      const text = input.value.trim();
+      await save(key, text === "" ? null : (key === "storage_check" ? text : Number(text)));
+    } }, t("Save"));
+    return [el("label", { for: input.id }, t(label)), el("div", { class: "row" }, input, saveButton)];
+  });
+  main.append(el("h2", {}, t("Storage")), el("div", { class: "card" }, el("p", { class: "hint" }, t("The storage check (sandbox-ai gc --check) and its automatic rules, each off while empty: applied by the check and gc, each action logged and said in the next notice.")), el("div", { class: "form" }, storageFields)));
+  if (live()) await phoneNotifications(main, host, live);
 };
+
+// Phone notifications of a host (sandbox-ai notify there): its channels - ntfy, Telegram, WhatsApp, a webhook - with
+// their events, when they send and how much a message says; tokens only as the names of that host's secrets (page
+// Secrets), never typed here. Add and Remove are asked first (notify-add, notify-remove); Test sends a message now;
+// Edit puts a channel into the form (saved under the same name, it replaces it).
+const NOTIFY_KINDS = ["ntfy", "telegram", "whatsapp", "webhook"];
+const NOTIFY_EVENTS = [["questions", N_("Questions")], ["alarms", N_("Alarms")], ["safeguards", N_("Safeguards")], ["limits", N_("Limits")], ["run-ended", N_("Run ended")], ["run-failed", N_("Run failed")], ["budget", N_("Budget nearly or all used")]];
+// The fields of each kind: [field (notify.json's name), label, placeholder]
+const NOTIFY_FIELDS = {
+  ntfy: [["url", N_("Server"), "https://ntfy.sh"], ["topic", N_("Topic"), "a-long-random-topic"], ["token_secret", N_("Token (a secret's name, optional)"), "NTFY_TOKEN"]],
+  telegram: [["bot_token_secret", N_("Bot token (a secret's name)"), "TG_BOT"], ["chat", N_("Chat ID"), "123456789"], ["api", N_("Another API URL (optional)"), "https://api.telegram.org"]],
+  whatsapp: [["phone_id", N_("Phone-number ID"), "106540352242922"], ["token_secret", N_("Access token (a secret's name)"), "WA_TOKEN"], ["to", N_("Recipient"), "+4917612345678"], ["template", N_("Approved template (optional)"), "sandbox_alert"], ["language", N_("Its language"), "en"], ["api", N_("Another API URL (optional)"), "https://graph.facebook.com/v23.0"]],
+  webhook: [["url", N_("URL"), "https://hooks.example.org/in"], ["url_secret", N_("Or: the URL is the secret"), "HOOK_URL"], ["token_secret", N_("Token (a secret's name, optional)"), "HOOK_TOKEN"]],
+};
+
+async function phoneNotifications(main, host, live) {
+  const box = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
+  main.append(el("h2", { id: "phone-notifications" }, t("Phone notifications")), box);
+  let data;
+  try { data = await api("GET", hostPath("/notify", host)); } catch (e) { if (live()) clear(box).append(errorNotice(e)); return; }
+  if (!live()) return;
+  const channels = Array.isArray(data && data.channels) ? data.channels.filter(c => c && typeof c.name === "string") : [];
+  const result = el("div", { class: "wide check-result" });
+  const form = el("div", { class: "form" });
+  const name = el("input", { id: "notify-name", class: "mono", placeholder: t("phone"), autocomplete: "off" });
+  const kind = el("select", { id: "notify-kind" }, NOTIFY_KINDS.map(k => el("option", { value: k }, k)));
+  kind.value = NOTIFY_KINDS[0];  // (said, not left to the browser: the first kind's fields are drawn at once)
+  const own = el("div", { class: "form wide" });
+  const inputs = {};
+  const drawOwn = (values) => {
+    clear(own);
+    for (const [field, label, example] of NOTIFY_FIELDS[kind.value] || []) {
+      const input = el("input", { id: `notify-${field}`, class: "mono", placeholder: example, autocomplete: "off", spellcheck: "false" });
+      input.value = values && values[field] !== undefined && values[field] !== null ? String(values[field]) : "";
+      inputs[field] = input;
+      own.append(el("label", { for: input.id }, t(label)), input);
+    }
+  };
+  kind.addEventListener("change", () => drawOwn({}));
+  const events = NOTIFY_EVENTS.map(([key, label]) => {
+    const box = el("input", { type: "checkbox", id: `notify-event-${key}` });
+    box.checked = key === "questions" || key === "alarms";
+    return [key, box, el("label", { for: box.id }, t(label))];
+  });
+  const when = el("select", { id: "notify-when" }, el("option", { value: "away" }, t("away: while neither the app nor the web interface watches")), el("option", { value: "always" }, t("always")));
+  const detail = el("select", { id: "notify-detail" }, el("option", { value: "minimal" }, t("minimal: only that something waits")), el("option", { value: "normal", selected: true }, t("normal: kind, run, what, time")), el("option", { value: "full" }, t("full: also destinations and paths")));
+  detail.value = "normal";
+  const quiet = el("input", { id: "notify-quiet", class: "mono", placeholder: "22:00-07:00" });
+  const rate = el("input", { id: "notify-rate", class: "mono", type: "number", min: "0", max: "86400", value: "60" });
+  const fill = (c) => {  // a channel into the form (Edit): its fields, its events, when, detail, quiet hours, rate
+    name.value = c ? c.name : ""; kind.value = c ? c.kind : "ntfy";
+    drawOwn(c || {});
+    for (const [key, box] of events) box.checked = c ? (c.events || []).includes(key) : key === "questions" || key === "alarms";
+    when.value = (c && c.when) || "away"; detail.value = (c && c.detail) || "normal";
+    quiet.value = (c && c.quiet) || ""; rate.value = String(c && Number.isInteger(c.rate) ? c.rate : 60);
+    name.focus();
+  };
+  drawOwn({});
+  const body = () => {
+    const b = { name: name.value.trim(), kind: kind.value, events: events.filter(([, box]) => box.checked).map(([key]) => key), when: when.value, detail: detail.value };
+    for (const [field] of NOTIFY_FIELDS[kind.value] || []) { const v = inputs[field].value.trim(); if (v) b[field] = v; }
+    if (quiet.value.trim()) b.quiet = quiet.value.trim();
+    if (rate.value.trim() !== "") b.rate = Number(rate.value);
+    return b;
+  };
+  const row = el("div", { class: "row" });
+  const save = (event) => busy(event.target, async () => {
+    clear(result);
+    const b = body();
+    try { await api("POST", hostPath("/notify", host), Object.assign({}, b, { check_only: true })); }
+    catch (e) { result.append(errorNotice(e, t("The channel was not saved"))); return; }
+    const send = async () => {
+      try { await api("POST", hostPath("/notify", host), Object.assign({}, b, { confirm: true })); toast("success", t("Saved"), t("{name} on {host}: try it with Test.", { name: b.name, host })); show("settings"); }
+      catch (e) { result.append(errorNotice(e, t("The channel was not saved"))); }
+    };
+    if (!needsConfirm("notify-add")) { await send(); return; }
+    confirmIn(row, t("Send the questions and alarms of {host} to {name} ({kind})? The service receives what the detail allows: the kind, the run's name, a short what, and with full also destinations and paths.", { host, name: b.name, kind: b.kind }), t("Yes, save it"), send, { kind: "primary", trigger: event.target });
+  });
+  row.append(el("button", { class: "primary", onclick: save }, t("Save channel…")), el("button", { onclick: () => { fill(null); clear(result); } }, t("New")));
+  // each channel: Test, Edit, Remove… (the same in its right-click menu)
+  const rows = channels.map(c => {
+    const actions = el("td", { class: "actions" });
+    const test = rowButton(t("Test"), c.name, host, { onclick: (event) => busy(event.target, async () => {
+      clear(result);
+      try { const r = await api("POST", hostPath(`/notify/${encodeURIComponent(c.name)}/test`, host), {}); result.append(notice(r.ok ? t("Sent: {name}", { name: c.name }) : t("Not sent: {name}", { name: c.name }), r.ok ? "ok" : "error"), outputBlock(r)); }
+      catch (e) { result.append(errorNotice(e)); }
+    }) });
+    const edit = rowButton(t("Edit"), c.name, host, { onclick: () => fill(c) });
+    const remove = rowButton(t("Remove…"), c.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the phone channel {name} on {host}? Its questions and alarms no longer reach you there.", { name: c.name, host }), t("Yes, remove it"), async () => {
+      try { await api("POST", hostPath(`/notify/${encodeURIComponent(c.name)}/remove`, host), { confirm: true }); show("settings"); } catch (e) { failed(t("Could not remove it"))(e); }
+    }, { trigger: remove }) });
+    actions.append(test, edit, remove);
+    const status = c.status && typeof c.status === "object" ? (c.status.ok ? t("sent") : t("failed: {error}", { error: String(c.status.error || "") })) : "";
+    const tr = el("tr", {}, el("td", { class: "mono" }, c.name), el("td", {}, String(c.kind || "")), el("td", { class: "mono" }, String(c.where || "")),
+      el("td", {}, (c.events || []).join(", ")), el("td", {}, `${c.when || ""}, ${c.detail || ""}${c.quiet ? `, ${t("quiet {hours}", { hours: c.quiet })}` : ""}`), el("td", {}, status), actions);
+    return tr;
+  });
+  const link = el("input", { id: "notify-link", class: "mono", placeholder: "https://web.example.org:8443", value: (data && data.link) || "" });
+  const linkSave = el("button", { onclick: (event) => busy(event.target, async () => {
+    clear(result);
+    try { await api("POST", hostPath("/notify-link", host), { url: link.value.trim() || null }); toast("success", t("Saved"), link.value.trim() || t("no link")); }
+    catch (e) { result.append(errorNotice(e)); }
+  }) }, t("Save link"));
+  form.append(el("label", { for: "notify-name" }, t("Name")), name, el("label", { for: "notify-kind" }, t("Kind")), kind, own,
+    el("span", {}, t("Events")), el("div", { class: "row" }, ...events.flatMap(([, box, label]) => [box, label])),
+    el("label", { for: "notify-when" }, t("When")), when, el("label", { for: "notify-detail" }, t("A message says")), detail,
+    el("label", { for: "notify-quiet" }, t("Quiet hours (alarms still go)")), quiet, el("label", { for: "notify-rate" }, t("At most one message per (seconds)")), rate,
+    el("span"), row, el("label", { for: "notify-link" }, t("Link in the messages")), el("div", { class: "row" }, link, linkSave), result);
+  clear(box).append(
+    el("p", { class: "hint" }, t("Questions and alarms of {host} to your phone while you are away: sent by that host, never from inside a sandbox. Tokens are the names of that host's secrets (page Secrets). WhatsApp needs an approved message template to start a conversation.", { host })),
+    table([t("Name"), t("Kind"), t("Sends to"), t("Events"), t("When, detail"), t("Last message"), ""], rows, t("No phone channels on this host.")),
+    el("div", { class: "card" }, form));
+}
+
+// What protects a host's secrets (GET /vault: `secrets status` there) and the step that unlocks them:
+// the system's keyring or Keychain, or the private files with their primary password (docs/SECRETS_DESIGN.md).
+// The password is typed into a field that starts hidden and whose choice is not remembered (as the login's), sent
+// once over this page's HTTPS and cleared; the service hands it to `secrets unlock --password-stdin` on that host.
+// Changing or removing it is the command line's (sandbox-ai secrets password change|remove).
+function protectionWords(p) {
+  if (p.backend === "keyring") return t("Kept in the system's keyring, which encrypts them.");
+  if (p.backend === "keychain") return t("Kept in the macOS Keychain, which encrypts them.");
+  if (!p.password) return p.plain
+    ? t("Kept in plain files, not encrypted ({count}): whoever reads that host's files or a backup has them. Set a primary password.", { count: p.plain })
+    : t("Kept in private files: the first secret needs a primary password, which encrypts them.");
+  const left = p.plain ? " " + t("{count} still in plain files: encrypted at the next unlock.", { count: p.plain }) : "";
+  return (p.locked ? t("Encrypted with the primary password; locked: a start that needs a secret waits for it.")
+    : t("Encrypted with the primary password; unlocked.")) + left;
+}
+
+function secretsProtection(p, host) {
+  const box = el("div", { class: "card", id: "secrets-protection" });
+  const status = el("div", { class: "wide" });
+  const actions = el("div", { class: "row" });
+  const form = el("div", { class: "form" });
+  const sent = (title, r) => { toast("success", title, (r && r.output) || ""); show("secrets"); };
+  const passwordField = (id) => secretInput({ id, class: "mono" }, { shown: false, remember: false });
+  const open = (fields, button) => { clear(form).append(...fields, el("span"), el("div", { class: "row" }, button)); };
+  box.append(el("p", {}, protectionWords(p)), actions, form, status);
+  const files = p.backend === "file" || p.password || p.plain;
+  if (!files) return box;
+  if (!p.password) {
+    actions.append(el("button", { class: "primary", onclick: () => {
+      const [first, firstField] = passwordField("primary-password-new");
+      const [again, againField] = passwordField("primary-password-again");
+      open([el("label", { for: "primary-password-new" }, t("New primary password (8 characters or more)")), firstField,
+        el("label", { for: "primary-password-again" }, t("The same again")), againField,
+        el("p", { class: "hint wide" }, t("It is asked once per session. There is no way to recover it: without it nobody reads these secrets, you neither."))],
+      el("button", { class: "primary", onclick: async () => {
+        clear(status);
+        if (first.value.length < 8) { status.append(notice(t("A primary password has 8 characters or more."), "warn")); return; }
+        if (first.value !== again.value) { status.append(notice(t("The two passwords do not match."), "warn")); return; }
+        const password = first.value; first.value = ""; again.value = "";
+        try { sent(t("Primary password set on {host}", { host }), await api("POST", hostPath("/vault/new", host), { password })); }
+        catch (e) { status.append(errorNotice(e)); }
+      } }, t("Set the primary password")));
+      first.focus();
+    } }, t("Set a primary password…")));
+  } else if (p.locked) {
+    actions.append(el("button", { class: "primary", onclick: () => {
+      const [password, passwordBox] = passwordField("primary-password");
+      const time = el("select", { id: "primary-password-for" },
+        ...[["30m", t("30 minutes")], ["8h", t("8 hours")], ["1d", t("1 day")]].map(([value, text]) => el("option", Object.assign({ value }, value === "8h" ? { selected: true } : {}), text)));
+      open([el("label", { for: "primary-password" }, t("Primary password")), passwordBox,
+        el("label", { for: "primary-password-for" }, t("Unlocked for")), time],
+      el("button", { class: "primary", onclick: async () => {
+        clear(status);
+        if (!password.value) { status.append(notice(t("Type the primary password."), "warn")); return; }
+        const typed = password.value; password.value = "";
+        try { sent(t("Secrets unlocked on {host}", { host }), await api("POST", hostPath("/vault/unlock", host), { password: typed, for: time.value || "8h" })); }
+        catch (e) { status.append(errorNotice(e)); }
+      } }, t("Unlock")));
+      password.focus();
+    } }, t("Unlock…")));
+  } else {
+    actions.append(el("button", { onclick: async () => {
+      clear(status);
+      try { sent(t("Secrets locked on {host}", { host }), await api("POST", hostPath("/vault/lock", host), {})); }
+      catch (e) { status.append(errorNotice(e)); }
+    } }, t("Lock")));
+  }
+  return box;
+}
 
 // The secrets of a host (sandbox-ai secrets there): names and where each is kept, never a value. A value is typed
 // into a field shown while it is typed (secretInput: "Show value" hides it), sent once and cleared; the service hands
@@ -4282,16 +7136,54 @@ pages.secrets = async (main) => {
   const names = (Array.isArray(list) ? list : []).filter(x => x && typeof x.name === "string");
   clear(main).append(el("h1", {}, t("Secrets on {host}", { host })),
     el("p", { class: "hint" }, t("API keys and tokens in that host's keyring, for {options}: their names, never their values.", { options: "--secret-env, --git-token-secret, VPN, LLM" })));
+  // (an older sandbox-ai on that host knows no primary password: the page shows its secrets as before)
+  let protection = null;
+  try { protection = await api("GET", hostPath("/vault", host)); } catch (e) { protection = null; }
+  if (!live()) return;
+  if (protection && typeof protection === "object" && typeof protection.backend === "string") main.append(secretsProtection(protection, host));
   const rows = names.map(x => {
     const actions = el("td", { class: "actions" });
     const remove = rowButton(t("Delete"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Delete the secret {name} on {host}? Starts, VPN profiles and Git logins that name it no longer get it.", { name: x.name, host }), t("Yes, delete it"), async () => {
       try { await api("DELETE", hostPath(`/secrets/${encodeURIComponent(x.name)}`, host), { confirm: true }); toast("success", t("{name} deleted on {host}", { name: x.name, host }), ""); show("secrets"); }
       catch (e) { failed(t("Could not delete {name} on {host}", { name: x.name, host }))(e); }
     }, { trigger: remove }) });
-    actions.append(remove);
+    // Edit…: another name (secrets rename: carried through every login, VPN profile, project file and kept start
+    // that names it). Its value is never shown: a new one is typed below under the same name (asked first).
+    const edit = rowButton(t("Edit…"), x.name, host, { onclick: () => rowEditor(secretEditor, t("Edit the secret {name}", { name: x.name }),
+      [{ key: "new", label: t("Name"), value: x.name }],
+      (v, row, result, trigger) => {
+        if (!v.new || v.new === x.name) { clear(result).append(el("p", { class: "hint" }, t("Nothing changed. To replace its value: type the name and the new value below (Add asks first)."))); return; }
+        confirmIn(row, t("Rename the secret {old} to {new} on {host}? Its name is changed in every login, VPN profile, trusted project file and kept start that names it; what still names {old} afterwards is said.", { old: x.name, new: v.new, host }), t("Yes, rename it"), async () => {
+          try { const r = await api("POST", hostPath(`/secrets/${encodeURIComponent(x.name)}/rename`, host), { new: v.new, confirm: true }); clear(secretEditor).append(el("div", { class: "card" }, el("h3", {}, t("{old} is now {new} on {host}", { old: x.name, new: v.new, host })), outputBlock(r), el("button", { onclick: () => show("secrets") }, t("OK")))); }
+          catch (e) { clear(result).append(errorNotice(e, t("The secret was not renamed"))); }
+        }, { trigger });
+      }, host) });
+    // Send to another host…: that host's `sandbox-ai hosts` names the hosts it reaches; the value goes from its store
+    // over SSH on standard input (secrets send), never through this page
+    const send = rowButton(t("Send to another host…"), x.name, host, { onclick: () => rowEditor(secretEditor, t("Send the secret {name} to another host", { name: x.name }),
+      [{ key: "host", label: t("Host (a name of sandbox-ai hosts there)"), value: "" }],
+      (v, row, result, trigger) => {
+        if (!v.host) { clear(result).append(el("p", { class: "hint" }, t("Name the host."))); return; }
+        const post = (replace) => api("POST", hostPath(`/secrets/${encodeURIComponent(x.name)}/send`, host), Object.assign({ host: v.host, confirm: true }, replace ? { replace: true } : {}));
+        const done = (r) => { toast("success", t("{name} is kept on {target} now", { name: x.name, target: v.host }), (r && r.output) || ""); clear(secretEditor); };
+        confirmIn(row, t("Send the secret {name} from {host} to {target}? Its value goes over SSH on standard input into that host's secret store and is kept there from then on: whoever controls {target} can use it.", { name: x.name, host, target: v.host }), t("Yes, send it"), async () => {
+          try { done(await post(false)); }
+          catch (e) {
+            if (/already/.test(errorText(e)) && /--replace/.test(errorText(e) + errorDetail(e))) {
+              confirmIn(row, t("{target} keeps a secret {name} already: replace its value there? Everything that names it on that host gets the new one.", { name: x.name, target: v.host }), t("Yes, replace it"), async () => {
+                try { done(await post(true)); } catch (err) { clear(result).append(errorNotice(err, t("The secret was not sent"))); }
+              }, { trigger });
+              return;
+            }
+            clear(result).append(errorNotice(e, t("The secret was not sent")));
+          }
+        }, { trigger });
+      }, host) });
+    actions.append(edit, send, remove);
     return el("tr", {}, el("td", { class: "mono" }, x.name), el("td", {}, x.store || ""), actions);
   });
-  main.append(table([t("Name"), t("Kept in"), ""], rows, t("No secrets on this host."), t("Secrets on {host}", { host })));
+  const secretEditor = el("div");
+  main.append(table([t("Name"), t("Kept in"), ""], rows, t("No secrets on this host."), t("Secrets on {host}", { host })), secretEditor);
   const name = el("input", { id: "secret-name", class: "mono", placeholder: "GITEA_TOKEN", pattern: "[A-Za-z_][A-Za-z0-9_]{0,63}", autocomplete: "off" });
   const [value, valueField] = secretInput({ id: "secret-value", class: "mono", "aria-describedby": "secret-hint" });
   const status = el("div", { class: "wide" });
@@ -4336,9 +7228,11 @@ pages.secrets = async (main) => {
 function versionText(s) {
   if (!s) return "…";
   if (!s.version) return s.error ? (sandboxMissing(s) ? t("not installed") : t("unreachable")) : "?";
-  if (["checkout", "pip", "package"].includes(s.kind)) return `${s.version} (${s.kind})`;
-  if (s.update) return t("{version} → {available} available", { version: s.version, available: s.available });
-  return s.update === false ? t("{version}, up to date", { version: s.version }) : s.version;
+  // its own update mode (sandbox-ai update mode; 0.1.122 on): changed on the Doctor page of that host
+  const mode = typeof s.update_mode === "string" ? `; ${t("updates: {mode}", { mode: s.update_mode })}` : "";
+  if (["checkout", "pip", "package"].includes(s.kind)) return `${s.version} (${s.kind})${mode}`;
+  if (s.update) return t("{version} → {available} available", { version: s.version, available: s.available }) + mode;
+  return (s.update === false ? t("{version}, up to date", { version: s.version }) : s.version) + mode;
 }
 
 // Whether a host answers over SSH but has no sandbox-ai (the shell found none: exit status 127, "not found").
@@ -5078,6 +7972,26 @@ function mcpOriginCell(x) {
 
 // MCP servers (sandbox-ai mcp): every defined one, running or not; start (for a start: attached to it), stop, the
 // catalogs and adding from them.
+// An MCP server's network as `mcp add|set --network` names it, for people (mcp_egress.py: what each reaches).
+const MCP_NETWORKS = { full: N_("internet (no LAN)"), allowlist: N_("only its hosts"), lan: N_("internet + LAN (warning)"),
+  none: N_("network|none") };
+
+// The network cell of a server of `mcp list --json`: a catalog server's kind (its hosts, the parts of your network
+// opened to it), with what to change (egress_note: switch to its hosts, it reaches your network) beneath; a server
+// with a command reaches what its own sandbox's rules let it.
+function mcpNetworkCell(x) {
+  const definition = (x && typeof x.definition === "object" && x.definition) || {};
+  if (x.network === null || x.network === undefined) return el("td", { class: "hint" }, t("its sandbox's rules"));
+  const kind = typeof definition.network === "string" ? definition.network : "none";
+  const extra = [...(Array.isArray(definition.hosts) && kind === "allowlist" ? definition.hosts : []),
+    ...(Array.isArray(definition.allow_private) ? definition.allow_private : []),
+    ...(Array.isArray(definition.allow_tcp) ? definition.allow_tcp : [])].filter(v => typeof v === "string");
+  const cell = el("td", { class: kind === "lan" ? "status-warn" : "" }, t(MCP_NETWORKS[kind] || kind),
+    extra.length ? el("div", { class: "hint mono" }, extra.join(", ")) : "");
+  if (typeof x.egress_note === "string" && x.egress_note) cell.append(el("div", { class: "hint", lang: "en" }, x.egress_note));
+  return cell;
+}
+
 pages.mcp = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("MCP servers on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
@@ -5108,13 +8022,13 @@ pages.mcp = async (main) => {
       el("label", { for: "mcp-backend" }, t("Backend")), backend, el("label", { for: "mcp-vpn" }, t("VPN profile")), vpn,
       el("label", { for: "mcp-for" }, t("For the start")), forStart, el("label", { for: "mcp-restart" }, t("Restart that start now")), restart, el("span"), row)));
   };
-  main.append(table([t("Name"), t("State"), t("Serves"), t("Catalog"), t("Command"), ""], servers.map(x => {
+  main.append(table([t("Name"), t("State"), t("Network"), t("Serves"), t("Catalog"), t("Command"), ""], servers.map(x => {
     const actions = el("td", { class: "actions" });
     const stop = rowButton(t("Stop"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: x.name, host }), t("Yes, stop it"), async () => {
       try { await api("POST", hostPath(`/mcp/${encodeURIComponent(x.name)}/stop`, host), { confirm: true }); show("mcp"); } catch (e) { failed(t("Could not stop {name} on {host}", { name: x.name, host }))(e); }
     }, { trigger: stop }) });
     actions.append(rowButton(t("Start…"), x.name, host, { onclick: () => startForm(x.name) }), stop);
-    return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), actions);
+    return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), mcpNetworkCell(x), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), actions);
   }), t("No MCP servers on this host yet: add one from a catalog below.")), startBox);
 
   // the catalogs, and adding an entry with its options
@@ -5138,7 +8052,10 @@ pages.mcp = async (main) => {
     if (!env.value.trim()) env.value = list.filter(v => v.required).map(v => v.name).join("\n");
   };
   showVariables([]);
-  const network = el("select", { id: "mcp-network" }, el("option", { value: "" }, t("as the entry says")), ["none", "full"].map(n => el("option", { value: n }, n)));
+  // where it reaches (mcp add --network): the internet without your local network, only its entry's hosts, your
+  // network too (asked first), or nothing
+  const network = el("select", { id: "mcp-network" }, el("option", { value: "" }, t("as the entry says")),
+    ["full", "allowlist", "lan", "none"].map(n => el("option", { value: n }, t(MCP_NETWORKS[n]))));
   const memory = el("input", { id: "mcp-memory", placeholder: "512m" }), pids = el("input", { id: "mcp-pids", type: "number", min: 1, placeholder: "128" });
   const backend = el("select", { id: "mcp-add-backend" }, el("option", { value: "" }, t("Podman when it is there")), ["podman", "bwrap", "both"].map(b => el("option", { value: b }, b)));
   const vpn = offerNames(el("input", { id: "mcp-add-vpn", class: "mono", placeholder: "home" }), "vpn", host);
@@ -5188,7 +8105,8 @@ pages.mcp = async (main) => {
       }, { kind: "primary", onCancel: () => { clear(addStatus).append(errorNotice(e)); } });
     };
     const writable = body.mounts.filter(m => m.mode === "rw").map(m => m.host);
-    const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null].filter(Boolean);
+    const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null,
+      body.network === "lan" ? t("reaching your local network and this host (internet + LAN)") : null].filter(Boolean);
     if (!what.length) { busy(event.target, () => send(false)); return; }
     confirmIn(addRow, t("Add the MCP server {name} on {host} {what}?", { name: body.entry, host, what: what.join(t(" and ")) }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: event.target });
   };
@@ -5204,6 +8122,130 @@ pages.mcp = async (main) => {
     addStatus, el("span"), addRow)));
 };
 
+// The logins of the sessions (sandbox-ai login --status --sessions): what each session's login file says about itself
+// - written by its agent, so every value is put in as text - and its fingerprint, never a token. Import as central
+// login… is `login AGENT --from-session NAME --expect FINGERPRINT` (confirmed in place: login-import).
+const LOGIN_SOURCES = { store: N_("central login"), host: N_("this computer's login"), file: N_("a login file"), none: N_("no login") };
+const LOGIN_KINDS = { subscription: N_("subscription"), "api-key": N_("API key"), "subscription+api-key": N_("subscription and API key") };
+function loginSource(row) {
+  return row.source === "session" ? t("from session {name}", { name: String(row.source_session || "?") }) : t(LOGIN_SOURCES[row.source] || String(row.source || "?"));
+}
+function loginAccount(info) {
+  const a = (info && info.account) || {};
+  return [a.email, a.organization, a.account_id, ...(Array.isArray(a.providers) ? a.providers : [])].filter(Boolean).map(String).join(", ");
+}
+function loginDetails(row) {
+  const info = row.info || {}, a = info.account || {};
+  const pairs = [[t("Session"), row.name], [t("Agent"), row.agent], [t("State"), row.state], [t("Login from"), loginSource(row)],
+    [t("Account (as the file says)"), a.email], [t("Organization"), a.organization], [t("Plan"), a.plan], [t("Account id"), a.account_id],
+    [t("Providers"), (Array.isArray(a.providers) ? a.providers : []).join(", ")], [t("Kind"), info.kind ? t(LOGIN_KINDS[info.kind] || String(info.kind)) : ""],
+    [t("Expires"), shownTime(info.expires)], [t("Renewable to"), shownTime(info.refresh_expires)], [t("Last refresh"), shownTime(info.last_refresh)],
+    [t("Fingerprint"), info.fingerprint], [t("The same login as the central one"), row.login ? (row.shares_central ? t("yes") : t("no")) : ""],
+    [t("Problem"), row.problem]];
+  return el("dl", { class: "details" }, ...pairs.filter(([, v]) => v).flatMap(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, String(v))]));
+}
+// A row's Edit…: FIELDS ([{key, label, value, placeholder, kind}]: KIND "secret" offers that host's secret names) in
+// a small form in HOLDER, filled in with what the row has now - never a secret's value, only names. Save hands what
+// the fields hold ({key: text}) to SAVE(values, row, result, trigger); Cancel drops the form.
+function rowEditor(holder, title, fields, save, host) {
+  const inputs = fields.map((f, i) => {
+    const input = el("input", { id: `row-edit-${i}`, class: "mono", value: f.value || "", placeholder: f.placeholder || "" });
+    return f.kind === "secret" ? offerNames(input, "secret", host) : input;
+  });
+  const row = el("div", { class: "row" }), result = el("div", { class: "wide" });
+  const values = () => Object.fromEntries(fields.map((f, i) => [f.key, inputs[i].value.trim()]));
+  row.append(el("button", { class: "primary", onclick: (event) => save(values(), row, result, event.target) }, t("Save…")), el("button", { onclick: () => clear(holder) }, t("Cancel")));
+  clear(holder).append(el("div", { class: "card" }, el("h3", {}, title), el("div", { class: "form" },
+    ...fields.flatMap((f, i) => [el("label", { for: `row-edit-${i}` }, f.label), inputs[i]]), el("span"), row, result)));
+  if (inputs[0]) inputs[0].focus();
+  return inputs;
+}
+
+// Why a kind of credential cannot be given to a sandbox that runs: its Give… button is there, greyed out, with this.
+const NOT_WHILE_RUNNING = {
+  publish: N_("A publish login cannot be given to a sandbox that runs: its tools' variables are set when it starts, and the questions before every upload are rules of that start. Restart it with --publish KIND; the token alone, without those questions, as an API key: the start's Network card."),
+  identities: N_("An identity is chosen when a sandbox starts (--identity NAME): its commit name, its Git logins and its publish logins are set up then. Restart the sandbox with it; one of its Git logins for a running sandbox: the start's Network card (Git login)."),
+  vpn: N_("A VPN is set up before the agent starts (its tunnel and kill switch are the sandbox's network): a running sandbox cannot be given one. Restart it with --vpn PROFILE."),
+};
+function notWhileRunning(kind, what, host) {
+  return rowButton(t("Give to a running sandbox…"), what, host, { disabled: "", title: t(NOT_WHILE_RUNNING[kind]) });
+}
+
+// An agent login for a sandbox that runs on HOST (sandbox-ai login give): the central login of AGENT, or the session
+// FROM's. In HOLDER: the running starts of that agent to choose from, then the login as that host describes it
+// (POST /session-logins/give {check_only}: whose it is, what it replaces - never a token), asked in place, then
+// given with the fingerprint that was shown.
+async function giveAgentLogin(holder, host, agent, from) {
+  let starts;
+  clear(holder).append(el("p", { class: "hint" }, t("Loading…")));
+  try { starts = await api("GET", hostPath("/starts", host)); } catch (e) { clear(holder).append(errorNotice(e)); return; }
+  const running = (Array.isArray(starts) ? starts : []).filter(s => s && s.state === "running" && s.agent === agent && s.kind !== "mcp" && typeof s.name === "string" && s.name !== from);
+  if (!running.length) { clear(holder).append(el("p", { class: "hint" }, t("No other sandbox of {agent} runs on {host} now: a login is given to a sandbox that runs (a stopped one takes the stored login at its next start).", { agent, host }))); return; }
+  const choice = el("select", { id: "login-give-run" }, running.map(s => el("option", { value: s.name }, s.name)));
+  const restart = el("input", { id: "login-give-restart", type: "checkbox" });
+  const row = el("div", { class: "row" }), result = el("div", { class: "wide" });
+  const body = () => Object.assign({ run: choice.value, agent }, from ? { from_session: from } : {});
+  const show_ = (event) => busy(event.target, async () => {
+    let shown;
+    try { shown = await api("POST", hostPath("/session-logins/give", host), Object.assign({ check_only: true }, body())); }
+    catch (e) { clear(result).append(errorNotice(e, t("The login was not given"))); return; }
+    const login = (shown && typeof shown.login === "object" && shown.login) || {};
+    if (shown && shown.same) { clear(result).append(el("p", { class: "hint" }, t("{name} has this login already: nothing to give.", { name: choice.value }))); return; }
+    const lines = [t("Give {source} ({agent}) to {name} on {host}? Its agent works as that account from now on.", { source: String((shown && shown.source) || ""), agent, name: choice.value, host }),
+      `${t("Account (as the file says)")}: ${loginAccount(login) || "?"}`, `${t("Fingerprint")}: ${String(login.fingerprint || "?")}`,
+      shown && shown.current ? (shown.same_account ? t("It replaces the login the sandbox has now, of the same account.") : t("It replaces the login the sandbox has now, of ANOTHER account (or one that cannot be told).")) : "",
+      t("The two then share the login: subscription logins rotate their refresh tokens, and two sandboxes that refresh the same one can log each other out."),
+      shown && !shown.reads_again ? (restart.checked && shown.restart ? t("Its agent is started again inside the sandbox: what it does right now ends, its conversation continues.") : t("{agent} reads its login when it starts: until its agent is started again (sandbox-ai kits restart-agent), it goes on with the login it has.", { agent })) : ""].filter(Boolean);
+    confirmIn(row, lines.join("\n"), t("Yes, give it"), async () => {
+      try {
+        const r = await api("POST", hostPath("/session-logins/give", host), Object.assign({ fingerprint: String(login.fingerprint || ""), restart: restart.checked, confirm: true }, body()));
+        toast("success", t("{name} has the {agent} login now on {host}", { name: choice.value, agent, host }), (Array.isArray(r && r.notes) ? r.notes : []).map(String).join("\n"));
+        show("logins");
+      } catch (e) { clear(result).append(errorNotice(e, t("The login was not given"))); }
+    }, { trigger: event.target });
+  });
+  row.append(el("button", { class: "primary", onclick: show_ }, t("Show the login…")), el("button", { onclick: () => clear(holder) }, t("Cancel")));
+  clear(holder).append(el("div", { class: "card" }, el("h3", {}, from ? t("Give the login of {name} to a running sandbox", { name: from }) : t("Give the stored {agent} login to a running sandbox", { agent })),
+    el("div", { class: "form" }, el("label", { for: "login-give-run" }, t("Sandbox")), choice,
+      ...(agent === "claude" ? [] : [el("label", { for: "login-give-restart" }, t("Start its agent again inside the sandbox")), restart]), el("span"), row, result)));
+  choice.focus();
+}
+
+async function drawSessionLogins(box, host) {
+  let found;
+  try { found = await api("GET", hostPath("/session-logins", host)); } catch (e) { clear(box).append(errorNotice(e)); return; }
+  const rows = Array.isArray(found && found.sessions) ? found.sessions.filter(r => r && typeof r === "object") : [];
+  const central = (found && typeof found.central === "object" && found.central) || {};
+  if (!rows.length) { clear(box).append(el("p", { class: "hint" }, t("No running or kept session of an agent whose login sandbox-ai keeps."))); return; }
+  const detail = el("div");
+  const trs = rows.map(row => {
+    const info = (row.info && typeof row.info === "object") ? row.info : {};
+    const actions = el("td", { class: "actions" });
+    actions.append(rowButton(t("Details"), row.name, host, { onclick: () => clear(detail).append(el("h3", {}, t("Login of {name}", { name: String(row.name) })), loginDetails(row)) }));
+    if (row.login && /^[0-9a-f]{8}$/.test(String(info.fingerprint || ""))) {
+      const stored = central[row.agent] && typeof central[row.agent] === "object" ? central[row.agent] : null;
+      const other = Boolean(stored && stored.fingerprint !== info.fingerprint);
+      const account = loginAccount(info) || String(info.fingerprint);
+      const text = other ? t("Make the {agent} login of {name} ({account}) the central login on {host}? It replaces the central login ({old}) for every {agent} sandbox started from now on.", { agent: row.agent, name: row.name, account, host, old: loginAccount(stored) || String(stored.fingerprint || "") })
+        : t("Make the {agent} login of {name} ({account}) the central login on {host}? Every {agent} sandbox started from now on uses it.", { agent: row.agent, name: row.name, account, host });
+      const button = rowButton(t("Import as central login…"), row.name, host, { class: "primary", onclick: () => confirmIn(actions, text, t("Yes, import"), async () => {
+        try {
+          await api("POST", hostPath("/session-logins/import", host), { agent: row.agent, name: row.name, fingerprint: info.fingerprint, replace: other, confirm: true });
+          toast("success", t("The {agent} login of {name} is the central login on {host}", { agent: row.agent, name: row.name, host }));
+          show("logins");
+        } catch (e) { failed(t("Could not import the login"))(e); }
+      }, { trigger: button }) });
+      actions.append(button);
+      actions.append(rowButton(t("Give to a running sandbox…"), row.name, host, { onclick: () => giveAgentLogin(detail, host, String(row.agent), String(row.name)) }));
+    }
+    return el("tr", {}, el("td", { class: "mono" }, String(row.name)), el("td", { class: "mono" }, String(row.agent)), el("td", {}, String(row.state || "")),
+      el("td", {}, loginSource(row)), el("td", {}, row.login ? loginAccount(info) : String(row.problem || t("no login"))),
+      el("td", {}, info.kind ? t(LOGIN_KINDS[info.kind] || String(info.kind)) : ""), el("td", {}, shownTime(info.expires)),
+      el("td", { class: "mono" }, String(info.fingerprint || "")), actions);
+  });
+  clear(box).append(table([t("Session"), t("Agent"), t("State"), t("Login from"), t("Account (as the file says)"), t("Kind"), t("Expires"), t("Fingerprint"), ""], trs), detail);
+}
+
 // Logins (sandbox-ai login, plugins, git-logins, publish-logins, identities): the tokens stay secrets of that host.
 // A Git or publish login's token is typed here (stored as a secret first: tokenSource) or a stored secret is chosen;
 // a token already stored is never shown or sent back.
@@ -5215,15 +8257,23 @@ pages.logins = async (main) => {
   const agentRows = AGENTS.map(agent => {
     const actions = el("td", { class: "actions" });
     const logout = rowButton(t("Log out…"), agent, host, { class: "danger", onclick: () => confirmIn(actions, t("Log {agent} out on {host}? Its sandboxes need a new login.", { agent, host }), t("Yes, log out"), () => openTerminal({ kind: "login", host, agent, logout: "1", confirm: "1" }, t("logout {agent}", { agent })), { trigger: logout }) });
-    actions.append(rowButton(t("Log in (terminal)"), agent, host, { class: "primary", onclick: () => openTerminal({ kind: "login", host, agent }, t("login {agent}", { agent })) }), logout);
+    actions.append(rowButton(t("Log in (terminal)"), agent, host, { class: "primary", onclick: () => openTerminal({ kind: "login", host, agent }, t("login {agent}", { agent })) }), logout,
+      rowButton(t("Give to a running sandbox…"), agent, host, { onclick: () => giveAgentLogin(agentGive, host, agent, null) }));
     return el("tr", {}, el("td", { class: "mono" }, agent), actions);
   });
+  const agentGive = el("div");
   const update = el("input", { id: "plugins-update", type: "checkbox" }), pluginKits = el("input", { id: "plugins-kits", class: "mono", placeholder: "egm" });
   const loginStatus = el("div");
-  main.append(el("h2", {}, t("The agents' logins")), table([t("Agent"), ""], agentRows),
+  main.append(el("h2", {}, t("The agents' logins")), table([t("Agent"), ""], agentRows), agentGive,
     el("div", { class: "row" }, el("button", { onclick: (event) => busy(event.target, async () => {
       try { clear(loginStatus).append(outputBlock(await api("GET", hostPath("/login-status", host)))); } catch (e) { clear(loginStatus).append(errorNotice(e)); }
-    }) }, t("Which login each agent's sandboxes get"))), loginStatus,
+    }) }, t("Which login each agent's sandboxes get"))), loginStatus);
+  // the logins of the sessions (login --status --sessions): which login each running or kept session uses, never a
+  // token (a fingerprint); one imported as the central login, confirmed in place, only the login shown
+  const sessionLogins = el("div", {}, el("p", { class: "hint" }, t("Loading…")));
+  main.append(el("h2", {}, t("Logins of the sessions")), sessionLogins);
+  drawSessionLogins(sessionLogins, host);
+  main.append(
     el("div", { class: "card" }, el("h3", {}, t("Claude plugins")), el("div", { class: "form" },
       el("label", { for: "plugins-update" }, t("Also update them")), update, el("label", { for: "plugins-kits" }, t("Plugins of built-in kits")), pluginKits,
       el("span"), el("button", { onclick: () => openTerminal({ kind: "plugins", host, agent: "claude", update: update.checked ? "1" : "", kits: wordsOf(pluginKits.value.replace(/,/g, " ")).join(",") }, t("plugins on {host}", { host })) }, t("Install in a terminal")))));
@@ -5344,9 +8394,25 @@ pages.logins = async (main) => {
   await section(t("Git logins (every sandbox's proxy)"), "/git-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.url).map(x => {
       const actions = el("td", { class: "actions" });
+      // Edit…: its server, its user, which secret holds the token (git-logins edit); the token itself is that
+      // secret's value, replaced on the page Secrets - never shown here
+      actions.append(rowButton(t("Edit…"), x.url, host, { onclick: () => rowEditor(gitEditor, t("Edit the Git login for {url}", { url: x.url }),
+        [{ key: "new_url", label: t("Server"), value: x.url }, { key: "user", label: t("User"), value: x.user || "" }, { key: "secret", label: t("Secret (its name)"), value: x.secret || "", kind: "secret" }],
+        (v, row, result, trigger) => {
+          const body = { url: x.url };
+          if (v.new_url && v.new_url !== x.url) body.new_url = v.new_url;
+          if (v.user && v.user !== (x.user || "")) body.user = v.user;
+          if (v.secret && v.secret !== (x.secret || "")) body.secret = v.secret;
+          if (Object.keys(body).length === 1) { clear(result).append(el("p", { class: "hint" }, t("Nothing changed."))); return; }
+          confirmIn(row, t("Change the Git login for {url} on {host}? It is for the starts from now on: a sandbox that runs keeps the login it was started with (its Network card gives it the new one).", { url: x.url, host }), t("Yes, change it"), async () => {
+            try { const r = await api("POST", hostPath("/git-logins/edit", host), Object.assign({ confirm: true }, body)); toast("success", t("The Git login for {url} was changed on {host}", { url: x.url, host }), (r && r.output) || ""); show("logins"); }
+            catch (e) { clear(result).append(errorNotice(e, t("The login was not changed"))); }
+          }, { trigger });
+        }, host) }));
       actions.append(removeButton(actions, t("Remove the Git login for {url} on {host}? Sandboxes no longer push there with it.", { url: x.url, host }), "/git-logins/remove", { url: x.url }, x.url));
       return el("tr", {}, el("td", { class: "mono" }, x.url), el("td", { class: "mono" }, x.user || ""), el("td", { class: "mono" }, x.secret || ""), actions);
     });
+    const gitEditor = el("div");
     const url = el("input", { id: "git-url", class: "mono", placeholder: "https://git.example.org" }), user = el("input", { id: "git-user", class: "mono", placeholder: "x-access-token" });
     const token = tokenSource("git", () => gitTokenName(url.value));
     url.addEventListener("input", token.refresh);
@@ -5358,16 +8424,29 @@ pages.logins = async (main) => {
         question: replace === null ? question : `${question} ${t("The token is stored first as the secret {secret} on {host}, for good.", { secret, host })}` });
     });
     row.append(el("button", { class: "primary", onclick: add }, t("Add…")), el("button", { onclick: check("/git-logins/check", () => ({ url: url.value.trim() })) }, t("Check")));
-    clear(box).append(table([t("Server"), t("User"), t("Secret"), ""], rows, t("No Git logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
+    clear(box).append(table([t("Server"), t("User"), t("Secret"), ""], rows, t("No Git logins on this host.")), gitEditor, el("div", { class: "card" }, el("div", { class: "form" },
       el("label", { for: "git-url" }, t("Server")), url, el("label", { for: "git-user" }, t("User")), user, ...token.fields, el("span"), row, result)));
   });
 
   await section(t("Publish logins (with --publish only)"), "/publish-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.kind).map(x => {
       const actions = el("td", { class: "actions" });
-      actions.append(removeButton(actions, t("Remove the publish login {kind} on {host}?", { kind: x.kind, host }), `/publish-logins/${encodeURIComponent(x.kind)}/remove`, {}, x.kind));
+      actions.append(rowButton(t("Edit…"), x.kind, host, { onclick: () => rowEditor(publishEditor, t("Edit the publish login {kind}", { kind: x.kind }),
+        [{ key: "secret", label: t("Secret (its name)"), value: x.secret || "", kind: "secret" }, { key: "url", label: t("Another server (optional)"), value: "", placeholder: `https://${x.host || ""}` }],
+        (v, row, result, trigger) => {
+          const body = {};
+          if (v.secret && v.secret !== (x.secret || "")) body.secret = v.secret;
+          if (v.url) body.url = v.url;
+          if (!Object.keys(body).length) { clear(result).append(el("p", { class: "hint" }, t("Nothing changed."))); return; }
+          confirmIn(row, t("Change the publish login {kind} on {host}? It is for the starts from now on: a sandbox that runs keeps the login it was started with until it is restarted.", { kind: x.kind, host }), t("Yes, change it"), async () => {
+            try { const r = await api("POST", hostPath(`/publish-logins/${encodeURIComponent(x.kind)}/edit`, host), Object.assign({ confirm: true }, body)); toast("success", t("The publish login {kind} was changed on {host}", { kind: x.kind, host }), (r && r.output) || ""); show("logins"); }
+            catch (e) { clear(result).append(errorNotice(e, t("The login was not changed"))); }
+          }, { trigger });
+        }, host) }));
+      actions.append(removeButton(actions, t("Remove the publish login {kind} on {host}?", { kind: x.kind, host }), `/publish-logins/${encodeURIComponent(x.kind)}/remove`, {}, x.kind), notWhileRunning("publish", x.kind, host));
       return el("tr", {}, el("td", { class: "mono" }, x.kind), el("td", { class: "mono" }, x.host || ""), el("td", { class: "mono" }, x.secret || ""), actions);
     });
+    const publishEditor = el("div");
     const kind = el("select", { id: "publish-kind" }, PUBLISH_KINDS.map(k => el("option", { value: k }, k)));
     const url = el("input", { id: "publish-url", class: "mono", placeholder: "https://npm.example.org" });
     const token = tokenSource("publish", () => PUBLISH_TOKEN_NAMES[kind.value] || "PUBLISH_TOKEN");
@@ -5378,7 +8457,7 @@ pages.logins = async (main) => {
     row.append(el("button", { class: "primary", onclick: add }, t("Add")),
       el("button", { onclick: check("/publish-logins/check", () => ({ kind: kind.value })) }, t("Check")),
       el("button", { onclick: (event) => busy(event.target, async () => { try { clear(result).append(outputBlock(await api("GET", hostPath("/publish-logins/kinds", host)))); } catch (e) { clear(result).append(errorNotice(e)); } }) }, t("What each kind opens")));
-    clear(box).append(table([t("Kind"), t("Host"), t("Secret"), ""], rows, t("No publish logins on this host.")), el("div", { class: "card" }, el("div", { class: "form" },
+    clear(box).append(table([t("Kind"), t("Host"), t("Secret"), ""], rows, t("No publish logins on this host.")), publishEditor, el("div", { class: "card" }, el("div", { class: "form" },
       el("label", { for: "publish-kind" }, t("Kind")), kind, ...token.fields, el("label", { for: "publish-url" }, t("Another server (optional)")), url, el("span"), row, result)));
   });
 
@@ -5391,7 +8470,7 @@ pages.logins = async (main) => {
       const remove = rowButton(t("Remove…"), name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the identity {name} on {host} with its logins? Starts with {option} cannot start.", { name, host, option: `--identity ${name}` }), t("Yes, remove it"), async () => {
         try { await api("DELETE", hostPath(`/identities/${encodeURIComponent(name)}`, host), { confirm: true }); show("logins"); } catch (e) { failed(t("Could not remove it"))(e); }
       }, { trigger: remove }) });
-      actions.append(remove);
+      actions.append(remove, notWhileRunning("identities", name, host));
       for (const g of Array.isArray(x.git) ? x.git : []) actions.append(removeButton(actions, t("Remove the Git login {url} of {name} on {host}?", { url: g.url, name, host }), `/identities/${encodeURIComponent(name)}/logout`, { url: g.url }, `${name} ${g.url}`));
       for (const p of Array.isArray(x.publish) ? x.publish : []) actions.append(removeButton(actions, t("Remove the publish login {kind} of {name} on {host}?", { kind: p.kind, name, host }), `/identities/${encodeURIComponent(name)}/unpublish`, { kind: p.kind }, `${name} ${p.kind}`));
       const logins = [...(Array.isArray(x.git) ? x.git.map(g => g.url) : []), ...(Array.isArray(x.publish) ? x.publish.map(p => p.kind) : [])].join(", ");
@@ -5605,9 +8684,17 @@ pages.teams = async (main) => {
   // Per member (advanced): another profile for a member (team start --member-vpn AGENT=PROFILE), a row for each
   // agent of the team
   const memberVpn = Object.fromEntries(teamAgents.map(a => [a, vpnSelect(`team-vpn-${a}`, t("(the team's)"), t("VPN profile of {agent}", { agent: a }))]));
-  const memberRows = Object.fromEntries(teamAgents.map(a => [a, el("div", { class: "row", id: `team-vpn-row-${a}` }, el("label", { for: `team-vpn-${a}`, class: "mono" }, a), memberVpn[a])]));
+  // ... and each member's role (added to its first prompt: team start --role AGENT=TEXT) and its own model, LLM server
+  // and security mode (--member-model, --member-llm, --member-mode: in place of the team's for it); team start checks
+  // their values and says what it refuses in the terminal
+  const memberRole = Object.fromEntries(teamAgents.map(a => [a, el("input", { id: `team-role-${a}`, maxlength: 1000, placeholder: t("Role, e.g. reviews every change"), "aria-label": t("Role of {agent}", { agent: a }) })]));
+  const memberModel = Object.fromEntries(teamAgents.map(a => [a, el("input", { id: `team-model-${a}`, class: "mono", placeholder: t("Model (the team's)"), "aria-label": t("Model of {agent}", { agent: a }) })]));
+  const memberLlm = Object.fromEntries(teamAgents.map(a => [a, el("input", { id: `team-llm-${a}`, class: "mono", placeholder: t("LLM server (the team's)"), "aria-label": t("LLM server of {agent}", { agent: a }) })]));
+  const memberMode = Object.fromEntries(teamAgents.map(a => [a, el("select", { id: `team-mode-${a}`, "aria-label": t("Mode of {agent}", { agent: a }) }, el("option", { value: "" }, t("Mode (the team's)")), ORDER.mode.map(m => el("option", { value: m }, m)))]));
+  const memberRows = Object.fromEntries(teamAgents.map(a => [a, el("div", { class: "row", id: `team-vpn-row-${a}` }, el("label", { for: `team-vpn-${a}`, class: "mono" }, a), memberVpn[a], memberRole[a], memberModel[a], memberLlm[a], memberMode[a])]));
   const perMember = el("details", { id: "team-per-member", class: "wide" }, el("summary", {}, t("Per member (advanced)")),
-    el("p", { class: "hint" }, t("Another VPN profile for a member (sandbox-ai team start --member-vpn AGENT=PROFILE)")), Object.values(memberRows));
+    el("p", { class: "hint" }, t("Another VPN profile for a member (sandbox-ai team start --member-vpn AGENT=PROFILE)")),
+    el("p", { class: "hint" }, t("A member's role is added to its first prompt; its own model, LLM server and mode replace the team's for it (team start --role, --member-model, --member-llm, --member-mode).")), Object.values(memberRows));
   const shared = el("input", { type: "checkbox", id: "team-shared-openvpn", onchange: () => changed() });
   const sharedRow = el("label", { class: "wide" }, shared, " ", t("Allow one OpenVPN profile in several members (your server must allow it: duplicate-cn)"));
   const options = el("textarea", { id: "team-options", rows: 2, class: "mono", placeholder: "--mode high\n--allow-pypi" });
@@ -5635,6 +8722,11 @@ pages.teams = async (main) => {
     if (vpn.value) query.vpn = vpn.value;
     if (Object.keys(mine).length) query.member_vpn = JSON.stringify(mine);
     if (!sharedRow.hidden && shared.checked) query.shared_openvpn = "1";
+    const typed = (w) => String((w && w.value) || "").trim();
+    const roles = Object.fromEntries(agents.map(a => [a, typed(memberRole[a])]).filter(([, v]) => v));
+    const memberOptions = Object.fromEntries(agents.map(a => [a, Object.fromEntries([["model", memberModel[a]], ["llm", memberLlm[a]], ["mode", memberMode[a]]].map(([k, w]) => [k, typed(w)]).filter(([, v]) => v))]).filter(([, v]) => Object.keys(v).length));
+    if (Object.keys(roles).length) query.roles = JSON.stringify(roles);
+    if (Object.keys(memberOptions).length) query.member_options = JSON.stringify(memberOptions);
     openTerminal(query, t("team {team}", { team }));
   } }, t("Start the team in a terminal"));
   const listing = choices instanceof Error ? errorNotice(choices)
@@ -5655,7 +8747,7 @@ pages.teams = async (main) => {
 
 // Images and tools: the images (sandbox-ai images) with their extensions and variants (packages, files, a
 // Containerfile fragment; checked, changed, removed), a build in a terminal, the demo device.
-const BUILD_TARGETS = ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose", "all", "team", "cairn", "vpn", "tor", "browser"];
+const BUILD_TARGETS = ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi", "all", "team", "cairn", "vpn", "tor", "browser"];
 const IMAGE_STATES = { current: N_("current"), outdated: N_("extension changed: rebuild"), "base-changed": N_("base rebuilt: rebuild"),
   invalid: N_("extension has errors"), "not-built": N_("not built") };
 const IMAGE_TARGET = /^[a-z0-9][a-z0-9_.-]{0,29}$/;
@@ -5824,7 +8916,7 @@ pages.images = async (main) => {
 };
 
 // Activity (sandbox-ai activity --json): the last events of the runs, filtered; Follow asks again every few seconds.
-const ACTIVITY_KINDS = ["prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens"];
+const ACTIVITY_KINDS = ["prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens", "resources"];
 // What the agents did (sandbox-ai activity --json): of a start of that host (a session by its name, a run by its
 // name), a project (its default log directory), a log directory, or a sandbox HOME's transcripts. Never the
 // directory the service (or the SSH login) runs in: with nothing chosen it shows the first running start's (else
@@ -5887,12 +8979,12 @@ pages.activity = async (main) => {
 // scripts/export_web_help.py; a test keeps it current), in the page's language. Each page's heading has a (?) that
 // opens the sections about what that page does; the Help page shows all of them.
 const HELP_FOR = {
-  starts: ["sessions", "sandbox", "security-modes", "workspaces-mounts", "network", "presets", "limits", "devices"],
+  starts: ["sessions", "sandbox", "security-modes", "workspaces-mounts", "network", "presets", "limits", "devices", "scheduled-runs"],
   approvals: ["approvals", "taint", "network", "proxy"], terminals: ["sessions"], doctor: ["sandbox", "releases-update"],
   logs: ["logs", "privacy-check"], llm: ["llm"], vpn: ["vpn-tor"], kits: ["kits"], canaries: ["canaries"], secrets: ["secrets"],
   logins: ["secrets", "proxy"], projects: ["workspaces-mounts", "rulesets", "policy"], mcp: ["mcp"], presets: ["presets"], teams: ["teams", "mcp"],
-  images: ["display", "devices", "releases-update"], activity: ["logs", "memory-watch"], settings: ["security-modes", "canaries", "policy", "logs"],
-  hosts: ["hosts", "web", "releases-update"],
+  images: ["display", "devices", "releases-update"], activity: ["logs", "memory-watch"], settings: ["security-modes", "canaries", "policy", "logs", "phone-notifications"],
+  hosts: ["hosts", "web", "releases-update"], monitor: ["monitoring", "memory-watch", "limits"],
 };
 
 async function helpSections() {

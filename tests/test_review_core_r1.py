@@ -117,15 +117,16 @@ def test_the_web_opens_no_terminal_for_an_agent_the_command_does_not_take():
     an agent that is none: refused with the agents that are taken, not opened to fail there; a refusal never says
     "claude, codex or opencode" where seven agents are taken (a team takes all seven: hotfix 0.1.96)."""
     w = load("webui")
-    for query, taken in (({"kind": "login", "agent": "goose"}, "hermes or qwen"),
-                         ({"kind": "login", "agent": "dsh"}, "hermes or qwen"),
-                         ({"kind": "plugins", "agent": "hermes"}, "codex or opencode"),
+    for query, taken in (({"kind": "login", "agent": "goose"}, "hermes, qwen or pi"),
+                         ({"kind": "login", "agent": "dsh"}, "hermes, qwen or pi"),
+                         # (plugins for Codex and OpenCode 2 from kits: the plugin store takes these since 0.1.98)
+                         ({"kind": "plugins", "agent": "hermes"}, "claude, codex, opencode, opencode2 or all"),
                          ({"kind": "team-start", "team": "t1", "agents": "claude,bash", "workspace": "/srv/w"},
                           "claude, codex, opencode, hermes, dsh, qwen, goose")):
         with pytest.raises(w.Refused, match=taken):
             w.terminal_command({"host": "local", **query})
     assert w.terminal_command({"host": "local", "kind": "login", "agent": "qwen"})[1][-1] == "qwen"
-    with pytest.raises(w.Refused, match="dsh, qwen or goose"):
+    with pytest.raises(w.Refused, match="goose, openhands, nanobot, letta or pi"):
         w.terminal_command({"host": "local", "kind": "start", "agent": "nobody"})
 
 

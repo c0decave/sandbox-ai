@@ -1,0 +1,27 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "default-nanobot",
+  "title": "nanobot (default)",
+  "description": "nanobot on your project with sandbox-ai's defaults and nothing more: only its model is reachable, everything else is refused or asked; its telemetry is always off.",
+  "translations": {
+    "de": {
+      "title": "nanobot (Standard)",
+      "description": "nanobot an Ihrem Projekt mit den Voreinstellungen von sandbox-ai und nichts weiter: nur sein Modell ist erreichbar, alles andere wird abgelehnt oder nachgefragt; seine Telemetrie ist immer aus."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "nanobot"
+  ],
+  "options": [
+    "--api-key",
+    "api.anthropic.com=ANTHROPIC_API_KEY"
+  ],
+  "notes": [
+    "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once). nanobot sees a placeholder, the connection proxy puts the key in on the wire, and nanobot starts with its provider anthropic (its model: --model NAME). Another provider: --api-key api.openai.com=OPENAI_API_KEY, openrouter.ai=OPENROUTER_API_KEY or api.deepseek.com=DEEPSEEK_API_KEY, or a model server of yours with --llm (the preset nanobot-local-llm).",
+    "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-nanobot or sandbox-ai net allow during the run.",
+    "Its telemetry is always off and cannot be turned on.",
+    "nanobot is not live-tested yet (a start says so); its image first: sandbox-ai build nanobot (a start builds it when it is missing)."
+  ]
+}

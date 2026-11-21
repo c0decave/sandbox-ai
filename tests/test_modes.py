@@ -131,7 +131,7 @@ def normalized(run):
     text = json.dumps({"command": run.joined, "files": run.files, "config": run.config, "proxy": run.proxy,
                        "home": run.home_files, "env": run.env}, sort_keys=True)
     text = re.sub(r"agent-sandbox-(proxy-)?[A-Za-z0-9_]{8}", "TMP", text)
-    text = re.sub(r"connections-\d{8}-\d{6}", "connections-TIME", text)
+    text = re.sub(r"(connections|spend)-\d{8}-\d{6}", r"\1-TIME", text)
     return text
 
 
@@ -196,6 +196,8 @@ def widening_options(m):
         (["--gui"], {"paranoid"}, "high"),
         (["--gui-vnc", str(m.tmp / "vnc")], {"paranoid"}, "high"),
         (["--no-canaries"], {"high", "paranoid"}, "medium"),
+        (["--no-package-guard"], {"high", "paranoid"}, "medium"),
+        (["--allow-send", "github-token@*"], {"high", "paranoid"}, "medium"),
     ]
 
 
@@ -438,7 +440,7 @@ def test_the_run_records_its_mode_for_run_time_changes(m):
     what it refuses at run time and its approval scope."""
     presets = [f"--allow-{p}" for p in s.PRESETS]
     run = m.run("--mode", "high")
-    expected = {"name": "high", "origin": "--mode", "refuses": ["--allow", "--allow-host", "--allow-domain", "--allow-tcp", "--dns", "--allow-host-port", *presets],
+    expected = {"name": "high", "origin": "--mode", "refuses": ["--allow", "--allow-host", "--allow-domain", "--allow-shared-wildcard", "--allow-tcp", "--dns", "--allow-host-port", *presets],
                 "approval_scope": "run"}
     assert run.run_record["mode"] == expected and run.config["mode"] == expected
     run = m.run("--mode", "paranoid", "--offline")

@@ -1,0 +1,39 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "letta-local-llm",
+  "title": "Letta Code with a local model",
+  "description": "Letta Code with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another OpenAI-compatible one) and nothing else: only the server's address is opened, and its long-term memory stays in the sandbox.",
+  "translations": {
+    "de": {
+      "title": "Letta Code mit einem lokalen Modell",
+      "description": "Letta Code mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer OpenAI-kompatibler) und sonst nichts: nur die Adresse des Servers ist offen, und sein Langzeitgedächtnis bleibt in der Sandbox."
+    }
+  },
+  "category": "agents",
+  "agents": [
+    "letta"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "loop_guard=on"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    }
+  },
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent letta asks it for the API Letta Code uses.",
+    "Letta Code gets the server as variables: its OpenAI-compatible provider llama-cpp at the server's /v1 URL (LLAMA_CPP_BASE_URL) with the key as a placeholder the connection proxy replaces, and --model llama-cpp/MODEL. LM Studio, Ollama, vLLM and llama.cpp all work.",
+    "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent; Letta Code has no read-only place for the loop guard's instructions or a turn limit. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
+    "Letta Code's memory subagents (reflection, dreaming) use the same model: a small one may take a while between turns.",
+    "Letta Code is not live-tested yet (a start says so); its image first: sandbox-ai build letta."
+  ]
+}

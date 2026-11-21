@@ -417,7 +417,9 @@ def test_the_launcher_hands_the_rules_to_the_proxy_and_the_relays(tmp_path, monk
     relay = s.mcp_relay_config(a, "files")
     assert [rule["id"] for rule in relay["rules"][0]["mcp"]] == ["tainted-files"] and relay["rules"][0]["untrusted"] == []
     assert s.mcp_relay_config(a, "web")["rules"][0]["untrusted"][0]["id"] == "fetch"
-    assert s.mcp_relay_config(a, "other") == {"server": "other", "rules": []}
+    other = s.mcp_relay_config(a, "other")
+    assert {k: v for k, v in other.items() if k != "tools_pin"} == {"server": "other", "rules": []}
+    assert other["tools_pin"]["pins"] is None  # nothing pinned yet for this project
 
 
 @needs_openssl

@@ -5,6 +5,7 @@ import errno
 import importlib.util
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,7 @@ SPEC = importlib.util.spec_from_file_location("sandbox_workspaces_tests", ROOT /
 w = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(w)
 L = w.module("agent_sandbox")
+REAL_SCOPE = L.check_workspace_scope  # (the fixture `run` stands in for it)
 
 
 class FakeLibc:
@@ -191,12 +193,12 @@ def test_a_workspace_gets_the_checks_of_a_start(run, monkeypatch):
         judged(make(tmp / "other"))  # holds the start's /workspaces/lib
     with pytest.raises(ValueError, match="HOME of the run"):
         judged(make(tmp / "sandbox-home" / "x"))
-    with pytest.raises(ValueError, match="Your rules"):
-        judged(make(tmp / "config"))  # holds the rules file
-    with pytest.raises(ValueError, match="--log-dir"):
-        judged(make(tmp / "logs" / "inner"))
-    with pytest.raises(ValueError, match="kits directory"):
-        judged(make(tmp / "kits" / "mine"))
+    # You decide: what the launcher reads, the run's own folders and the stores are given, each with its risk said.
+    for folder, words in ((tmp / "config", "Your rules"), (tmp / "logs" / "inner", "--log-dir"),
+                          (tmp / "kits" / "mine", "kits directory")):
+        said = []
+        assert w.judged(record, Path(make(folder)).resolve(), warn=said.append) == "rw"
+        assert said and words in said[0] and "read-only" in said[0], said
     with pytest.raises(ValueError, match="administrator's policy"):
         monkeypatch.setattr(L, "load_policy", lambda path=None: {"forbid": ["--workspace"]})
         judged(make(tmp / "fresh"))
@@ -208,13 +210,13 @@ def test_a_workspace_gets_the_checks_of_a_start(run, monkeypatch):
 
 
 def test_the_scope_checks_of_a_start_hold(run, monkeypatch):
+    """The start's scope checks are said for a live add as well: what they say goes to the add's WARN."""
     record, tmp = run
-    calls = []
-    monkeypatch.setattr(L, "check_workspace_scope", lambda path, *a, **k: calls.append(path) or (_ for _ in ()).throw(
-        ValueError("is or contains your HOME directory")))
-    with pytest.raises(ValueError, match="HOME directory"):
-        w.judged(record, Path(make(tmp / "fresh")))
-    assert calls == [Path(make(tmp / "fresh"))]
+    calls, said = [], []
+    monkeypatch.setattr(L, "check_workspace_scope", lambda path, *a, warn=None, **k: calls.append(path) or warn(
+        "Workspace X is your HOME directory: the agent can change your shell start files"))
+    assert w.judged(record, Path(make(tmp / "fresh")), warn=said.append) == "rw"
+    assert calls == [Path(make(tmp / "fresh"))] and "HOME directory" in said[0]
 
 
 def test_a_planted_link_or_odd_path_is_refused_before_anything_is_opened(run, monkeypatch):
@@ -400,7 +402,7 @@ def test_the_command_line(run, monkeypatch, capsys):
     assert json.loads(lines[0])[0] == {"host": str(tmp / "start"), "sandbox": "/work", "mode": "rw",
                                        "source": "start", "kind": "dir"}
     main = w.module("main")
-    assert main.PYTHON_COMMANDS["workspace"] == ("workspaces.py",) and "sandbox-ai workspace" in main.__doc__
+    assert main.PYTHON_COMMANDS["workspace"] == ("workspaces.py",) and "\n  workspace " in main.help_text()
 
 
 def test_the_start_records_what_a_later_workspace_is_checked_against(tmp_path, monkeypatch):
@@ -584,56 +586,26 @@ def test_remove_refuses_while_the_agent_holds_a_copy(run):
 # --- review findings: kernel trees, pending and partial states, refusal phrases, PIDs with start times -------------
 
 
-def test_the_kernels_trees_are_never_a_workspace(run):
-    """/proc, /sys (its cgroup tree), /dev (/dev/shm): refused for a live add as at a start, also read-only."""
+def test_the_kernels_trees_are_given_with_a_warning(run, monkeypatch):
+    """/proc, /sys (its cgroup tree), /dev (/dev/shm): refused before for a live add as at a start, also read-only;
+    you decide now - given, and the warning says what the agent gets with it (the start's own check, for real)."""
     record, _ = run
+    monkeypatch.setattr(L, "check_workspace_scope", REAL_SCOPE)
     for tree in ("/proc", "/proc/1/root", "/sys", "/sys/fs/cgroup", "/dev", "/dev/shm"):
         for read_only in (False, True):
-            with pytest.raises(ValueError, match="kernel's and the devices' trees"):
-                w.judged(record, Path(tree), read_only)
-    if Path("/dev/shm").is_dir():
-        with pytest.raises(ValueError, match="kernel's and the devices' trees"):
-            w.add(record, "/dev/shm", read_only=True, runner=lambda *a, **kw: (0, ""), finder=fake_found,
-                  remember=lambda trees: None)
-        assert w.present_workspaces(record) == []
+            said = []
+            assert w.judged(record, Path(tree), read_only, warn=said.append) == ("ro" if read_only else "rw")
+            assert any("the kernel's and the devices' tree" in text and "Podman or Bubblewrap" in text
+                       for text in said), said
 
 
-def test_kernel_file_systems_in_the_clone_are_found_by_the_mount_table():
-    table = ("1 1 0:1 / / rw - ext4 /dev/sda1 rw\n"
-             "20 1 0:20 / /srv/chroot rw shared:1 - ext4 /dev/sdb rw\n"
-             "21 20 0:4 / /srv/chroot/proc rw - proc proc rw\n"
-             "22 1 0:5 / /srv/other/proc rw - proc proc rw\n"
-             "23 1 0:30 / /mnt/sys rw - sysfs sysfs rw\n"
-             "24 1 0:31 / /srv/my\\040chroot/dev rw - devtmpfs udev rw\n"
-             "25 20 0:32 / /srv/chroot/sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
-             "26 1 0:33 / /srv/project/data rw - fuse.sshfs host:/x rw\n")
-    assert w.kernel_mounts(table, 20, "/srv/chroot") == [("/srv/chroot/proc", "proc"),
-                                                         ("/srv/chroot/sys/fs/cgroup", "cgroup2")]
-    assert w.kernel_mounts(table, 1, "/srv/chroot/sys") == [("/srv/chroot/sys/fs/cgroup", "cgroup2")]
-    assert w.kernel_mounts(table, 1, "/srv/project") == []         # another file system below it: fine
-    assert w.kernel_mounts(table, 1, "/srv/chroo") == []           # a prefix of a name is not a parent
-    assert w.kernel_mounts(table, 23, "/mnt/sys/kernel") == [("/mnt/sys", "sysfs")]  # lies on one itself
-    assert w.kernel_mounts(table, 1, "/srv/my chroot") == [("/srv/my chroot/dev", "devtmpfs")]
-    assert w.kernel_mounts(table, 99, "/x") == [("/x", "unknown")]  # its mount not in the table: never "none"
-
-
-def test_the_helper_refuses_a_directory_holding_a_kernel_file_system(space, tmp_path, monkeypatch):
+def test_the_helper_adds_a_directory_holding_a_kernel_file_system(space):
+    """It refused one before ("a file system of the kernel's own: not handed to a sandbox"); you decide - `workspace
+    add` said what it holds (judged), the helper clones it; what the kernel refuses fails with its error."""
     proc, mounts, source, identity = space
-    fd = os.open(source, os.O_PATH)
-    holder = w.mount_id(fd)
-    os.close(fd)
-    table = tmp_path / "mountinfo"
-    monkeypatch.setattr(w, "MOUNTINFO", table)
-    table.write_text(f"{holder} 1 0:1 / / rw - tmpfs t rw\n{holder + 7000} {holder} 0:4 / {source}/proc rw - proc proc rw\n")
     c = FakeLibc()
-    with pytest.raises(OSError, match=r"/proc \(proc\), a file system of the kernel's own"):
-        w.helper("add", 100, "project", [100, 101], str(source), identity, "ro", proc, c)
-    assert w.SYS_MOVE_MOUNT not in kinds(c.calls) and w.SYS_MOUNT_SETATTR not in kinds(c.calls)
-    table.write_text(f"{holder} 1 0:1 / / rw - tmpfs t rw\n{holder + 7000} {holder} 0:4 / {source}/data rw - ext4 x rw\n")
-    w.helper("add", 100, "project", [100], str(source), identity, "ro", proc, FakeLibc())  # another disk: added
-    table.write_text("1 1 0:1 / / rw - tmpfs t rw\n")  # its mount not found: refused
-    with pytest.raises(OSError, match="cannot be told"):
-        w.helper("add", 100, "project", [100], str(source), identity, "ro", proc, FakeLibc())
+    w.helper("add", 100, "project", [100], str(source), identity, "ro", proc, c)
+    assert w.SYS_MOVE_MOUNT in kinds(c.calls) and w.SYS_MOUNT_SETATTR in kinds(c.calls)
 
 
 def test_a_relative_directory_names_its_workspace_and_an_ambiguous_value_is_refused(run, monkeypatch):
@@ -1013,11 +985,16 @@ def test_a_file_is_added_for_the_run_only_and_listed_as_a_file(run, monkeypatch)
     assert "added, file" in w.list_lines(record, w.listing(record))[-1]
     w.remove(record, "notes.txt", out=lines.append, runner=runner, finder=fake_found, using=lambda f, p: [])
     assert calls[-1][0] == "remove" and calls[-1][-1] == {"force": False, "kind": "file"}
-    # The checks of a start hold for a file as for a directory: here, the run's HOME and its log directory.
-    for refused, why in ((tmp / "sandbox-home" / "f", "HOME of the run"), (tmp / "logs" / "f", "--log-dir")):
-        refused.write_text("")
-        with pytest.raises(ValueError, match=why):
-            w.add(record, str(refused), runner=runner, finder=fake_found, remember=lambda t: None)
+    # The checks of a start hold for a file as for a directory: here, the run's HOME (refused: it is mounted already)
+    # and its log directory (you decide: given, said).
+    (tmp / "sandbox-home" / "f").write_text("")
+    with pytest.raises(ValueError, match="HOME of the run"):
+        w.add(record, str(tmp / "sandbox-home" / "f"), runner=runner, finder=fake_found, remember=lambda t: None)
+    (tmp / "logs" / "f").write_text("")
+    said = []
+    monkeypatch.setattr(L, "warner", lambda warn=None: warn or said.append)
+    w.add(record, str(tmp / "logs" / "f"), out=lines.append, runner=runner, finder=fake_found, remember=lambda t: None)
+    assert any("--log-dir" in text for text in said), said
 
 
 def test_a_file_is_never_in_the_push_check_nor_in_the_check_after_the_run(run, tmp_path, monkeypatch):
@@ -1110,38 +1087,44 @@ def test_the_start_takes_workspace_names_as_kept(scenario, tmp_path):
 
 
 def test_held_paths_are_checked_both_ways(run):
-    """Finding L3: a file or folder inside --privacy-rules or a --kit-dir is refused, not only one holding them; a
-    --copy source is only copied in (both ways is not needed there)."""
+    """Finding L3: a file or folder inside --privacy-rules or a --kit-dir is said, not only one holding them; a
+    --copy source is only copied in (both ways is not needed there). You decide: given, with the warning."""
     record, tmp = run
     rules, kit = tmp / "privacy", tmp / "kitdir"
     record["workspace_checks"]["held"] += [[str(rules), "--privacy-rules"], [str(kit), "--kit-dir"],
                                            [str(tmp / "copied"), "--copy"]]
     for inside, why in ((rules / "sub", "--privacy-rules"), (kit / "claude", "--kit-dir")):
-        with pytest.raises(ValueError, match=f"lies in .*{why}.*which the launcher reads"):
-            w.judged(record, Path(make(inside)).resolve())
+        said = []
+        assert w.judged(record, Path(make(inside)).resolve(), warn=said.append) == "rw"
+        assert any(re.search(f"lies in .*{why}.*which the launcher reads", text) for text in said), said
     (rules / "rules.json").write_text("{}")
-    with pytest.raises(ValueError, match="--privacy-rules"):
-        w.judged(record, (rules / "rules.json").resolve(), kind="file")
-    assert w.judged(record, Path(make(tmp / "copied" / "x")).resolve()) == "rw"
+    said = []
+    w.judged(record, (rules / "rules.json").resolve(), kind="file", warn=said.append)
+    assert any("--privacy-rules" in text for text in said)
+    said = []
+    assert w.judged(record, Path(make(tmp / "copied" / "x")).resolve(), warn=said.append) == "rw" and said == []
 
 
 def test_the_starts_own_folders_are_refused_later_too(run, monkeypatch):
     """Finding L2: the start recorded sandbox-ai's own folders as it saw them (its XDG_*): a later add from another
-    environment refuses them too."""
+    environment says them too (given: you decide)."""
     record, tmp = run
     monkeypatch.undo()  # the real check_workspace_scope
     monkeypatch.setattr(L, "load_policy", lambda path=None: {})
     monkeypatch.setattr(L, "exposed_before", lambda: [])
     own = tmp / "other-xdg" / "sandbox-ai"
     record["workspace_checks"]["own_folders"] = [str(own)]
-    with pytest.raises(ValueError, match="sandbox-ai's own folder"):
-        w.judged(record, Path(make(own / "sessions" / "x")).resolve())
-    assert w.judged(record, Path(make(tmp / "project")).resolve()) == "rw"
+    said = []
+    assert w.judged(record, Path(make(own / "sessions" / "x")).resolve(), warn=said.append) == "rw"
+    assert any("sandbox-ai's own folder" in text for text in said), said
+    said = []
+    assert w.judged(record, Path(make(tmp / "project")).resolve(), warn=said.append) == "rw" and said == []
 
 
 def test_review6_the_starts_launcher_is_refused_later_too(run, monkeypatch):
     """Review 6, L-1: a sandbox started from a checkout (~/c0de/sandbox-ai) gets ~/c0de added during the run through
-    the installed CLI, the web or the app: the start recorded its launcher and package, and the add refuses them."""
+    the installed CLI, the web or the app: the start recorded its launcher and package, and the add says them
+    (given: you decide)."""
     record, tmp = run
     monkeypatch.undo()  # the real checks
     monkeypatch.setattr(L, "load_policy", lambda path=None: {})
@@ -1150,13 +1133,15 @@ def test_review6_the_starts_launcher_is_refused_later_too(run, monkeypatch):
     package = Path(make(tmp / "pkg" / "copy"))
     record["workspace_checks"]["launcher"] = [str(checkout / "sandbox"), str(checkout)]
     record["workspace_checks"]["packages"] = [[str(package), "the copy sandbox-ai runs in"]]
-    with pytest.raises(ValueError, match="contains .*c0de/sandbox-ai, sandbox-ai's own launcher|"
-                                         "contains .*sandbox-ai's own launcher"):
-        w.judged(record, (tmp / "c0de").resolve())
-    with pytest.raises(ValueError, match="sandbox-ai's own launcher"):
-        w.judged(record, Path(make(checkout / "scripts")).resolve())
-    with pytest.raises(ValueError, match="the copy sandbox-ai runs in"):
-        w.judged(record, (tmp / "pkg").resolve())
+    for path, words in (((tmp / "c0de").resolve(), "contains .*sandbox-ai's own launcher"),
+                        (Path(make(checkout / "scripts")).resolve(), "sandbox-ai's own launcher"),
+                        ((tmp / "pkg").resolve(), "the copy sandbox-ai runs in")):
+        said = []
+        assert w.judged(record, path, warn=said.append) == "rw"
+        assert any(re.search(words, text) for text in said), (path, said)
+        said = []  # read-only: the launcher's code is only read
+        assert w.judged(record, path, True, warn=said.append) == "ro"
+        assert not any(re.search(words, text) for text in said), (path, said)
     assert w.judged(record, Path(make(tmp / "project")).resolve()) == "rw"
     del record["workspace_checks"]["launcher"], record["workspace_checks"]["packages"]  # a start before 0.1.78
     assert w.judged(record, Path(make(tmp / "project2")).resolve()) == "rw"
@@ -1258,3 +1243,130 @@ def test_list_json_with_nothing_running_is_an_empty_list(monkeypatch, capsys):
     monkeypatch.setattr(devices.module("net") if hasattr(devices, "module") else net, "running", lambda: {})
     lines = []
     assert devices.main(["list", "--json"], out=lines.append) == 0 and lines == ["[]"]
+
+
+# --- --hide: the run's globs hold for a workspace added during the run too ------------------------------------------
+# Found open after 0.1.132 (the Knostic follow-up): --hide covered the start's workspaces only, a folder added with
+# `sandbox-ai workspace add` showed its .env. Now the add hides what the run's globs match there, with the same empty
+# read-only file or folder, put over them before the folder reaches the sandbox: the helper mounts the clone in its
+# own mount namespace first, the blanks over the matches, and hands the sandbox a recursive clone of that.
+
+
+def test_add_hides_what_the_runs_globs_match_there(run):
+    record, tmp = run
+    record["hide"] = [".env", "*.pem", "secrets"]
+    folder = Path(make(tmp / "elsewhere" / "api"))
+    (folder / ".env").write_text("TOKEN=1")
+    make(folder / "sub")
+    (folder / "sub" / "key.pem").write_text("k")
+    make(folder / "secrets")
+    (folder / "ok.txt").write_text("fine")
+    (folder / "link.pem").symlink_to(folder / "ok.txt")
+    seen = {}
+
+    def runner(op, found, name, *rest, **kw):
+        seen.update(kw, op=op)
+        blanks = kw.get("blanks") or {}
+        seen["blank_file"] = Path(blanks["file"][0]).read_bytes() if blanks else None
+        seen["blank_dir"] = os.listdir(blanks["dir"][0]) if blanks else None
+        seen["stage"] = Path(kw["stage"]).is_dir() if kw.get("stage") else None
+        return 0, ""
+    lines = []
+    sandbox = w.add(record, str(folder), out=lines.append, runner=runner, finder=fake_found, remember=lambda t: None)
+    assert seen["op"] == "add" and sorted(seen["hidden"], key=lambda item: item["path"]) == [
+        {"path": ".env", "kind": "file"}, {"path": "secrets", "kind": "dir"}, {"path": "sub/key.pem", "kind": "file"}]
+    assert seen["blank_file"] == b"" and seen["blank_dir"] == [] and seen["stage"] is True
+    assert not Path(seen["blanks"]["file"][0]).exists(), "the blanks and the stage go after the add"
+    text = "\n".join(lines)
+    assert "hidden from the agent (--hide): " in text and f"{sandbox}/.env" in text and "link.pem is a symlink" in text
+    [entry] = w.added_workspaces(record)
+    assert sorted(entry["hidden"]) == [".env", "secrets", "sub/key.pem"]
+    calls = []
+    w.remove(record, sandbox, out=lines.append, runner=lambda op, found, name, *rest, **kw: calls.append(kw) or (0, ""),
+             finder=fake_found, using=lambda found, p: [])
+    assert sorted(calls[0]["hidden"]) == [".env", "secrets", "sub/key.pem"]
+
+
+def test_add_without_globs_or_matches_hides_nothing(run):
+    record, tmp = run
+    seen = []
+    runner = lambda op, found, name, *rest, **kw: seen.append(kw) or (0, "")  # noqa: E731
+    folder = Path(make(tmp / "elsewhere" / "plain"))
+    (folder / ".env").write_text("x")
+    w.add(record, str(folder), out=lambda line: None, runner=runner, finder=fake_found, remember=lambda t: None)
+    assert not seen[0].get("hidden")
+    record["hide"] = ["*.key"]
+    lines = []
+    w.add(record, make(tmp / "elsewhere" / "other"), out=lines.append, runner=runner, finder=fake_found,
+          remember=lambda t: None)
+    assert not seen[1].get("hidden") and any("nothing matches" in line for line in lines)
+
+
+def test_a_file_added_that_a_glob_matches_is_added_with_a_warning(run):
+    """You chose that very file: it is added (a mount the human chooses is warned about, never refused)."""
+    record, tmp = run
+    record["hide"] = [".env"]
+    (tmp / "elsewhere").mkdir()
+    (tmp / "elsewhere" / ".env").write_text("x")
+    lines = []
+    w.add(record, str(tmp / "elsewhere" / ".env"), out=lines.append, runner=lambda *a, **kw: (0, ""),
+          finder=fake_found, remember=lambda t: None)
+    assert any("matches --hide" in line and "the agent reads it" in line for line in lines)
+
+
+def blank_files(tmp_path):
+    blanks = tmp_path / "blanks"
+    blanks.mkdir()
+    (blanks / "file").write_bytes(b"")
+    (blanks / "dir").mkdir()
+    return {kind: [str(blanks / kind), [(blanks / kind).stat().st_dev, (blanks / kind).stat().st_ino]]
+            for kind in ("file", "dir")}
+
+
+def test_the_helper_hides_in_its_own_namespace_before_the_sandbox_gets_the_folder(space, tmp_path):
+    proc, mounts, source, identity = space
+    stage = tmp_path / "stage"  # (stands for the clone mounted there in the helper's own mount namespace)
+    (stage / "sub").mkdir(parents=True)
+    (stage / ".env").write_text("x")
+    (stage / "sub" / "key.pem").write_text("k")
+    c = FakeLibc()
+    w.helper("add", 100, "api", [100, 101], str(source), identity, "rw", proc, c,
+             hidden=[{"path": ".env", "kind": "file"}, {"path": "sub/key.pem", "kind": "file"}],
+             blanks=blank_files(tmp_path), stage=str(stage))
+    calls = kinds(c.calls)
+    first_setns = calls.index("setns", 1)
+    before = calls[:first_setns]
+    # the folder's clone onto the stage, a read-only blank over each match, then one recursive clone per namespace
+    assert before == ["setns", "unshare", w.SYS_OPEN_TREE, w.SYS_MOUNT_SETATTR, w.SYS_MOVE_MOUNT,
+                      w.SYS_OPEN_TREE, w.SYS_MOUNT_SETATTR, w.SYS_MOVE_MOUNT,
+                      w.SYS_OPEN_TREE, w.SYS_MOUNT_SETATTR, w.SYS_MOVE_MOUNT,
+                      w.SYS_OPEN_TREE, w.SYS_OPEN_TREE]
+    assert calls[first_setns:] == ["setns", w.SYS_MOVE_MOUNT, "setns", w.SYS_MOVE_MOUNT]
+    assert (mounts / "api").is_dir()
+
+
+def test_the_helper_hides_nothing_through_a_link_and_then_adds_nothing(space, tmp_path):
+    proc, mounts, source, identity = space
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".env").write_text("x")
+    (stage / "sub").symlink_to(outside)
+    c = FakeLibc()
+    with pytest.raises(OSError):
+        w.helper("add", 100, "api", [100], str(source), identity, "rw", proc, c,
+                 hidden=[{"path": "sub/.env", "kind": "file"}], blanks=blank_files(tmp_path), stage=str(stage))
+    assert "setns" not in kinds(c.calls)[1:], "the sandbox's namespaces were never entered"
+    assert not (mounts / "api").exists()
+
+
+def test_remove_unmounts_the_hidden_blanks_first(space, monkeypatch):
+    proc, mounts, _, _ = space
+    (mounts / "api").mkdir()
+    monkeypatch.setattr(w, "mounted", lambda base, target: True)
+    c = FakeLibc()
+    w.helper("remove", 100, "api", [100], proc=proc, c=c, hidden=[".env", "sub/key.pem"])
+    assert [call[1] for call in c.calls if call[0] == "umount2"] == [
+        f"{w.WORKSPACES_DIR}/api/sub/key.pem".encode(), f"{w.WORKSPACES_DIR}/api/.env".encode(),
+        f"{w.WORKSPACES_DIR}/api".encode()]

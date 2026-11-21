@@ -15,13 +15,14 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout,
 )
 
-from . import wizard_llm as WL
+from . import model_profile as MP, model_profile_view as MPV, tables, wizard_llm as WL
 from .files import printable
 from .i18n import N_, tr
 from .widgets import plain_label, safe_tooltip
 
 SORTS = (("name", N_("Name")), ("params", N_("Parameters")), ("size", N_("Size")))
 COLUMNS = (N_("Model"), N_("Tags"), N_("Parameters"), N_("Size"))
+SUPPORT = N_("Support")  # the traffic light's column: only when some row has one (model_profile.support_of)
 
 
 class ModelPicker(QDialog):
@@ -54,18 +55,26 @@ class ModelPicker(QDialog):
         self.tag.currentIndexChanged.connect(lambda _i: self.show_rows())
         top.addWidget(self.tag)
         layout.addLayout(top)
-        self.table = QTableWidget(0, len(COLUMNS))
-        self.table.setHorizontalHeaderLabels([tr(c) for c in COLUMNS])
+        self.lights = any(row.get("support") for row in self.rows)
+        columns = [*COLUMNS, SUPPORT] if self.lights else list(COLUMNS)
+        self.table = QTableWidget(0, len(columns))
+        self.table.setHorizontalHeaderLabels([tr(c) for c in columns])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, self.table.horizontalHeader().ResizeMode.Stretch)
+        # the model's name takes the rest; parameters, size and the light their content (tables.py)
+        tables.keep(tables.setup(self.table, 0, range(2, len(columns))), "dialog-model-picker")
         self.table.setAccessibleName(tr("Models"))
         self.table.cellDoubleClicked.connect(lambda row, _column: self.take(row))
         self.table.itemSelectionChanged.connect(self.update_ok)
         layout.addWidget(self.table, 1)
+        # the selected model's traffic light in detail: per agent what worked and failed, the settings, the speed
+        self.support_panel = MPV.SupportPanel()
+        self.support_area = MPV.scrolled(self.support_panel, 200)
+        self.support_area.setVisible(False)
+        layout.addWidget(self.support_area)
+        self.table.itemSelectionChanged.connect(self.show_support)
         self.count = plain_label(role="secondary")
         layout.addWidget(self.count)
         buttons = QDialogButtonBox()
@@ -89,22 +98,39 @@ class ModelPicker(QDialog):
         for index, row in enumerate(rows):
             cells = [printable(row["label"]), " ".join(f"[{tr(dict(WL.TAGS)[t])}]" for t in row["tags"]),
                      WL.params_label(row["params"]), WL.size_text(row["size"]) if row["size"] else ""]
+            found = row.get("support")
+            if self.lights:
+                cells.append(MP.light_label(found) if found else "")
             for column, text in enumerate(cells):
                 item = QTableWidgetItem(text)
+                if found and column in (0, len(COLUMNS)):  # the light's icon beside the name and in its column
+                    item.setIcon(MPV.light_icon(found["light"]))
+                    item.setData(Qt.ItemDataRole.AccessibleTextRole,
+                                 f"{text}, {MP.light_accessible(found, row['model'])}")
                 if row["hint"]:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled & ~Qt.ItemFlag.ItemIsSelectable)
                     item.setToolTip(safe_tooltip(row["hint"]))
                 elif column == 0:
-                    item.setToolTip(safe_tooltip(f"--llm {row['value']}" if row["value"] else
-                                                 tr("The agent's own provider and login (no --llm)")))
+                    item.setToolTip(safe_tooltip((f"--llm {row['value']}" if row["value"] else
+                                                  tr("The agent's own provider and login (no --llm)"))
+                                                 + (f"\n{MP.light_summary(found)}" if found else "")))
+                elif column == len(COLUMNS) and found:
+                    item.setToolTip(safe_tooltip(MP.light_summary(found)))
                 self.table.setItem(index, column, item)
-        self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setSectionResizeMode(0, self.table.horizontalHeader().ResizeMode.Stretch)
+        tables.fit_columns(self.table)
         found = next((i for i, r in enumerate(rows) if r["value"] == keep and not r["hint"]), None)
         if found is not None:
             self.table.selectRow(found)
         self.count.setText(tr("{shown} of {total} models", shown=len(rows), total=len(self.rows)))
         self.update_ok()
+
+    def show_support(self):
+        """The detail panel of the selected row's light (hidden for a row without one)."""
+        row = self.table.currentRow()
+        selected = 0 <= row < len(self.shown_rows) and bool(self.table.selectedItems())
+        found = self.shown_rows[row].get("support") if selected else None
+        self.support_panel.set(found)
+        self.support_area.setVisible(found is not None)
 
     def current_value(self):
         row = self.table.currentRow()

@@ -32,7 +32,7 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 TEMPLATES = HERE / "templates"
 # Shipped with sandbox-ai and part of every sandbox: the sandbox-ai skill. An entry of the same name in
 # a kit replaces it (unlike two kits, which may not share a name).
@@ -55,6 +55,9 @@ LAYOUT = {
     "codex": {"skills": ".agents/skills", "prompts": ".codex/prompts"},
     "opencode": {"skills": ".config/opencode/skills", "agents": ".config/opencode/agents",
                  "commands": ".config/opencode/commands"},
+    # OpenCode 2 reads the same folders of its global configuration as OpenCode 1 (its own HOMEs: never both).
+    "opencode2": {"skills": ".config/opencode/skills", "agents": ".config/opencode/agents",
+                  "commands": ".config/opencode/commands"},
     # Hermes writes its own skills into ~/.hermes/skills; the kits' are its external skills (hermes.py,
     # skills.external_dirs), where the agent cannot change them.
     "hermes": {"skills": ".agents/skills"},
@@ -65,23 +68,54 @@ LAYOUT = {
     "qwen": {"skills": ".qwen/skills"},
     # Goose finds skills in ~/.agents/skills (and ~/.config/goose/skills, its own); the kits' are read-only there.
     "goose": {"skills": ".agents/skills"},
+    # OpenHands loads user skills from ~/.agents/skills (and ~/.openhands/skills, its own); the kits' are read-only.
+    "openhands": {"skills": ".agents/skills"},
+    # nanobot reads skills only from its workspace (~/.nanobot/workspace/skills): the kits' are mounted there,
+    # read-only (as Qwen Code's), so nanobot writes no skill of its own in a sandbox.
+    "nanobot": {"skills": ".nanobot/workspace/skills"},
+    # Letta Code's global skills (~/.letta/skills); its own it learns go into the agent's memory (MemFS) or the
+    # project's .agents/skills.
+    "letta": {"skills": ".letta/skills"},
+    # Pi finds skills in ~/.agents/skills (and ~/.pi/agent/skills, its own); the kits' are read-only there.
+    "pi": {"skills": ".agents/skills"},
 }
 # (name in a kit, sandbox HOME path) of the agent's own memory file.
 MEMORY_FILE = {"claude": ("CLAUDE.md", ".claude/CLAUDE.md"), "codex": ("AGENTS.md", ".codex/AGENTS.md"),
                "opencode": ("AGENTS.md", ".config/opencode/AGENTS.md"),
+               "opencode2": ("AGENTS.md", ".config/opencode/AGENTS.md"),
                # Hermes' own memory (its memory tool's MEMORY.md), kept per project like the others' memory files.
                "hermes": ("MEMORY.md", ".hermes/memories/MEMORY.md"),
                # DSH's user-global instructions ($DSH_HOME/AGENTS.md); Qwen Code's global context file.
                "dsh": ("AGENTS.md", ".dsh/AGENTS.md"), "qwen": ("QWEN.md", ".qwen/QWEN.md"),
                # Goose's global hints: ~/.config/goose/AGENTS.md, read at every start beside .goosehints.
-               "goose": ("AGENTS.md", ".config/goose/AGENTS.md")}
+               "goose": ("AGENTS.md", ".config/goose/AGENTS.md"),
+               # OpenHands: a skill without triggers in its user skills (~/.openhands/skills) is in every conversation.
+               "openhands": ("AGENTS.md", ".openhands/skills/AGENTS.md"),
+               # nanobot's long-term memory (its workspace's memory/MEMORY.md, in its prompt every turn).
+               "nanobot": ("MEMORY.md", ".nanobot/workspace/memory/MEMORY.md"),
+               # Letta Code's own memory is its MemFS in the HOME (~/.letta/lc-local-backend); sandbox-ai's project
+               # notes for it are ~/.letta/AGENTS.md, which the sandbox-ai skill tells it to read and keep.
+               "letta": ("AGENTS.md", ".letta/AGENTS.md"),
+               # Pi's user instructions (~/.pi/agent/AGENTS.md): Pi reads them at every start in every folder.
+               "pi": ("AGENTS.md", ".pi/agent/AGENTS.md")}
 # Claude keeps its auto memory per working directory, named after the path with "/" as "-";
 # the first workspace is always /work.
-AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "hermes": "Hermes",
-               "dsh": "DeepSeek Harness", "qwen": "Qwen Code", "goose": "Goose"}
-MEMORY_DIRS = {"claude": (".claude/projects/-work/memory",), "codex": (), "opencode": (), "hermes": (), "dsh": (),
-               "qwen": (), "goose": ()}
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "opencode2": "OpenCode 2",
+               "hermes": "Hermes",
+               "dsh": "DeepSeek Harness", "qwen": "Qwen Code", "goose": "Goose",
+               "openhands": "OpenHands",
+               "nanobot": "nanobot",
+               "letta": "Letta Code",
+               "pi": "Pi"}
+MEMORY_DIRS = {"claude": (".claude/projects/-work/memory",), "codex": (), "opencode": (), "opencode2": (), "hermes": (), "dsh": (),
+               "qwen": (), "goose": (), "openhands": (), "nanobot": (), "letta": (),
+               "pi": ()}
 PLUGINS_FILE = "marketplaces.json"
+# The agents whose kits name plugins of Claude's marketplaces (NAME@MARKETPLACE), installed by Claude Code into one
+# plugin store (plugin_store("claude"), `sandbox-ai plugins AGENT`) and given to each sandbox read-only: Claude Code
+# and Codex read the same plugin folders (Codex 0.169.0 takes .codex-plugin/plugin.json, else .claude-plugin/plugin.json:
+# codex-rs/exec-server-protocol DISCOVERABLE_PLUGIN_MANIFEST_PATHS), OpenCode 2 a plugin folder's server module.
+STORE_AGENTS = ("claude", "codex", "opencode2")
 
 KIT_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
 PLUGIN_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
@@ -245,9 +279,12 @@ def summary(plan):
     return {kind: sorted(items) for kind, items in plan["entries"].items() if items}
 
 
-def stage(agent, plan, staging, check):
+def stage(agent, plan, staging, check, every_kind=False):
     """Copy the kits' entries to STAGING (a fresh launcher-owned directory), one directory per kind;
-    returns [(staged directory, sandbox path)] to mount read-only, and notes.
+    returns [(staged directory, sandbox path)] to mount read-only, and notes. EVERY_KIND: every kind of the agent's
+    LAYOUT gets its directory and mount, an empty one where the kits have none - the place `sandbox-ai kits attach`
+    copies a skill, subagent or command into while the sandbox runs (kits_live.py): the agent sees it there at once,
+    read-only, as the rest of the snapshot.
 
     CHECK(path, label) raises for a host path the agent could change, and for a symlink a sandbox may have planted.
     A kit entry that is a symlink is followed one link at a time, every link on the way and the target checked
@@ -255,7 +292,7 @@ def stage(agent, plan, staging, check):
     KIT_DEPTH levels are errors."""
     mounts, notes, budget = [], [], {"files": 0, "bytes": 0}
     for kind, items in plan["entries"].items():
-        if not items:
+        if not items and not every_kind:
             continue
         target = staging / kind
         target.mkdir(mode=0o755)
@@ -464,6 +501,9 @@ def ensure_default_home(agent):
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 MEMORY_ENTRIES = 20000   # files, directories and skipped entries walked per collect, against slow DoS
 MEMORY_NOTES = 20
+# In a project's memory store made by `sandbox-ai kits host-import --project` before the project's first start: the kits'
+# memory template is still due at that start (memory_prepare), as for a store that does not exist yet.
+SEED_MARKER = ".seed-template"
 
 
 def memory_store(project, agent):
@@ -755,6 +795,13 @@ def memory_prepare(agent, project, home, template=None, check=None, persistent=F
             if data is not None:
                 write_at(store, MEMORY_FILE[agent][1], data)
                 seeded = template[0]
+        elif os.path.lexists(store / SEED_MARKER):
+            # `sandbox-ai kits host-import --project` made the store before the project's first start: the template is
+            # still due (unless a memory file was imported, which is then the project's own).
+            if data is not None and read_store_file(store, MEMORY_FILE[agent][1]) is None:
+                write_at(store, MEMORY_FILE[agent][1], data)
+                seeded = template[0]
+            remove_at(store, SEED_MARKER, tree=False)
         files, more, _ = collect(store, agent)
         notes += more
         # A reused HOME (--state-dir) may hold an older copy: the store is the authority.
@@ -768,6 +815,21 @@ def memory_prepare(agent, project, home, template=None, check=None, persistent=F
         with os.fdopen(fd, "wb") as stream:
             stream.write(record)
     return manifest, seeded, store, notes
+
+
+def read_store_file(store, relative):
+    """The bytes of STORE/RELATIVE (nothing followed), or None."""
+    parts = parts_of(relative)
+    try:
+        fd = open_dir(store, parts[:-1])
+    except ValueError:
+        return None
+    if fd is None:
+        return None
+    try:
+        return read_at(fd, parts[-1], MEMORY_BYTES)[0]
+    finally:
+        os.close(fd)
 
 
 def save_locked(agent, store, home, manifest):
@@ -871,7 +933,8 @@ def read_declaration(label, path, check=None):
 
 def declarations(agent, plugin_files, with_disabled=False, check=None):
     """({marketplace name: source}, [plugin ids], notes) of the marketplaces.json files of the kits.
-    Claude: marketplaces + "NAME@MARKETPLACE" plugins; OpenCode: npm plugin names; Codex: not yet.
+    Claude, Codex and OpenCode 2 (STORE_AGENTS): marketplaces + "NAME@MARKETPLACE" plugins, from sandbox-ai's plugin
+    store; OpenCode: npm plugin names; the other agents: none (a note).
     "plugins" lists what a kit enables, "disabled" what it keeps declared but off; of the kits in PLUGIN_FILES'
     order, the last that names a plugin decides (a kit given with --kit after the default kit can turn one of the
     default kit's plugins off, or on again). WITH_DISABLED: every declared plugin, off or on (what the plugin
@@ -893,7 +956,7 @@ def declarations(agent, plugin_files, with_disabled=False, check=None):
         declared = document.get("marketplaces", {})
         if not isinstance(declared, dict):
             raise ValueError(f"{label}: {path}: \"marketplaces\" must be an object")
-        if agent in ("codex", "hermes", "dsh", "qwen", "goose"):
+        if agent not in STORE_AGENTS and agent != "opencode":
             if listed or declared or off:
                 notes.append(f"{label}: plugins and marketplaces are not supported for "
                              f"{AGENT_NAMES[agent]} yet; ignored")
@@ -922,7 +985,7 @@ def declarations(agent, plugin_files, with_disabled=False, check=None):
             plugins[plugin] = enabled
     chosen = [plugin for plugin, enabled in plugins.items() if enabled or with_disabled]
     for plugin in list(chosen):
-        if agent == "claude" and plugin.split("@")[1] not in marketplaces:
+        if agent in STORE_AGENTS and plugin.split("@")[1] not in marketplaces:
             notes.append(f"plugin {plugin} skipped: no kit declares marketplace {plugin.split('@')[1]}")
             chosen.remove(plugin)
     return marketplaces, chosen, notes
@@ -1002,10 +1065,14 @@ def describe(agent, label, directory):
 
 # --- hooks: kits may carry the agent's hooks; they run only once the user approved them ------------------------
 #
-# AGENT/hooks/ in a kit. For Claude Code and Codex: hooks.json, the "hooks" object of Claude Code's settings
-# ({"hooks": {EVENT: [{"matcher": ..., "hooks": [{"type": "command", "command": ..., "timeout": ...}]}]}}), and the
-# files its commands run, named ${HOOK_DIR}/FILE. For OpenCode: plugin modules (*.js, *.mjs, *.ts at the top) and
-# their helper files. A run copies the folder, hashes the copy and installs its hooks as the agent's managed
+# AGENT/hooks/ in a kit. For Claude Code, Codex, Qwen Code, Hermes, Letta Code and Goose: hooks.json, the "hooks"
+# object of Claude Code's settings ({"hooks": {EVENT: [{"matcher": ..., "hooks": [{"type": "command", "command": ...,
+# "timeout": ...}]}]}}), and the files its commands run, named ${HOOK_DIR}/FILE (Hermes gets them as its shell hooks,
+# under its own event names: HERMES_EVENTS). For OpenCode, OpenCode 2 and Pi: plugin modules at the top and their
+# helper files - OpenCode's plugins (*.js, *.mjs, *.ts), OpenCode 2's V2 plugins ({id, setup} as the default export)
+# and Pi's extensions (a default export function(pi)), the last two .js or .mjs, loaded by sandbox-ai's plugin or
+# extension after its rule check (and checked again after them). DeepSeek Harness, OpenHands and nanobot run no kit
+# hooks (NO_HOOKS says why). A run copies the folder, hashes the copy and installs its hooks as the agent's managed
 # configuration (next to the rule hooks, after them) only if the user approved exactly that content with
 # `sandbox-ai kits trust-hooks`, recorded in trust_file(): outside every tree a sandbox can write. Any change, by
 # anyone, takes the approval away until it is given again. A symlink or a special file makes a folder's hooks
@@ -1023,8 +1090,39 @@ HOOK_EVENTS = {
                "Notification", "Stop", "SubagentStart", "SubagentStop", "PreCompact", "SessionStart", "SessionEnd"),
     "codex": ("PreToolUse", "PostToolUse", "PermissionRequest", "UserPromptSubmit", "SessionStart", "SessionEnd",
               "Stop", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact"),
+    # Qwen Code 0.26.4: packages/core/src/hooks/types.ts, HookEventName.
+    "qwen": ("PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "Notification", "UserPromptSubmit",
+             "UserPromptExpansion", "SessionStart", "Stop", "MessageDisplay", "SubagentStart", "SubagentStop",
+             "PreCompact", "PostCompact", "SessionEnd", "SessionDelete", "PermissionRequest", "PermissionDenied",
+             "StopFailure", "TodoCreated"),
+    # Letta Code 0.34.36: src/hooks/types.ts.
+    "letta": ("PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest", "UserPromptSubmit",
+              "Notification", "Stop", "SubagentStop", "PreCompact", "SessionStart", "SessionEnd"),
+    # Goose 1.57.0: crates/goose/src/hooks/mod.rs, HookEvent.
+    "goose": ("PreToolUse", "PreToolUseResult", "PostToolUse", "PostToolUseFailure", "SessionStart", "SessionEnd",
+              "UserPromptSubmit", "BeforeReadFile", "AfterFileEdit", "BeforeShellExecution", "AfterShellExecution",
+              "Stop"),
 }
+# Hermes v0.22.5's shell hooks under Claude Code's names (agent/shell_hooks.py, hermes_cli/plugins.py VALID_HOOKS):
+# an event without one here never runs in Hermes, so a kit's hooks.json naming it is an error for Hermes.
+HERMES_EVENTS = {"PreToolUse": "pre_tool_call", "PostToolUse": "post_tool_call", "SessionStart": "on_session_start",
+                 "SessionEnd": "on_session_end", "SubagentStart": "subagent_start", "SubagentStop": "subagent_stop"}
+HOOK_EVENTS["hermes"] = tuple(HERMES_EVENTS)
 PLUGIN_SUFFIXES = (".js", ".mjs", ".ts")
+# How each agent takes a kit's hooks: "json" (hooks.json and the files it runs), "modules" (plugin modules at the top
+# of the folder, MODULE_SUFFIXES). The others take none: NO_HOOKS says what their reviewed release lacks.
+HOOK_STYLES = {"claude": "json", "codex": "json", "qwen": "json", "hermes": "json", "letta": "json", "goose": "json",
+               "opencode": "modules", "opencode2": "modules", "pi": "modules"}
+MODULE_SUFFIXES = {"opencode": PLUGIN_SUFFIXES, "opencode2": (".js", ".mjs"), "pi": (".js", ".mjs")}
+NO_HOOKS = {
+    "dsh": "DeepSeek Harness 0.2.1-rc.5 runs hooks only through Cordis plugins; its Claude Code hook bridge "
+           "(dsh-hooks-claude-code) is experimental and not in the reviewed release's image",
+    "openhands": "OpenHands' agent server 1.58.1 takes hooks only with each conversation from its client (the "
+                 "Canvas sends the project's .openhands/hooks.json, which the agent can write); there is no layer a "
+                 "start can install",
+    "nanobot": "nanobot 0.4.0 has hooks only for Python programs that use its SDK (AgentHook), none a configuration "
+               "or a start can install",
+}
 TRUST_VERSION = 1
 
 
@@ -1151,22 +1249,28 @@ def hook_groups(agent, document):
 
 
 def read_hooks(agent, directory):
-    """What the hooks folder DIRECTORY holds for AGENT: {"path", "files", "sha256", "groups" (Claude Code, Codex),
-    "plugins" (OpenCode), "hooks" (one line per hook: event, matcher, command, the folder's files it runs), "notes",
-    "errors"}. Hooks with errors never run and cannot be approved."""
+    """What the hooks folder DIRECTORY holds for AGENT: {"path", "files", "sha256", "groups" (HOOK_STYLES "json"),
+    "plugins" (HOOK_STYLES "modules"), "hooks" (one line per hook: event, matcher, command, the folder's files it
+    runs), "notes", "errors"}. Hooks with errors never run and cannot be approved."""
     tree = hook_tree(directory)
     result = {"path": str(directory), "files": tree["files"], "sha256": tree["sha256"], "groups": {},
               "plugins": [], "hooks": [], "notes": [], "errors": list(tree["errors"])}
     names = [f["path"] for f in tree["files"]]
-    if agent in ("hermes", "dsh", "qwen", "goose"):  # the launcher refuses rules for their own tools: never enforced
+    style = HOOK_STYLES.get(agent)
+    if style is None:  # no hook of the agent's a start can install: never run
         if names or tree["data"] is not None:
-            result["errors"].append(f"hooks are not supported for {AGENT_NAMES[agent]} yet")
+            result["errors"].append(f"hooks are not supported for {AGENT_NAMES[agent]}: "
+                                    f"{NO_HOOKS.get(agent, 'its reviewed release has no hooks')}")
+            result["sha256"] = None
         return result
-    if agent == "opencode":
-        result["plugins"] = [name for name in names if "/" not in name and name.endswith(PLUGIN_SUFFIXES)]
+    if style == "modules":
+        suffixes = MODULE_SUFFIXES[agent]
+        result["plugins"] = [name for name in names if "/" not in name and name.endswith(suffixes)]
         result["hooks"] = [{"plugin": name, "files": [name]} for name in result["plugins"]]
         if names and not result["plugins"]:
-            result["errors"].append(f"no plugin module ({', '.join(PLUGIN_SUFFIXES)}) at the top of the folder")
+            result["errors"].append(f"no plugin module ({', '.join(suffixes)}) at the top of the folder")
+        if result["errors"]:
+            result["sha256"] = None
         return result
     if tree["data"] is None:
         if names or not tree["errors"]:
@@ -1175,6 +1279,11 @@ def read_hooks(agent, directory):
     try:
         document = json.loads(tree["data"].decode("utf-8"))
         result["groups"], result["notes"] = hook_groups(agent, document)
+        if agent == "hermes":  # an event Hermes has no shell hook for would never run: not one to approve
+            unknown = [event for event in result["groups"] if event not in HERMES_EVENTS]
+            if unknown:
+                raise ValueError(f"{HOOKS_FILE}: {unknown[0]} is no event Hermes runs shell hooks for (it has "
+                                 f"{', '.join(HERMES_EVENTS)})")
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         result["errors"].append(str(exc) if isinstance(exc, ValueError) and HOOKS_FILE in str(exc)
                                 else f"{HOOKS_FILE} is not valid JSON ({exc})")
@@ -1325,6 +1434,269 @@ def stage_plugin_hooks(plugins, installed_plugins, store=None, records=None):
             continue  # a plugin without hooks: nothing to approve
         staged.append({**info, "label": f"plugin {plugin}", "kit": plugin_trust_key(plugin),
                        "trusted": hooks_trusted("claude", info["sha256"], plugin_trust_key(plugin), records)})
+    return staged
+
+
+# --- Codex and OpenCode 2: the same plugin folders, read as each of them reads them ---------------------------------
+#
+# Codex 0.169.0 (codex-rs/core-plugins: loader.rs, manifest.rs, store.rs; codex-rs/utils/plugins: plugin_namespace.rs)
+# loads a plugin named in its configuration ([plugins."NAME@MARKETPLACE"] enabled) from
+# CODEX_HOME/plugins/cache/MARKETPLACE/NAME/VERSION. Its manifest: plugin.json at the root when it names an Agent
+# Plugins $schema (then no hooks and no apps), else the first of .codex-plugin/, .claude-plugin/, .cursor-plugin/
+# plugin.json. It brings skills ("skills", default skills/), hooks ("hooks": a path, paths, an object or objects,
+# which replace the default hooks/hooks.json; run with PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, PLUGIN_DATA and
+# CLAUDE_PLUGIN_DATA set), MCP servers ("mcpServers": a path or an object, default .mcp.json) and apps (ChatGPT
+# connectors: "apps", default .app.json). Plugin hooks do not run while allow_managed_hooks_only holds
+# (codex-rs/hooks/src/engine/discovery.rs); a plugin's MCP servers are off when a requirement lists none for it
+# (core/src/config/mod.rs filter_plugin_mcp_servers_by_requirements).
+#
+# OpenCode 2.2.5 (packages/core/src/config/plugin/source.ts, plugin/supervisor.ts, packages/plugin/src/host.ts) loads
+# a configured local plugin from a directory: through its package.json "exports" when the package names itself and
+# maps them, else its server or index module; the module's default export {id, setup} gets the whole plugin context
+# (tools and their hooks, skills, sessions, MCP servers, shell) in OpenCode 2's own process. So such a plugin is code
+# that runs as the agent: it runs only once approved, like a kit's hook module.
+
+CODEX_PLUGIN_CACHE = PurePosixPath("/root/.codex/plugins/cache")
+CODEX_LOCAL_VERSION = "local"
+CODEX_PLUGIN_DATA = PurePosixPath("/root/.codex/plugins/data")  # Codex's PLUGIN_DATA: NAME-MARKETPLACE below it
+CODEX_MANIFESTS = (".codex-plugin/plugin.json", ".claude-plugin/plugin.json", ".cursor-plugin/plugin.json")
+CODEX_AGENT_MANIFEST = "plugin.json"
+AGENT_PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/"
+CODEX_HOOK_VARIABLES = ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_DATA")
+# Marketplace names Codex keeps for its own (codex-rs/core-plugins: is_reserved_marketplace_name - OpenAI's
+# marketplaces and the remote ones of remote.rs).
+CODEX_RESERVED_MARKETPLACE = re.compile(r"openai-.*|created-by-me-remote|workspace-directory"
+                                        r"|workspace-shared-with-me(?:-private|-unlisted)?")
+OPENCODE2_PLUGINS = PurePosixPath("/sandbox/plugins")  # OpenCode 2's plugin folders: MARKETPLACE/NAME below it
+# The extensions Bun resolves a module path without one to (packages/plugin/src/host.ts: resolveModule).
+OPENCODE2_MODULE_SUFFIXES = (".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs")
+
+
+def sandbox_root(agent, plugin, claude_root):
+    """Where AGENT's sandbox finds PLUGIN (NAME@MARKETPLACE), installed by Claude at CLAUDE_ROOT. Codex: its cache
+    folder of the plugin, version "local" - the version Codex takes whatever other versions lie beside it
+    (codex-rs/core-plugin-common installed.rs: active_plugin_version), so none planted there replaces it."""
+    name, marketplace = plugin.split("@")
+    if agent == "codex":
+        return str(CODEX_PLUGIN_CACHE / marketplace / name / CODEX_LOCAL_VERSION)
+    if agent == "opencode2":
+        return str(OPENCODE2_PLUGINS / marketplace / name)
+    return str(claude_root)
+
+
+def codex_manifest(kept):
+    """(relative path of the manifest Codex reads, its JSON object or None, "agent" or "legacy") from KEPT ({path:
+    bytes} of the candidates), or (None, None, None) when Codex finds none."""
+    data = kept.get(CODEX_AGENT_MANIFEST)
+    if data is not None:
+        try:
+            document = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            document = None
+        schema = document.get("$schema") if isinstance(document, dict) else None
+        if isinstance(schema, str) and schema.startswith(AGENT_PLUGIN_SCHEMA):
+            return CODEX_AGENT_MANIFEST, document, "agent"
+    for relative in CODEX_MANIFESTS:
+        if relative in kept:
+            try:
+                document = json.loads(kept[relative].decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                document = None
+            return relative, document if isinstance(document, dict) else None, "legacy"
+    return None, None, None
+
+
+def codex_hook_documents(manifest, files, host_root):
+    """[(where, hooks object)] of the hooks Codex loads from a legacy plugin with MANIFEST: the manifest's "hooks"
+    (a ./path, ./paths, an object or a list of objects: {"hooks": {EVENT: [...]}}), else hooks/hooks.json."""
+    declared = manifest.get("hooks") if isinstance(manifest, dict) else None
+    paths, inline = [], None
+    if isinstance(declared, str):
+        paths = [declared]
+    elif isinstance(declared, list) and declared and all(isinstance(v, dict) for v in declared):
+        inline = declared
+    elif isinstance(declared, list) and all(isinstance(v, str) for v in declared):
+        paths = declared
+    elif isinstance(declared, dict):
+        inline = [declared]
+    if inline is not None:
+        return [("plugin.json", entry.get("hooks") if isinstance(entry.get("hooks"), dict) else {})
+                for entry in inline]
+    chosen = [path[2:] for path in paths if path.startswith("./") and len(path) > 2]
+    if not chosen:  # nothing usable named: the default file, as Codex falls back to it
+        chosen = [PLUGIN_HOOKS_FILE] if PLUGIN_HOOKS_FILE in files else []
+    documents = []
+    for name in chosen:
+        name = os.path.normpath(name)
+        if name not in files or "link" in files[name] or name.startswith(".."):
+            raise ValueError(f"hooks {name[:80]!r} is no file of the plugin")
+        data, why = read_at_path(host_root, name)
+        if data is None or hashlib.sha256(data).hexdigest() != files[name]["sha256"]:
+            raise ValueError(f"{name}: {why or 'changed while it was read'}")
+        document = json.loads(data.decode("utf-8"))  # a HooksFile: {"hooks": {EVENT: [...]}}
+        documents.append((name, document.get("hooks") if isinstance(document, dict) and
+                          isinstance(document.get("hooks"), dict) else {}))
+    return documents
+
+
+def codex_mcp_names(manifest, files, host_root):
+    """The names of the MCP servers a legacy plugin declares ("mcpServers": a ./path or an object; else .mcp.json)."""
+    declared = manifest.get("mcpServers") if isinstance(manifest, dict) else None
+    document = None
+    if isinstance(declared, dict):
+        document = declared
+    else:
+        name = declared[2:] if isinstance(declared, str) and declared.startswith("./") else ".mcp.json"
+        name = os.path.normpath(name)
+        if name in files and "link" not in files[name]:
+            data, _ = read_at_path(host_root, name)
+            try:
+                document = json.loads(data.decode("utf-8")) if data is not None else None
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                document = {"(unreadable)": {}}
+    if not isinstance(document, dict):
+        return []
+    servers = document.get("mcpServers") if isinstance(document.get("mcpServers"), dict) else document
+    return sorted(str(name)[:64] for name in servers)[:50]
+
+
+def read_codex_plugin(plugin, host_root, sandbox_root_path):
+    """PLUGIN as Codex 0.169.0 reads its installed folder HOST_ROOT (SANDBOX_ROOT_PATH in the sandbox): like
+    read_plugin_hooks (hooks with their variables set as Codex sets them, ready to run as managed hooks), and "mcp"
+    (the names of its MCP servers), "apps" (it declares ChatGPT apps), "manifest", "format"."""
+    keep = (CODEX_AGENT_MANIFEST, *CODEX_MANIFESTS)
+    tree = hook_tree(host_root, PLUGIN_LIMITS, keep=keep, links=True)
+    result = {"plugin": plugin, "path": str(host_root), "files": tree["files"], "sha256": tree["sha256"],
+              "groups": {}, "hooks": [], "notes": [], "errors": list(tree["errors"]), "declared": False,
+              "mcp": [], "apps": False, "manifest": None, "format": None}
+    files = {f["path"]: f for f in tree["files"]}
+    relative, manifest, kind = codex_manifest(tree["kept"])
+    result["manifest"], result["format"] = relative, kind
+    if relative is None:
+        result["errors"].append("no plugin manifest Codex reads (.codex-plugin/plugin.json, .claude-plugin/"
+                                "plugin.json, .cursor-plugin/plugin.json)")
+        result["sha256"] = None
+        return result
+    name, marketplace = plugin.split("@")
+    data_root = str(CODEX_PLUGIN_DATA / f"{name}-{marketplace}")
+    try:
+        result["mcp"] = codex_mcp_names(manifest if kind == "legacy" else None, files, host_root)
+        if kind == "legacy":
+            declared_apps = manifest.get("apps") if isinstance(manifest, dict) else None
+            result["apps"] = isinstance(declared_apps, str) or ".app.json" in files
+            documents = codex_hook_documents(manifest, files, host_root)
+        else:
+            documents = []  # an Agent Plugin brings no hooks to Codex
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        result["errors"].append(f"its hook definitions cannot be read: {exc}")
+        documents = []
+    exports = "; ".join(f"export {variable}={shlex.quote(value)}" for variable, value in (
+        ("PLUGIN_ROOT", sandbox_root_path), ("CLAUDE_PLUGIN_ROOT", sandbox_root_path),
+        ("PLUGIN_DATA", data_root), ("CLAUDE_PLUGIN_DATA", data_root)))
+    for where, document in documents:
+        try:
+            groups, notes = hook_groups("codex", {"hooks": document} if document else {})
+        except ValueError as exc:
+            result["errors"].append(f"{where}: {str(exc).replace(HOOKS_FILE + ': ', '')}")
+            continue
+        result["notes"] += notes
+        for event, entries in groups.items():
+            for entry in entries:
+                handlers = []
+                for handler in entry["hooks"]:
+                    command = handler["command"]
+                    result["hooks"].append({"event": event, "matcher": entry.get("matcher"), "command": command,
+                                            "timeout": handler.get("timeout")})
+                    for variable, value in (("PLUGIN_ROOT", sandbox_root_path), ("CLAUDE_PLUGIN_ROOT",
+                                                                                   sandbox_root_path),
+                                            ("PLUGIN_DATA", data_root), ("CLAUDE_PLUGIN_DATA", data_root)):
+                        command = command.replace("${" + variable + "}", value)
+                    handlers.append({**handler, "command": f"{exports}; {command}"})
+                result["groups"].setdefault(event, []).append({**entry, "hooks": handlers})
+    result["declared"] = bool(result["hooks"])  # a plugin with errors is not given at all (codex_plugins)
+    if result["errors"]:
+        result["sha256"] = None
+    return result
+
+
+def opencode2_entry(files, kept):
+    """(the module OpenCode 2.2.5 loads from a plugin folder, None) or (None, why): packages/plugin/src/host.ts
+    resolve() - a package.json that names the package and maps "exports" ("./server" or "." to a file), else the
+    folder's server module, else its index module."""
+    manifest = None
+    if "package.json" in kept:
+        try:
+            manifest = json.loads(kept["package.json"].decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            manifest = None  # OpenCode 2 counts it as missing
+    if isinstance(manifest, dict) and isinstance(manifest.get("name"), str) and "exports" in manifest:
+        exports = manifest["exports"]
+        target = exports if isinstance(exports, str) else (
+            next((exports[key] for key in ("./server", ".") if isinstance(exports, dict) and key in exports), None))
+        if not isinstance(target, str) or not target.startswith("./"):
+            return None, ("its package.json maps \"exports\" in a way sandbox-ai does not resolve (only a file for "
+                          "\"./server\" or \".\"): which module OpenCode 2 would load cannot be checked")
+        name = os.path.normpath(target[2:])
+        if name not in files or "link" in files[name]:
+            return None, f"its package.json exports {target[:80]!r}, which is no file of the plugin"
+        return name, None
+    for stem in ("server", "index"):
+        found = [stem + suffix for suffix in OPENCODE2_MODULE_SUFFIXES if stem + suffix in files]
+        if stem in files or any(path.startswith(stem + "/") for path in files):
+            return None, f"its {stem} is a folder or a file without an extension: not a module sandbox-ai checks"
+        if len(found) > 1:
+            return None, f"it has {', '.join(found)}: which one OpenCode 2 loads depends on Bun's order"
+        if found:
+            if "link" in files[found[0]]:
+                return None, f"{found[0]} is a symlink"
+            return found[0], None
+    return None, "no server or index module at its top: not an OpenCode 2 plugin"
+
+
+def read_opencode2_plugin(plugin, host_root, sandbox_root_path):
+    """PLUGIN's installed folder HOST_ROOT as OpenCode 2 loads it from SANDBOX_ROOT_PATH: {"plugin", "path", "files",
+    "sha256" (the whole folder: what an approval covers), "entry", "hooks" (one line: the module), "notes", "errors",
+    "declared": True}. The whole plugin is code in OpenCode 2's process: it is approved as a whole."""
+    tree = hook_tree(host_root, PLUGIN_LIMITS, keep=("package.json",), links=True)
+    result = {"plugin": plugin, "path": str(host_root), "sandbox_path": sandbox_root_path, "files": tree["files"],
+              "sha256": tree["sha256"], "entry": None, "hooks": [], "notes": [], "errors": list(tree["errors"]),
+              "declared": True, "groups": {}}
+    files = {f["path"]: f for f in tree["files"]}
+    entry, why = opencode2_entry(files, tree["kept"])
+    if why:
+        result["errors"].append(why)
+    else:
+        result["entry"] = entry
+        result["hooks"] = [{"plugin": entry, "files": [entry]}]
+    if result["errors"]:
+        result["sha256"] = None
+    return result
+
+
+def read_store_plugin(agent, plugin, host_root, claude_root):
+    """PLUGIN (installed by Claude at CLAUDE_ROOT in its sandbox, HOST_ROOT here) as AGENT reads it."""
+    where = sandbox_root(agent, plugin, claude_root)
+    if agent == "codex":
+        return read_codex_plugin(plugin, host_root, where)
+    if agent == "opencode2":
+        return read_opencode2_plugin(plugin, host_root, where)
+    return read_plugin_hooks(plugin, host_root, where)
+
+
+def stage_store_plugins(agent, plugins, installed_plugins, store=None, records=None):
+    """Codex's and OpenCode 2's view of the run's PLUGINS (ids) as INSTALLED_PLUGINS lists them: [{read_store_plugin's
+    keys, "host_root", "label", "kit", "trusted"}], every installed one (a plugin without hooks has nothing to
+    approve: "trusted" is then True for Codex)."""
+    records = trust_records() if records is None else records
+    staged = []
+    for plugin in plugins:
+        where = plugin_install(plugin, installed_plugins.get(plugin), store)
+        if where is None:
+            continue
+        info = read_store_plugin(agent, plugin, *where)
+        approved = hooks_trusted(agent, info["sha256"], plugin_trust_key(plugin), records)
+        staged.append({**info, "host_root": str(where[0]), "label": f"plugin {plugin}",
+                       "kit": plugin_trust_key(plugin), "trusted": approved})
     return staged
 
 

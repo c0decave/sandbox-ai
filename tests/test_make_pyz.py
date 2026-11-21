@@ -24,7 +24,13 @@ VERSION = next(line.split('"')[1] for line in (ROOT / "sandbox/agent_sandbox.py"
 def load(name):
     spec = importlib.util.spec_from_file_location(f"{name}_for_tests", ROOT / "scripts" / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # dist_boot starts itself again with -I (os.execv) when a PYTHON* variable is set: loaded here, that replaced the
+    # test run itself - with PYTHONPATH or PYTHONUNBUFFERED set, pytest ended with status 1 and no word.
+    kept = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("PYTHON")}
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        os.environ.update(kept)
     return module
 
 
@@ -137,9 +143,13 @@ def test_the_real_bundle_runs_as_a_pyz(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == f"sandbox-ai {VERSION}"
     verbose = run(pyz, tmp_path, "version", "--verbose")
-    assert "package: pyz" in verbose.stdout and "sandbox-ai.pyz: download the new one" in verbose.stdout
-    update = run(pyz, tmp_path, "update")
-    assert update.returncode == 1 and "download the new one" in update.stderr  # install.sh is never run
+    # It replaces itself with the release's sandbox-ai.pyz (tests/test_update_github.py does it against a fake
+    # GitHub); here the release source is nowhere: it asked for its own update, and install.sh is never run.
+    assert "package: pyz" in verbose.stdout and "updates: the signed release replaces it (sandbox-ai update)" in \
+        verbose.stdout and "self-update: yes" in verbose.stdout
+    update = run(pyz, tmp_path, "update", SANDBOX_AI_SOURCE="http://127.0.0.1:9/o/r")
+    assert update.returncode == 1 and "sandbox-ai update: cannot reach 127.0.0.1:9" in update.stderr
+    assert pyz.is_file() and "install.sh" not in update.stderr
     [copy] = copies(tmp_path)
     assert (copy / "sandbox" / "__pycache__").is_dir()  # precompiled once
     assert not (copy / "tests" / "__pycache__").exists()
@@ -460,20 +470,23 @@ def test_every_start_reads_the_manifest_without_zipfile(pyz, tmp_path):
 def test_a_workspace_holding_the_pyz_is_refused(tmp_path):
     """Review finding (HIGH), reproduced: `curl -fLO .../sandbox-ai.pyz` into a project, then a start there: the
     agent could rewrite the .pyz, and its next start runs that on the host. The boot names the package and its copy
-    (SANDBOX_AI_PACKAGE, SANDBOX_AI_PACKAGE_COPY), the launcher refuses such a workspace."""
+    (SANDBOX_AI_PACKAGE, SANDBOX_AI_PACKAGE_COPY); the launcher gives such a workspace (you decide) with the warning
+    that names the package."""
     make_dist = load("make_dist")
     project = tmp_path / "project"
     project.mkdir()
     pyz = make_pyz.build_pyz(make_dist.bundle(tmp_path, VERSION), project / "sandbox-ai.pyz", epoch=0)
     result = run(pyz, tmp_path, "claude", "--dry-run", "--no-config", "-w", str(project))
-    assert result.returncode != 0 and "contains" in result.stderr and "sandbox-ai.pyz" in result.stderr, \
+    assert result.returncode == 0 and "warning:" in result.stderr and "contains" in result.stderr and \
+        "sandbox-ai.pyz" in result.stderr and "code that runs on your host" in result.stderr, \
         result.stdout[-500:] + result.stderr[-500:]
     elsewhere = tmp_path / "bin"
     elsewhere.mkdir()
     moved = pyz.rename(elsewhere / "sandbox-ai.pyz")
     result = run(moved, tmp_path, "claude", "--dry-run", "--no-config", "-w", str(project))
     assert result.returncode == 0, result.stderr[-1000:]
-    assert run(moved, tmp_path, "claude", "--dry-run", "--no-config", "-w", str(elsewhere)).returncode != 0
+    said = run(moved, tmp_path, "claude", "--dry-run", "--no-config", "-w", str(elsewhere))
+    assert said.returncode == 0 and "sandbox-ai.pyz" in said.stderr and "warning:" in said.stderr, said.stderr[-1000:]
 
 
 def test_the_boot_names_the_package_and_its_copy(pyz, tmp_path):

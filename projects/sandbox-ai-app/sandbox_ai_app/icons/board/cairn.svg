@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<!-- sandbox-ai Board: Cairn: a pile of stones (own drawing, MIT; drawn in currentColor) -->
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <ellipse cx="12" cy="18.5" rx="8" ry="2.5"/>
+  <ellipse cx="12" cy="13" rx="5.5" ry="2.25"/>
+  <ellipse cx="12" cy="7.75" rx="3.5" ry="2"/>
+  <path d="M11 3.5h2"/>
+</g>
+</svg>

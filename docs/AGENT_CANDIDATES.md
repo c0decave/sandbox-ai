@@ -13,6 +13,11 @@ confirm in code or official docs is marked *(unverified)*.
 
 The 14-day rule: today is 2026-11-13, so a pin must be published on or before **2026-10-30**.
 
+**OpenCode 2** (2026-11-15) is not a candidate of this list but the next major line of a supported agent: a new npm
+package (`@opencode/cli`) with a new plugin and server API beside OpenCode 1 (`opencode-ai`, still maintained). It is
+integrated as an agent of its own, `sandbox-ai opencode2` (docs/OPENCODE2_REVIEW.md: why not an upgrade of
+`sandbox-ai opencode`, every host measured, the verdict).
+
 ## Summary
 
 | Rank | Candidate | Verdict | Why, in one line |
@@ -21,7 +26,7 @@ The 14-day rule: today is 2026-11-13, so a pin must be published on or before **
 | - | **Cairn** (oritera/Cairn) | **Integrate now** (as planned, pin a commit) | Its `runtime.execution: local` mode exists only on `main` (since 2026-07-15), not in a release. Pin `main` 8e7e0ea6 (2026-09-07). AGPL-3.0. |
 | 2 | **OpenHands** (Agent Canvas + Agent Server) | **Integrate later** (next after Goose) | Strong SWE agent with a web UI, automations and ACP. The project was restructured recently (CLI unmaintained, frontend-only main repo) and churns fast (Canvas 1.34->1.40 in 16 days). The Canvas sends a PostHog install event before consent unless it is switched off. |
 | 3 | **Letta Code** (letta-ai/letta-code) | **Integrate later** | Unique long-term memory and self-improving agents (MemGPT lineage), Apache-2.0, MCP. Letta Cloud is the default and the local backend is still flagged experimental. Telemetry and auto-update are on by default. About 100 releases since mid-August. |
-| 4 | **nanobot** (HKUDS/nanobot) | **Later, optional** | MIT, small Python core, WebUI + TUI, MCP, memory, cron, bwrap option. Mostly overlaps Hermes, which is already supported. |
+| 4 | **nanobot** (HKUDS/nanobot) | **Integrated in 0.1.97** (not live-tested yet; docs/NANOBOT_REVIEW.md) | MIT, a Python core (now about 144,000 lines), WebUI + TUI, MCP, memory, cron, bwrap option. Mostly overlaps Hermes, which is already supported. |
 | 5 | **ZeroClaw** (zeroclaw-labs/zeroclaw) | **Watch** | Apache-2.0 Rust single binary with SHA256SUMS. Gateway + dashboard, SOP engine, hardware. Overlaps Hermes; young, with config-schema churn. |
 | 6 | **OpenClaw** (openclaw/openclaw) | **Not now** | Huge (npm package 250 MB unpacked, install scripts), very fast churn, serious security history (CVEs, ClawHub malware). A messaging-assistant niche that Hermes already covers. |
 | 7 | **Moltis** (moltis-org/moltis) | **Not now** | MIT Rust, good supply-chain hygiene, but effectively one maintainer. Web-UI-first and built around its own container sandbox. Overlaps Hermes. |
@@ -193,7 +198,7 @@ The 14-day rule: today is 2026-11-13, so a pin must be published on or before **
 | Local mode | `runtime.execution: local` (workers run as host processes, reusing installed `claude`/`codex`/`pi` CLIs) was added in commit `233f5e8505b9`, **2026-07-15, after v0.2.1** (`dispatch.local.example.yaml` is 404 at v0.2.1). So pin a commit: **`main` = `8e7e0ea67552383851dfcabfba0c4e9c8d007878`, 2026-09-07** ("docs: add logo"), 14 commits ahead of v0.2.1 and more than 14 days old |
 | Maturity | 5.1k stars, effectively one author (l3yx, 70 commits), last push 2026-09-07 |
 | How it runs | The default dispatcher creates per-project worker containers **via the host Docker socket**, which is not acceptable here. Local mode needs no Docker and no API keys in the workers; the README warns that it runs "with your user's permissions and no sandbox", which inside sandbox-ai is exactly the point |
-| Workers | Claude Code, Codex, **Pi** (Pi is not a sandbox-ai agent: leave it out or add it later) |
+| Workers | Claude Code, Codex, **Pi** (Pi is a sandbox-ai agent since 0.1.97, `sandbox-ai pi`, docs/PI_REVIEW.md; Cairn's Pi worker still needs Pi in Cairn's image, which is built on the team image without it) |
 | Telemetry | No analytics found by grep in `cairn/` (only a vendored graph-layout JS) |
 | Integration shape | As in the plan: a uv lock with hashes at the pinned commit, `runtime.execution: local`, workers from the team image, server bound to `127.0.0.1:8000` and shown with `--browser`. Ship it unmodified with a link to the source (AGPL §13 applies to modified network use). Keep the pentest preset's egress allow-list to the authorised target only |
 
@@ -228,6 +233,9 @@ The 14-day rule: today is 2026-11-13, so a pin must be published on or before **
 ### Integrate later
 
 1. **OpenHands** (next). Pair Agent Canvas 1.34.0 with Agent Server 1.59.0 (or newer pairs once 14 days old, after checking compatibility).
+   - Done in 0.1.97 (`sandbox-ai openhands`, not live-tested yet; docs/OPENHANDS_REVIEW.md): Canvas 1.34.0 with the agent server it
+     was released with, 1.58.1, and the automation backend 1.26.0 (which pins the SDK to 1.58.1), the image's own uvx in front of the
+     real one instead of `OH_AGENT_SERVER_LOCAL_PATH`, the settings applied through the agent server's API.
    - Image: an npm lock (`npm ci --ignore-scripts`) plus a uv lock with hashes for `openhands-agent-server`. Start with `OH_AGENT_SERVER_LOCAL_PATH` (or a preinstalled venv) so that `uvx` never fetches at start.
    - Forced settings: `AGENT_CANVAS_DISABLE_TELEMETRY=1`; block `z.openhands.dev`, `*.posthog.com` and `api.lmnr.ai`. Refuse `OH_CONVERSATION_RUNTIME=docker` and remote backends.
    - Features: the Automation backend off by default (`automations`); Slack/GitHub/Linear integrations per switch.
@@ -242,6 +250,8 @@ The 14-day rule: today is 2026-11-13, so a pin must be published on or before **
    - Image: a pinned wheel and uv lock with hashes.
    - Forced settings: the WebUI updater disabled and the `raw.githubusercontent.com` release index closed. `tools.exec.sandbox` none (sandbox-ai is the sandbox; nested bwrap untested). Channels per switch.
    - How the human uses it: a tmux TUI, or the WebUI on `127.0.0.1:8765` via `--browser`.
+
+4. **Pi** (earendil-works/pi, formerly badlogic/pi-mono): done in 0.1.97 (`sandbox-ai pi`, not live-tested yet; docs/PI_REVIEW.md): Pi 1.4.0 from an npm lock (`npm ci --ignore-scripts`), `PI_OFFLINE` and `PI_TELEMETRY=0`, the proxy refusing its install report and bug reports, sandbox-ai's read-only extension for `--mcp` and `--llm`, its login as OpenCode's (`sandbox-ai login pi`).
 
 ### Watch or not now
 

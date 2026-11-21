@@ -46,14 +46,18 @@ SERVERS = (("ollama", "ollama", "http://127.0.0.1:11434", ["--model", "qwen3-cod
 ANTHROPIC = {"ollama", "lmstudio", "llamacpp", "vllm", "gateway", "gpu"}
 # The LLM presets and the server each is tried with first (its own kind; for Claude the raw API's Anthropic one).
 LLM_PRESETS = {"local-api": "api", "ollama": "ollama", "lm-studio": "lmstudio", "llama-cpp": "llamacpp", "vllm": "vllm"}
-# The catalog servers that need a folder of their own (sandbox-ai-mcp's catalog: engram and memory at /data).
-CATALOG_FOLDERS = {"engram": ["/data"], "memory": ["/data"]}
+# The catalog servers a preset gives a folder of its own (--mcp-mount): engram and memory at /data, the file-analysis
+# servers the samples at /work, smali and frida also a writable /out for what they make.
+CATALOG_FOLDERS = {"engram": ["/data"], "memory": ["/data"], "binwalk": ["/work"], "capa": ["/work"], "jadx": ["/work"], "cfr": ["/work"],
+                   "radare2": ["/work"], "floss": ["/work"], "yara": ["/work"], "smali": ["/work", "/out"],
+                   "frida": ["/work", "/out"], "axross": ["/work", "/axross", "/ssh"]}
 # The entries of the two MCP catalogs (sandbox-ai-mcp: "mcp", axross-mcp-hub: "hub") a preset may name; checked against
 # the catalogs themselves where a checkout has them (test_the_mcp_servers_the_presets_name_are_in_the_catalogs).
 CATALOG_ENTRIES = {
-    "mcp": {"binwalk", "brave-search", "capa", "duckduckgo", "engram", "gowitness", "memory", "openosint", "osint-mcp",
-            "playwright", "radare2", "searxng", "signal", "telegram", "telegram-user", "web-fetch", "whatsapp",
-            "whatweb"},
+    "mcp": {"axross", "binwalk", "brave-search", "capa", "cfr", "duckduckgo", "engram", "frida", "gowitness", "jadx",
+            "memory",
+            "openosint", "osint-mcp", "playwright", "radare2", "searxng", "signal", "smali", "telegram",
+            "telegram-user", "web-fetch", "whatsapp", "whatweb"},
     "hub": {"binwalk", "capa", "crtsh", "dnstwist", "exiftool", "ffuf", "floss", "gitleaks", "john", "mcpcap", "nmap",
             "nuclei", "radare2", "sleuthkit", "sqlmap", "tshark", "yara"},
 }
@@ -84,8 +88,9 @@ def host(tmp_path_factory):
     # The keys a preset's --api-key names (coding-goose: Anthropic's), kept as a user keeps them: a start refuses a
     # key that is not there, the dry run too.
     patch.setenv("SANDBOX_AI_TEST_API_KEY", "sk-ant-not-a-key")
-    assert s.load_secret_store_module().main(["set", "ANTHROPIC_API_KEY", "--from-env", "SANDBOX_AI_TEST_API_KEY"],
-                                             out=lambda line: None) == 0
+    for secret in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"):  # default-dsh: DeepSeek's
+        assert s.load_secret_store_module().main(["set", secret, "--from-env", "SANDBOX_AI_TEST_API_KEY"],
+                                                 out=lambda line: None) == 0
     for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "WAYLAND_DISPLAY", "GIT_CONFIG_GLOBAL"):
         patch.delenv(name, raising=False)
     patch.setattr(s, "load_policy", lambda path=None: {})
@@ -139,7 +144,8 @@ def host(tmp_path_factory):
     # The images the presets' services name (--service NAME:image=...), as `sandbox-ai images pull --as NAME` records
     # them (pulled, pinned by digest, unchecked).
     images = {}
-    for index, (name, user) in enumerate((("postgres", "999:999"), ("redis", "999:1000"), ("web", "101:101"))):
+    for index, (name, user) in enumerate((("postgres", "999:999"), ("redis", "999:1000"), ("web", "101:101"),
+                                          ("showcase-web", "101:101"))):
         images[name] = {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + str(index) * 64,
                         "id": "sha256:" + str(index + 5) * 64, "digest": "sha256:" + str(index) * 64, "user": user,
                         "ports": [], "os": {}}
@@ -269,6 +275,31 @@ def test_the_presets_asked_for_are_there():
     assert PRESETS["tor"]["category"] == "privacy" and PRESETS["tor"]["values"]["tor"]["kind"] == "vpn"
 
 
+# Every agent of the launcher has a basic preset: the agent with sandbox-ai's defaults, nothing opened beyond its model,
+# nothing to fill in (only a login or a key in the keyring) - usable at once.
+
+
+def every_agent():
+    import ast
+    tree = ast.parse((ROOT / "sandbox/agent_mcp.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "AGENTS":
+            return ast.literal_eval(node.value)
+    raise AssertionError("agent_mcp.AGENTS not found")
+
+
+@pytest.mark.parametrize("agent", every_agent())
+def test_every_agent_has_a_basic_default_preset(agent):
+    preset = PRESETS.get(f"default-{agent}")
+    assert preset, f"no preset default-{agent}"
+    assert preset["agents"] == [agent] and preset["category"] == "agents"
+    assert preset["translations"]["de"]["title"].endswith("(Standard)")
+    allowed = {"--api-key", "--model"}
+    flags = {option for option in preset["options"] if option.startswith("-")}
+    assert flags <= allowed, f"default-{agent} opens more than its model: {flags - allowed}"
+    assert not preset.get("values") and not preset.get("mcp")  # nothing to fill in, no servers
+
+
 @pytest.mark.parametrize("full", [False, True], ids=["required-values", "every-value"])
 @pytest.mark.parametrize("agent", AGENTS)
 @pytest.mark.parametrize("name", sorted(PRESETS))
@@ -349,6 +380,95 @@ def test_every_preset_is_in_a_category_of_the_one_list():
     assert set(P.LEGACY_CATEGORIES.values()) <= set(P.CATEGORIES)
 
 
+def test_the_analysis_presets_give_their_servers_the_samples():
+    """MCP review 2026-11-17 (group A): firmware-iot and software-analysis told the agent to analyse /mnt/firmware or
+    /mnt/samples with binwalk, capa, radare2, FLOSS and YARA, but gave those servers nothing: each read whatever folder
+    `sandbox-ai mcp add` had once given it at /work (`mcp add hub:binwalk`, the note said, without the --mount the
+    entry requires), and the agent's paths were not theirs. The start now mounts the preset's folder at the servers'
+    /work (read-only), the first task says how the paths map, and binwalk, capa and radare2 are this project's
+    reviewed entries (mcp:)."""
+    for preset_id, value, servers in (("firmware-iot", "firmware", ["binwalk"]),
+                                      ("software-analysis", "samples", ["capa", "floss", "radare2", "yara", "binwalk", "jadx", "cfr"])):
+        preset = PRESETS[preset_id]
+        mounts = dict(value.split("=", 1) for value, _ in P.option_values(preset, {value: "/x"}, "--mcp-mount"))
+        assert mounts == {f"{server}:/work": "/x:ro" for server in servers}, (preset_id, mounts)
+        assert all(f"mcp:{name}" in preset["mcp"] for name in ("binwalk", "capa", "radare2") if name in servers)
+        assert "as /work" in preset["prompt"], preset_id
+        hint = P.missing(preset, {value: str(ROOT)}, "claude", mcp_names=set())
+        assert any(f"sandbox-ai mcp add mcp:binwalk --mount /work={ROOT}:ro" in line for line in hint), hint
+    assert PRESETS["hardware-analysis"]["mcp"] == ["mcp:binwalk"]
+
+
+def test_the_android_debugging_preset():
+    """android-debugging (user 2026-11-19): the APKs read-only everywhere (the sandbox at /mnt/apks, the servers at
+    their /work), one writable output folder the agent and the servers share (/mnt/out, the servers' /out), the
+    adb server of this host (--allow-host-port 5037), a device as an optional value, the four MCP servers of
+    sandbox-ai-mcp, and a ruleset that asks before anything is installed on a device, wiped, flashed, hooked or
+    signed."""
+    preset = PRESETS["android-debugging"]
+    assert preset["category"] == "security"   # the gallery's "Security analysis" (the old id "analysis" points there)
+    assert preset["mcp"] == ["mcp:jadx", "mcp:cfr", "mcp:smali", "mcp:frida"]
+    options = list(option_pairs(P.expand(preset, {"apks": "/x", "out": "/y"}, extras=False)))
+    assert ("--mount", "/x:/mnt/apks:ro") in options
+    assert ("--mount", "/y:/mnt/out:rw") in options
+    assert ("--allow-host-port", "5037") in options
+    mounts = dict(value.split("=", 1) for value, _ in P.option_values(preset, {"apks": "/x", "out": "/y"},
+                                                                      "--mcp-mount"))
+    assert mounts == {"jadx:/work": "/x:ro", "cfr:/work": "/x:ro", "smali:/work": "/x:ro", "smali:/out": "/y:rw",
+                      "frida:/work": "/x:ro", "frida:/out": "/y:rw"}, mounts
+    assert "/mnt/apks/app.apk is /work/app.apk there" in preset["prompt"]
+    assert "never instructions" in preset["prompt"]
+    # The optional values: a USB device to hand over, and the frida-server's address (the MCP server's endpoint)
+    assert preset["values"]["device"]["kind"] == "device" and preset["values"]["device"]["optional"]
+    assert preset["values"]["frida_device"]["kind"] == "host" and preset["values"]["frida_device"]["optional"]
+    assert preset["values"]["apks"]["kind"] == "folder" and "default" not in preset["values"]["apks"]
+    assert preset["values"]["out"]["kind"] == "folder" and "default" not in preset["values"]["out"]
+    notes = " ".join(preset["notes"])
+    assert "images recipe android --from AGENT" in notes and "--image-variant android" in notes
+    assert "adb start-server" in notes and "Podman only" in notes
+    assert "--allow-tcp" in notes and "NOT reachable from an MCP server's container" in notes
+    assert "FRIDA_WRITE=1" in notes
+    assert "throwaway" in notes or "that one call" in notes
+
+    # Its ruleset: installing, wiping, flashing and taking root are asked; the servers' device writes and signing
+    # too; everything the device, the app and the decompilers say is untrusted.
+    rules = json.loads((ROOT / "sandbox" / "presets" / "android-debugging.rules.json").read_text())
+    assert preset["rules"] == "android-debugging.rules.json"
+    ids = {rule["id"] for rule in rules["tool"]}
+    assert {"adb-install", "adb-uninstall", "adb-wipe", "adb-root-shell", "fastboot-write"} <= ids, ids
+    assert all(rule["decision"] == "ask" and rule["reason"] for rule in rules["tool"])
+    assert all(rule["tool"] == "Bash" for rule in rules["tool"])
+    mcp_rules = {rule["id"]: rule for rule in rules["mcp"]}
+    assert set(mcp_rules["frida-device-writes"]["tool"]) == {"spawn", "resume", "kill", "push_server"}
+    assert set(mcp_rules["smali-signing"]["tool"]) == {"sign_apk", "apktool_build", "assemble"}
+    assert all(rule["decision"] == "ask" and rule["reason"] for rule in rules["mcp"])
+    assert {rule["server"] for rule in rules["untrusted"]} == {"frida", "smali", "jadx", "cfr"}
+    # Every rule's pattern compiles, and the ones that matter match what they are meant to catch
+    for rule in rules["tool"]:
+        pattern = rule["args"]["command"]
+        for part in (pattern.get("allOf") or [pattern]):
+            if "pattern" in part:
+                re.compile(part["pattern"])
+    install = next(r for r in rules["tool"] if r["id"] == "adb-install")["args"]["command"]["pattern"]
+    assert re.fullmatch(install, "adb -s emulator-5554 install /mnt/out/patched.apk")
+    assert not re.fullmatch(install, "adb shell pm list packages")
+    wipe = next(r for r in rules["tool"] if r["id"] == "adb-wipe")["args"]["command"]["pattern"]
+    assert re.fullmatch(wipe, "adb shell pm clear com.example.app")
+    assert re.fullmatch(wipe, "adb shell rm /data/local/tmp/x")
+    assert re.fullmatch(wipe, "adb shell settings put global x 1")
+    assert not re.fullmatch(wipe, "adb shell getprop ro.product.cpu.abi")
+    assert not re.fullmatch(wipe, "adb shell ls /data/local/tmp")
+    root_shell = next(r for r in rules["tool"] if r["id"] == "adb-root-shell")["args"]["command"]["pattern"]
+    assert re.fullmatch(root_shell, "adb shell su 0 id") and not re.fullmatch(root_shell, "adb shell id")
+    spawn = next(r for r in rules["tool"] if r["id"] == "frida-cli-spawn")["args"]["command"]["pattern"]
+    assert re.fullmatch(spawn, "frida -U -f com.example.app -l hooks.js")
+    assert not re.fullmatch(spawn, "frida-ps -U")
+    flash = next(r for r in rules["tool"] if r["id"] == "fastboot-write")["args"]["command"]["pattern"]
+    assert re.fullmatch(flash, "fastboot flashing unlock")
+    assert re.fullmatch(flash, "fastboot flash boot patched.img")
+    assert not re.fullmatch(flash, "fastboot devices")
+
+
 def test_the_mcp_servers_the_presets_name_are_in_the_catalogs():
     """Every catalog server a preset names (hub:capa, mcp:engram; one by default in an --mcp option) is an entry of
     that catalog: `sandbox-ai mcp add` the note names finds it. Checked against the catalogs themselves where this
@@ -356,7 +476,10 @@ def test_the_mcp_servers_the_presets_name_are_in_the_catalogs():
     for prefix, folder in (("mcp", "sandbox-ai-mcp"), ("hub", "axross-mcp-hub")):
         path = ROOT / "projects" / folder / "catalog.json"
         if path.is_file():
-            assert {entry["name"] for entry in json.loads(path.read_text())["entries"]} >= CATALOG_ENTRIES[prefix]
+            have = {entry["name"] for entry in json.loads(path.read_text())["entries"]}
+            # A checkout of the catalog that is older than a preset here: only the servers whose branch is not
+            # merged yet may be missing, and they are named (smali and frida: sandbox-ai-mcp feat/android).
+            assert CATALOG_ENTRIES[prefix] - have <= {"smali", "frida"}, CATALOG_ENTRIES[prefix] - have
     named = []
     for name, preset in PRESETS.items():
         for server in preset.get("mcp", []):
@@ -404,8 +527,12 @@ def test_a_memory_preset_asks_for_its_folder_and_gives_it_to_its_server(host, ca
     entry = next(e for e in plan["mcp"] if e["name"] == server)
     assert entry["own_mounts"] == [{"target": "/data", "host": str(brain), "mode": "rw"}] and not brain.exists()
     assert plan["dangerously_skip_permissions"] and plan["workspace_mode"] == "rw"
-    with pytest.raises(ValueError, match="which the agent can write"):
+    # Inside the workspace: given (you decide), with the warning that the agent can change the memory there.
+    said = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(s, "warner", lambda warn=None: warn or said.append)
         dry_run(capsys, work, "claude", name, {**values, folder_value: str(work / ".brain")})
+    assert any("which the agent can write" in text for text in said), said
     found = P.missing(preset, {**values, folder_value: "/srv/brains/app"}, "codex", mcp_names=set())
     assert f"sandbox-ai mcp add mcp:{server} --mount /data=/srv/brains/app:rw" in "\n".join(found)
 
@@ -527,7 +654,9 @@ def test_the_full_stack_showcase_names_what_it_needs_pinned(host, capsys):
     text = "\n".join(preset["notes"] + [spec["hint"] for spec in preset["values"].values()])
     pulled = re.findall(r"images pull (\S+) --as postgres", text)
     assert pulled and all(re.fullmatch(r"docker\.io/library/postgres:\d+\.\d+-bookworm", ref) for ref in pulled)
-    assert "images build-image web --builtin showcase-web" in text
+    assert "images build-image showcase-web --builtin showcase-web" in text
+    # (2026-11-19: its default is the template's own name - the app's start builds it when it is not built yet)
+    assert preset["values"]["web"]["default"] == "showcase-web"
     assert "showcase-web" in s.load_services_module().builtin_images()
     assert "images recipe django --from AGENT" in text and "--image-variant django" in text
     assert "django" in s.load_services_module().images_module().RECIPES
@@ -621,6 +750,57 @@ def option_pairs(options):
     return pairs
 
 
+def test_the_axross_mcp_server_preset():
+    """axross-mcp-server (user 2026-11-20): the MCP server axross on a folder of yours (its /work; the agent sees it
+    read-only at /mnt/files), read-only unless the values say rw and write=1, axross's saved connections and the ssh
+    folder read-only and optional, the host of a connection as a value for the server's network (the preset cannot
+    open it: sandbox-ai mcp set does), and a ruleset that lets the reads run and asks before every write, delete,
+    rename, copy, mode change and link."""
+    preset = PRESETS["axross-mcp-server"]
+    assert preset["category"] == "development" and preset["mcp"] == ["mcp:axross"]
+    assert set(preset["translations"]["de"]) == {"title", "description"}
+    values = {"files": "/x", "connections": "/c", "ssh": "/s"}
+    options = list(option_pairs(P.expand(preset, values, extras=False)))   # the defaults filled in: ro, write=0
+    assert ("--mount", "/x:/mnt/files:ro") in options
+    assert ("--mcp-mount", "axross:/work=/x:ro") in options and ("--mcp-env", "axross:AXROSS_WRITE=0") in options
+    values.update(files_mode="ro", write="0")
+    assert [flag for flag, _ in options if flag == "--mount"] == ["--mount"]   # nothing else of yours in the sandbox
+    mounts = dict(value.split("=", 1) for value, _ in P.option_values(preset, values, "--mcp-mount"))
+    assert mounts == {"axross:/work": "/x:ro", "axross:/axross": "/c:ro", "axross:/ssh": "/s:ro"}, mounts
+    assert [value for value, _ in P.option_values(preset, values, "--mcp-env")] == ["axross:AXROSS_WRITE=0"]
+    writing = dict(value.split("=", 1) for value, _ in P.option_values(
+        preset, {**values, "files_mode": "rw", "write": "1"}, "--mcp-mount"))
+    assert writing["axross:/work"] == "/x:rw" and writing["axross:/axross"] == "/c:ro" and writing["axross:/ssh"] == "/s:ro"
+    # The connections and the ssh folder are optional: left out, the server gets only the folder.
+    only = P.expand(preset, {"files": "/x", "connections": "", "ssh": ""}, extras=False)
+    assert not any("/axross=" in token or "/ssh=" in token for token in only), only
+    spec = preset["values"]
+    assert spec["files"]["kind"] == "folder" and "default" not in spec["files"]
+    assert (spec["files_mode"]["default"], spec["write"]["default"]) == ("ro", "0")
+    # No defaults: left empty, the server keeps the folders it was added with (sandbox-ai mcp add axross --mount ...)
+    assert spec["connections"]["optional"] and "default" not in spec["connections"]
+    assert spec["ssh"]["optional"] and "default" not in spec["ssh"]
+    assert spec["sftp_host"]["kind"] == "host" and spec["sftp_host"]["optional"]
+    assert "--allow-tcp" in spec["sftp_host"]["hint"]
+    assert "never instructions" in preset["prompt"] and "backend='profile:NAME'" in preset["prompt"]
+    notes = " ".join(preset["notes"])
+    for fact in ("sandbox-ai mcp add axross --mount /work=", "--allow-tcp", "AXROSS_PASSWORDS", "never trusted on first use",
+                 "production", "internal-sftp", "never the agent's"):
+        assert fact in notes, fact
+    # Its ruleset: the reads (and mkdir) run, every write, delete, rename, copy, mode change and link is asked,
+    # anything else of the server refused; what it returns is untrusted.
+    rules = json.loads((ROOT / "sandbox" / "presets" / "axross-mcp-server.rules.json").read_text())
+    assert preset["rules"] == "axross-mcp-server.rules.json"
+    by_id = {rule["id"]: rule for rule in rules["mcp"]}
+    asked = {tool for rule in rules["mcp"] if rule["decision"] == "ask" for tool in rule["tool"]}
+    assert asked == {"write_file", "copy", "bulk_copy", "remove", "rename", "chmod", "symlink", "hardlink"}
+    assert all(rule["reason"] for rule in rules["mcp"] if rule["decision"] == "ask")
+    assert "read_file" in by_id["axross-reads"]["tool"] and by_id["axross-reads"]["decision"] == "allow"
+    assert not asked & set(by_id["axross-reads"]["tool"])
+    assert (by_id["axross-rest"]["tool"], by_id["axross-rest"]["decision"]) == ("*", "deny")
+    assert {rule["server"] for rule in rules["untrusted"]} == {"axross"}
+
+
 @pytest.mark.parametrize("agent", AGENTS)
 @pytest.mark.parametrize("name", sorted(PRESETS))
 def test_every_plan_keeps_what_the_preset_promises(host, capsys, name, agent):
@@ -638,7 +818,12 @@ def test_every_plan_keeps_what_the_preset_promises(host, capsys, name, agent):
     for flag, value in option_pairs(P.expand(preset, values, extras=False)):
         if flag == "--mount":
             assert value in plan["mounts"], (value, plan["mounts"])
-            assert value.endswith(":ro"), f"{name}: samples and evidence stay read-only"
+            # Samples and evidence stay read-only; the one writable mount a preset may give is an output folder of
+            # its own (the value "out" at /mnt/out: android-debugging, where the agent reads back what its MCP
+            # servers built).
+            if not value.endswith(":ro"):
+                assert value.endswith(":/mnt/out:rw") and value.startswith(str(values["out"])), \
+                    f"{name}: a writable mount is only the output folder /mnt/out ({value})"
         elif flag == "--gui":
             assert plan["gui"], name
         elif flag == "--gui-screen":
@@ -664,12 +849,14 @@ def test_every_plan_keeps_what_the_preset_promises(host, capsys, name, agent):
             assert value in [entry["path"] for entry in plan["devices"]], plan["devices"]
         elif flag == "--gpu":
             assert plan["gpu"] == value
-        elif flag == "--mcp-mount":  # the server's folder of this start, in an instance of its own
+        elif flag == "--mcp-mount":  # the server's folders of this start, in an instance of its own
             server, _, rest = value.partition(":")
             target, _, host_folder = rest.partition("=")
             entry = next(e for e in plan["mcp"] if e["name"] == server)
-            assert entry["instance"].startswith(server + ".") and entry["own_mounts"] == [
-                {"target": target, "host": host_folder.rsplit(":", 1)[0], "mode": host_folder.rsplit(":", 1)[1]}]
+            assert entry["instance"].startswith(server + ".")
+            # A server may get more than one folder (android-debugging: the APKs at /work, the output at /out).
+            assert {"target": target, "host": host_folder.rsplit(":", 1)[0],
+                    "mode": host_folder.rsplit(":", 1)[1]} in entry["own_mounts"], entry["own_mounts"]
         elif flag == "--dangerously-skip-permissions":
             assert plan["dangerously_skip_permissions"] is True
         elif flag == "--service":
@@ -841,10 +1028,10 @@ def test_your_own_development_preset_with_its_folders(host, capsys, monkeypatch)
 # --- the agents' own presets: "Coding with AGENT" and "AGENT with a local model" for every harness ------------------
 
 def test_every_agent_has_its_coding_and_its_local_model_preset():
-    """Each harness of the launcher (claude, codex, opencode, hermes, dsh, qwen, goose) has both, for it alone; the
+    """Each harness of the launcher (claude, codex, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi) has both, for it alone; the
     local one opens only the server (--no-provider-defaults) with the loop guard on. Hermes' local one is the older
     hermes-local-llm (category llm), not a second copy."""
-    assert set(s.AUTH_TARGETS) == {"claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"}
+    assert set(s.AUTH_TARGETS) == {"claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"}
     for agent in s.AUTH_TARGETS:
         coding, local = PRESETS[f"coding-{agent}"], PRESETS[f"{agent}-local-llm"]
         assert coding["agents"] == [agent] and local["agents"] == [agent], agent
@@ -858,7 +1045,7 @@ def test_every_agent_has_its_coding_and_its_local_model_preset():
     assert P.CATEGORY_INFO["agents"]["title"] == {"en": "Agents", "de": "Agenten"}
 
 
-@pytest.mark.parametrize("agent", ["hermes", "dsh", "qwen", "goose"])
+@pytest.mark.parametrize("agent", ["opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"])
 def test_the_presets_of_the_experimental_agents(host, capsys, monkeypatch, agent):
     """The ones test_every_preset_with_every_agent leaves out (its agents are claude, codex and opencode): presets
     check, a dry run (no opt-in: they are only not live-tested yet), and only the network the preset names."""

@@ -298,7 +298,9 @@ def test_remember_catalog_env(scenario, tmp_path):
         source = remembered(tmp_path, [GOWITNESS, TELEGRAM])
         known = json.loads(m.catalog_env_file().read_text())
         assert known[source]["mcp:gowitness"] == {"signature": "unsigned", "env": {
-            "ALLOW_PRIVATE_TARGETS": {"required": False, "secret": False}}}
+            "ALLOW_PRIVATE_TARGETS": {"required": False, "secret": False}},
+            # (its network and hosts too: mcp list and doctor tell a full server of an allowlist entry to switch)
+            "network": "full", "hosts": []}
         assert known[source]["mcp:telegram"]["env"]["TELEGRAM_BOT_TOKEN"] == {"required": True, "secret": True}
         assert oct(m.catalog_env_file().stat().st_mode & 0o777) == "0o600"
     elif scenario == "sad":  # a catalog whose signature does not verify: what it said before is forgotten
@@ -580,3 +582,84 @@ def test_mcp_catalog_json_names_the_folders_each_entry_takes(tmp_path, capsys):
         {"target": "/work", "required": True, "description": "the files to read"},
         {"target": "/out", "required": False, "description": ""}]
     assert entries["gowitness"]["mounts"] == []
+
+
+# --- a variable that changes what code runs (LD_PRELOAD, NODE_OPTIONS, PYTHONSTARTUP, ...) ---------------------------
+# The human's own --mcp-env is set, with a warning that names the risk (stderr and launcher.log); a preset passed on
+# (built-in, an extra directory's: someone else's text) may not set one - "give it yourself if you mean it".
+
+@pytest.mark.parametrize("name", ["LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "NODE_OPTIONS", "PYTHONSTARTUP",
+                                  "PYTHONPATH", "PERL5OPT", "RUBYOPT", "BASH_ENV", "JAVA_TOOL_OPTIONS", "PATH",
+                                  "DYLD_INSERT_LIBRARIES", "LD_BIND_NOW"])
+def test_a_variable_that_changes_what_code_runs_is_known(name):
+    assert m.code_variable(name)
+
+
+@pytest.mark.parametrize("name", ["ALLOW_PRIVATE_TARGETS", "TELEGRAM_ALLOWED_CHATS", "LOG_LEVEL", "NODE_ENV",
+                                  "PYTHONUNBUFFERED", "LANG", "OLD_PRELOAD"])
+def test_an_ordinary_variable_is_not(name):
+    assert not m.code_variable(name)
+
+
+def test_code_env_in_options():
+    options = ["--mcp", "g", "--mcp-env", "g:NODE_OPTIONS=--require /work/x.js", "--mcp-env=g:LD_PRELOAD=/w/x.so",
+               "--mcp-env", "g:ALLOW_PRIVATE_TARGETS=1", "--mcp-env", "g:PYTHONPATH@SECRET_ONE", "--mcp-env", "bad"]
+    assert m.code_env_in(options) == ["--mcp-env g:NODE_OPTIONS", "--mcp-env g:LD_PRELOAD", "--mcp-env g:PYTHONPATH"]
+    # A whole value the human gives (--preset-value) is theirs.
+    assert m.code_env_in(options, ["g:LD_PRELOAD=/w/x.so"]) == ["--mcp-env g:NODE_OPTIONS", "--mcp-env g:PYTHONPATH"]
+    assert m.code_env_in(["--mcp-env"]) == [] and m.code_env_in([]) == []
+
+
+def test_code_env_warnings():
+    a = s.parse_args(["codex", "--mcp", "g", "--mcp-env", "g:LD_PRELOAD=/work/x.so", "--mcp-env", "g:X=1"])
+    said = m.code_env_warnings(a)
+    assert len(said) == 1 and "--mcp-env g:LD_PRELOAD" in said[0] and "changes what code runs" in said[0]
+    assert "MCP server g" in said[0] and "--mcp-mount" in said[0]
+    assert m.code_env_warnings(s.parse_args(["codex", "--mcp-env", "g:X=1"])) == []
+    assert m.code_env_warnings(s.parse_args(["codex", "--mcp-env", "bad"])) == []  # (start_problems says it)
+
+
+@pytest.fixture
+def mcp_host(tmp_path):
+    from live_fakes import Host
+    host = Host(tmp_path)
+    host.env.pop("SANDBOX_AI_RUN", None)
+    added = host.run("mcp", "add", "mcp:duckduckgo", "--network", "full", "--no-pull")
+    assert added.returncode == 0, added.stderr
+    image = json.loads((host.home / ".config/sandbox-ai/mcp.json").read_text())["duckduckgo"]["image"]
+    host.add_image(image, "localhost/claude-sandbox:latest")
+    return host
+
+
+def test_mcp_env_ld_preload_of_yours_is_set_with_a_warning(mcp_host):
+    """End to end: `--mcp-env duckduckgo:LD_PRELOAD=...` was taken without a word."""
+    done = mcp_host.run("claude", "--mcp", "duckduckgo", "--mcp-env", "duckduckgo:LD_PRELOAD=/work/x.so", "--dry-run")
+    assert done.returncode == 0, done.stderr
+    assert "warning: --mcp-env duckduckgo:LD_PRELOAD" in done.stderr and "changes what code runs" in done.stderr
+    log = (mcp_host.home / ".local/state/sandbox-ai/launcher.log").read_text()
+    assert "--mcp-env duckduckgo:LD_PRELOAD" in log
+    # A session's start: its supervisor says it, relayed whole to the terminal - once.
+    session = mcp_host.run("claude", "--session", "s1", "--mcp", "duckduckgo", "--mcp-env",
+                           "duckduckgo:LD_PRELOAD=/work/x.so")
+    assert session.stderr.count("changes what code runs") == 1, session.stderr
+    assert "set as you chose it" in session.stderr
+    plain = mcp_host.run("claude", "--mcp", "duckduckgo", "--mcp-env", "duckduckgo:SAFESEARCH=off", "--dry-run")
+    assert plain.returncode == 0 and "changes what code runs" not in plain.stderr, plain.stderr
+
+
+def test_mcp_env_node_options_in_a_preset_passed_on_is_refused(mcp_host, tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    document = {"format": "sandbox-ai preset", "version": 1, "id": "theirs", "title": "t", "description": "d",
+                "options": ["--mcp", "duckduckgo", "--mcp-env", "duckduckgo:NODE_OPTIONS=--require=/work/x.js"]}
+    (shared / "theirs.json").write_text(json.dumps(document))
+    assert mcp_host.run("presets", "dirs", "add", shared).returncode == 0
+    refused = mcp_host.run("claude", "--preset", "theirs", "--dry-run")
+    assert refused.returncode != 0
+    assert "--mcp-env duckduckgo:NODE_OPTIONS is not allowed in a preset that is not yours" in refused.stderr, \
+        refused.stderr
+    own = mcp_host.home / ".config/sandbox-ai/presets"
+    own.mkdir(parents=True, exist_ok=True)
+    (own / "mine.json").write_text(json.dumps({**document, "id": "mine"}))
+    mine = mcp_host.run("claude", "--preset", "mine", "--dry-run")
+    assert mine.returncode == 0 and "warning: --mcp-env duckduckgo:NODE_OPTIONS" in mine.stderr, mine.stderr

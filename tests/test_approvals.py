@@ -102,7 +102,7 @@ def test_questions_name_the_sandbox_that_asks(run, tmp_path, monkeypatch):
     thread.join(5)
     assert titles == [r"sandbox-ai asks: claude-1 (~/app, session web\x1b[2J)"]
     questions, lines = ap.questions, []
-    monkeypatch.setattr(ap, "questions", lambda: questions(run))
+    monkeypatch.setattr(ap, "questions", lambda late=False, **kw: questions(run, late=late, **kw))
     assert ap.main(["list"], out=lines.append) == 0
     assert lines[0].split() == ["ID", "SANDBOX", "QUESTION"]
     assert [cell.strip() for cell in lines[1].split("  ") if cell.strip()] == ["1-1-1", "claude-1 (~/app)", "look up pypi.org"]
@@ -326,10 +326,10 @@ def test_answer_refuses_ambiguous_ids(run, tmp_path):
 
 
 def test_lookup_opens_only_public_addresses(run, tmp_path):
-    ask(run, "1-1-1", kind="dns", name="x.attacker.example")
+    ask(run, "1-1-1", kind="dns", name="x.attacker.example.org")
     with pytest.raises(ValueError, match="non-public"):
         ap.answer("1-1-1", "allow", "run", runs=run, resolver=lambda n: ["10.0.0.5", "127.0.0.1"], out=lambda l: None)
-    assert "x.attacker.example" not in (tmp_path / "session/hosts").read_text()
+    assert "x.attacker.example.org" not in (tmp_path / "session/hosts").read_text()
     lines = []
     reply = ap.answer("1-1-1", "allow", "once", runs=run, resolver=lambda n: ["192.168.1.1", "151.101.0.223"],
                       out=lines.append)
@@ -518,7 +518,7 @@ def test_list_as_json_for_the_web_interface(run, monkeypatch):
     """approvals list --json: the same questions as the table, escaped the same way."""
     ask(run, "1-1-1", kind="dns", name="pypi.org\x1b[2J")
     real = ap.questions
-    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: real(run, answered))
+    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False, **kw: real(run, answered, **kw))
     lines = []
     assert ap.main(["list", "--json"], out=lines.append) == 0
     (entry,) = json.loads(lines[0])
@@ -654,7 +654,7 @@ def test_allow_no_open_answers_a_browser_question_without_opening_it_here(run, m
     monkeypatch.setattr(ap, "open_browser", opened.append)
     directory = ask(run, "1-1-1", kind="browser", url="https://claude.ai/oauth?code=1")
     questions = ap.questions
-    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False: questions(run, answered))
+    monkeypatch.setattr(ap, "questions", lambda runs=None, answered=False, **kw: questions(run, answered, **kw))
     assert ap.main(["allow", "1-1-1", "--no-open"], out=lines.append) == 0
     assert opened == [] and json.loads((directory / "1-1-1.answer").read_text())["decision"] == "allow"
     assert (directory / "1-1-1.done").exists() and "not opened on this host" in lines[0]
@@ -733,3 +733,89 @@ def test_the_desktop_notifications_default_says_what_the_launchers_show(monkeypa
     ap.desktop_notification("canary", "went off", alarm=True)
     assert calls == shown
     assert ap.shows(alarm=True) is bool(shown) and ap.shows() is ("question" in shown)
+
+
+# --- A damaged approved.json is never overwritten: the next "always" wrote back only its own entry, and the human's
+# earlier answers were gone (the audit of 2026-11-16) -------------------------------------------------------------
+
+@pytest.mark.parametrize("damage", ['{"/srv/app": {"hosts": ["pypi.org"]', '["not", "an object"]', "\x00\x00"])
+def test_damaged_approved_json_is_kept_aside_not_overwritten(run, tmp_path, capsys, damage):
+    path = ap.approved_file()
+    path.parent.mkdir(parents=True)
+    path.write_text(damage)
+    ap.remember(tmp_path / "app", host="files.pythonhosted.org")
+    kept = sorted(path.parent.glob("approved.json.damaged-*"))
+    assert len(kept) == 1 and kept[0].read_text() == damage  # every earlier answer is still there
+    assert kept[0].stat().st_mode & 0o777 == 0o600
+    assert ap.approved_for(tmp_path / "app")["hosts"] == ["files.pythonhosted.org"]
+    said = capsys.readouterr().err
+    assert "approved.json could not be read" in said and kept[0].name in said and "remembered" in said
+
+
+def test_unreadable_approved_json_is_not_written(run, tmp_path, monkeypatch):
+    """A store that cannot be read at all (not a missing one) is left as it is: the remember fails, nothing lost."""
+    path = ap.approved_file()
+    path.parent.mkdir(parents=True)
+    path.write_text('{"x": 1}')
+    real = Path.read_text
+    monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied"))
+                        if self == path else real(self, *a, **k))
+    with pytest.raises(OSError, match="approved.json"):
+        ap.remember(tmp_path / "app", host="pypi.org")
+    monkeypatch.undo()
+    assert path.read_text() == '{"x": 1}' and not list(path.parent.glob("approved.json.damaged-*"))
+
+
+@pytest.mark.parametrize("empty", [None, "", " \n"])
+def test_missing_approved_json_starts_empty_without_a_word(run, tmp_path, capsys, empty):
+    """No store, or an empty one (nothing in it to lose): begun anew, without a warning."""
+    if empty is not None:
+        ap.approved_file().parent.mkdir(parents=True)
+        ap.approved_file().write_text(empty)
+    ap.remember(tmp_path / "app", host="pypi.org")
+    assert ap.approved_for(tmp_path / "app")["hosts"] == ["pypi.org"] and capsys.readouterr().err == ""
+    assert not list(ap.approved_file().parent.glob("approved.json.damaged-*"))
+
+
+def test_damaged_approved_json_forget_through_the_entry_point(tmp_path):
+    """End to end: `sandbox-ai approvals forget` on a damaged store wrote "{}" over it."""
+    from live_fakes import Host
+    host = Host(tmp_path)
+    path = host.home / ".config/sandbox-ai/approved.json"
+    path.parent.mkdir(parents=True)
+    damage = '{"%s": {"hosts": ["pypi.org", "github.com"]' % host.workspace
+    path.write_text(damage)
+    done = host.run("approvals", "forget", str(host.workspace), "pypi.org")
+    kept = list(path.parent.glob("approved.json.damaged-*"))
+    assert [p.read_text() for p in kept] == [damage], done.stderr
+    assert "approved.json could not be read" in done.stderr
+
+
+def test_allow_always_with_an_unreadable_store_is_allowed_for_the_run_and_says_why_not_remembered(run, tmp_path,
+                                                                                                 monkeypatch):
+    supervisor(run)
+    ask(run, "1-1-1", kind="connect", destination="192.0.2.9:5432", address="192.0.2.9", port=5432)
+    monkeypatch.setattr(ap, "read_store", lambda path: (_ for _ in ()).throw(OSError(13, "approved.json could not "
+                                                                                          "be read")))
+    said = []
+    reply = ap.answer("1-1-1", "allow", "always", runs=run, out=said.append)
+    assert reply["decision"] == "allow"
+    assert "not remembered for the project" in said[0] and "could not be read" in said[0]
+
+
+def test_an_always_answer_says_it_is_kept_for_the_project_and_how_to_lift_it(run, tmp_path):
+    """No confirmation for "always" (user 2026-11-17: a click acts): the answer's line says that later starts of the
+    project get it without a question and how to forget it (the app and the web show that line after the click)."""
+    supervisor(run)
+    ask(run, "1-1-1", kind="connect", destination="192.0.2.9:5432", address="192.0.2.9", port=5432)
+    lines = []
+    ap.answer("1-1-1", "allow", "always", runs=run, out=lines.append)
+    assert "remembered for this project" in lines[0] and "sandbox-ai approvals forget" in lines[0]
+    ask(run, "1-1-2", kind="dns", name="tracker.example")
+    lines = []
+    ap.answer("1-1-2", "deny", "always", runs=run, out=lines.append)
+    assert "refused at every later start of this project" in lines[0] and "forget" in lines[0]
+    lines = []
+    ask(run, "1-1-3", kind="connect", destination="192.0.2.10:5432", address="192.0.2.10", port=5432)
+    ap.answer("1-1-3", "allow", "run", runs=run, out=lines.append)
+    assert "remembered" not in lines[0]

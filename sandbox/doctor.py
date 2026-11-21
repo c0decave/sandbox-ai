@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -22,9 +23,10 @@ import threading
 LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
-AGENTS = ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose")
-# Not live-tested yet (hermes, dsh, qwen, goose): no image or login of them is not a warning.
-OPTIONAL = {"hermes", "dsh", "qwen", "goose"}
+AGENTS = ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
+# Not live-tested yet (opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi): no image or login of them is
+# not a warning.
+OPTIONAL = {"opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"}
 _launcher = None
 _modules = {}
 
@@ -372,6 +374,30 @@ def check_tiocsti(sysctl=Path("/proc/sys/dev/tty/legacy_tiocsti")):
     return "ok", "TIOCSTI (bwrap)", "disabled", ""
 
 
+def check_landlock(supported=None):
+    """Landlock on this kernel, which a sandbox shares: what `runtime.py --untrusted COMMAND` (a command of the sandbox
+    kept from the agent's login, state, terminal, hooks and MCP relays) can hold. Without it such a command is not
+    run at all."""
+    title = "Landlock (--untrusted)"
+    try:
+        found = (supported or launcher().RUNTIME.landlock_supported)()
+    except (OSError, AttributeError) as exc:
+        return ("warn", title, f"not available ({getattr(exc, 'strerror', None) or exc})",
+                "a command of a sandbox cannot be kept from the agent's login and state (--untrusted refuses to run "
+                "it): boot a kernel of 5.13 or later with Landlock among its security modules (cat "
+                "/sys/kernel/security/lsm; else add lsm=landlock,... to GRUB_CMDLINE_LINUX in /etc/default/grub, "
+                "sudo update-grub, reboot)")
+    parts = ["files and other processes' memory"] + (["signals"] if found["scope"] else []) + \
+        (["Unix sockets (tmux, hooks, MCP relays)"] if found["unix"] else [])
+    if found["unix"] and found["scope"]:
+        return "ok", title, f"ABI {found['abi']}: {', '.join(parts)}", ""
+    missing = ([] if found["scope"] else ["signals to the agent's processes (Linux 6.12)"]) + \
+        ([] if found["unix"] else ["the Unix sockets of its terminal, hooks and MCP relays (a newer kernel)"])
+    return ("warn", title, f"ABI {found['abi']}: {', '.join(parts)}",
+            f"--untrusted keeps a command from the agent's files and memory, not from {' nor from '.join(missing)}: "
+            "a newer kernel closes that")
+
+
 def check_proxy_nat(modules=Path("/sys/module"), builtin=None):
     """The connection proxy redirects with nftables NAT: a loaded module shows in /sys/module, a built-in
     one in modules.builtin. A module that is only installed may still be loaded on demand: a warning."""
@@ -388,6 +414,106 @@ def check_proxy_nat(modules=Path("/sys/module"), builtin=None):
                 "still load it on demand)", "sudo modprobe -a nft_chain_nat nft_redir (persist in "
                 "/etc/modules-load.d/), or start with --no-proxy")
     return "ok", "Connection proxy", "nftables NAT available", ""
+
+
+def check_syscall_filters(machine=None, environ=None):
+    """sandbox-ai's own system call filters (runtime.own_filter) on this machine: made for x86-64 and arm64. On
+    another machine a sandbox has Firejail's filter alone, and the modes high and paranoid do not start."""
+    title = "Isolation: system calls"
+    runtime = launcher().RUNTIME
+    machine = machine or os.uname().machine
+    value = (os.environ if environ is None else environ).get(launcher().SYSCALL_FILTER_ENV, "").strip().lower()
+    if machine not in runtime.SECCOMP_MACHINES:
+        return ("warn", title, f"no table of the system calls of {machine}",
+                "sandboxes run with Firejail's filter alone here (io_uring, new namespaces and every socket family "
+                "stay open to the agent); the security modes high and paranoid do not start")
+    if value == "off":
+        return ("warn", title, f"switched off in this environment ({launcher().SYSCALL_FILTER_ENV}=off)",
+                f"unset {launcher().SYSCALL_FILTER_ENV}: without them the agent reaches io_uring, new namespaces "
+                "and every socket family of this host's kernel")
+    return ("ok", title, f"{machine}: sandbox-ai's own filters beside Firejail's - no io_uring, no new namespaces "
+            "(but with --nested-containers), sockets of the families unix, inet, inet6 and netlink only, calls "
+            "newer than its table answered \"no such call\"", "")
+
+
+def check_io_uring(sysctl=Path("/proc/sys/kernel/io_uring_disabled")):
+    """The host's io_uring: every sandbox's filter refuses it; the host's own setting closes it for all programs."""
+    title = "Isolation: io_uring"
+    try:
+        value = sysctl.read_text().strip()
+    except OSError:
+        return "ok", title, "this kernel has no switch for it (before 6.6); refused in every sandbox by its filter", ""
+    if value == "2":
+        return "ok", title, "disabled for the whole host (kernel.io_uring_disabled=2)", ""
+    return ("ok", title, f"kernel.io_uring_disabled={value}: refused in every sandbox by its own filter; for the "
+            "whole host: sudo sysctl -w kernel.io_uring_disabled=2 (kept in /etc/sysctl.d/)", "")
+
+
+def check_lsm(policy=None, modules=None, backend="podman"):
+    """AppArmor or SELinux for the sandboxes: rootless Podman loads no profile of its own, so they run unconfined by
+    them unless the administrator's policy names one (lsm)."""
+    title = "Isolation: security module"
+    names = {"apparmor": "AppArmor", "selinux": "SELinux"}
+    try:
+        policy = launcher().load_policy() if policy is None else policy
+    except ValueError as exc:
+        return "warn", title, str(exc), "correct the policy file"
+    modules = launcher().host_lsm() if modules is None else modules
+    wanted = policy.get("lsm") or {}
+    active = " and ".join(names[name] for name in modules) or "neither AppArmor nor SELinux"
+    if wanted:
+        kind, name = next(iter(wanted.items()))
+        if kind not in modules:
+            return ("warn", title, f"the policy asks for the {names[kind]} confinement {name}, and this host runs "
+                    f"{active}", f"no sandbox starts so: enable {names[kind]}, or take lsm out of "
+                    f"{launcher().POLICY_FILE}")
+        if backend == "bwrap":
+            return ("warn", title, f"the policy asks for the {names[kind]} confinement {name}, which Bubblewrap "
+                    "cannot apply", "use --backend podman")
+        return ("ok", title, f"every sandbox's container is started as {name} ({names[kind]}, the administrator's "
+                "policy); its supervisor starts nothing outside it", "")
+    return ("ok", title, f"this host runs {active}; sandboxes are not confined by them (rootless Podman loads no "
+            "profile of its own) - their namespaces, filters and empty capability set hold without. An "
+            f"administrator's profile is named in {launcher().POLICY_FILE}: \"lsm\": {{\"apparmor\": \"PROFILE\"}} "
+            "(loaded with sudo apparmor_parser -r FILE) or {\"selinux\": \"TYPE\"}", "")
+
+
+def check_disk(path=None, statvfs=os.statvfs):
+    """The disk behind sandbox-ai's state (the HOMEs of the sandboxes, their logs): no sandbox has a quota of its
+    own there. Below the strict modes' reserve a run in high or paranoid is ended."""
+    title = "Isolation: disk"
+    path = Path(path or os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        info = statvfs(path)
+    except OSError as exc:
+        return "skip", title, f"{path}: {exc.strerror}", ""
+    free = info.f_bavail * info.f_frsize
+    reserve = launcher().DISK_RESERVE["stop"][0]
+    quota = ("no sandbox has a quota of its own (a project quota or a file system of its own for the folders it "
+             "writes is the host's to set: sudo xfs_quota -x -c 'limit -p bhard=20g PROJECT' MOUNTPOINT, or for "
+             "ext4 sudo setquota -P PROJECT 0 20G 0 0 MOUNTPOINT)")
+    if free < 2 * reserve:
+        return ("warn", title, f"{free >> 20} MiB free behind {path}",
+                f"free space: below {reserve >> 20} MiB a run in the modes high and paranoid is ended, and a full "
+                f"disk ends every run's records; {quota}")
+    return "ok", title, f"{free >> 30} GiB free behind {path}; {quota}", ""
+
+
+def check_firejail_version(run_command=None):
+    """Bubblewrap backend: the host's Firejail. Its --restrict-namespaces (0.9.72) is the second filter beside
+    sandbox-ai's own; upstream supports its latest release only."""
+    title = "Firejail version"
+    status, out = (run_command or run)(["firejail", "--version"])
+    version = re.search(r"firejail version ([0-9][0-9.]*)", out or "")
+    if status != 0 or not version:
+        return "skip", title, "not found", ""
+    numbers = tuple(int(part) for part in version[1].rstrip(".").split(".") if part.isdigit())
+    if numbers < (0, 9, 72):
+        return ("warn", title, f"{version[1]}: older than 0.9.72 (no --restrict-namespaces)",
+                "upgrade the host's firejail package; sandbox-ai's own filter refuses new namespaces all the same")
+    return "ok", title, f"{version[1]} (started with --noprofile; its folder in the sandbox's HOME is sealed)", ""
 
 
 def check_login(agent):
@@ -421,6 +547,30 @@ def check_git_identity():
         return ("warn", "Git identity", "no usable global user.name/user.email",
                 "git config --global user.name ...; needed only for --git-identity")
     return "ok", "Git identity", f"{name} <{email}>", ""
+
+
+def check_secrets(store=None):
+    """Where sandbox-ai's secrets are kept and what protects them (secret_store.protection): the system's keyring
+    or Keychain, the primary password of the private files (locked or unlocked), or nothing - plain files."""
+    try:
+        store = store or launcher().load_secret_store_module()
+        info = store.protection()
+        text = store.protection_text(info)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        return "fail", "Secrets", str(exc), "sandbox-ai secrets status"
+    # OpenVPN profiles and the wizard's token files still plain beside the store (encrypted since 0.1.98)
+    files = getattr(store, "plain_files_text", lambda info: "")(info)
+    text += f"; {files}" if files else ""
+    plain = info["plain"] or info.get("plain_files")
+    if plain and info["password"]:
+        return "warn", "Secrets", text, "sandbox-ai secrets unlock"
+    if plain and os.environ.get(store.PLAIN_CHOICE) == "1":
+        return "ok", "Secrets", f"{text} - your choice ({store.PLAIN_CHOICE}=1)", ""
+    if info["plain"] or (plain and info["backend"] == "file"):
+        return "warn", "Secrets", text, store.SET_PASSWORD
+    if plain:
+        return "warn", "Secrets", text, "sandbox-ai vpn check NAME (encrypts its profile), or a start that uses the token"
+    return "ok", "Secrets", text, ""
 
 
 VERSION_CHECK = "sandbox-ai"  # the title of the first check: this sandbox-ai, where it is installed, its Python
@@ -480,6 +630,107 @@ def check_installation(here=None):
     checkout = (Path(here or HERE.parent) / ".git").exists()
     hint = "install it (./install.sh --from .) and never use the checkout as a workspace" if checkout else ""
     return ("warn" if checkout else "ok"), VERSION_CHECK, detail, hint
+
+
+def path_order_module():
+    if "path_order" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_path_order_for_doctor", HERE / "path_order.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["path_order"] = loaded  # published only once loaded
+    return _modules["path_order"]
+
+
+def check_path_order(here=None, path=None):
+    """sandbox-ai and sandbox-ai-app installed more than once in different versions (a system installation before the
+    user's own in PATH, 2026-11-18): which one PATH finds first, which version is installed where, and the ways out."""
+    try:
+        return path_order_module().doctor_check(Path(here or HERE.parent), path)
+    except Exception as exc:  # noqa: BLE001 - the other checks still run
+        return "skip", "Commands in PATH", f"not checked: {exc}", ""
+
+
+def updates_module():
+    if "updates" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_updates_for_doctor", HERE / "updates.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["updates"] = loaded  # published only once loaded
+    return _modules["updates"]
+
+
+UPDATES_CHECK = "Updates"
+
+
+def check_updates(status=None):
+    """The update mode (sandbox-ai update mode): which, its timer (made by update mode; download and auto need it),
+    the last check and what it found - a newer release, one waiting for its window, a timer that is not active."""
+    try:
+        data = status if status is not None else updates_module().status()
+    except Exception as exc:  # noqa: BLE001 - the other checks still run
+        return "skip", UPDATES_CHECK, f"not checked: {exc}", ""
+    U = updates_module()
+    mode, timer = data["mode"], data["timer"]
+    words = [f"mode {mode}" + ("" if data.get("chosen") else " (the default)")]
+    if mode == "off":
+        return "ok", UPDATES_CHECK, words[0] + ": nothing is checked unless asked", ""
+    if timer["installed"]:
+        words.append(f"timer {U.TIMER_NAME} " + {True: "active", False: "NOT active", None: "made"}[timer["active"]])
+    else:
+        words.append("no timer (checked when sandbox-ai is used on a terminal or the app starts)")
+    words.append(f"last check {U.shown(data.get('last_check'))}" +
+                 (f": {U.result_text(data['result'])}" if data.get("result") else ""))
+    if data.get("waiting"):
+        words.append(data["waiting"].get("text", "waiting"))
+    detail = "; ".join(words)
+    if timer["installed"] and timer["active"] is False:
+        return "warn", UPDATES_CHECK, detail, (f"turn it on again: sandbox-ai update mode {mode}" +
+                                               (" (or systemctl --user enable --now sandbox-ai-update.timer)"
+                                                if timer["kind"] == "systemd" else ""))
+    if mode in U.SELF_MODES and not timer["installed"]:
+        return "warn", UPDATES_CHECK, detail, f"make the timer: sandbox-ai update mode {mode}"
+    if (data.get("result") or {}).get("newer"):
+        way = "sandbox-ai update" + (" --apply" if data.get("downloaded") else "") if data.get("self_updating") \
+            else data.get("manual") or "sandbox-ai update"
+        return "warn", UPDATES_CHECK, detail, f"a newer release is there: {way}"
+    return "ok", UPDATES_CHECK, detail, ""
+
+
+PACKAGES_CHECK = "Package guard"
+
+
+def packages_module():
+    if "packages" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_packages_for_doctor", HERE / "packages.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["packages"] = loaded  # published only once loaded
+    return _modules["packages"]
+
+
+def check_packages(status=None):
+    """The package guard's offline copy of the known malicious packages (sandbox-ai packages): its age, its entries,
+    whether a release key signed it. Without a copy, with an old or a damaged one, the guard misses malware that is
+    known: a warning with the command that fetches it."""
+    try:
+        data = status if status is not None else packages_module().status()
+    except Exception as exc:  # noqa: BLE001 - the other checks still run
+        return "skip", PACKAGES_CHECK, f"not checked: {exc}", ""
+    sync = "sandbox-ai packages sync (the signed copy; --osv builds it here from OSV's dumps)"
+    if not data.get("present"):
+        why = f"its copy of the known malicious packages cannot be read ({data['problem']})" if data.get("problem") \
+            else "no copy of the known malicious packages on this machine"
+        return "warn", PACKAGES_CHECK, f"{why}: release age and new names are still checked", sync
+    age = data.get("age_days")
+    detail = (f"known malicious packages: {data.get('total', 0)} entries, {age} day{'' if age == 1 else 's'} old "
+              f"(made {data.get('generated')}), "
+              + ("signed by a release key" if data.get("signed") else
+                 f"not signed ({data.get('unsigned') or 'no release key vouches for it'})"))
+    if data.get("problem"):
+        return "warn", PACKAGES_CHECK, f"{detail}; {data['problem']}", sync
+    if data.get("stale"):
+        return "warn", PACKAGES_CHECK, detail + ": new malware is missing", sync
+    return "ok", PACKAGES_CHECK, detail, ""
 
 
 def kits():
@@ -648,6 +899,58 @@ def check_sessions(state=None):
     return "ok", "Sessions", f"{len(entries)} kept, none damaged", ""
 
 
+def check_remote_folders(which=shutil.which, platform=None):
+    """sshfs for remote folders (--workspace sshfs://..., --mount, workspace add): optional - not installed is
+    "skip" with how to install it (remotefs.doctor_check)."""
+    if "remotefs" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_remotefs_for_doctor", HERE / "remotefs.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["remotefs"] = loaded
+    return _modules["remotefs"].doctor_check(which, platform)
+
+
+def check_orphans(entries=None):
+    """Starts that run without their supervisor (orphaned: approvals, net allow, workspace add and the kill switch do
+    not reach them): each with why - its supervisor's end as recorded - and what to do. ENTRIES: starts.entries."""
+    try:
+        found = (entries or (lambda: launcher().load_starts_module().entries(prune=False)))()
+    except Exception as exc:  # noqa: BLE001 - the other checks go on
+        return "skip", "Orphaned starts", f"not looked at ({launcher().printable(str(exc))[:200]})", ""
+    orphans = [entry for entry in found if entry.get("state") == "orphaned"]
+    if not orphans:
+        return "ok", "Orphaned starts", "none (every running start has its supervisor)", ""
+    printable = launcher().printable
+    return ("fail", "Orphaned starts", f"{len(orphans)} run without their supervisor: "
+            + ", ".join(printable(entry["name"]) for entry in orphans),
+            " | ".join(f"{printable(entry['name'])}: {printable(entry.get('orphaned_why') or '')}" for entry in orphans))
+
+
+def check_mcp_network(servers=None, problem=None):
+    """The catalog MCP servers with network: where each reaches (the internet without your local network, only its
+    hosts, or your network too), that this host can load their egress rules (nft, nsenter: without them they do not
+    start), and what to change - a full server whose catalog entry needs only its hosts, one that reaches your
+    network. SERVERS: mcp.server_list(); PROBLEM: mcp_egress.prerequisite_problem."""
+    try:
+        mcp = launcher().load_mcp_module()
+        found = mcp.server_list() if servers is None else servers
+        networked = [entry for entry in found if entry.get("network") not in (None, "none")]
+        if networked and problem is None:
+            problem = mcp.egress_module().prerequisite_problem("podman")
+    except Exception as exc:  # noqa: BLE001 - the other checks go on
+        return "skip", "MCP network", f"not looked at ({launcher().printable(str(exc))[:200]})", ""
+    if not networked:
+        return "skip", "MCP network", "no catalog server with network", ""
+    printable = launcher().printable
+    detail = "; ".join(printable(f"{entry['name']}: {entry['network']}") for entry in networked)
+    if problem:
+        return "fail", "MCP network", printable(problem), "install nftables and util-linux (nft, nsenter)"
+    notes = [printable(entry["egress_note"]) for entry in networked if entry.get("egress_note")]
+    if notes:
+        return "warn", "MCP network", detail, " | ".join(notes)
+    return "ok", "MCP network", detail, ""
+
+
 def check_machine(runner=None, home=None, tmpdir=None):
     """macOS: podman machine, the Linux VM Podman runs the sandboxes in: running, rootless, sharing HOME and
     $TMPDIR (a workspace or a session's files outside the shares cannot be mounted), its CPUs and memory."""
@@ -688,15 +991,18 @@ def checks(backend="podman", podman_url=None, cwd=None):
     if sys.platform == "darwin" and not podman_url:
         # macOS: Podman in podman machine's Linux VM; user namespaces, systemd, pasta, subuids and Bubblewrap are
         # the VM's (or Linux only), not this host's.
-        result = [check_installation(), check_user(), check_python(), check_machine(), check_podman(podman_url)]
+        result = [check_installation(), check_path_order(), check_updates(), check_packages(), check_user(),
+                  check_python(), check_machine(),
+                  check_podman(podman_url)]
         result += [check_image(agent, podman_url) for agent in AGENTS] + [check_vpn(podman_url)]
         result += [check_login(agent) for agent in AGENTS]
         result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
-        result += [check_git_identity(), check_project(cwd), check_mode(cwd), check_settings_files(),
-                   check_sessions()]
+        result += [check_git_identity(), check_secrets(), check_project(cwd), check_mode(cwd), check_settings_files(),
+                   check_sessions(), check_orphans(), check_remote_folders()]
         return result
-    result = [check_installation(), check_user(), check_python(), check_userns(),
-              check_user_session(backend=backend, podman_url=podman_url), check_proxy_nat()]
+    result = [check_installation(), check_path_order(), check_updates(), check_packages(), check_user(),
+              check_python(), check_userns(), check_user_session(backend=backend, podman_url=podman_url),
+              check_proxy_nat(), check_landlock()]
     if backend in ("podman", "both"):
         result += [check_podman(podman_url), check_pasta(podman_url)]
         if not podman_url:
@@ -706,9 +1012,14 @@ def checks(backend="podman", podman_url=None, cwd=None):
         result += [check_bwrap_tools(), check_tiocsti()]
         if backend == "bwrap":
             result += [check_subids(backend=backend), check_newuidmap()]
+        result.append(check_firejail_version())
+    # What a sandbox's isolation is made of beyond the engine: sandbox-ai's own system call filters, and what only
+    # this host can add (its io_uring switch, an AppArmor or SELinux profile, a quota).
+    result += [check_syscall_filters(), check_io_uring(), check_lsm(backend=backend), check_disk()]
     result += [check_login(agent) for agent in AGENTS]
     result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
-    result += [check_git_identity(), check_project(cwd), check_mode(cwd), check_settings_files(), check_sessions()]
+    result += [check_git_identity(), check_secrets(), check_project(cwd), check_mode(cwd), check_settings_files(),
+               check_sessions(), check_orphans(), check_remote_folders(), check_mcp_network()]
     return result
 
 
@@ -716,10 +1027,10 @@ SYMBOLS = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL", "skip": "--  "}
 # ok green, warnings orange, problems red, what was not checked grey.
 KINDS = {"ok": "ok", "warn": "orange", "fail": "bad", "skip": "muted"}
 # The table's sections, by the checks' titles (a title that fits none goes to the last).
-GROUPS = (("System", ("sandbox-ai", "Ordinary user", "Python", "User namespaces", "systemd user session",
-                      "Connection proxy")),
+GROUPS = (("System", ("sandbox-ai", "Commands in PATH", "Updates", "Package guard", "Ordinary user", "Python", "User namespaces",
+                      "systemd user session", "Connection proxy", "Landlock", "Remote folders", "Secrets")),
           ("Engine", ("Podman", "podman machine", "pasta", "Delegated UID/GID ranges", "newuidmap", "Image ", "VPN", "Bubblewrap",
-                      "TIOCSTI", "Firejail", "nft", "setpriv", "slirp")),
+                      "TIOCSTI", "Firejail", "nft", "setpriv", "slirp", "MCP network", "Isolation")),
           ("Agents", ("Login ", "Kit ", "Kits", "Plugins")),
           ("Project", ()))
 
@@ -778,8 +1089,8 @@ def report(results, out=print, colour=None, plain=False):
 
 def cli(argv):
     parser = argparse.ArgumentParser(prog="sandbox-ai doctor", description="Check the host for sandbox-ai.")
-    parser.add_argument("-b", "--backend", choices=["podman", "bwrap", "both"], default="podman")
-    parser.add_argument("-pu", "--podman-url")
+    parser.add_argument("-b", "--backend", choices=["podman", "bwrap", "both"], default="podman", help="which backend to check: podman, bwrap or both")
+    parser.add_argument("-pu", "--podman-url", help="the URL of the Podman API socket to use instead of the default")
     parser.add_argument("-j", "--json", action="store_true", help="Machine-readable output")
     parser.add_argument("-p", "--plain", action="store_true", help="One line per check, without the table")
     parser.add_argument("-nc", "--no-color", action="store_true",

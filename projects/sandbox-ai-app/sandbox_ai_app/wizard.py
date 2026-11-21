@@ -12,6 +12,7 @@ file is shown, never applied, until it is written and trusted again.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 from pathlib import Path
@@ -28,15 +29,17 @@ from . import applog
 from . import board as B, labels
 from . import presets as PR
 from . import project_trust as PT
+from . import list_fields as LF
 from . import widgets
 from . import wizard_llm as WL
+from . import model_profile_view as MPV
 from .board_view import LinesEdit, PathEdit, RulesEdit, choose_agent, combo_agent, experimental_note, fill_agent_combo
 from .preset_gallery import PlaceholderForm
 from .files import printable, printable_text
 from .model_combo import searchable
 from .name_fields import NameField
 from .i18n import N_, tr
-from .widgets import MONO, ask_first, background, confirm, plain_label, safe_tooltip, show_text, warn
+from .widgets import MONO, ask_first, background, confirm, explanation, plain_label, safe_tooltip, show_text, warn
 
 DEFAULT_MEMORY = "8g"  # the launcher's default, as a placeholder
 SECRET_EXAMPLE = "LLM_KEY"  # the same in every language
@@ -47,13 +50,21 @@ TOKEN_KINDS = (("env", "--git-token-env"), ("secret", "--git-token-secret"), ("t
 
 
 class Page(QWizardPage):
-    def __init__(self, wizard, title, subtitle=""):
+    def __init__(self, wizard, title, subtitle="", explained=True):
+        """SUBTITLE: what the page is for - an explanation (shown only with the setting explanations on) unless
+        EXPLAINED is False: a page whose line must be read to act safely (a device's risk, what Finish trusts)."""
         super().__init__()
         self.wizard_ = wizard
         self.setTitle(title)
+        self.subtitle, self.explained = subtitle, explained
         if subtitle:
-            self.setSubTitle(subtitle)
+            self.show_subtitle(widgets.explanations_shown())
+            if explained:
+                widgets.on_explanations_changed(self.show_subtitle)
         self.form = QFormLayout(self)
+
+    def show_subtitle(self, shown):
+        self.setSubTitle(self.subtitle if shown or not self.explained else "")
 
     @property
     def board(self):
@@ -62,6 +73,19 @@ class Page(QWizardPage):
     def node(self, kind):
         node = self.board.first(kind)
         return node if node is not None else self.board.add(kind)
+
+    def keep(self):
+        """What the page shows, onto the board as Next would put it, without asking anything (Back: see
+        cleanupPage). A page that only writes the board keeps it so; one that asks (or keeps a token) says False."""
+        return False
+
+    def cleanupPage(self):  # noqa: N802
+        """Back: what was set on this page goes onto the board first - Next fills the page from the board again
+        (initializePage), and what was typed here was gone (the bug class of 2026-11-16: set, gone after going
+        back). QWizardPage's own resets only registered fields (none here)."""
+        super().cleanupPage()
+        if self.board is not None:
+            self.keep()
 
     def forbid(self, widget, option, value=None):
         """Grey out WIDGET when the administrator's policy forbids OPTION (or OPTION=VALUE)."""
@@ -171,23 +195,24 @@ class FolderPage(Page):
 
 
     def create(self, directory):
-        """Create the new project folder DIRECTORY after the human confirmed the full path; never one that is,
-        lies in or holds the host's settings, keys or programs (board.sensitive, the launcher's private
-        locations), nor one inside sandbox-ai or this app. False (the reason in the note) when not created."""
+        """Create the new project folder DIRECTORY after the human confirmed the full path. One that is, lies in or
+        holds the host's settings, keys or programs (board.sensitive, the launcher's private locations), or lies
+        inside sandbox-ai or this app, is yours to choose: the question says what it means (risk) first. False (the
+        reason in the note) when not created."""
         if not os.path.isabs(directory):
             self.note.setText(tr("Give the full path of the folder (it starts with / or ~)."))
             return False
         if os.path.lexists(directory):
             self.note.setText(tr("{path} exists and is not a folder.", path=printable(directory)))
             return False
-        why = refusal(self.wizard_.sai, directory)
-        if why:
-            self.note.setText(tr("Not created: {path} is {why}.", path=printable(directory), why=why))
-            return False
+        why = risk(self.wizard_.sai, directory)
         path = os.path.abspath(directory)
-        if not confirm(self, tr("Create the folder"), tr("{path} does not exist yet. Create it (and the folders above "
-                                                         "it that are missing) as the new project folder?",
-                                                         path=printable(path)), tr("Create")):
+        question = tr("{path} does not exist yet. Create it (and the folders above it that are missing) as the new "
+                      "project folder?", path=printable(path))
+        if why:  # you decide: made after a yes, the question says what it means
+            question += "\n\n" + tr("Warning: it is {why}. The agent can read and change what is there; read-only "
+                                    "is the safer choice.", why=why)
+        if not confirm(self, tr("Create the folder"), question, tr("Create")):
             self.note.setText(tr("Choose a folder that exists, or agree to create it."))
             return False
         try:
@@ -200,14 +225,15 @@ class FolderPage(Page):
         return True
 
 
-def refusal(sai, path):
-    """Why a new project folder may not be created at PATH, or None: what board.sensitive calls "bad" (HOME, the
-    file system, the host's settings, keys and programs), and the folders of sandbox-ai and of this app."""
+def risk(sai, path):
+    """What a new project folder at PATH hands the agent, or None: what board.sensitive calls "bad" (HOME, the file
+    system, the host's settings, keys and programs), and the folders of sandbox-ai and of this app. Said before it
+    is made, never a refusal: you decide what a sandbox gets."""
     launcher = None
     try:
         launcher = sai.launcher
     except Exception as _exc:  # noqa: BLE001 - board.sensitive's own list still holds
-        applog.swallowed("wizard", "refusal: board.sensitive's own list still holds", _exc)
+        applog.swallowed("wizard", "risk: board.sensitive's own list still holds", _exc)
     verdict = B.sensitive(path, launcher)
     if verdict and verdict[0] == "bad":
         return verdict[1]
@@ -247,8 +273,11 @@ class AgentPage(Page):
 
     def initializePage(self):  # noqa: N802
         existing = self.wizard_.existing
-        if existing is not None and existing.agent:
-            choose_agent(self.agent, existing.agent)
+        # The project's agent once per project: entered again (Back, Next), the agent chosen here stays.
+        if existing is not getattr(self, "seen_existing", None):
+            self.seen_existing = existing
+            if existing is not None and existing.agent:
+                choose_agent(self.agent, existing.agent)
 
 
 class ModelPage(Page):
@@ -272,15 +301,23 @@ class ModelPage(Page):
         self.cloud.setChecked(True)
         self.form.addRow(tr("Where the model runs"), self.cloud)
         self.form.addRow("", self.own)
-        self.form.addRow("", widgets.plain_label(tr("LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible "
-                                                    "server, registered with sandbox-ai llm add."), role="secondary"))
-        # The cloud: the agent's own models with their versions (models.py), the effort's guide.AGENT_EFFORTS; a model
-        # it does not list can be typed.
+        self.form.addRow("", widgets.explanation(tr("LM Studio, Ollama, llama.cpp, vLLM or any OpenAI-compatible "
+                                                    "server, registered with sandbox-ai llm add.")))
+        # The cloud: the agent's own models with their versions, grouped by provider (models.py: sandbox-ai's table
+        # of cloud models), the effort's levels those the chosen model takes (models.efforts); a model it does not
+        # list can be typed.
         self.model = QComboBox()
         self.model.setEditable(True)
+        self.model.setAccessibleName(tr("Model"))
         self.effort = QComboBox()
+        self.effort.setAccessibleName(tr("Effort"))
+        self.effort_note = widgets.plain_label(role="secondary")
+        self.effort_note.hide()
         self.form.addRow(tr("Model"), self.model)
         self.form.addRow(tr("Effort"), self.effort)
+        self.form.addRow("", self.effort_note)
+        self.model.currentIndexChanged.connect(lambda _i: self.model_changed())
+        self.model.lineEdit().editingFinished.connect(self.model_changed)
         # Whether the agent shows its model's thinking in its terminal (--show-thinking): for the cloud and a server
         # of your own alike; greyed out with the reason for an agent without a switch (thinking.py).
         self.thinking = QComboBox()
@@ -317,6 +354,21 @@ class ModelPage(Page):
                                 "provider"))
         self.only.setChecked(True)
         self.form.addRow("", self.only)
+        # What it is for (--use-case): the pair - model x harness - measured best for it among the server's models,
+        # and the others below (use_case_view.PairList: not measured and unsafe ones too, with why).
+        from .use_case_view import PairList
+        self.use_case_choice = QComboBox()
+        self.use_case_choice.setAccessibleName(tr("Use case"))
+        self.use_case_tip = tr("What the project is for: picks the model of this server and the agent sandbox-ai's "
+                               "local-model research found best for it (--use-case); the pairs below list the others, "
+                               "unsafe ones with why")
+        self.use_case_choice.setToolTip(safe_tooltip(self.use_case_tip))
+        self.use_case_choice.activated.connect(lambda _index: self.use_case_chosen())
+        self.form.addRow(tr("Use case"), self.use_case_choice)
+        self.pair_list = PairList()
+        self.pair_list.picked.connect(lambda pair: self.use_pair(pair))
+        self.form.addRow(self.pair_list)
+        self.use_cases = None
         self.hint = plain_label(role="secondary")
         self.form.addRow(self.hint)
         self.status = plain_label(role="secondary", selectable=True, log="wizard")
@@ -336,16 +388,12 @@ class ModelPage(Page):
         return self.wizard_.agent_page.chosen()
 
     def agent_changed(self, agent):
-        from .guide import AGENT_EFFORTS
         from . import models
         same = agent == self.shown_agent
         model, effort = (self.model_name(), self.effort.currentData() or "") if same else ("", "")
-        models.fill_combo(self.model, agent, model)  # each with its version (models.py says where from)
-        self.effort.clear()
-        self.effort.addItem(tr("the agent's default"), "")
-        for level in AGENT_EFFORTS.get(agent, ()):
-            self.effort.addItem(level, level)
-        self.effort.setCurrentIndex(max(0, self.effort.findData(effort)))
+        # each with its version, grouped by provider (models.py says where from)
+        models.fill_combo(self.model, agent, model, getattr(self.wizard_, "sai", None))
+        self.fill_efforts(agent, model, effort)
         from . import thinking
         shown = self.thinking.currentData() or "" if same else ""
         self.thinking.clear()
@@ -355,6 +403,35 @@ class ModelPage(Page):
         self.thinking.setEnabled(thinking.available(agent))
         self.thinking.setToolTip(safe_tooltip(thinking.tooltip(agent)))
         self.shown_agent = agent
+        self.where_changed()
+
+    def fill_efforts(self, agent, model, effort):
+        """The Effort choice: the agent's default (with the model's own where known), then the levels MODEL takes in
+        AGENT (models.efforts); EFFORT stays chosen when the model takes it. Whether it stayed."""
+        from .guide import AGENT_EFFORTS
+        from . import models
+        sai = getattr(self.wizard_, "sai", None)
+        self.effort.blockSignals(True)
+        self.effort.clear()
+        default = models.default_effort(agent, model, sai)
+        self.effort.addItem(tr("the agent's default ({level} for this model)", level=default) if default
+                            else tr("the agent's default"), "")
+        for level in models.efforts(agent, model, sai) if AGENT_EFFORTS.get(agent) else ():
+            self.effort.addItem(level, level)
+        self.effort.setCurrentIndex(max(0, self.effort.findData(effort)))
+        self.effort.blockSignals(False)
+        return not effort or self.effort.findData(effort) >= 0
+
+    def model_changed(self):
+        """Another model: the effort's levels are its own; an effort it does not take is reset, said below."""
+        if self.shown_agent is None:
+            return
+        effort = self.effort.currentData() or ""
+        kept = self.fill_efforts(self.shown_agent, self.model_name(), effort)
+        if not kept:
+            self.effort_note.setText(tr("The effort {level} was reset: {model} does not take it.", level=effort,
+                                        model=self.model_name() or tr("the agent's default model")))
+        self.effort_note.setVisible(not kept or (self.effort_note.isVisible() and not self.effort.currentData()))
         self.where_changed()
 
     def model_name(self):
@@ -386,6 +463,10 @@ class ModelPage(Page):
                 self.own.setChecked(True)
                 self.wanted, self.wanted_model = self.existing_choice["name"], self.existing_choice.get("model") or ""
                 self.only.setChecked(bool(self.existing_choice.get("only")))
+                # its --use-case chosen (kept until the server's models are read; its pairs show then), the project's
+                # model staying selected: nothing else is changed by it
+                from .use_case_view import fill_use_cases
+                fill_use_cases(self.use_case_choice, self.use_cases or [], self.existing_choice.get("use_case") or "")
         if not self.loaded:
             self.refresh()
         else:
@@ -402,6 +483,7 @@ class ModelPage(Page):
         self.servers.setCurrentItem(None)
         self.servers.blockSignals(False)
         self.server_model.clear()
+        self.use_case_choice.setCurrentIndex(0)
         self.wizard_.llm_choice, self.wizard_.llm_endpoint = None, None
 
     def where_changed(self):
@@ -417,6 +499,7 @@ class ModelPage(Page):
                        self.only):
             widget.setEnabled(own)
         self.update_hint()
+        self.show_use_cases()
 
     # -- the servers --
 
@@ -496,6 +579,8 @@ class ModelPage(Page):
                 if row.get("size"):
                     extra.append(f"{row['size'] / 1e9:.1f} GB")
                 combo.addItem(row["name"] + (f"  ({', '.join(extra)})" if extra else ""), row["name"])
+            # each model's traffic light (the server's default: its model's)
+            MPV.mark_combo(combo, self.wizard_.sai, lambda index: combo.itemData(index) or endpoint.get("model"))
         index = combo.findData(typed) if typed else -1
         if index >= 0:
             combo.setCurrentIndex(index)
@@ -542,6 +627,57 @@ class ModelPage(Page):
                             tr("{name} offers no model now: load one on the server, or type its name.", name=name))
         if self.chosen_name() == name:
             self.fill_models(self.endpoints.get(name), result, self.server_model_value())
+            self.show_use_cases()
+
+    # -- the use case: the pair measured best for it among the server's models --
+
+    def show_use_cases(self):
+        """The Use case choice and the pairs of the chosen server's models (what it listed: sizes, what is loaded)
+        for the agent chosen; greyed out with why for the agent's provider or no server."""
+        from . import use_case as UC
+        from .use_case_view import fill_use_cases
+        endpoint = self.chosen_endpoint() if self.own.isChecked() else None
+        current = str(self.use_case_choice.currentData() or "")
+        found = None
+        if endpoint is not None:
+            listed = self.listed.get(endpoint["name"])
+            shown = dict(endpoint)
+            if listed:
+                shown["models"] = [row["name"] for row in listed if isinstance(row, dict) and row.get("name")]
+                shown["model_info"] = {row["name"]: row for row in listed if isinstance(row, dict) and row.get("name")}
+            found = UC.recommendations(self.wizard_.sai, [shown], True, note_agent=self.agent())
+        self.use_cases = found
+        fill_use_cases(self.use_case_choice, found or [], current)
+        self.use_case_choice.setEnabled(found is not None)
+        self.use_case_choice.setToolTip(safe_tooltip(self.use_case_tip if found is not None else tr(
+            "Choose a model server of your own first: a use case picks among its models")))
+        chosen = next((entry for entry in found or [] if entry["use_case"] == current), None)
+        model = self.server_model_value()
+        self.pair_list.set(chosen, current=(endpoint["name"], model) if endpoint is not None and model else None)
+
+    def use_case_chosen(self):
+        """A use case chosen: its choice - the pair measured best for it - as the agent and the server's model."""
+        name = str(self.use_case_choice.currentData() or "")
+        entry = next((e for e in self.use_cases or [] if e["use_case"] == name), None)
+        choice = (entry or {}).get("choice")
+        if choice:
+            self.use_pair(choice)
+        else:
+            self.show_use_cases()
+
+    def use_pair(self, pair):
+        """PAIR's agent (on the Agent page) and model (this server's) chosen; the use case stays chosen."""
+        harness = pair.get("harness")
+        if harness and harness != self.agent() and choose_agent(self.wizard_.agent_page.agent, harness):
+            self.agent_changed(harness)
+        combo = self.server_model
+        index = combo.findData(pair["model"])
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        else:
+            combo.setEditText(pair["model"])
+        self.update_hint()
+        self.show_use_cases()
 
     def update_hint(self):
         endpoint = self.chosen_endpoint() if self.own.isChecked() else None
@@ -588,6 +724,10 @@ class ModelPage(Page):
             self.status.setText(printable_text(exc))
             return False
         wizard.llm_choice = {"name": endpoint["name"], "model": model, "only": self.only.isChecked()}
+        if self.use_case_choice.currentData():
+            wizard.llm_choice["use_case"] = str(self.use_case_choice.currentData())  # --use-case on the board
+        elif (self.existing_choice or {}).get("use_case"):
+            wizard.llm_choice["use_case"] = ""  # "none" for a project that had one: its --use-case goes
         wizard.llm_endpoint = endpoint
         return True
 
@@ -657,10 +797,9 @@ class ServerDialog(QDialog):
         form.addRow(tr("Its value"), widgets.secret_value(self.value))
         form.addRow(tr("VPN profile (optional)"), self.vpn)
         form.addRow("", self.anthropic)
-        layout.addWidget(plain_label(tr("Most local servers need no key. A key typed here is kept as a secret of "
+        layout.addWidget(explanation(tr("Most local servers need no key. A key typed here is kept as a secret of "
                                         "sandbox-ai (standard input, never a command line); the server's entry only "
-                                        "names that secret, and the proxy adds the key on the wire."),
-                                     role="secondary"))
+                                        "names that secret, and the proxy adds the key on the wire.")))
         self.note = plain_label(role="notice-warn")
         self.note.hide()
         layout.addWidget(self.note)
@@ -855,6 +994,7 @@ def fill_model_combo(combo, only, endpoints, agent, sai, value="", only_checked=
                 combo.model().item(index).setEnabled(False)
         if value and combo.findData(value) < 0:  # typed into the options, a placeholder, or no longer registered
             combo.addItem(value, value)
+        MPV.mark_combo(combo, sai)  # each model's traffic light: how far the research supports it, per agent
         combo.setCurrentIndex(max(0, combo.findData(value or "")))
         only.setChecked(bool(value) and bool(only_checked))
         only.setEnabled(bool(value))
@@ -955,6 +1095,11 @@ class StartPage(Page):
         has_existing = self.wizard_.existing is not None
         self.buttons["existing"].setVisible(has_existing)
         self.fill_presets()
+        # The default once per folder and project: entered again (Back to the model, Next), the choice made stays.
+        seen = (self.wizard_.directory, id(self.wizard_.existing), self.host())
+        if seen == getattr(self, "seen", None):
+            return
+        self.seen = seen
         wanted = self.wizard_.settings().get("default_template", "development")
         if not self.select_preset(wanted):
             self.select_preset("development")
@@ -972,8 +1117,75 @@ class StartPage(Page):
         return confirm(self, tr("Model"), cloud_question(existing), tr("Use the agent's provider"),
                        reject=tr("Back"))
 
+    def basis(self):
+        """What the board is built from here: the folder, project and host, this page's choice (its preset's values
+        too) and the Agent and Model pages' choices."""
+        wizard, choice = self.wizard_, self.choice()
+        model_page = wizard.model_page
+        preset = self.chosen_preset() if choice not in ("existing", "custom") else None
+        values = self.values if preset is not None and self.values_for == preset.key else None
+        return (wizard.directory, id(wizard.existing), self.host(), choice, preset.key if preset else None,
+                repr(sorted((values or {}).items())), wizard.agent_page.chosen(), wizard.agent_page.danger.isChecked(),
+                repr(wizard.llm_choice), model_page.thinking.currentData() if model_page.thinking.isEnabled() else None,
+                model_page.model_name(), model_page.effort.currentData(), wizard.settings().get("default_backend"))
+
+    # The places of basis() that only the Model page sets: the server choice, Show thinking, the cloud model, effort.
+    MODEL_BASIS = (8, 9, 10, 11)
+
+    def model_only_change(self, basis):
+        """Whether BASIS differs from what the board was built from only in the Model page's choices: the board then
+        keeps every later page's changes and only what depends on the model changes (keep_model). A preset whose
+        placeholders the model server fills (<llm:...>, the VPN that follows it) is built anew: the server is its
+        values."""
+        wizard, before = self.wizard_, getattr(self, "built_from", None)
+        if wizard.board is None or wizard.board is not getattr(self, "built", None) or before is None or \
+                len(before) != len(basis):
+            return False
+        if any(old != new for index, (old, new) in enumerate(zip(before, basis)) if index not in self.MODEL_BASIS):
+            return False
+        preset = self.chosen_preset() if self.choice() not in ("existing", "custom") else None
+        return preset is None or not any(p.kind == "llm" for p in preset.placeholders or ())
+
+    def keep_model(self):
+        """The Model page's choices onto the board built before, nothing else changed: --llm and "only this server"
+        (or the server taken off again for the agent's provider - asked first for the project's own), the agent's
+        cloud model and effort, Show thinking. False when the human keeps the project's server (Back)."""
+        wizard, board, model_page = self.wizard_, self.wizard_.board, self.wizard_.model_page
+        llm, before = wizard.llm_choice, getattr(self, "built_llm", None)
+        node = board.first("agent")
+        if llm:
+            WL.apply(board, llm)
+        elif WL.uses_server(board) and (before or model_page.dropped_existing()):
+            if model_page.dropped_existing() and self.choice() == "existing" and not before and \
+                    not self.confirm_cloud(model_page.existing_choice):
+                return False
+            WL.clear(board)
+        thinking = model_page.thinking.currentData() if model_page.thinking.isEnabled() else None
+        if thinking:
+            node.props["thinking"] = thinking
+        else:
+            node.props.pop("thinking", None)
+        for key, value in (("model", model_page.model_name()), ("effort", model_page.effort.currentData())):
+            if value and not WL.uses_server(board):
+                node.props[key] = value
+            else:
+                node.props.pop(key, None)
+        return True
+
     def validatePage(self):  # noqa: N802
         wizard, choice = self.wizard_, self.choice()
+        # Nothing changed since the board was built (Back to here and Next again): the board stays as the later pages
+        # left it - built anew, every change made there was gone.
+        basis = self.basis()
+        if wizard.board is not None and wizard.board is getattr(self, "built", None) and \
+                basis == getattr(self, "built_from", None):
+            return True
+        # Only the model changed (Back to the Model page): the same board, only what depends on the model changes.
+        if self.model_only_change(basis):
+            if not self.keep_model():
+                return False
+            self.built_from, self.built_llm = self.basis(), wizard.llm_choice
+            return True
         agent_page, model_page = wizard.agent_page, wizard.model_page
         agent = agent_page.chosen()
         llm = wizard.llm_choice  # an own model server chosen on the Model page, or None: the agent's provider
@@ -994,6 +1206,8 @@ class StartPage(Page):
                     if widgets.AUTO_ANSWER is None and widgets.exec_dropped(form) != QDialog.DialogCode.Accepted:
                         return False
                     values = form.values()
+                    # Kept for this preset: Back and Next again does not ask for them once more
+                    self.values, self.values_for = dict(values), preset.key
             elif values is not None:
                 values = {**values, **given}
             board = PR.build(wizard.sai, preset, wizard.directory, agent=agent, values=values,
@@ -1024,6 +1238,8 @@ class StartPage(Page):
         else:
             node.props.pop("model", None)  # the launcher refuses --model with --llm: the model is the server's
         wizard.board = board
+        self.built, self.built_from = board, self.basis()
+        self.built_llm = llm
         return True
 
 
@@ -1063,18 +1279,24 @@ class NetworkPage(Page):
             row.addWidget(box)
             self.presets[option] = box
         self.form.addRow(tr("Presets"), row)
-        self.hosts = LinesEdit([])
-        self.form.addRow(tr("Further hosts (HTTPS)"), self.hosts)
-        # --allow-domain DOMAIN: DOMAIN and every name below it (sandbox-ai's --allow-host DOMAIN '*.DOMAIN').
-        self.domains = LinesEdit([])
-        self.domains.setToolTip(safe_tooltip(tr("Domains, one per line: each one and every name below it "
-                                                "(--allow-domain; not for shared hosting such as github.io, nor "
-                                                "public suffixes such as co.uk).")))
-        self.forbid(self.domains, "--allow-domain")
-        self.forbid(self.domains, "--allow-host")
-        self.form.addRow(tr("Whole domains (HTTPS)"), self.domains)
-        self.ports = LinesEdit([])
-        self.form.addRow(tr("Ports of services on this host"), self.ports)
+        # Further hosts, whole domains (--allow-domain DOMAIN: DOMAIN and every name below it, sandbox-ai's
+        # --allow-host DOMAIN '*.DOMAIN') and ports of this host: one field of kinds (list_fields, 2026-11-19).
+        self.lists = LF.ListFields([
+            LF.option_kind("--allow-host", tr("Further hosts (HTTPS)"), tip=tr(
+                "Names separated by commas or spaces. *.DOMAIN opens every name below DOMAIN, each as it is looked up "
+                "(not for shared hosting such as *.github.io, nor public suffixes).")),
+            LF.option_kind("--allow-domain", tr("Whole domains (HTTPS)"), tip=tr(
+                "Domains, one or more per line, separated by commas or spaces: each one and every name below it "
+                "(--allow-domain; not for shared hosting such as github.io, nor public suffixes such as co.uk).")),
+            LF.option_kind("--allow-host-port", tr("Ports of services on this host"), tip=tr(
+                "Ports on this computer's loopback (a local Git server, an LLM server), reached through a relay that "
+                "only you start; separated by commas or spaces"))], {}, name=tr("Hosts, domains, ports"))
+        for option in ("--allow-domain", "--allow-host"):  # (a domain is its hosts: greyed out with either)
+            forbidden = self.wizard_.forbidden.get(option, set())
+            if None in forbidden and self.lists.kinds["--allow-domain"].enabled:
+                self.lists.set_kind_enabled("--allow-domain", False,
+                                            tr("The administrator's policy forbids {option}", option=option))
+        self.form.addRow(tr("Hosts, domains, ports"), self.lists)
         self.ask = QCheckBox(tr("ask before anything else (approvals)"))
         self.forbid(self.ask, "--ask", "off")
         self.form.addRow("", self.ask)
@@ -1087,15 +1309,17 @@ class NetworkPage(Page):
         self.shown_profiles = self.checked_profiles()
         for option, box in self.presets.items():
             box.setChecked(bool(props.get(option)))
-        self.hosts.setPlainText("\n".join(props.get("--allow-host", [])))
-        self.domains.setPlainText("\n".join(props.get("--allow-domain", [])))
-        self.ports.setPlainText("\n".join(props.get("--allow-host-port", [])))
+        for option in ("--allow-host", "--allow-domain", "--allow-host-port"):
+            self.lists.set_values(option, props.get(option, []))
         approvals = self.board.first("approvals")
         self.ask.setChecked(not approvals or approvals.props.get("--ask", "on") != "off")
         self.shown_ask = self.ask.isChecked()  # unchanged, --ask stays as written (allow too)
 
     def checked_profiles(self):
         return [name for name, box in self.profiles.items() if box.isChecked()]
+
+    def keep(self):  # only writes the board: Back keeps it as Next would
+        return self.validatePage()
 
     def validatePage(self):  # noqa: N802
         props = self.node("network").props
@@ -1107,10 +1331,12 @@ class NetworkPage(Page):
             set_or_drop(props, "--profile", profiles)
         for option, box in self.presets.items():
             set_or_drop(props, option, box.isChecked())
-        set_or_drop(props, "--allow-host", self.hosts.values())
-        if self.domains.isEnabled():  # greyed out by the policy: what the board has stays as it is
-            set_or_drop(props, "--allow-domain", self.domains.values())
-        set_or_drop(props, "--allow-host-port", self.ports.values())
+        if not self.lists.take_typed():  # (a value typed and not added: added; one it refuses says why)
+            return False
+        set_or_drop(props, "--allow-host", self.lists.values("--allow-host"))
+        if self.lists.kinds["--allow-domain"].enabled:  # greyed out by the policy: what the board has stays as it is
+            set_or_drop(props, "--allow-domain", self.lists.values("--allow-domain"))
+        set_or_drop(props, "--allow-host-port", self.lists.values("--allow-host-port"))
         if self.ask.isChecked() == getattr(self, "shown_ask", None):
             pass  # as it was: --ask allow (every question allowed, chosen on the board) is not turned into on
         elif self.ask.isChecked():
@@ -1153,6 +1379,9 @@ class ProxyPage(Page):
             self.rules.add_row(*(parts + ["", "", ""])[:3])
         self.privacy.setCurrentIndex(max(0, self.privacy.findData(props.get("--privacy-check", "public"))))
 
+    def keep(self):  # only writes the board: Back keeps it as Next would
+        return self.validatePage()
+
     def validatePage(self):  # noqa: N802
         props = self.node("proxy").props
         props["enabled"] = self.enabled.isChecked()
@@ -1164,11 +1393,11 @@ class ProxyPage(Page):
 
 
 class GitPage(Page):
-    """Identity and push tokens: a host variable, a stored secret or a token typed here (to a private file)."""
+    """Identity and push tokens: a host variable, a stored secret or a token typed here (kept as a secret)."""
 
     def __init__(self, wizard):
-        super().__init__(wizard, tr("Git and tokens"), tr("Push from the sandbox: a typed token goes to a private "
-                                                          "file, never into the project file. The project's own "
+        super().__init__(wizard, tr("Git and tokens"), tr("Push from the sandbox: a typed token is kept in sandbox-ai "
+                                                          "secrets, never in the project file. The project's own "
                                                           "remote is not offered: the agent can rewrite .git/config."))
         self.identity = QCheckBox(labels.shown(tr(
             "commit as my global user.name and user.email (--git-identity)")))
@@ -1217,7 +1446,7 @@ class GitPage(Page):
 
     PLACEHOLDERS = {"env": N_("GH_TOKEN  (a variable of the shell the app was started from)"),
                     "secret": N_("GH_PUSH  (sandbox-ai secrets set GH_PUSH)"),
-                    "typed": N_("ghp_…  (kept in a private file, never in the project file)"),
+                    "typed": N_("ghp_…  (kept in sandbox-ai secrets, never in the project file)"),
                     "file": N_("/home/you/.config/tokens/github  (one line, mode 0600)")}
 
     def add_row(self, url, kind, value):
@@ -1226,7 +1455,7 @@ class GitPage(Page):
         self.table.setItem(row, 0, QTableWidgetItem(url))
         combo = QComboBox()
         for key, text in (("env", tr("host variable")), ("secret", tr("stored secret")),
-                          ("typed", tr("typed here (kept in a private file)")), ("file", tr("token file"))):
+                          ("typed", tr("typed here (kept as a secret)")), ("file", tr("token file"))):
             combo.addItem(text, key)
         combo.setCurrentIndex(max(0, combo.findData(kind)))
         self.table.setCellWidget(row, 1, combo)
@@ -1273,16 +1502,101 @@ class GitPage(Page):
                 edit.setCompleter(self.completer())
                 edit.setToolTip(safe_tooltip(tr("Kept secrets: {names}", names=", ".join(self.stored) or tr("none yet"))))
 
+    def keep(self):
+        """Back: the rows that name where a token is (a variable, a stored secret, a file) and the boxes onto the board
+        as Next would; a token typed here is not written anywhere on the way back (it is kept in a private file only
+        by Next). The table stays as it is while the board says what was kept (initializePage): a typed row too."""
+        props = self.node("git").props
+        values = {"--git-token-env": [], "--git-token-secret": [], "--git-token-file": []}
+        for row in range(self.table.rowCount()):
+            url = (self.table.item(row, 0).text() if self.table.item(row, 0) else "").strip()
+            kind, value = self.table.cellWidget(row, 1).currentData(), self.token_edit(row).text().strip()
+            if kind != "typed" and url.startswith(("https://", "http://")) and value:
+                values[dict(TOKEN_KINDS)[kind]].append(f"{url}={value}")
+        for option, entries in values.items():
+            set_or_drop(props, option, entries)
+        set_or_drop(props, "--git-identity", self.identity.isChecked())
+        set_or_drop(props, "--token-proxy", self.token_proxy.isChecked())
+        self.kept = json.dumps(props, sort_keys=True, default=str)
+        return True
+
     def initializePage(self):  # noqa: N802
         background(self.wizard_.sai.secrets, owner=self, timeout=60, done=self.secrets_read)  # names only, never values
         props = self.node("git").props
+        if getattr(self, "kept", None) == json.dumps(props, sort_keys=True, default=str):
+            return  # as Back left it (keep): the rows as they were, a token typed in one too
+        self.kept = None
         self.identity.setChecked(bool(props.get("--git-identity")))
         self.token_proxy.setChecked(bool(props.get("--token-proxy")))
         self.table.setRowCount(0)
         for kind, option in (("env", "--git-token-env"), ("secret", "--git-token-secret"), ("file", "--git-token-file")):
             for value in props.get(option, []):
                 url, _, name = str(value).partition("=")
-                self.add_row(url, kind, name)
+                moved = self.wizard_.sai.moved_token(name) if kind == "file" else None
+                # a token file of an older wizard's, moved into sandbox-ai secrets: its secret
+                self.add_row(url, "secret" if moved else kind, moved or name)
+
+    def keep_typed(self, row, url, value):
+        """A token typed for URL kept as a secret of sandbox-ai (`secrets set GIT_TOKEN_HOST` on standard input), in
+        the background: the row then names the secret and the wizard goes on (token_kept). Locked secrets, or private
+        files without a primary password yet: the password is asked first (hidden), as the Credentials page asks it."""
+        self.keeping = True
+        self.note.setText(tr("Keeping the token as a secret of sandbox-ai…"))
+        background(self.wizard_.sai.save_token, url, value, owner=self, timeout=90, work=True,
+                   done=functools.partial(self.token_kept, row, url, value, False))
+
+    def token_kept(self, row, url, value, retried, result, error):
+        self.keeping = False
+        if error is None and result:
+            kind_box, edit = self.table.cellWidget(row, 1), self.token_edit(row)
+            if kind_box is not None and edit is not None:
+                kind_box.setCurrentIndex(kind_box.findData("secret"))
+                edit.setText(result)  # the token itself is no longer held here, only where it is kept
+            self.note.setText("")
+            self.wizard().next()
+            return
+        error = str(error or tr("The token was not kept."))
+        if retried:
+            self.note.setText(tr("The token was not kept: {error}", error=printable_text(error.strip())))
+            return
+        go_on = functools.partial(self.unlocked, row, url, value)
+        if "sandbox-ai secrets unlock" in error:
+            password = widgets.ask_password(self, tr("Primary password"), tr(
+                "The secrets{where} are encrypted. Type their primary password: they stay unlocked for 8 hours, or "
+                "until Lock.", where=""), tr("Unlock"))
+            if not password:
+                self.note.setText(tr("The token was not kept: {error}", error=printable_text(error.strip())))
+                return
+            self.keeping = True
+            background(self.wizard_.sai.secrets_unlock, password, owner=self, timeout=120, work=True, done=go_on)
+        elif "sandbox-ai secrets password set" in error:
+            password = widgets.ask_password(self, tr("Primary password"), tr(
+                "The secrets{where} are kept in private files. A primary password encrypts them: without it nobody "
+                "reads them from the disk or a backup - you neither, there is no way to recover it. It is asked once "
+                "per session.\n\nNew primary password (8 characters or more):", where=""), tr("Next"))
+            again = password and widgets.ask_password(self, tr("Primary password"),
+                                                      tr("The same primary password again:"),
+                                                      tr("Set primary password"))
+            if not password or again != password:
+                self.note.setText(tr("The two passwords are not the same: nothing was set.") if password else
+                                  tr("The token was not kept: {error}", error=printable_text(error.strip())))
+                return
+            self.keeping = True
+            background(self.wizard_.sai.secrets_new_password, password, owner=self, timeout=120, work=True,
+                       done=go_on)
+        else:
+            self.note.setText(tr("The token was not kept: {error}", error=printable_text(error.strip())))
+        password = again = None  # noqa: F841 - not held here any longer
+
+    def unlocked(self, row, url, value, result, error):
+        self.keeping = False
+        status, out, err = widgets.outcome(result, error)
+        if status != 0:
+            self.note.setText(tr("The token was not kept: {error}", error=printable_text((err or out).strip())))
+            return
+        self.keeping = True
+        background(self.wizard_.sai.save_token, url, value, owner=self, timeout=90, work=True,
+                   done=functools.partial(self.token_kept, row, url, value, True))
 
     def validatePage(self):  # noqa: N802
         props = self.node("git").props
@@ -1297,14 +1611,9 @@ class GitPage(Page):
                 self.note.setText(tr("Each token needs a server (https://HOST) and a name, file or token."))
                 return False
             if kind == "typed":
-                try:
-                    path = self.wizard_.sai.save_token(url, value)
-                except (OSError, ValueError) as exc:
-                    self.note.setText(tr("The token was not kept: {error}", error=printable_text(exc)))
-                    return False
-                kind, value = "file", str(path)
-                kind_box.setCurrentIndex(kind_box.findData("file"))
-                edit.setText(value)  # the token itself is no longer held here, only where it is kept
+                if not getattr(self, "keeping", False):
+                    self.keep_typed(row, url, value)  # kept in the background; the wizard goes on once it is
+                return False
             option = dict(TOKEN_KINDS)[kind]
             values[option].append(f"{url}={value.strip()}")
         for option, entries in values.items():
@@ -1343,6 +1652,9 @@ class McpPage(Page):
         if not self.servers.count():
             self.servers.addItem(tr("No MCP server is defined yet."))
 
+    def keep(self):  # only writes the board: Back keeps it as Next would
+        return self.validatePage()
+
     def validatePage(self):  # noqa: N802
         wanted = [self.servers.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.servers.count())
                   if self.servers.item(i).flags() & Qt.ItemFlag.ItemIsUserCheckable
@@ -1366,7 +1678,7 @@ class McpPage(Page):
 class HardwarePage(Page):
     def __init__(self, wizard):
         super().__init__(wizard, tr("Devices and limits"), tr("Devices weaken the isolation: a service on the host "
-                                                              "reached through a host port is safer."))
+                                                              "reached through a host port is safer."), explained=False)
         self.devices = LinesEdit([])
         self.forbid(self.devices, "--device")
         self.form.addRow(tr("Devices (/dev/...)"), self.devices)
@@ -1392,6 +1704,9 @@ class HardwarePage(Page):
         self.cpus.setText(str(limits.get("--cpus", "") or ""))
         self.pids.setText(str(limits.get("--pids", "") or ""))
 
+    def keep(self):  # only writes the board: Back keeps it as Next would
+        return self.validatePage()
+
     def validatePage(self):  # noqa: N802
         devices, limits = self.node("devices").props, self.node("limits").props
         set_or_drop(devices, "--device", self.devices.values())
@@ -1408,7 +1723,7 @@ class HardwarePage(Page):
 class ReviewPage(Page):
     def __init__(self, wizard):
         super().__init__(wizard, tr("Review"), tr("What will be written and started. Finish writes the project file, "
-                                                  "trusts exactly it and opens the board."))
+                                                  "trusts exactly it and opens the board."), explained=False)
         self.command = QPlainTextEdit()
         self.command.setReadOnly(True)
         self.command.setFont(MONO)

@@ -173,9 +173,11 @@ def test_builder_all_builds_every_image(tmp_path, fake_npm, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "all"], capture_output=True, text=True)
     lines = [line for line in log.read_text().splitlines() if line.split()[len(CGROUPS):len(CGROUPS) + 1] == ["build"]]
-    assert [line.split()[2 + len(CGROUPS)] for line in lines][:7] == [
-        f"localhost/{a}-sandbox:latest" for a in ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose")]
-    assert all(line.split()[:len(CGROUPS)] == CGROUPS for line in lines[:7])
+    agents = ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot",
+              "letta", "pi")
+    assert [line.split()[2 + len(CGROUPS)] for line in lines][:len(agents)] == [
+        f"localhost/{a}-sandbox:latest" for a in agents]
+    assert all(line.split()[:len(CGROUPS)] == CGROUPS for line in lines[:len(agents)])
     assert "CLAUDE_VERSION=9.2.0" in lines[1]
     for label in ("team", "cairn", "browser", "vpn", "tor"):
         assert f": {label}\n" in result.stderr + "\n", result.stderr
@@ -237,6 +239,18 @@ def test_builder_help_does_not_build(fake_podman):
     result = subprocess.run([str(ROOT / "sandbox-ai"), "build", "--help"], capture_output=True, text=True)
     assert result.returncode == 0
     assert "codex|claude|opencode" in result.stdout
+    assert not fake_podman.exists()
+
+
+@pytest.mark.parametrize("args", [["claude", "--help"], ["claude", "-h"], ["--pin", "1.0.42", "claude", "--help"],
+                                  ["claude", "codex", "--help"], ["all", "--help"], ["team", "--help"],
+                                  ["myvariant", "--help"]])
+def test_builder_help_after_a_target_is_builds_own_help(args, fake_podman):
+    """`sandbox-ai build NAME --help` showed Podman's `build --help` (everything after the target goes to
+    `podman build`): it is build's own help now, as `build --help` is, and nothing is built."""
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "build", *args], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("Usage:  sandbox-ai build [OPTIONS] TARGET...") and "codex|claude|opencode" in result.stdout
     assert not fake_podman.exists()
 
 

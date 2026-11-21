@@ -4,9 +4,11 @@ inside the sandbox.
 
   sandbox-ai publish-logins add KIND --secret NAME [--url URL]   a login: the token is the secret NAME
   sandbox-ai publish-logins list [--json]                         the logins (kinds, hosts, secret names)
+  sandbox-ai publish-logins edit KIND [--secret NAME] [--url URL] change a login: which secret, which server
   sandbox-ai publish-logins remove KIND
   sandbox-ai publish-logins check [KIND]                          whether each login's secret is there
   sandbox-ai publish-logins kinds                                 what each kind opens, sets and asks about
+  sandbox-ai publish-logins give RUN KIND                         why a running sandbox cannot be given one, and what to do
 
 KIND is npm, pypi, testpypi, crates, gitlab or github. --url names another server of that kind (a private npm
 registry, your GitLab, GitHub Enterprise). Keep the token first: sandbox-ai secrets set NAME.
@@ -19,6 +21,12 @@ puts the token in its place on the wire, only in a credential header of HTTPS re
 npm publish or unpublish, a crate yank, a GitHub or GitLab release, a file written through the API, which a push's
 privacy check would not see) is asked first; with --ask off it is refused. Answers of those hosts reach the agent
 with the token masked.
+
+`edit` changes a login in place (--url default: back to the service's public server); the token itself is the
+secret's (sandbox-ai secrets set NAME replaces its value). It is for the starts from then on: a publish login
+cannot be given to a sandbox that runs (its tools' variables are set at the start, and the questions before every
+upload are its start's rules), so a running one needs a restart with --publish KIND (sandbox-ai resume NAME
+--restart --publish KIND); `give RUN KIND` says so for a run, with the way to give the token alone as an API key.
 
 The list is ~/.config/sandbox-ai/publish-logins.json (mode 0600): kinds, hosts and secret names, no tokens.
 Git pushes are sandbox-ai git-logins. Standard library only.
@@ -276,29 +284,86 @@ def plan(kinds, logins=None):
              "variables": sorted(spec["env"])} for login, spec in selected(kinds, logins)]
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def main(argv, out=print):
     p = argparse.ArgumentParser(prog="sandbox-ai publish-logins", description=__doc__.split("\n\n")[0],
-                                formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False,
-                                epilog="\n\n".join(__doc__.split("\n\n")[1:4]))
+                                formatter_class=help_style, allow_abbrev=False,
+                                epilog="\n\n".join(__doc__.split("\n\n")[1:5]))
     commands = p.add_subparsers(dest="command", required=True)
-    added = commands.add_parser("add")
+    added = commands.add_parser("add", help="a login: the token is the secret NAME")
     added.add_argument("kind", choices=sorted(KINDS))
-    added.add_argument("--secret", required=True, metavar="NAME")
-    added.add_argument("--url", metavar="URL")
-    listing = commands.add_parser("list")
-    listing.add_argument("--json", action="store_true")
-    removed = commands.add_parser("remove")
+    added.add_argument("--secret", required=True, metavar="NAME", help="the secret (sandbox-ai secrets) holding the access token")
+    added.add_argument("--url", metavar="URL", help="the server's URL (default: the service's public one)")
+    listing = commands.add_parser("list", help="the logins (kinds, hosts, secret names)")
+    listing.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
+    edited = commands.add_parser("edit", help="change a login: which secret, which server",
+                                 description="Change the login of KIND in place: --secret which secret holds the "
+                                             "token, --url its server (default: the service's public one). For the "
+                                             "starts from then on; a sandbox that runs needs a restart with "
+                                             "--publish KIND.")
+    edited.add_argument("kind", choices=sorted(KINDS))
+    edited.add_argument("--secret", metavar="NAME", help="the secret (sandbox-ai secrets) holding the access token")
+    edited.add_argument("--url", metavar="URL", help="the server's URL (default: back to the service's public one)")
+    removed = commands.add_parser("remove", help="forget a login")
     removed.add_argument("kind", choices=sorted(KINDS))
-    checked = commands.add_parser("check")
+    checked = commands.add_parser("check", help="whether each login's secret is there")
     checked.add_argument("kind", nargs="?", choices=sorted(KINDS))
-    commands.add_parser("kinds")
+    commands.add_parser("kinds", help="what each kind opens, sets and asks about")
+    given = commands.add_parser("give", help="a running sandbox cannot be given a publish login: why, and what to do",
+                                description="A publish login is set up when a sandbox starts (--publish KIND): its "
+                                            "tools' variables hold the placeholder from the start, and the "
+                                            "questions before every upload are rules of that start. Neither can be "
+                                            "given to a sandbox that runs, so this command gives nothing: it says "
+                                            "so for RUN, with the restart that brings the login and the way to "
+                                            "give the token alone as an API key (without the questions).")
+    given.add_argument("run")
+    given.add_argument("kind", choices=sorted(KINDS))
     args = p.parse_args(argv)
+    if args.command == "give":
+        return give_refusal(args.run, args.kind)
     try:
-        with settings_lock(path()) if args.command in ("add", "remove") else contextlib.nullcontext():
+        with settings_lock(path()) if args.command in ("add", "edit", "remove") else contextlib.nullcontext():
             return run_command(args, out)
     except ValueError as exc:  # the lock not taken in time
         print(f"sandbox-ai publish-logins: {exc}", file=sys.stderr)
         return 1
+
+
+def give_refusal(run, kind):
+    """`publish-logins give RUN KIND`: never given (exit status 1) - why, for the run named as sandbox-ai list names
+    it, and the two ways that work."""
+    printable = launcher().printable
+    shown, name = printable(run), printable(run)
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_net_for_publish_logins", HERE / "net.py")
+        net = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(net)
+        net._launcher_source = launcher
+        record = net.choose(net.running(), run, command="publish-logins give")
+        shown, name = net.who(record, run), printable(str(net.label(record.get("run") or run, record)))
+    except (ValueError, OSError) as exc:
+        print(f"sandbox-ai publish-logins: {exc}", file=sys.stderr)
+        return 1
+    login = next((entry for entry in load() if entry["kind"] == kind), None)
+    host = (login or {}).get("host") or KINDS[kind]["hosts"][0]
+    variable = next(name_ for name_, value in KINDS[kind]["env"].items() if "{placeholder}" in value)
+    secret = (login or {}).get("secret") or "NAME"
+    print(f"sandbox-ai publish-logins: {shown} cannot be given the publish login {kind} while it runs: its tools' "
+          f"variables ({', '.join(sorted(KINDS[kind]['env']))}) are set when a sandbox starts, and the questions "
+          f"before every upload are rules of that start. Restart it with the login: sandbox-ai resume {name} "
+          f"--restart --publish {kind}. The token alone, without those questions, as an API key of the running "
+          f"sandbox: sandbox-ai secrets give {name} {secret} --api-key {host} --as {variable}", file=sys.stderr)
+    return 1
 
 
 def run_command(args, out):
@@ -320,6 +385,31 @@ def run_command(args, out):
                 f"a start uses it with --publish {args.kind}")
             if launcher().load_secret_store_module().get(args.secret) is None:
                 out(f"note: the secret {args.secret} is not kept yet: sandbox-ai secrets set {args.secret}")
+            return 0
+        if args.command == "edit":
+            entry = next((e for e in logins if e["kind"] == args.kind), None)
+            if entry is None:
+                raise ValueError(f"no login for {args.kind} (sandbox-ai publish-logins list)")
+            if args.secret is None and args.url is None:
+                raise ValueError("nothing to change: give --secret NAME or --url URL (default: back to the "
+                                 "service's public server)")
+            if args.secret is not None and not SECRET.fullmatch(args.secret):
+                raise ValueError("--secret is a secret's name (letters, digits, _)")
+            before = dict(entry)
+            if args.url is not None:
+                entry["host"] = server_host(args.kind, None if args.url == "default" else args.url)
+            if args.secret is not None:
+                entry["secret"] = args.secret
+            if entry == before:
+                out(f"{args.kind}: unchanged (it is that already)")
+                return 0
+            save(logins)
+            out(f"{args.kind}: {', '.join(hosts_of(args.kind, entry['host']))} with the secret {entry['secret']}; "
+                f"a start uses it with --publish {args.kind}")
+            if launcher().load_secret_store_module().get(entry["secret"]) is None:
+                out(f"note: the secret {entry['secret']} is not kept yet: sandbox-ai secrets set {entry['secret']}")
+            out(f"note: this is for the starts from now on; a sandbox that runs with --publish {args.kind} keeps the "
+                f"login it was started with until it is restarted (sandbox-ai resume NAME --restart)")
             return 0
         if args.command == "list":
             if args.json:

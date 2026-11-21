@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "description": "axross-mcp-server: the MCP server axross reads without asking; every tool that writes, deletes, renames, copies, uploads or changes a file's mode or links - on the folder or on an SFTP connection - is asked first; everything it returns is untrusted.",
+  "mcp": [
+    {
+      "id": "axross-reads",
+      "server": "axross",
+      "tool": [
+        "list_dir",
+        "stat",
+        "read_file",
+        "checksum",
+        "search",
+        "walk",
+        "recursive_checksum",
+        "grep",
+        "list_versions",
+        "open_version_read",
+        "remote_profiles",
+        "remote_open",
+        "remote_close",
+        "list_backends",
+        "mkdir"
+      ],
+      "decision": "allow"
+    },
+    {
+      "id": "axross-overwrites",
+      "server": "axross",
+      "tool": [
+        "write_file",
+        "copy",
+        "bulk_copy"
+      ],
+      "decision": "ask",
+      "reason": "writes a file, or copies files, on your folder or on an SFTP server (an upload when the backend is a profile)"
+    },
+    {
+      "id": "axross-deletes",
+      "server": "axross",
+      "tool": [
+        "remove",
+        "rename"
+      ],
+      "decision": "ask",
+      "reason": "deletes, moves or renames a file or folder on your folder or on an SFTP server"
+    },
+    {
+      "id": "axross-modes-and-links",
+      "server": "axross",
+      "tool": [
+        "chmod",
+        "symlink",
+        "hardlink"
+      ],
+      "decision": "ask",
+      "reason": "changes a file's mode or makes a link on your folder or on an SFTP server"
+    },
+    {
+      "id": "axross-rest",
+      "server": "axross",
+      "tool": "*",
+      "decision": "deny",
+      "priority": 1000
+    }
+  ],
+  "untrusted": [
+    {
+      "id": "axross-files",
+      "server": "axross",
+      "tool": "*"
+    }
+  ]
+}

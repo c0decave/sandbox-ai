@@ -75,13 +75,13 @@ def team_start(runner=None, **query):
 # --- the members: team.AGENTS ------------------------------------------------------------------------------------
 
 def test_the_web_takes_every_member_team_py_takes_from_team_py_itself():
-    assert tuple(w.team_agents()) == team.AGENTS == ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+    assert tuple(w.team_agents()) == team.AGENTS and len(team.AGENTS) == 12  # every agent (0.1.98)
     source = (ROOT / "sandbox/webui.py").read_text()
     assert "TEAM_AGENTS" not in source, "no copy of team.AGENTS of its own"
     argv = team_start(agents=",".join(reversed(team.AGENTS)))
-    assert argv[:3] == ["team", "start", "--agents=goose,qwen,dsh,hermes,opencode,codex,claude"]
+    assert argv[:3] == ["team", "start", "--agents=" + ",".join(reversed(team.AGENTS))]
     for agents in ("claude", "claude,claude", "claude,bash", "claude,-x", "claude,,codex", ""):
-        with pytest.raises(w.Refused, match="two or more of claude, codex, opencode, hermes, dsh, qwen, goose"):
+        with pytest.raises(w.Refused, match="two or more of " + ", ".join(team.AGENTS)):
             team_start(agents=agents)
 
 
@@ -191,7 +191,9 @@ def test_the_argv_of_a_team_start_parses_with_the_real_command_line(monkeypatch)
     assert argv[0] == "team" and team.main(argv[1:]) == 0
     (name, agents, workspace, options, _out), kw = got[0]
     assert (name, agents, workspace, options) == ("t1", ["goose", "dsh"], "/srv/w", ["--allow-pypi"])
-    assert kw == {"vpn": "anon", "member_vpn": {"dsh": "wg1"}, "shared_openvpn": True}
+    # (0.1.98: each member's role and own options too - none here; tests/test_board_teams.py has them)
+    assert kw == {"vpn": "anon", "member_vpn": {"dsh": "wg1"}, "shared_openvpn": True, "roles": {},
+                  "member_options": {}, "dry_run": False, "login_question": True}  # (the web's terminal asks)
 
 
 def test_a_host_older_than_the_vpn_options_is_told_to_update(monkeypatch):
@@ -215,7 +217,7 @@ const byId = (id) => body.all().find(n => n.id === id);
 (async () => {
   const result = {};
   vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1" }]; var terminalsOpened = []; openTerminal = (params, title) => { terminalsOpened.push(params); };', context);
-  let choices = { agents: ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"], error: null,
+  let choices = { agents: ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "opencode2", "pi"], error: null,
     profiles: [{ profile: "anon", type: "tor", provider: "generic" }, { profile: "wg1", type: "wireguard", provider: "mullvad" },
                { profile: "office", type: "openvpn", provider: "generic" }] };
   answer = (method, path) => (path.endsWith("/teams") ? [] : path.endsWith("/team-choices") ? choices : {});
@@ -362,7 +364,8 @@ def test_e2e_a_team_from_the_web_with_tor_for_all_and_its_own_profile_for_one(se
     host = service.host
     add_wireguard(host, "wg")
     assert host.run("vpn", "add", "anon", "--tor").returncode == 0
-    host.add_image("localhost/claude-sandbox:latest", "localhost/hermes-sandbox:latest",
+    # (codex's image too: the team's board is a command MCP server, run in codex's image - the start checks it)
+    host.add_image("localhost/claude-sandbox:latest", "localhost/hermes-sandbox:latest", "localhost/codex-sandbox:latest",
                    "localhost/sandbox-ai-tor:latest", "localhost/sandbox-ai-vpn:latest")
     _, done = terminal(service, kind="team-start", team="e2t", agents="claude,hermes", workspace=str(host.workspace),
                        vpn="anon", member_vpn=json.dumps({"hermes": "wg"}), options=json.dumps(["--no-auth"]))

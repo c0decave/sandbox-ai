@@ -192,6 +192,9 @@ def test_a_new_skill_for_a_new_kit_offers_every_agent(fake, monkeypatch, wait):
             self.name, self.description = QtWidgets.QLineEdit("lint"), QtWidgets.QLineEdit("when linting")
             self.agents = type("A", (), {"chosen": lambda self: ["claude"]})()
 
+        def keep_draft(self, key):  # (the real dialog keeps what was typed: drafts.py)
+            return self
+
         def exec(self):
             return QtWidgets.QDialog.DialogCode.Accepted
     monkeypatch.setattr(kits_page, "NewSkillDialog", Skill)
@@ -224,6 +227,9 @@ def test_every_change_runs_sandbox_ai_kits(fake, env, monkeypatch, wait):
                 self.args = args
                 for name, value in fields.items():
                     setattr(self, name, value)
+
+            def keep_draft(self, key):  # (the real dialog keeps what was typed: drafts.py)
+                return self
 
             def exec(self):
                 return QtWidgets.QDialog.DialogCode.Accepted
@@ -313,7 +319,7 @@ def test_install_plugins_in_the_background_with_the_projects_built_in_kits(fake,
                (1, "", "sandbox-ai plugins: not installed: sandcastle@sandbox-ai\n")]
     call = fake.sai.call
     monkeypatch.setattr(fake.sai, "call", lambda *args, **kw: (ran.append(args) or answers.pop(0))
-                        if args[:2] == ("plugins", "claude") else call(*args, **kw))
+                        if args[:2] in (("plugins", "claude"), ("plugins", "all")) else call(*args, **kw))
     monkeypatch.setattr(fake, "notify", lambda title, text, level="warning", action=None: notes.append(
         (level, title, text, action)))
     started = len(fake.started)
@@ -321,7 +327,9 @@ def test_install_plugins_in_the_background_with_the_projects_built_in_kits(fake,
     assert wait(lambda: notes and not page.task.running, 20)
     assert len(fake.started) == started, "no terminal"
     supports = "--kit" in (fake.sai.directory / "plugins.py").read_text()
-    assert ran[-1] == (("plugins", "claude", "--update") + (("--kit", "egm") if supports else ())), \
+    # Claude's, Codex's and OpenCode 2's kit plugins in one go, where this sandbox-ai has `plugins all`.
+    every = "all" if '"all"' in (fake.sai.directory / "plugins.py").read_text() else "claude"
+    assert ran[-1] == (("plugins", every, "--update") + (("--kit", "egm") if supports else ())), \
         "only built-in kits, only where it can"
     assert notes[-1][:3] == ("success", "Plugins updated", "sandbox-ai plugins: 1 plugin(s) in /x/plugins/claude; "
                              "every Claude sandbox enables those its kits list")
@@ -335,7 +343,7 @@ def test_install_plugins_in_the_background_with_the_projects_built_in_kits(fake,
     assert action[0] == "Show the log"
     action[1]()
     assert not fake.log_fold.is_folded()
-    assert ran[-1][:2] == ("plugins", "claude") and "--update" not in ran[-1]
+    assert ran[-1][:2] == ("plugins", every) and "--update" not in ran[-1]
 
 
 def test_the_page_s_actions_are_above_its_lists_grouped_and_on_their_context_menus(fake):
@@ -539,6 +547,9 @@ def test_hooks_are_added_and_removed_with_sandbox_ai_kits(hooked, env, monkeypat
             self.dialog.agents.boxes["codex"].setChecked(False)
             self.file, self.agents, self.options = self.dialog.file, self.dialog.agents, self.dialog.options
 
+        def keep_draft(self, key):  # (the real dialog keeps what was typed: drafts.py)
+            return self
+
         def exec(self):
             return QtWidgets.QDialog.DialogCode.Accepted
     monkeypatch.setattr(kits_page, "HookDialog", Hook)
@@ -607,14 +618,16 @@ def test_the_vendored_skill_kits_are_listed_and_switched_on_and_off(window, env,
     if "hallmark" not in builtin:
         pytest.skip("this sandbox-ai has no vendored skills (0.1.94)")
     for kit, skill in VENDORED.items():
-        assert set(builtin[kit]["agents"]) == {"claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"}, kit
+        assert set(builtin[kit]["agents"]) == {"claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose",
+                                               "openhands",
+                                               "nanobot", "letta", "pi"}, kit
         assert all(skill in builtin[kit]["agents"][agent]["skills"] for agent in builtin[kit]["agents"]), kit
     assert set(builtin["hallmark-hook"]["agents"]) == {"claude"}
     page = window.kits
     page.refresh()
     assert wait(lambda: all(widgets.find_row(page.table, f"builtin:{kit}") >= 0 for kit in VENDORED), 60)
     row = widgets.find_row(page.table, "builtin:hyperframes")
-    assert page.table.item(row, 2).text() == "claude, codex, dsh, goose, hermes, opencode, qwen"
+    assert page.table.item(row, 2).text() == "claude, codex, dsh, goose, hermes, letta, nanobot, opencode, opencode2, openhands, pi, qwen"
     assert "hyperframes-cli" in page.table.item(row, 3).text() and "media-use" in page.table.item(row, 3).text()
     # On: Use in the current project.
     folder = project(env, "p")
@@ -665,3 +678,67 @@ def test_several_kits_are_deleted_at_once_and_only_yours(fake, monkeypatch, wait
     assert "Delete these 2 kits" in question and "- mine\n- ours" in question and "Left out" in question
     assert wait(lambda: ("delete", "ours", "--yes") in calls, 10)
     assert [c for c in calls if c[0] == "delete"] == [("delete", "mine", "--yes"), ("delete", "ours", "--yes")]
+
+
+def test_the_kits_dialogs_keep_what_was_typed_until_it_was_added(fake, monkeypatch, wait):
+    """Dialog drafts (drafts.py) for the kits: New kit…, New skill…, Add plugin…, Add marketplace…, Add hook… keep
+    what was typed and not sent (Cancel, a refusal) for the same host and kit; dropped once the command succeeded."""
+    from sandbox_ai_app import drafts
+    page, calls = fake.kits, fake.calls
+    answers = []
+    monkeypatch.setattr(fake.sai, "kit_command", lambda action, name, *args, options=(): calls.append(
+        (action, name, *args, *options)) or (answers.pop(0) if answers else (0, "", "")))
+    seen = []
+
+    def opened(fill, answer):
+        def run(dialog, *args):
+            seen.append({name: drafts.value_of(widget) for name, widget in dialog.fields().items()})
+            fill(dialog)
+            dialog.done(answer)
+            return answer
+        monkeypatch.setattr(widgets, "exec_dropped", run)
+    rejected, accepted = QtWidgets.QDialog.DialogCode.Rejected, QtWidgets.QDialog.DialogCode.Accepted
+
+    def kit_form(dialog):
+        if not dialog.name.text():
+            dialog.name.setText("team")
+            dialog.agents.boxes["codex"].setChecked(False)
+    opened(kit_form, rejected)
+    page.new_kit()
+    assert seen[-1]["name"] == "" and calls == [], "cancelled: nothing sent"
+    opened(kit_form, accepted)
+    answers.append((1, "", "sandbox-ai kits: team exists"))
+    page.new_kit()
+    assert seen[-1]["name"] == "team" and seen[-1]["agent:codex"] is False, "filled in again"
+    assert wait(lambda: calls and calls[-1][:2] == ("new", "team"), 10)
+    assert ("kits", "new-kit", "local") in drafts.DRAFTS, "refused: still kept"
+    page.new_kit()
+    assert seen[-1]["name"] == "team"
+    assert wait(lambda: len(calls) == 2, 10)
+    assert ("kits", "new-kit", "local") not in drafts.DRAFTS, "added: done with"
+
+    def hook_form(dialog):
+        if not dialog.file.text():
+            dialog.file.setText("/tmp/check.sh")
+            dialog.matcher.setText("Bash")
+    select_kit(page, "user", "mine")
+    opened(hook_form, rejected)
+    page.add_hook()
+    select_kit(page, "user", "mine")
+    opened(lambda dialog: None, rejected)
+    page.add_hook()
+    assert seen[-1]["file"] == "/tmp/check.sh" and seen[-1]["matcher"] == "Bash"
+    for method, key in ((page.new_skill, "new-skill"), (page.add_plugin, "plugin"),
+                        (page.add_marketplace, "marketplace")):
+        select_kit(page, "user", "mine")
+
+        def typed(dialog):
+            first = getattr(dialog, "name", None) or dialog.plugin
+            first.setCurrentText("typed") if hasattr(first, "setCurrentText") else first.setText("typed")
+        opened(typed, rejected)
+        method()
+        select_kit(page, "user", "mine")
+        opened(lambda dialog: None, rejected)
+        method()
+        assert "typed" in seen[-1].values(), (key, seen[-1])
+        assert any(k[:2] == ("kits", key) for k in drafts.DRAFTS)

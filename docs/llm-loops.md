@@ -49,15 +49,17 @@ order. `sandbox-ai llm show NAME` shows what applies.
 
 | Layer | Default | What it does |
 |---|---|---|
-| `steps` | 40 | OpenCode: `agent.build.steps` 40, `plan`/`explore` 18, `general` 26; at the last step OpenCode asks for a text answer (a new message of yours starts the count again). 0: OpenCode's own (no limit). |
-| `compaction` | on | OpenCode: `compaction.auto` and `prune` on, `reserved` a fifth of the window; `tool_output` cut at 1000 lines / 128 KiB (OpenCode's own: 2000 / 51 200; above 51 200 so that a whole part of the files MCP server's `read_file`, 60 000 characters, reaches the model instead of a preview). |
+| `steps` | 150 | OpenCode: `agent.build.steps` 150, `plan`/`explore` 67, `general` 100; at the last step OpenCode asks for a text answer (a new message of yours starts the count again). 0: OpenCode's own (no limit). The same value is the turn limit of the agents that have one for `--llm` (Goose's `GOOSE_MAX_TURNS`, Hermes' `agent.max_turns`, OpenHands' `max_iterations`, nanobot's `maxToolIterations`, Pi's and OpenCode 2's; Qwen Code's `maxSessionTurns` only where you set `steps` yourself). It was 40 up to 0.1.97, which ended real work early: on the research's debugging task OpenCode stopped after 41 requests with nothing fixed, and solved it in 102 with a limit of 120; the task took 21 to 38 requests with Nemotron, 23 to 36 with Laguna, 30 with Qwen3.6, 102 with Qwen3-Coder-Next. A low limit is no protection against loops - `warn`, `block` and the watchdog are. |
+| `compaction` | on | OpenCode: `compaction.auto` and `prune` on, `reserved` a fifth of the window; `tool_output` cut at 1000 lines / 50 000 bytes (OpenCode's own: 2000 / 51 200). A whole part of the files MCP server's `read_file` fits (24 000 characters a part; as JSON 25-31 KB), and one tool result cannot cost tens of thousands of tokens: with the 128 KiB of 0.1.96 and 0.1.97 (set when the server's parts were 60 000 characters and the model got a preview instead of one) a single `read` of a log took a request from 9k to 45k tokens, 47 s before the first token on the fastest model. |
 | `instructions` | on | OpenCode: `~/.config/opencode/sandbox-ai-loop-guard.md` in its `instructions` (OpenCode concatenates the instructions of all its configuration files: your `AGENTS.md` and instructions stay). |
 | `sampling` | on | The model family's recommended sampling as the lowest default (Qwen3 thinking T 0.6 / top_p 0.95 / top_k 20 / min_p 0; Qwen3 Instruct T 0.7 / top_p 0.8; Qwen3-Coder T 0.7 / top_p 0.8 / top_k 20 / repetition 1.05; QwQ as Qwen3; DeepSeek-R1 T 0.6 / top_p 0.95; gpt-oss T 1.0 / top_p 1.0). For the Qwen and DeepSeek families a temperature below 0.3 is raised to theirs (never greedy). Your own parameters win. |
 | `context` | on | A warning at the start when the agent would be told a larger window than the server has the model loaded with (LM Studio's loaded instance, Ollama's `/api/ps`) or reports. |
-| `warn` | 3 | The proxy, on each request: the same tool call with the same result (volatile parts - dates, times, durations, UUIDs and hex ids, Codex's `Chunk ID` and `session ID`, the `call_`/`toolu_`/`tool_` ids harnesses print, PIDs, temporary paths - taken out) this many times since your last message: a note `[sandbox-ai loop guard] ...` is added to that result. The model reads it and goes on. A harness's own note after a tool result (DSH's "You are repeating the exact same tool call", "Repeated tool call detected") is no message of yours: it does not start the count again; any other text there (typed while the agent works) does. |
-| `block` | 6 | ... this many times: the note tells the model to stop calling tools and summarise. The request otherwise goes out as the agent sent it - `tool_choice: none` (or Ollama's tools taken away) would make servers such as LM Studio render the prompt anew without the tools, a full prefill of the conversation (15-18 s on an 80B model) and another for the next request. The proxy reads the model's whole answer: a text answer (a summary, a different plan) passes; one that calls a tool again goes no further - sandbox-ai answers in the model's place ("... sandbox-ai ended this turn here. Say what you need, or what to try differently.") in the API's own shape (chat completions, Responses, Anthropic Messages; streamed or not), and the agent's turn ends. Your next message goes on as usual. |
+| `warn` | 3 | The proxy, on each request: the same tool call with the same result (volatile parts - dates, times, durations, UUIDs and hex ids, Codex's `Chunk ID` and `session ID`, the `call_`/`toolu_`/`tool_` ids harnesses print, PIDs, temporary paths - taken out) this many times since your last message: a note `[sandbox-ai loop guard] ...` is added to that result - the third identical call's result says "3 times", the fourth's "4 times" and so on, and each note stays in its result in every later request (the agent sends the conversation without them; the proxy puts each back where it was, the earlier turns' too). So a request always begins exactly like the one before it and the server's prompt cache holds: with one note that moved to the latest result, LM Studio read the whole conversation again at every step (7 to 30 s each in the research's Codex run, 1,084 of its 1,200 s; 0.34-0.46 s with the notes in place). The model reads it and goes on. A harness's own note after a tool result (DSH's "You are repeating the exact same tool call", "Repeated tool call detected") is no message of yours: it does not start the count again; any other text there (typed while the agent works) does. A call is compared without the free text a harness has the model write beside its arguments (the `description` of Claude Code's `Bash`, DSH's `bash`, Qwen Code's `run_shell_command`, Codex's `justification`, and any tool's text argument `description`, `reason`, `explanation`, `justification`, `rationale`, `thought(s)`, `comment` or `title` that its schema in the request does not require): five `pytest` runs described as "first time" ... "fifth time" are one call five times. A result is compared without Hermes' own notes in it (`[hermes note: this is the 3rd consecutive identical call ...]`). |
+| `block` | 6 | ... this many times: that call's note tells the model to stop calling tools and summarise (it is the last one: later identical calls get none). The request otherwise goes out as the agent sent it - `tool_choice: none` (or Ollama's tools taken away) would make servers such as LM Studio render the prompt anew without the tools, a full prefill of the conversation (15-18 s on an 80B model) and another for the next request. The proxy reads the model's whole answer: a text answer (a summary, a different plan) passes; one that calls a tool again goes no further - sandbox-ai answers in the model's place ("... sandbox-ai ended this turn here. Say what you need, or what to try differently.") in the API's own shape (chat completions, Responses, Anthropic Messages; streamed or not), and the agent's turn ends. Your next message goes on as usual. |
+| `failures` | 6 | The proxy, on each request: the same tool failed this many times in a row, whatever its arguments (guessing: Laguna-S in Codex called `read_mcp_resource` 110 times with guessed URIs, no two the same, so `warn` had nothing to count): a note in that result - and in every as many failures after it - tells the model to stop guessing, read the errors, check what the tool expects or take another tool. A failed call: the API marks it (`is_error` on the Messages API), or its result starts as the harnesses write an error (`Error: ...`, `resources/read failed: ...`, `Failed to read MCP resource`, `<tool_use_error>`, a JSON `{"error": ...}`), or a command exited with another code than 0. A call of the same tool that worked, or of another tool, ends the streak. A note only, at its fixed place; 0: off. |
 | `text` | 10 | The proxy, on a streamed answer: one block of 8 to 4096 characters repeated this many times in a row, over at least 4 KiB: the answer ends cleanly in its API's own events (`finish_reason: stop`, `end_turn`, `response.completed`) with a note; the server's connection is closed (it stops generating); the next request gets stronger anti-repetition sampling once (presence/frequency penalty, repeat/repetition penalty, DRY where the server takes them). |
-| `watchdog_requests`, `watchdog_minutes` | 0 (off) | For unattended runs: after this many model requests (or minutes) in one turn, the note and the stop of `block`. The hard limit for OpenCode too: its `steps` are no hard limit in OpenCode 1.19.5 (after the last step it asks for a text answer but still runs what the model calls). |
+| `rejected` | 3 | The proxy, on each request: the very same request (its path and its body as it goes to the server, the guard's notes included) that the server rejected this many times with HTTP 4xx (not 408 or 429) is not sent again for ten minutes after its last rejection: the agent gets sandbox-ai's error at once, with the server's status and words no harness takes for a context overflow (OpenCode would compact again) or a passing fault (it would retry); the server's reason goes into the connection log (`llm_loop`, kind `rejected`). OpenCode answered Strata's 400 "requests are never truncated" with 551 identical requests in 150 s (compaction and retry in turn: each is counted on its own). A different request always goes; one that succeeds is forgotten. 0: off. |
+| `watchdog_requests`, `watchdog_minutes` | 0 (off) | For unattended runs: after this many model requests (or minutes) in one turn, the note (in the latest tool result, where it then stays) and the stop of `block`. The hard limit for OpenCode too: its `steps` are no hard limit in OpenCode 1.19.5 (after the last step it asks for a text answer but still runs what the model calls). |
 
 What counts as a loop, and what does not (tests in `tests/test_llm_loops.py`):
 
@@ -74,6 +76,32 @@ in `sandbox-ai safeguards` and the app.
 
 With `--dangerously-skip-permissions` and the loop guard on, OpenCode's own `doom_loop` question is kept (`ask`),
 which `{"*": "allow"}` would otherwise allow.
+
+## Codex at a local model server
+
+Codex talks to the server through the Responses API (`/v1/responses`). Two things in its requests do not work with a
+local server, and the connection proxy changes them for requests to the `--llm` server (found and verified by the
+local-model research with the real Codex CLI against LM Studio):
+
+- **Namespace tools.** Codex 0.166 offers each MCP server - and its own `multi_agent_v1` - as one tool
+  `{"type": "namespace", "name": "mcp__files", "tools": [...]}`. LM Studio's `/v1/responses` ignores it: the model
+  answered "I don't have access to a `write_file` tool from the MCP server named files" and used `exec_command`
+  instead, so with Codex no MCP tool reached a local model. The proxy replaces each namespace by its tools as plain
+  functions named `NAMESPACE__TOOL` (where the namespace stood, in their order; a name that would then exist twice
+  leaves the tools as they came), names the calls of the conversation the same way, and in the answer gives a call of
+  such a function its tool's name and `namespace` back (`response.output_item.added`, `response.output_item.done`,
+  `response.completed`; an answer that is not streamed gets its new `Content-Length`). The loop guard's notes name a
+  tool as the model sees it (`mcp__files__read_file`).
+- **Approval parameters.** Codex's `exec_command` offers `justification`, `prefix_rule` and `sandbox_permissions`
+  (how the model asks for an escalation). Codex refuses a call whose arguments hold `justification` without
+  `sandbox_permissions` ("`justification` requires an explicit `sandbox_permissions`"), and a local model fills it
+  at nearly every call ("List files", "Read stats.py"): 24 of 24 calls in one research run, each refused, the command
+  repeated until the loop guard ended the turn with nothing done. The proxy takes the three out of the schema of
+  every tool that has `sandbox_permissions` (a tool with a `justification` of its own, an MCP server's, keeps it)
+  and out of the arguments of such a tool's call in the answer (the finished item, `response.completed` and
+  `response.function_call_arguments.done`; the arguments' deltas pass as they came). Nothing is lost by it:
+  sandbox-ai starts Codex with `--sandbox danger-full-access` inside its own sandbox, which is the boundary, so
+  there is nothing to escalate to.
 
 ## Sampling parameters per model
 
@@ -112,7 +140,7 @@ unloads models is the server:
 - **LM Studio**: JIT loading (on by default) loads a model at its first request, and **Auto-Evict** (on by default,
   Developer > Server Settings) unloads the models loaded that way before it loads another. Models loaded explicitly
   (`lms load`, `POST /api/v1/models/load`) are not affected (LM Studio's docs, "Idle TTL and Auto-Evict"). So a start
-  loads its model explicitly when no instance of it is loaded (with `num_ctx` as its `context_length`), and leaves a
+  loads its model explicitly when no instance of it is loaded (with `num_ctx` as its `context_length` and `parallel: 1`: one request at a time keeps the prompt cache), and leaves a
   loaded one alone. Such a model stays loaded until you unload it in LM Studio (or `lms unload`).
 - **Ollama** unloads a model idle for `OLLAMA_KEEP_ALIVE` (5 minutes) and when more than `OLLAMA_MAX_LOADED_MODELS`
   (3 per GPU) or more than its memory are asked for. Its API reports neither setting and its OpenAI-compatible API
@@ -189,6 +217,7 @@ steps, retries, tool calls, tokens, time, false-positive blocks).
 - OpenCode 1.19.5 reads `~/.config/opencode/AGENTS.md`, the project's `AGENTS.md`, and also `CLAUDE.md` (project and
   `~/.claude/CLAUDE.md`) unless its Claude Code prompt is disabled (`session/instruction.ts`).
 - Issue numbers #43800, #61328, #53032 and the 18/8/8/12 step values were not checked; the step defaults here are
-  higher (40/18/18/26) because a step limit that is too low ends ordinary edit-test cycles.
+  higher (150/67/67/100 since 0.1.98; 40/18/18/26 before) because a step limit that is too low ends ordinary
+  edit-test cycles.
 - LM Studio's JIT, TTL and Auto-Evict behaviour: from its docs ("Idle TTL and Auto-Evict"); `POST
   /api/v1/models/load` with `context_length`: from its REST docs. Not checked against a real LM Studio here.

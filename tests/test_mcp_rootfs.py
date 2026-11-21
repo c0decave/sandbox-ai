@@ -139,7 +139,10 @@ def definition(tmp_path, network="none", env=(), mounts=()):
     return {"rootfs": {"path": str(r.rootfs_dir(sha)), "sha256": sha, "entrypoint": ["/opt/venv/bin/python", "-I",
                                                                                    "/opt/mcp/server.py"],
                        "user": 10001, "workdir": "/tmp", "env": {"HOME": "/tmp"}},
-            "network": network, "env": list(env), "mounts": list(mounts), "memory": "512m", "pids": 128}
+            "network": network, "env": list(env), "mounts": list(mounts), "memory": "512m", "pids": 128,
+            # (as mcp.py writes the checked definition: with its egress rules where it has network)
+            **({"egress": {"kind": "internet", "hosts": [], "allow_private": [], "allow_tcp": []}}
+               if network != "none" else {})}
 
 
 @pytest.mark.parametrize("change, why", [

@@ -69,6 +69,25 @@ def test_a_start_option_skips_its_server_and_a_missing_secret_is_named():
             {"url": "http://localhost:3080", "user": "ch", "secret": "NOT_KEPT"}])
     g.launcher().load_secret_store_module().store().set("GH", "ghp_" + "a" * 36)
     pairs, notes = g.credentials(skip={"https://github.com"})
-    assert pairs == [] and notes == ["git-logins: http://localhost:3080 left out: no usable secret NOT_KEPT "
+    assert pairs == [] and notes == ["git-logins: http://localhost:3080 left out: no secret NOT_KEPT "
                                      "(sandbox-ai secrets set NOT_KEPT)"]
     assert [c["url"] for c, _ in g.credentials()[0]] == ["https://github.com"]
+
+
+def test_a_token_kept_with_a_line_end_is_used_and_a_value_that_is_no_token_says_why():
+    """User 2026-11-19: "the secret GITHUB_c0decave_TOKEN is kept in a plain file" and right after "left out: no
+    usable secret GITHUB_c0decave_TOKEN" - the secret was there, its value was no token. A line end or blanks around
+    it are taken off (never part of a token); anything else wrong is said by what it is, never the value."""
+    store = g.launcher().load_secret_store_module().store()
+    g.save([{"url": "https://github.com", "user": "x-access-token", "secret": "GH"}])
+    token = "ghp_" + "a" * 36
+    store.set("GH", token + "\n")
+    pairs, notes = g.credentials()
+    assert notes == [] and pairs[0][1] == token
+    for value, said in ((f"me:{token}", "USER:TOKEN"), (f"{token}\nsecond", "more than one line"),
+                        ("ghp_ aaaaaaaa", "a space"), ("short", "5 characters"), ("ghp_aaaa$aaaa", "never has")):
+        store.set("GH", value)
+        pairs, notes = g.credentials()
+        assert pairs == [] and len(notes) == 1, value
+        assert "is no access token" in notes[0] and said in notes[0], notes[0]
+        assert value not in notes[0] and token not in notes[0], "the value is never said"

@@ -2,7 +2,6 @@
 out of the project file, honours the policy, writes and trusts the file and hands the board on."""
 import json
 import os
-import stat
 
 import pytest
 
@@ -19,6 +18,7 @@ def wizard(qapp, tmp_path, monkeypatch):
                       ("XDG_DATA_HOME", "data")):
         monkeypatch.setenv(name, str(tmp_path / sub))
     (tmp_path / "runtime").mkdir()
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")  # (a typed token is kept as a secret: here, not in a keyring)
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     monkeypatch.setattr(widgets, "SHOWN", [])
     from sandbox_ai_app.wizard import SandboxWizard
@@ -47,21 +47,25 @@ def test_a_new_project_from_a_template_to_the_board(wizard, tmp_path, wait):
     assert B.values(wizard.board)[0] == "codex" and expected in B.to_argv(wizard.sai, wizard.board)
     wizard.network_page.initializePage()
     assert wizard.network_page.presets["--allow-pypi"].isChecked() and wizard.network_page.presets["--allow-github"].isChecked()
-    wizard.network_page.hosts.setPlainText("docs.example.org")
+    wizard.network_page.lists.add("docs.example.org", key="--allow-host")
     assert wizard.network_page.validatePage()
     wizard.proxy_page.initializePage()
     wizard.proxy_page.rules.add_row("api.github.com", "GET,HEAD", "/**")
     assert wizard.proxy_page.validatePage()
     wizard.git_page.initializePage()
     wizard.git_page.add_row("https://github.com", "typed", "ghp_secret_value")
-    assert wizard.git_page.validatePage()
+    # a typed token is kept in the background (the GUI never waits on sandbox-ai); valid once the row names it
+    if not wizard.git_page.validatePage():
+        assert wait(lambda: not getattr(wizard.git_page, "keeping", False), 60)
+    assert wizard.git_page.validatePage(), wizard.git_page.note.text()
     walk(wizard, wizard.mcp_page, wizard.hardware_page)
     argv = B.to_argv(wizard.sai, wizard.board)
     assert "docs.example.org" in argv and "api.github.com GET,HEAD /**" in argv
-    token_file = next(v for v in argv if v.startswith("https://github.com=")).partition("=")[2]
-    assert stat.S_IMODE(os.stat(token_file).st_mode) == 0o600 and open(token_file).read().strip() == "ghp_secret_value"
+    # a typed token is kept as a secret of sandbox-ai (since 0.1.98), the project file names the secret
+    assert argv[argv.index("https://github.com=GIT_TOKEN_GITHUB_COM") - 1] == "--git-token-secret"
+    assert ("GIT_TOKEN_GITHUB_COM", "file") in wizard.sai.secrets()[1]
+    assert not (tmp_path / "config/sandbox-ai/tokens").exists(), "no token file"
     assert "ghp_secret_value" not in json.dumps(wizard.document()[0]), "a typed token never goes into the project file"
-    assert not str(token_file).startswith(str(project)), "kept outside the workspace"
     wizard.review_page.initializePage()
     assert "sandbox-ai codex" in wizard.review_page.command.toPlainText()
     assert wait(lambda: wizard.review_page.verdict_ok is not None, 60)
@@ -131,6 +135,125 @@ def test_an_existing_project_is_offered_and_kept(wizard, tmp_path):
     assert "No change." in wizard.file_diff() or '"--offline"' in wizard.file_diff()
 
 
+def test_going_back_and_on_again_keeps_what_was_set_on_every_page(wizard, tmp_path):
+    """The bug class of 2026-11-16 (set, gone after the dialog was opened again): Back and Next again lost what was
+    set. Next refilled a page from the board, which only Next had written: Back now writes it as Next would (the Git
+    page: never a typed token on the way back, its row stays in the table). Start from rebuilt the board at every
+    Next, dropping every later page's changes: it is kept while what it was built from is unchanged. Entered again,
+    Start from and Agent kept their choice instead of going back to the default or the project's."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude", "options": []}))
+    wizard.folder_page.path.edit.setText(str(project))
+    walk(wizard, wizard.folder_page, wizard.agent_page)
+    assert wizard.agent_page.chosen() == "claude", "the project's agent"
+    wizard.agent_page.agent.setCurrentIndex(wizard.agent_page.agent.findData("codex"))
+    assert wizard.agent_page.chosen() == "codex"
+    wizard.agent_page.initializePage()  # entered again (Back, Next)
+    assert wizard.agent_page.chosen() == "codex", "the agent chosen stays"
+    start = wizard.start_page
+    start.initializePage()
+    start.buttons["custom"].setChecked(True)
+    start.initializePage()  # Back to the model, Next
+    assert start.choice() == "custom", "the choice made stays"
+    assert start.validatePage()
+    built = wizard.board
+    network, hardware, git = wizard.network_page, wizard.hardware_page, wizard.git_page
+    network.initializePage()
+    network.lists.value_box.setEditText("docs.example.org")  # typed, not added: Back takes it as Next would
+    network.cleanupPage()  # Back to Start from
+    assert start.validatePage() and wizard.board is built, "nothing changed there: the board stays"
+    network.initializePage()
+    assert network.lists.values("--allow-host") == ["docs.example.org"]
+    assert network.validatePage()
+    walk(wizard, wizard.proxy_page)
+    git.initializePage()
+    git.add_row("https://github.com", "secret", "GH_PUSH")
+    git.add_row("https://gitlab.com", "typed", "glpat-secret-value")
+    git.cleanupPage()  # Back
+    props = wizard.board.first("git").props
+    assert props.get("--git-token-secret") == ["https://github.com=GH_PUSH"]
+    assert "glpat-secret-value" not in json.dumps(props, default=str), "a typed token is not kept on the way back"
+    git.initializePage()
+    assert git.table.rowCount() == 2 and git.token_edit(1).text() == "glpat-secret-value", "the rows as they were"
+    git.table.removeRow(1)
+    assert git.validatePage()
+    walk(wizard, wizard.mcp_page)
+    hardware.initializePage()
+    hardware.memory.setText("16g")
+    hardware.devices.setPlainText("/dev/ttyUSB0")
+    hardware.cleanupPage()
+    hardware.initializePage()
+    assert hardware.memory.text() == "16g" and hardware.devices.values() == ["/dev/ttyUSB0"]
+    argv = B.to_argv(wizard.sai, wizard.board)
+    assert "docs.example.org" in argv and "16g" in argv
+    # Another choice on Start from: built anew, as the subtitle says (a preset fills in the next pages).
+    start.buttons["preset"].setChecked(True)
+    start.select_preset("development")
+    assert start.validatePage() and wizard.board is not built
+    network.initializePage()
+    assert "docs.example.org" not in network.lists.values("--allow-host")
+
+
+def test_another_model_keeps_the_later_pages(wizard, tmp_path):
+    """Backlog: going back to the Model page and choosing another model (the cloud's, its effort, Show thinking or
+    another model server) rebuilt the board from scratch - every later page's changes were gone. Now only what
+    depends on the model changes (the agent's model and effort, --show-thinking, --llm and its "only this server");
+    another agent, folder or Start-from choice still builds anew."""
+    project = tmp_path / "project"
+    project.mkdir()
+    wizard.folder_page.path.edit.setText(str(project))
+    walk(wizard, wizard.folder_page, wizard.agent_page)
+    model_page, start = wizard.model_page, wizard.start_page
+    model_page.initializePage()
+    model_page.cloud.setChecked(True)
+    assert model_page.validatePage()
+    start.initializePage()
+    start.buttons["custom"].setChecked(True)
+    assert start.validatePage()
+    built = wizard.board
+    network, hardware = wizard.network_page, wizard.hardware_page
+    network.initializePage()
+    network.lists.add("docs.example.org", key="--allow-host")
+    assert network.validatePage()
+    walk(wizard, wizard.proxy_page, wizard.git_page, wizard.mcp_page)
+    hardware.initializePage()
+    hardware.memory.setText("16g")
+    assert hardware.validatePage()
+    # Back to the Model page: another cloud model and effort
+    model_page.initializePage()
+    model_page.model.setEditText("gpt-5.5-codex")
+    if model_page.effort.count() > 1:
+        model_page.effort.setCurrentIndex(model_page.effort.count() - 1)
+    assert model_page.validatePage()
+    start.initializePage()
+    assert start.validatePage()
+    assert wizard.board is built, "the same board: the later pages' changes stay"
+    argv = B.to_argv(wizard.sai, wizard.board)
+    assert "docs.example.org" in argv and "16g" in argv
+    agent = wizard.board.first("agent")
+    assert agent.props.get("model") == "gpt-5.5-codex"
+    if model_page.effort.count() > 1:
+        assert agent.props.get("effort") == model_page.effort.currentData()
+    # an own model server instead: --llm on the same board, the cloud model gone, the later pages kept
+    wizard.llm_choice = {"name": "studio", "model": "qwen/qwen3-coder-next", "only": True}
+    model_page.validatePage = lambda: True  # (the server's page is tested in test_wizard_llm_ui)
+    model_page.own.setChecked(True)
+    assert start.validatePage() and wizard.board is built
+    argv = B.to_argv(wizard.sai, wizard.board)
+    assert "--llm" in argv and argv[argv.index("--llm") + 1] == "studio:qwen/qwen3-coder-next"
+    assert "--model" not in argv and "--no-provider-defaults" in argv and "docs.example.org" in argv
+    # back to the cloud: the server goes, the rest stays
+    wizard.llm_choice = None
+    model_page.cloud.setChecked(True)
+    assert start.validatePage() and wizard.board is built
+    argv = B.to_argv(wizard.sai, wizard.board)
+    assert "--llm" not in argv and "--no-provider-defaults" not in argv and "16g" in argv
+    # another agent: built anew (the agent's own options and defaults)
+    wizard.agent_page.agent.setCurrentIndex(wizard.agent_page.agent.findData("claude"))
+    assert start.validatePage() and wizard.board is not built
+
+
 def test_the_policy_greys_out_what_it_forbids(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
     from sandbox_ai_app.wizard import SandboxWizard
@@ -153,20 +276,26 @@ def test_a_new_folder_is_created_after_the_path_is_confirmed(wizard, tmp_path):
 
 
 def test_a_new_folder_is_not_created_when_declined_or_in_a_private_place(wizard, tmp_path, monkeypatch):
+    """Declined: nothing made. In a private place (the host's settings, keys, sandbox-ai's or the app's own folder):
+    you decide what a sandbox gets - the question says what it means first, and a yes makes it."""
     page = wizard.folder_page
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
     page.path.edit.setText(str(tmp_path / "declined"))
     assert not page.validatePage() and not (tmp_path / "declined").exists() and "create" in page.note.text()
+    risky = [tmp_path / "config" / "evil",  # XDG_CONFIG_HOME: the host's settings
+             tmp_path / "work" / ".ssh" / "p",
+             os.path.join(os.environ["SANDBOX_AI_HOME"], "sandbox", "new-project"),
+             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "x")]
+    for path in risky:  # a no: nothing made, the warning was in the question
+        page.path.edit.setText(str(path))
+        assert not page.validatePage() and not os.path.exists(path), path
+        title, text, _ = widgets.SHOWN[-1]
+        assert title == "Create the folder" and "Warning: it is" in text and "read-only" in text, text
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
-    shown = len(widgets.SHOWN)
-    for refused in (tmp_path / "config" / "evil",  # XDG_CONFIG_HOME: the host's settings
-                    tmp_path / "work" / ".ssh" / "p",
-                    os.path.join(os.environ["SANDBOX_AI_HOME"], "sandbox", "new-project"),
-                    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "x")):
-        page.path.edit.setText(str(refused))
-        assert not page.validatePage(), refused
-        assert "Not created" in page.note.text() and not os.path.exists(refused)
-    assert len(widgets.SHOWN) == shown, "refused before the question"
+    for path in risky[:2]:  # a yes: made (the checkout's own folders are not made here: the tree is the tests')
+        page.path.edit.setText(str(path))
+        page.validatePage()
+        assert os.path.isdir(path), path
     page.path.edit.setText("relative/folder")
     assert not page.validatePage() and "full path" in page.note.text()
     (tmp_path / "file").write_text("x")
@@ -228,3 +357,33 @@ def test_the_folders_used_last_are_offered_and_taken(wizard, tmp_path, monkeypat
     page.recent.itemActivated.emit(page.recent.item(0))  # what a double-click or Enter sends
     assert went == [True] and page.path.edit.text() == str(one)
     wizard.hide()
+
+
+def test_the_effort_offers_the_models_own_levels_and_resets_one_it_does_not_take(wizard, tmp_path):
+    """The wizard asks as the Board does: the cloud models grouped by provider, the effort's levels those of the model
+    chosen (sandbox-ai's table of cloud models); a level the next model does not take is reset, with a note."""
+    from sandbox_ai_app import models as M
+    project = tmp_path / "project"
+    project.mkdir()
+    wizard.folder_page.path.edit.setText(str(project))
+    walk(wizard, wizard.folder_page, wizard.agent_page)
+    page = wizard.model_page
+    page.initializePage()
+    page.cloud.setChecked(True)
+    page.agent_changed("claude")  # (the agent page's choice: this computer's first agent with a login)
+    assert page.model.findData(M.HEADER + "Anthropic") > 0, "grouped by provider"
+
+    def levels():
+        return [page.effort.itemData(i) for i in range(page.effort.count())]
+    page.model.setCurrentIndex(page.model.findData("claude-opus-5-5"))
+    assert levels() == ["", "low", "medium", "high", "xhigh", "max"]
+    assert page.effort.itemText(0) == "the agent's default (medium for this model)"
+    page.effort.setCurrentIndex(page.effort.findData("xhigh"))
+    page.model.setCurrentIndex(page.model.findData("claude-opus-4-6"))
+    assert levels() == ["", "low", "medium", "high", "max"] and page.effort.currentData() == ""
+    assert not page.effort_note.isHidden()
+    assert page.effort_note.text() == "The effort xhigh was reset: claude-opus-4-6 does not take it."
+    page.effort.setCurrentIndex(page.effort.findData("max"))
+    page.model.setEditText("claude-not-listed")  # typed: the agent's levels, the effort kept
+    page.model.lineEdit().editingFinished.emit()
+    assert levels() == ["", "low", "medium", "high", "xhigh", "max"] and page.effort.currentData() == "max"

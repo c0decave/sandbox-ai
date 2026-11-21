@@ -34,8 +34,8 @@ from .files import printable, printable_text
 from .host_choice import on_host
 from .i18n import tr
 from .widgets import (
-    MONO, Task, ask_first, background, compact_combo, confirm, fill, flow, inform, multi_select, plain_label, report_each,
-    row_key, run_each, safe_tooltip, selected_rows, set_enabled, several, table, warn,
+    MONO, Task, ask_first, background, compact_combo, confirm, explanation, fill, flow, inform, multi_select,
+    plain_label, report_each, row_key, run_each, safe_tooltip, selected_rows, set_enabled, several, table, warn,
 )
 
 # Security modes in rising strictness (sandbox-ai's modes.NAMES) and its default when defaults.json names none; the
@@ -52,17 +52,24 @@ def is_remote(entry):
     return entry.get("kind") != "local" and entry.get("name") != "local"
 
 
+UPDATE_MODES = backend.UPDATE_MODES
+
+
 def version_text(info):
     """A host's sandbox-ai in a few words: its version and whether an update is there ("" when not asked yet)."""
     if not info:
         return ""
     if not info.get("version"):
         return tr("unreachable") if info.get("error") else ""
+    # its own update mode (sandbox-ai update mode; 0.1.122 on, read from its version --verbose)
+    mode = "; " + tr("updates: {mode}", mode=info["update_mode"]) if info.get("update_mode") in UPDATE_MODES else ""
     if info.get("kind") in ("checkout", "pip", "package"):
-        return f"{info['version']} ({info['kind']})"
+        return f"{info['version']} ({info['kind']})" + mode
     if info.get("update"):
-        return tr("{version}, update: {available}", version=info["version"], available=info.get("available") or "?")
-    return tr("{version}, up to date", version=info["version"]) if info.get("update") is False else info["version"]
+        return tr("{version}, update: {available}", version=info["version"],
+                  available=info.get("available") or "?") + mode
+    return (tr("{version}, up to date", version=info["version"]) if info.get("update") is False
+            else info["version"]) + mode
 
 
 def key_lines(result):
@@ -84,6 +91,40 @@ def update_text(name, result):
                   version=result.get("after") or result.get("before") or "?")
     return "\n".join([line, *("  " + text for text in key_lines(result)),
                       *("  " + note for note in result.get("notes") or [])])
+
+
+def storage_cell(found, on=True):
+    """A host's Storage cell: what its last storage check found to free, "no answer", "off", or "" (not yet)."""
+    if not on:
+        return tr("off")
+    if not isinstance(found, dict):
+        return ""
+    if found.get("error"):
+        return tr("no answer")
+    from .storage_view import size_text
+    return tr("{size} to free", size=size_text(found.get("total") or 0))
+
+
+def storage_words(found, now=None):
+    """What the last storage check of a host said, in a sentence (its tooltip, the line below the list)."""
+    import time
+    if not isinstance(found, dict) or not isinstance(found.get("time"), (int, float)):
+        return tr("not checked yet")
+    ago = widgets.ago((time.time() if now is None else now) - found["time"])
+    if found.get("error"):
+        return tr("no answer {ago}: {error}", ago=ago, error=printable(found["error"])[:300])
+    from .storage_view import size_text
+    text = tr("{ago}: {size} could be freed", ago=ago, size=size_text(found.get("total") or 0))
+    if isinstance(found.get("threshold"), int):
+        text += " " + (tr("(above the threshold of {size})", size=size_text(found["threshold"])) if found.get("above")
+                       else tr("(below the threshold of {size})", size=size_text(found["threshold"])))
+    grew = [e for e in found.get("grew") or [] if isinstance(e, dict)]
+    if grew:
+        text += "; " + tr("grew: {starts}", starts=", ".join(
+            f"{printable(str(e.get('name')))} +{size_text(e.get('bytes') or 0)}" for e in grew))
+    if found.get("said"):
+        text += "; " + tr("the storage rules acted {count} time(s)", count=found["said"])
+    return text
 
 
 def reach_text(info, now=None):
@@ -162,8 +203,8 @@ class EditHostDialog(QDialog):
         self.sudo = QCheckBox(tr("Its sandbox-ai is a system installation: update it with sudo"))
         self.sudo.setChecked(bool(entry.get("update_sudo")))
         form.addRow(self.sudo)
-        form.addRow(plain_label(tr("To change the address, the port or the key: remove the host and add it again (its "
-                                   "host key is learnt anew)."), role="secondary"))
+        form.addRow(explanation(tr("To change the address, the port or the key: remove the host and add it again (its "
+                                   "host key is learnt anew).")))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -267,7 +308,8 @@ def install_text(name, result):
 
 
 class AddHostDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, draft=None):
+        """DRAFT: the key of what was typed and not added (drafts.py): filled in again."""
         super().__init__(parent)
         self.setWindowTitle(tr("Add a host"))
         form = QFormLayout(self)
@@ -289,13 +331,16 @@ class AddHostDialog(QDialog):
         form.addRow(tr("sandbox-ai there"), self.command)
         self.update_sudo = QCheckBox(tr("Its sandbox-ai is a system installation: update it with sudo"))
         form.addRow(self.update_sudo)
-        form.addRow(plain_label(tr("Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed "
-                                   "there. The host key is learnt at the first contact and checked from then on."),
-                                role="secondary"))
+        form.addRow(explanation(tr("Your user needs SSH access with a key (ssh-copy-id), and sandbox-ai installed "
+                                   "there. The host key is learnt at the first contact and checked from then on.")))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+        from . import drafts
+        self.draft = None if draft is None else drafts.Draft(self, draft, {
+            "name": self.name, "ssh": self.ssh, "port": self.port, "identity": self.identity,
+            "description": self.description, "command": self.command, "update_sudo": self.update_sudo})
 
     def values(self):
         return (self.name.text().strip(), self.ssh.text().strip(), self.port.value(), self.identity.text().strip(),
@@ -314,9 +359,9 @@ class WebPanel(QWidget):
         super().__init__(parent)
         self.sai, self.in_terminal, self.host, self.token, self.loaded_for = sai, in_terminal, None, 0, None
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("The host's web interface (sandbox-ai web there): who may log in, its "
+        layout.addWidget(explanation(tr("The host's web interface (sandbox-ai web there): who may log in, its "
                                         "certificate and the service itself. Passwords and TOTP codes are typed in a "
-                                        "terminal, never through the app."), role="secondary"))
+                                        "terminal, never through the app.")))
         self.users = table([tr("Login"), tr("Since")], stretch=0, compact=(1,))
         self.users.setAccessibleName(tr("Logins of the web interface"))
         self.users.itemSelectionChanged.connect(self.update_buttons)
@@ -599,13 +644,13 @@ class HostsPage(QWidget):
         super().__init__()
         self.sai, self.in_terminal = sai, in_terminal
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("Other machines whose sandbox-ai this app manages over SSH (the web "
-                                        "interface, sandbox-ai web, uses the same list)."), role="secondary"))
+        layout.addWidget(explanation(tr("Other machines whose sandbox-ai this app manages over SSH (the web "
+                                        "interface, sandbox-ai web, uses the same list).")))
         split = QSplitter()
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        self.table = table([tr("Host"), tr("SSH"), tr("Answers"), tr("sandbox-ai"), tr("Running"), tr("Questions")],
-                           stretch=0, compact=(2, 3, 4, 5))
+        self.table = table([tr("Host"), tr("SSH"), tr("Answers"), tr("sandbox-ai"), tr("Running"), tr("Questions"),
+                            tr("Storage")], stretch=0, compact=(2, 3, 4, 5, 6))
         self.table.setAccessibleName(tr("Hosts"))
         multi_select(self.table)  # several at once (Ctrl, Shift): Remove… takes them all, the rest acts on one
         self.table.itemSelectionChanged.connect(self.host_changed)
@@ -631,6 +676,10 @@ class HostsPage(QWidget):
                                     self.remove, tr("Remove the host"))
         self.test_button = button(tr("Test"), tr("SSH, the host's sandbox-ai and its doctor (sandbox-ai hosts test)"),
                                   self.test, tr("Test the host"))
+        # The storage check of the host (sandbox-ai gc --check there): what could be freed, ticked and applied
+        self.optimize_button = button(tr("Optimize…"), tr(
+            "What could be freed on this host - each with how much, its command and whether it is safe while starts "
+            "run; tick and apply, asked first (sandbox-ai gc --check)"), self.optimize, tr("Optimize the host"))
         self.update_button = button(tr("Update sandbox-ai"), tr("sandbox-ai update on this host (its own signed "
                                                                 "update; sudo for a system installation)"),
                                     self.update_host, tr("Update the host"))
@@ -654,16 +703,36 @@ class HostsPage(QWidget):
             self.update_sudo.addItem(text, value)
         self.versions_button = button(tr("Check versions"), tr("Ask every host for its sandbox-ai version now"),
                                       lambda: self.load_versions(refresh=True))
+        # sandbox-ai hosts update NAME --mode MODE: the host's own update mode (asked first: update-mode)
+        self.update_mode_button = button(tr("Update mode…"), tr(
+            "What the host's sandbox-ai does by itself: off, notify (announce a newer signed release), download "
+            "(also fetch and check it), auto (also install it in its window while nothing runs) - sandbox-ai update "
+            "mode there"), self.set_update_mode, tr("Set the host's update mode"))
         compact_combo(self.update_sudo, 24)  # (18 cut "sudo wie für den Host eingestellt" short)
         # Rows that wrap when the window is narrow: the page never makes the window wider than the screen.
         for group in ((self.starts_button, self.questions_button, self.refresh_button),
-                      (self.add_button, self.edit_button, self.remove_button, self.test_button),
-                      (self.update_button, self.from_here_button, self.update_sudo),
+                      (self.add_button, self.edit_button, self.remove_button, self.test_button,
+                       self.optimize_button),
+                      (self.update_button, self.from_here_button, self.update_sudo, self.update_mode_button),
                       (self.install_button, self.update_all_button, self.versions_button)):
             left_layout.addWidget(flow(*group))
+        # The app's storage check of the host (storage_hosts.py): on or off for it, and what its last one said
+        self.storage_box = QCheckBox(tr("Check its storage in the background"))
+        self.storage_box.setAccessibleName(tr("Check the host's storage in the background"))
+        self.storage_box.setToolTip(safe_tooltip(tr(
+            "The app runs the storage check on this host (sandbox-ai gc --check there, over SSH) in the background, "
+            "as for this machine: at its start and then as the host's own Storage setting says (weekly by default); "
+            "it applies the host's storage rules and says above the threshold what could be freed there. On by "
+            "default for the hosts the app uses (the Sandboxes page found starts there).")))
+        self.storage_box.toggled.connect(self.storage_toggled)
+        self.storage_note = plain_label(role="secondary", selectable=True)
+        self.storage_note.setAccessibleName(tr("The host's last storage check"))
+        left_layout.addWidget(flow(self.storage_box))
+        left_layout.addWidget(self.storage_note)
+        self.storage_checked, self.storage_used = {}, lambda: []
         widgets.list_menu(self.table, lambda: [
-            self.starts_button, self.questions_button, None, self.edit_button, self.test_button,
-            self.update_button, self.from_here_button, self.install_button, None,
+            self.starts_button, self.questions_button, None, self.edit_button, self.test_button, self.optimize_button,
+            self.update_button, self.from_here_button, self.update_mode_button, self.install_button, None,
             (tr("Stop all starts on this host…"), self.host() not in (None, "local"), tr("Choose a host first"),
              self.stop_all), self.remove_button, None,
             self.add_button, self.update_all_button, self.versions_button, self.refresh_button])
@@ -729,6 +798,8 @@ class HostsPage(QWidget):
         canary_row.addWidget(self.canary_list, 1)
         self.keep = QCheckBox(tr("Remove kept starts unused for"))
         self.keep.setAccessibleName(tr("Remove kept starts after a while"))
+        self.keep.setToolTip(tr("Unchecked: kept starts never expire (keep_days 0). Without keep_days on the host they "
+                                "go after 90 days unused (sandbox-ai's default: Clean up… and the daily pass)"))
         self.keep_days = QSpinBox()
         self.keep_days.setAccessibleName(tr("Days"))
         self.keep_days.setRange(1, 3650)
@@ -793,6 +864,14 @@ class HostsPage(QWidget):
 
     # -- the list --
 
+    def optimize(self):
+        """Optimize…: the storage check's plan of the selected host (storage_view: gc --check there)."""
+        name = self.host()
+        if name is None:
+            return
+        from .storage_view import open_dialog
+        open_dialog(self, self.sai, name, owner=self)
+
     def host(self):
         rows = selected_rows(self.table)
         return row_key(self.table, rows[0]) if rows else None
@@ -848,6 +927,8 @@ class HostsPage(QWidget):
     def show_hosts(self):
         """One row per host: whether it answered, its version, starts running, questions waiting."""
         rows, colors = [], []
+        from . import storage_hosts
+        settings, used = backend.app_settings(), self.storage_used()  # (read once per look, not per row)
         for entry in self.entries:
             name = entry["name"]
             local = entry.get("kind") == "local" or name == "local"
@@ -857,9 +938,13 @@ class HostsPage(QWidget):
             rows.append([tr("{name} (this machine)", name=printable(name)) if local else printable(name),
                          "" if local else printable(f"{entry.get('ssh', '')}:{entry.get('port', 22)}"),
                          tr("yes") if local else reach_text(info), version_text(self.versions.get(name)),
-                         "" if count is None else str(count), "" if questions is None else str(questions)])
-            colors.append("bad" if info and info.get("problem") else "warn" if questions else None)
-        tooltips = [printable(e.get("description") or "") or None for e in self.entries]
+                         "" if count is None else str(count), "" if questions is None else str(questions),
+                         "" if local else storage_cell(self.storage_checked.get(name),
+                                                       storage_hosts.is_on(name, used, settings))])
+            colors.append("bad" if info and info.get("problem") else "warn" if questions or (
+                not local and (self.storage_checked.get(name) or {}).get("above")) else None)
+        tooltips = ["\n".join(t for t in (printable(e.get("description") or ""), storage_words(
+            self.storage_checked.get(e["name"])) if is_remote(e) else "") if t) or None for e in self.entries]
         keys = [e["name"] for e in self.entries]
         # Every look at the fleet (each few seconds) says it again: the table is filled only when a row changed.
         shown = (rows, colors, tooltips, keys, theme.current(), theme.is_dark())
@@ -873,6 +958,48 @@ class HostsPage(QWidget):
             fill(self.table, rows, colors, tooltips=tooltips, keys=keys)
         finally:
             self.table.blockSignals(False)
+
+    # -- the app's storage check of each host (storage_hosts.py; the window runs it) --
+
+    def storage_on(self, name):
+        """Whether the app checks host NAME's storage (its choice, else whether the app uses it)."""
+        from . import storage_hosts
+        return storage_hosts.is_on(name, self.storage_used(), backend.app_settings())
+
+    def set_storage(self, checked):
+        """{host: what its last storage check said} (storage_hosts.kept), from the window."""
+        self.storage_checked = dict(checked or {})
+        self.show_hosts()
+        self.show_storage()
+
+    def show_storage(self):
+        """The selected host's storage setting and its last check, in words."""
+        name = self.host()
+        remote = name not in (None, "local")
+        self.storage_box.blockSignals(True)
+        try:
+            self.storage_box.setChecked(bool(remote and self.storage_on(name)))
+        finally:
+            self.storage_box.blockSignals(False)
+        set_enabled(self.storage_box, remote, tr("This machine's storage check is set in Settings › Storage.")
+                    if name == "local" else None)
+        self.storage_note.setText(tr("Storage check: {what}", what=storage_words(self.storage_checked.get(name)))
+                                  if remote else "")
+
+    def storage_toggled(self, on):
+        """The selected host's storage check on or off (the app's settings: storage_hosts)."""
+        from . import storage_hosts
+        name = self.host()
+        if name in (None, "local"):
+            return
+        chosen = storage_hosts.choices(backend.app_settings())
+        chosen[name] = bool(on)
+        try:
+            self.sai.save_setting(storage_hosts.SETTING, chosen)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("Not saved"), printable_text(exc))
+        self.show_hosts()
+        self.show_storage()
 
     def set_fleet(self, fleet):
         """{host: {"running", "seen", "problem"}} from the Sandboxes page's last look at every host."""
@@ -900,7 +1027,8 @@ class HostsPage(QWidget):
         remote = name not in (None, "local")
         set_enabled(self.remove_button, remote, tr("This machine is always in the list.") if name else None)
         set_enabled(self.edit_button, remote, tr("This machine has no SSH settings.") if name else None)
-        for widget in (self.starts_button, self.questions_button, self.test_button, self.doctor_button):
+        for widget in (self.starts_button, self.questions_button, self.test_button, self.doctor_button,
+                       self.optimize_button):
             widget.setEnabled(name is not None)
         # Install… stands out where the host has no sandbox-ai that answers (missing, or not reachable).
         set_enabled(self.install_button, remote and self.sai.host_install_supported(),
@@ -920,6 +1048,7 @@ class HostsPage(QWidget):
             "update_sudo") else tr("without sudo")) if remote else tr("sudo as set for the host"))
         self.pane_title.setText(printable(self.label(name)) if name else "")
         self.web.set_host(name, load=self.isVisible() and self.tabs.currentWidget() is self.web)
+        self.show_storage()
         if name != self.defaults_host:
             self.defaults, self.defaults_host = None, None
             self.set_defaults_enabled(False)
@@ -930,7 +1059,8 @@ class HostsPage(QWidget):
         if len(names) > 1:  # several: Remove… takes those it can, the rest acts on one host
             why = tr("Acts on one host: {count} are selected.", count=len(names))
             for widget in (self.edit_button, self.starts_button, self.questions_button, self.test_button,
-                           self.doctor_button, self.install_button, self.from_here_button, self.update_button):
+                           self.doctor_button, self.install_button, self.from_here_button, self.update_button,
+                           self.update_mode_button):
                 set_enabled(widget, False, why)
             set_enabled(self.remove_button, any(n != "local" for n in names), tr("This machine is always in the list."))
 
@@ -942,7 +1072,9 @@ class HostsPage(QWidget):
             self.load_defaults()
 
     def add(self):
-        dialog = AddHostDialog(self)
+        from . import drafts
+        key = ("host-add",)  # what was typed and not added (Cancel, a refusal): filled in again (drafts.py)
+        dialog = AddHostDialog(self, draft=key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name, ssh, port, identity, description = dialog.values()
@@ -956,6 +1088,7 @@ class HostsPage(QWidget):
             if error:
                 warn(self, tr("Add a host"), printable_text(str(error)))
                 return
+            drafts.drop(key)
             self.load_hosts(name)
             self.refresh_requested.emit()
             # A key ssh would refuse (others could read it) was made private, and the connection tried: said here.
@@ -1143,10 +1276,11 @@ class HostsPage(QWidget):
         self.canaries.setCurrentIndex(1 if canaries is False else 2 if isinstance(canaries, list) else 0)
         self.canary_list.setText(", ".join(printable(c) for c in canaries) if isinstance(canaries, list) else "")
         self.canary_categories = [c for c in result.get("canary_categories") or () if isinstance(c, str)]
+        # No keep_days there: kept starts unused for 90 days go (the default); 0: never (the box unchecked).
         days = values.get("keep_days")
-        self.keep.setChecked(isinstance(days, int) and days > 0)
-        if isinstance(days, int) and days > 0:
-            self.keep_days.setValue(days)
+        self.keep.setChecked(days != 0)
+        self.keep_days.setValue(days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else
+                                backend.DEFAULT_KEEP_DAYS)
         self.telemetry.setCurrentIndex(max(0, self.telemetry.findData(values.get("telemetry", "off"))))
         for key, field in (("subnet", self.subnet), ("subnet6", self.subnet6)):
             field.setText(printable(values[key]) if isinstance(values.get(key), str) else "")
@@ -1169,7 +1303,9 @@ class HostsPage(QWidget):
             if unknown or not categories:
                 raise ValueError(tr("Canary categories: {known}", known=", ".join(known)))
             chosen["canaries"] = categories
-        if self.keep.isChecked():
+        if not self.keep.isChecked():
+            chosen["keep_days"] = 0  # never (without keep_days: the default, 90 days)
+        elif self.keep_days.value() != backend.DEFAULT_KEEP_DAYS or "keep_days" in (self.defaults or {}):
             chosen["keep_days"] = self.keep_days.value()
         level, before = self.telemetry.currentData(), (self.defaults or {}).get("telemetry")
         if not self.telemetry.isEnabled():  # a sandbox-ai there without telemetry levels: left as it is
@@ -1276,6 +1412,51 @@ class HostsPage(QWidget):
         self.tabs.setCurrentWidget(self.updates)
         self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), False
         self.next_update()
+
+    def set_update_mode(self):
+        """The host's own update mode: chosen in a small dialog, asked first (update-mode), set in the background
+        (`sandbox-ai update mode MODE --json` there, through SSH for another host); the versions are read again."""
+        name = self.host()
+        if name is None:
+            return
+        from .updates_view import MODES
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("Update mode of {host}", host=self.label(name)))
+        form = QFormLayout(dialog)
+        mode = QComboBox()
+        for value, text in MODES:
+            mode.addItem(tr(text), value)
+        known = (self.versions.get(name) or {}).get("update_mode")
+        mode.setCurrentIndex(max(0, mode.findData(known or "notify")))
+        window = QLineEdit()
+        window.setPlaceholderText("03:00-05:00")
+        form.addRow(tr("Update mode"), mode)
+        form.addRow(tr("Window of mode auto"), window)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
+            return
+        chosen, at = mode.currentData(), window.text().strip() if mode.currentData() == "auto" else ""
+        if not ask_first(self, "update-mode", tr("Update mode"), on_host(name, tr(
+                "Set the update mode to {mode}? What the sandbox-ai there does by itself follows it (a timer as that "
+                "host's user).", mode=chosen)), tr("Set")):
+            return
+        self.status.setText(tr("Working…"))
+        background(lambda: self.sai.set_update_mode(chosen, at or None, name), owner=self, work=True,
+                   source=self.update_mode_button, timeout=240, what=f"update mode {chosen} on {name}",
+                   done=lambda result, error: self.update_mode_set(name, result, error))
+
+    def update_mode_set(self, name, result, error):
+        if error is not None:
+            warn(self, tr("Update mode"), printable_text(error))
+            self.status.setText(tr("Not done."))
+            return
+        self.status.setText(tr("{host}: update mode {mode}", host=self.label(name), mode=printable(result.get("mode"))))
+        if name in self.versions and isinstance(self.versions[name], dict):
+            self.versions[name]["update_mode"] = result.get("mode")
+        self.load_versions(refresh=True)
 
     def update_all(self):
         names = [entry["name"] for entry in self.entries if is_remote(entry)]

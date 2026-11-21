@@ -40,7 +40,7 @@
   },
   "notes": [
     "Your app runs in the sandbox (npm run dev at localhost): the agent tests it with Playwright there (npx playwright install chromium; the browsers come from cdn.playwright.dev), and you watch it on the virtual screen (--gui). Chromium's libraries missing: an image variant with them, sandbox-ai images extend claude --add-apt chromium.",
-    "The Playwright MCP server runs in a container of its own with the full network: it opens public pages (documentation, a deployed preview), never the sandbox's localhost. Add it once: sandbox-ai mcp add playwright --network full; --preset-value browser= leaves it out. What its pages say is untrusted data.",
+    "The Playwright MCP server runs in a container of its own with the internet but never your local network: it opens public pages (documentation, a deployed preview), never the sandbox's localhost. Add it once: sandbox-ai mcp add playwright --network full; --preset-value browser= leaves it out. What its pages say is untrusted data.",
     "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
   ]
 }

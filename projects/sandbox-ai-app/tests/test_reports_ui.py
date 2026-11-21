@@ -21,8 +21,9 @@ class Accepting:
 
     made = []
 
-    def __init__(self, parent, title, what, label, parts=True, traffic=False):
+    def __init__(self, parent, title, what, label, parts=True, traffic=False, host=None):
         self.title, self.what, self.label, self.parts, self.traffic = title, what, label, parts, traffic
+        self.host = host
         Accepting.made.append(self)
 
     def exec(self):
@@ -87,7 +88,7 @@ def test_report_on_the_sandboxes_page(window, monkeypatch, wait, tmp_path):
     page.table.select_item(found["session:work"])
     assert button.isEnabled()
     page.table.select_item(found[backend.remote_key("ct1", "web")])
-    assert not button.isEnabled() and "sandbox-ai report there" in button.toolTip()
+    assert button.isEnabled(), "a start of another host: its report is made there (remote parity)"
     written, opened, notices = [], [], []
     monkeypatch.setattr(window.sai, "report", lambda *args: written.append(args) or args[0])
     monkeypatch.setattr(reports, "opener", opened.append)

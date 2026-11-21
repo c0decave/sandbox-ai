@@ -1,0 +1,64 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "cairn-local-llm",
+  "title": "Cairn with a local model",
+  "description": "Cairn's board beside Claude Code, with a model on your own server (Ollama, LM Studio, llama.cpp, vLLM or another one with Anthropic's Messages API): Cairn's workers are the session's Claude Code on that model, behind the relay's loop guard and with the model's real context window; only the server's address is opened, the provider's hosts stay closed.",
+  "translations": {
+    "de": {
+      "title": "Cairn mit einem lokalen Modell",
+      "description": "Cairns Brett neben Claude Code, mit einem Modell auf Ihrem eigenen Server (Ollama, LM Studio, llama.cpp, vLLM oder ein anderer mit Anthropics Messages-API): Cairns Worker sind das Claude Code der Sitzung mit diesem Modell, hinter dem Schleifenschutz des Relays und mit dem echten Kontextfenster des Modells; nur die Adresse des Servers ist offen, die Hosts des Anbieters bleiben zu."
+    }
+  },
+  "category": "llm",
+  "agents": [
+    "claude"
+  ],
+  "options": [
+    "--llm",
+    "{llm}",
+    "--no-provider-defaults",
+    "--llm-param",
+    "loop_guard=on",
+    "--cairn",
+    "--cairn-workers",
+    "claude",
+    "--cairn-origin",
+    "{origin}",
+    "--cairn-goal",
+    "{goal}",
+    "--cairn-hint",
+    "{hint}"
+  ],
+  "values": {
+    "llm": {
+      "label": "LLM server (sandbox-ai llm list), NAME or NAME:MODEL",
+      "kind": "llm",
+      "default": "ollama",
+      "hint": "sandbox-ai llm add ollama --kind ollama --url http://127.0.0.1:11434 --model MODEL"
+    },
+    "origin": {
+      "label": "What is given: the project, the target, the scope (Cairn's origin; optional: make the project on the board)",
+      "kind": "text",
+      "optional": true
+    },
+    "goal": {
+      "label": "The goal: what counts as done (with the origin, the project is made at the start)",
+      "kind": "text",
+      "optional": true
+    },
+    "hint": {
+      "label": "A first hint for the workers (optional)",
+      "kind": "text",
+      "optional": true
+    }
+  },
+  "notes": [
+    "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent claude asks it for the API Claude Code uses (Ollama 0.14.0, LM Studio 0.4.1, llama.cpp b7187, vLLM 0.11.1 or later).",
+    "Cairn's workers are the session's Claude Code, run in the agent's container through sandbox-ai's relay: what --llm configures for the agent holds for every task Cairn gives it - the server, the model, the relay's parameters and the loop guard on the wire, the model's context window. OpenRouter is one such server too (sandbox-ai llm add openrouter -k openai-compatible -u https://openrouter.ai/api/v1 -s SECRET -m MODEL -a).",
+    "Cairn's tasks are long (bootstrap, reason, explore): a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). Only one worker runs at a time here.",
+    "Podman only. Build the images once: sandbox-ai build claude, sandbox-ai build cairn and sandbox-ai build browser (the board opens in the app's Browser button). With origin and goal the project is made at the start; else make it on the board.",
+    "Once a project is active, Cairn hands out tasks on its own until it is complete or stopped, and a failing task is handed out again; the relay pauses the workers after 5 failed tasks in a row. Stop the project on the board to stop it.",
+    "Licence: Cairn is AGPL-3.0, built unchanged from the reviewed commit by sandbox-ai build cairn on your machine; using it for yourself puts no duty on you."
+  ]
+}

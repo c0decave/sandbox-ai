@@ -106,7 +106,8 @@ def test_add_list_show_remove(tmp_path):
     assert KEY not in path.read_text()
     status, out = run("list", "--json")
     view = json.loads(out)[0]
-    assert view["name"] == "gpu" and view["agents"] == ["claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose"] and KEY not in out
+    assert view["name"] == "gpu" and view["agents"] == ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose",
+                                                                 "openhands", "nanobot", "letta", "pi"] and KEY not in out
     status, out = run("show", "gpu")
     assert "key: secret GPU_KEY" in out and "header X-Team: secret TEAM" in out and "VPN profile: office" in out
     assert run("add", "gpu", "--kind", "vllm", "--url", "https://x.example")[0] == 1  # exists: needs --replace
@@ -546,7 +547,7 @@ def test_sandbox_ai_dispatches_llm():
     main = importlib.util.spec_from_file_location("sandbox_main_llm_test", ROOT / "sandbox/main.py")
     module = importlib.util.module_from_spec(main)
     main.loader.exec_module(module)
-    assert module.PYTHON_COMMANDS["llm"] == ("llm.py",) and "sandbox-ai llm add" in module.__doc__
+    assert module.PYTHON_COMMANDS["llm"] == ("llm.py",) and "\n  llm " in module.help_text()
 
 
 def test_the_models_carry_what_their_server_says_they_can_do():
@@ -765,8 +766,8 @@ def test_several_models_and_the_opencode_allow_list(team):
     assert list(written[llm.OPENCODE_CONFIG]["provider"]["llm-team"]["models"]) == ["llama-3.1-8b", "qwen3-coder-30b"]
     # The loop guard's OpenCode layers (on by default for --llm): steps, compaction, the instruction file.
     config = written[llm.OPENCODE_CONFIG]
-    assert config["agent"]["build"]["steps"] == 40 and config["agent"]["plan"]["steps"] == 18
-    assert config["compaction"]["auto"] is True and config["tool_output"] == {"max_lines": 1000, "max_bytes": 131072}
+    assert config["agent"]["build"]["steps"] == 150 and config["agent"]["plan"]["steps"] == 67
+    assert config["compaction"]["auto"] is True and config["tool_output"] == {"max_lines": 1000, "max_bytes": 50000}
     assert config["instructions"] == ["/root/" + llm.LOOP_INSTRUCTIONS]
     assert "[sandbox-ai loop guard]" in written[llm.LOOP_INSTRUCTIONS]
 

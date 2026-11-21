@@ -235,13 +235,16 @@ def test_the_hosts_a_login_browser_opens():
 
 
 def test_the_hosts_here_are_sandbox_ais_own():
-    """The copy of PROVIDERS here is the launcher's (agent_sandbox.py), and OpenCode's login gets --profile frontier."""
+    """The copy of PROVIDERS here is the launcher's (agent_sandbox.py), and the logins of LOGIN_FRONTIER (OpenCode's,
+    Pi's) get --profile frontier."""
     tree = ast.parse((ROOT / "sandbox" / "agent_sandbox.py").read_text())
     providers = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                      and any(getattr(t, "id", None) == "PROVIDERS" for t in node.targets))
     assert providers == T.PROVIDERS
     login = (ROOT / "sandbox" / "login.py").read_text()
-    assert 'LOGIN_OPTIONS = {"opencode": ["--profile", "frontier"]}' in login
+    options = next(ast.literal_eval(node.value) for node in ast.parse(login).body if isinstance(node, ast.Assign)
+                   and any(getattr(t, "id", None) == "LOGIN_OPTIONS" for t in node.targets))
+    assert options == {agent: ["--profile", "frontier"] for agent in T.LOGIN_FRONTIER}
     assert '"codex": ["login", "--device-auth"]' in login  # no callback to localhost in sandbox-ai login
 
 

@@ -30,7 +30,7 @@ def test_every_preset_of_sandbox_ai_becomes_one_of_the_gallery(sai):
     assert analysis.category == PR.SAI_CATEGORY and "--offline" not in analysis.options
     assert [p.marker for p in analysis.placeholders] == ["<folder:samples>"]
     assert "<folder:samples>:/mnt/samples:ro" in analysis.options
-    assert list(analysis.mcp) == ["capa", "floss", "radare2", "yara", "binwalk"]
+    assert list(analysis.mcp) == ["capa", "floss", "radare2", "yara", "binwalk", "jadx", "cfr"]  # (0.1.98: jadx, CFR)
     capsule = by_id["sai-time-capsule"]
     assert capsule.agent_args == () and "code archaeologist" in capsule.prompt and "<text:question>" in capsule.prompt
     assert by_id["sai-sand-chess"].agents == ("claude", "opencode")

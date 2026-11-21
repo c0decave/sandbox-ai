@@ -15,12 +15,13 @@ network, what was left out and why, and how sandbox-ai keeps it in check. Review
 - **At least 14 days old.** Every pin is the newest first-parent commit of the default branch committed on or before
   2026-10-28 (the release is 2026-11-12). Where newer commits exist, what they add is said below.
 - **One copy for every agent.** A built-in kit's `skills/` folder is shared by its agent folders (`claude/`,
-  `codex/`, `opencode/`, `hermes/`, `dsh/`, `qwen/`, `goose/`, each marked with a `.shared-skills` file; only sandbox-ai's own kits can do this, see
+  `codex/`, `opencode/`, `hermes/`, `dsh/`, `qwen/`, `goose/`, `openhands/`, `nanobot/`, `letta/`, `pi/`, each marked with a `.shared-skills` file; only sandbox-ai's own kits can do this, see
   `kits.shared_skills`). A start copies the skills read-only to where each agent looks: `~/.claude/skills`
   (Claude Code), `~/.agents/skills` (Codex), `~/.config/opencode/skills` (OpenCode 1.19.5; it takes a skill whose
   `name` matches its folder, `^[a-z0-9]+(-[a-z0-9]+)*$`, with a description of at most 1024 characters - every
   vendored skill passes, tested), `~/.agents/skills` for Hermes too (its external skills: sandbox/hermes.py) and for DeepSeek Harness (its shared
-  agents root) and for Goose, `~/.qwen/skills` (Qwen Code). Nothing is installed, fetched or built at a start.
+  agents root), for Goose and for OpenHands, `~/.qwen/skills` (Qwen Code), `~/.nanobot/workspace/skills` (nanobot: the only
+  folder it reads skills from), `~/.letta/skills` (Letta Code, its global skills), `~/.agents/skills` for Pi. Nothing is installed, fetched or built at a start.
 - **Off by default.** No kit is part of a start unless it is named: `--kit NAME`, `"options": ["--kit", "NAME"]` in
   the project's `.sandbox-ai.json`, or *Use in the current project* on the app's Kits & plugins page. Reasons: each
   skill's description goes into every session's context and steers the agent; superpowers changes how the agent
@@ -407,7 +408,7 @@ own (`--kit tdd`, `--kit superpowers`); choose one to avoid two TDD procedures c
 
 `tests/test_vendored_skills.py`: every vendored file equals the pinned upstream file (SHA-256 and git blob id) and
 nothing unlisted is in a kit; every pin is at least 14 days old; licences and NOTICE are there; every skill is valid
-for Claude Code, Codex, OpenCode, Hermes, DeepSeek Harness, Qwen Code and Goose; a dry start with `--kit NAME` lists the skills for each agent and a start stages
+for Claude Code, Codex, OpenCode, Hermes, DeepSeek Harness, Qwen Code, Goose, OpenHands, nanobot, Letta Code and Pi; a dry start with `--kit NAME` lists the skills for each agent and a start stages
 them read-only where each agent looks; without the kit no vendored skill is there; no vendored kit has hooks or
 plugins, and hallmark-hook's hook is unapproved until trusted; nothing is installed from the network; every sandbox
 gets the telemetry switches (always: there is no `--telemetry on`); the vendored hyperframes telemetry code sends nothing with

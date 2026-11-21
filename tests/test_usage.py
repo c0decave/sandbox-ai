@@ -132,7 +132,8 @@ def test_the_command_line(tmp_path, monkeypatch, capsys):
     root = tmp_path / "cg"
     group = cgroup(root)
     runs = {"claude-abc": record()}
-    net = type("Net", (), {"running": staticmethod(lambda: runs),
+    net = type("Net", (), {"running": staticmethod(lambda: runs), "orphaned_runs": staticmethod(lambda: {}),
+                           "NotRunning": type("NotRunning", (ValueError,), {}),
                            "choose": staticmethod(lambda r, name, **k: r[name] if name else next(iter(r.values())))})
     monkeypatch.setitem(u._modules, "net", net)
     monkeypatch.delenv("SANDBOX_AI_RUN", raising=False)
@@ -169,4 +170,20 @@ def test_main_knows_the_command():
     spec = importlib.util.spec_from_file_location("sandbox_main_usage_test", ROOT / "sandbox/main.py")
     main = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(main)
-    assert main.PYTHON_COMMANDS["usage"] == ("usage.py",) and "sandbox-ai usage" in main.__doc__
+    assert main.PYTHON_COMMANDS["usage"] == ("usage.py",) and "\n  usage " in main.help_text()
+
+
+def test_without_the_cgroup_and_the_watch_the_monitors_last_look_is_shown(tmp_path, monkeypatch):
+    """macOS (podman machine's VM) or a run without limits: no cgroup here, no resources.json - the system monitor's
+    collector recorded it (monitor/live/RUN.json, from podman stats)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    live = tmp_path / "state" / "sandbox-ai" / "monitor" / "live" / "claude-abc.json"
+    live.parent.mkdir(parents=True)
+    import time
+    live.write_text(json.dumps({"updated": time.time(), "interval": 30, "source": "podman", "sample": {
+        "cpu": 1.5, "cpu_pct": 37.5, "cpu_lim": 4.0, "thr": 10.0, "mem": 7 * GIB, "mem_lim": 8 * GIB, "pids": 9}}))
+    [entry] = u.measure([record(session_dir=str(tmp_path / "none"))], finder=lambda r: None, sleep=lambda s: None)
+    assert entry["source"] == "monitor" and entry["memory"]["used_bytes"] == 7 * GIB
+    assert entry["memory"]["percent"] == 87.5 and entry["cpu"]["used_cpus"] == 1.5 and entry["pids"]["current"] == 9
+    assert entry["warnings"] == ["memory"]
+    assert "the system monitor's last look (podman)" in "\n".join(u.lines(entry))

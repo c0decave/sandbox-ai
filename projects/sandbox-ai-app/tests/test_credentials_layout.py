@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QAbstractItemView, QLabel, QPushButton  # noqa: E4
 from sandbox_ai_app import i18n, widgets  # noqa: E402
 from sandbox_ai_app.credential_tab import CredentialTab, MessageArea, even_out  # noqa: E402
 
+from conftest import wait_until  # noqa: E402
 from test_ui import env, window  # noqa: E402,F401 - the isolated home and window of the UI tests
 
 
@@ -96,6 +97,7 @@ def test_a_message_or_a_late_state_line_moves_nothing(qapp, window, wait):  # no
 
 
 def test_even_out_makes_every_header_as_high_as_the_highest(qapp):
+    widgets.set_explanations_shown(True)  # (a tab's about line is an explanation: shown with the setting on)
     tabs = [CredentialTab("Short"), CredentialTab("A title")]
     tabs[0].add_about("One line.")
     tabs[1].add_about("A text that wraps: " + "many words " * 40)
@@ -106,6 +108,11 @@ def test_even_out_makes_every_header_as_high_as_the_highest(qapp):
     assert tabs[0].header.height() == tabs[1].header.height() or \
         tabs[0].header.minimumHeight() == tabs[1].header.minimumHeight() == tabs[1].header_height(380)
     assert tabs[0].header.minimumHeight() > QLabel("x").sizeHint().height() * 3  # the long one's wrapped lines
+    for tab in tabs:  # as the page does (CredentialsPage.add_tab): the setting switched off, the headers shrink
+        tab.resized = lambda: even_out(tabs)
+    widgets.set_explanations_shown(False)
+    assert wait_until(qapp, lambda: tabs[0].header.minimumHeight() < QLabel("x").sizeHint().height() * 3), \
+        "no room kept for the hidden lines"
     for tab in tabs:
         tab.deleteLater()
 

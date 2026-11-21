@@ -5,7 +5,16 @@
   sandbox-ai workspace add [RUN] DIR|FILE [--ro] [--name NAME]
                                                        mount DIR (or a single regular FILE) at /workspaces/NAME
                                                        (default NAME: its own name) while the sandbox runs
+  sandbox-ai workspace add [RUN] sshfs://[USER@]HOST[:PORT]/PATH [--ro] [--name NAME]
+                                                       a folder of another machine: mounted on this host with
+                                                       sshfs, then added as that folder (remotefs.py)
   sandbox-ai workspace remove [RUN] DIR|FILE|NAME [--force] take an added workspace away again
+  sandbox-ai workspace review [RUN] [--project DIR | --log-dir DIR] [--json]
+                                                       what the agent changed that your host runs or trusts
+                                                       (workspace_review.py), with the diffs
+  sandbox-ai workspace review RUN --keep PATH | --restore PATH --yes
+                                                       per file: keep the change, or put the file back as it
+                                                       was at the start (its recorded before-state)
 
 RUN as for `sandbox-ai net` (its run id or the name `sandbox-ai list` shows; may be left out when only one sandbox
 runs). For a stopped kept start, add keeps DIR for its next start instead (as resume NAME --workspace DIR would:
@@ -41,6 +50,12 @@ kernel refuses while a process of the sandbox's own namespaces still holds the t
 what is still open stays usable, also for writing, until it is closed. A copy held only through a descriptor shows
 nowhere: only a restart takes a workspace away for sure.
 
+--hide: the run's globs hold for a directory added as well. What they match in it gets the empty read-only file
+or folder a start puts over such a file, before the directory reaches the sandbox: the helper mounts its clone in
+a mount namespace of its own (on a staging folder of the run's), the blanks over the matches there (no link on the
+way followed), and hands the sandbox a recursive clone of that - the agent never sees the folder without them. A
+file added that a glob matches is added (you chose it), with a warning. `remove` unmounts the blanks first.
+
 The file log (--log-dir) watches it from then on. Not for a workspace added during the run: the push check (a
 push of its commits to a public remote is refused: push from /work, a start workspace, or from the host) and the
 privacy check after the run; restart the session with the workspace (resume --restart --workspace DIR) for them.
@@ -59,8 +74,10 @@ from pathlib import Path, PurePosixPath
 import re
 import socket
 import stat
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -72,6 +89,7 @@ MOVE_MOUNT_F_EMPTY_PATH, MOVE_MOUNT_T_EMPTY_PATH = 0x4, 0x40
 MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV = 0x1, 0x2, 0x4
 CLONE_NEWNS, CLONE_NEWUSER = 0x00020000, 0x10000000
 MNT_DETACH, UMOUNT_NOFOLLOW = 2, 8
+AT_FDCWD = -100
 # The registry's states: pending (recorded before the mount: it may be there, a failed save leaves no unknown mount),
 # attached, partial (a removal that stopped half-way: gone in the namespaces of "gone_in", still in the others),
 # removed. Every state but removed counts as present (names, overlaps, remove).
@@ -80,12 +98,6 @@ KINDS = ("dir", "file")  # what an added workspace is: a directory, or a single 
 # --name NAME: what /workspaces/NAME may be called (no "/", no leading "." or "-", nothing a shell or a list splits).
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 PRESENT = ("pending", "attached", "partial")
-# File systems of the kernel itself: never handed to a sandbox, neither as DIR nor mounted somewhere below it.
-KERNEL_FILESYSTEMS = frozenset({"proc", "sysfs", "cgroup", "cgroup2", "devtmpfs", "devpts", "mqueue", "debugfs",
-                                "tracefs", "securityfs", "bpf", "configfs", "fusectl", "pstore", "efivarfs",
-                                "binfmt_misc", "hugetlbfs"})
-KERNEL_TREES = (Path("/proc"), Path("/sys"), Path("/dev"))
-MOUNTINFO = Path("/proc/self/mountinfo")
 PARTIAL = 3  # the helper's exit status when a removal stopped half-way (stdout: {"gone": [pid, ...]})
 UNSURE = 4  # the helper's exit status when what it did may not have been undone (an add whose rollback failed)
 
@@ -144,49 +156,12 @@ def check(result, what, kernel="5.2"):
     return result
 
 
-def mount_id(fd):
-    """The mount ID of the mount the descriptor FD lies on (/proc/self/fdinfo, as /proc/self/mountinfo numbers it)."""
-    with contextlib.suppress(OSError, ValueError):
-        for line in Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines():
-            if line.startswith("mnt_id:"):
-                return int(line.split(":", 1)[1])
-    raise OSError(errno.ENOTSUP, "the mount of the directory cannot be told (no mnt_id in /proc/self/fdinfo)")
-
-
-def kernel_mounts(text, holder, source):
-    """[(mount point, file system type)] of the kernel's own file systems (KERNEL_FILESYSTEMS) in a recursive clone
-    of SOURCE, by the mount table TEXT (mountinfo): the mount HOLDER (its ID) that SOURCE lies on, and every mount at
-    or below SOURCE that hangs off it. HOLDER missing from the table: [(SOURCE, "unknown")] (refused: never "none"
-    for want of a match)."""
-    mounts = {}
-    for line in text.splitlines():
-        head, separator, tail = line.partition(" - ")
-        fields, kind = head.split(), tail.split()[:1]
-        if not separator or len(fields) < 5 or not kind:
-            continue
-        with contextlib.suppress(ValueError):
-            mounts[int(fields[0])] = (int(fields[1]), unescaped(fields[4]), kind[0])
-    if holder not in mounts:
-        return [(source, "unknown")]
-
-    def hangs_off_holder(ident):
-        for _ in range(len(mounts) + 1):
-            if ident == holder:
-                return True
-            if ident not in mounts or mounts[ident][0] == ident:
-                return False
-            ident = mounts[ident][0]
-        return False
-    prefix = source.rstrip("/") + "/"
-    return [(point, kind) for ident, (parent, point, kind) in mounts.items() if kind in KERNEL_FILESYSTEMS and (
-        ident == holder or ((point == source or point.startswith(prefix)) and hangs_off_holder(parent)))]
-
-
 def clone(c, source, identity, mode, kind="dir"):
     """A detached copy (open_tree) of the directory SOURCE (KIND file: the regular file SOURCE), refused unless it is
     still IDENTITY (device, inode): what was checked is what is mounted, whatever was swapped in on the way since.
-    Refused when it holds a file system of the kernel's own (KERNEL_FILESYSTEMS: proc, sysfs, cgroup ...). Read-only
-    for MODE ro; never set-user-ID or device files: without mount_setattr (Linux 5.12) nothing is added."""
+    A file system of the kernel's own in it (proc, sysfs, cgroup ...) is yours to give: `workspace add` said so
+    before (judged); a clone the kernel refuses fails with its error. Read-only for MODE ro; never
+    set-user-ID or device files: without mount_setattr (Linux 5.12) nothing is added."""
     fd = os.open(source, os.O_PATH | (os.O_DIRECTORY if kind == "dir" else 0) | os.O_NOFOLLOW | os.O_CLOEXEC)
     tree = None
     try:
@@ -197,13 +172,6 @@ def clone(c, source, identity, mode, kind="dir"):
             raise OSError(errno.ESTALE, f"{source} changed after it was checked; add it again")
         tree = check(c.syscall(SYS_OPEN_TREE, fd, b"", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE
                                | AT_EMPTY_PATH), f"clone {source}")
-        # The clone took every mount below SOURCE (AT_RECURSIVE): none may be the kernel's own.
-        refused = kernel_mounts(MOUNTINFO.read_text(errors="replace"), mount_id(fd), source)
-        if refused:
-            point, kind = refused[0]
-            raise OSError(errno.EPERM, f"{source} holds {point} ({kind}), a file system of the kernel's own: not "
-                                       "handed to a sandbox" if kind != "unknown" else
-                                       f"the mounts below {source} cannot be told: not added")
     except BaseException:
         if tree is not None:
             os.close(tree)
@@ -285,8 +253,70 @@ class Partial(OSError):
         self.gone = gone
 
 
+def open_below(top, relative, kind):
+    """O_PATH descriptor of RELATIVE below the folder descriptor TOP: every folder on the way a real folder, the
+    entry itself of KIND (file: a regular file, dir: a folder), never a link (OSError otherwise)."""
+    parts = PurePosixPath(relative).parts
+    if not parts or PurePosixPath(relative).is_absolute() or any(part in ("", ".", "..") for part in parts):
+        raise OSError(errno.EINVAL, f"{relative}: not a path below the folder")
+    fd = os.dup(top)
+    try:
+        for part in parts[:-1]:
+            inner = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = inner
+        target = os.open(parts[-1], os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+                         | (os.O_DIRECTORY if kind == "dir" else 0), dir_fd=fd)
+    finally:
+        os.close(fd)
+    mode = os.fstat(target).st_mode
+    if not (stat.S_ISDIR(mode) if kind == "dir" else stat.S_ISREG(mode)):
+        os.close(target)
+        raise OSError(errno.ENOTDIR if kind == "dir" else errno.EINVAL,
+                      f"{relative} is no {'folder' if kind == 'dir' else 'regular file'} now: not hidden, not added")
+    return target
+
+
+def staged(c, source, identity, mode, hidden, blanks, stage, count):
+    """COUNT detached trees of the directory SOURCE (still IDENTITY) with the empty read-only BLANKS ({"file"|"dir":
+    [path, identity]}) mounted over each of HIDDEN ([{"path", "kind"}]): the clone is mounted on STAGE in the
+    helper's own mount namespace, the blanks on it, and each tree is a recursive clone of that (open_tree
+    AT_RECURSIVE: the blanks come with it). The sandbox never sees the folder without them."""
+    tree = clone(c, source, identity, mode, "dir")
+    try:
+        check(c.syscall(SYS_MOVE_MOUNT, tree, b"", AT_FDCWD, os.fsencode(stage), MOVE_MOUNT_F_EMPTY_PATH),
+              "mount the folder on its staging folder")
+    finally:
+        os.close(tree)
+    top = os.open(stage, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    trees = []
+    try:
+        for item in hidden:
+            kind = "dir" if item.get("kind") == "dir" else "file"
+            blank = clone(c, blanks[kind][0], blanks[kind][1], "ro", kind)
+            try:
+                target = open_below(top, item["path"], kind)
+                try:
+                    check(c.syscall(SYS_MOVE_MOUNT, blank, b"", target, b"",
+                                    MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH), f"hide {item['path']}")
+                finally:
+                    os.close(target)
+            finally:
+                os.close(blank)
+        for _ in range(count):
+            trees.append(check(c.syscall(SYS_OPEN_TREE, top, b"", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE
+                                         | AT_EMPTY_PATH), "clone the folder with its hidden files"))
+    except BaseException:
+        for fd in trees:
+            os.close(fd)
+        raise
+    finally:
+        os.close(top)
+    return trees
+
+
 def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", proc=PROC, c=None, force=False,
-           starts=None, kind="dir"):
+           starts=None, kind="dir", hidden=(), blanks=None, stage=None):
     """In this (fresh, single-threaded) process: enter the user namespace of USER_PID, then mount SOURCE (op add)
     at /workspaces/NAME, or unmount it there (op remove), in the mount namespace of every pid in TARGETS (KIND: dir,
     or file for a single regular file, whose mount point is an empty file). STARTS
@@ -307,7 +337,10 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
         # A mount namespace of our own, owned by the sandbox's user namespace, may clone the host's directory;
         # each namespace needs a clone of its own (a detached tree is attached once).
         check(c.unshare(CLONE_NEWNS), "a private mount namespace")
-        trees = [clone(c, source, identity, mode, kind) for _ in namespaces]
+        if hidden and kind == "dir":  # --hide: the blanks over its matches before the sandbox sees it (staged)
+            trees = staged(c, source, identity, mode, hidden, blanks, stage, len(namespaces))
+        else:
+            trees = [clone(c, source, identity, mode, kind) for _ in namespaces]
     reached = []
     try:
         for index, fd in enumerate(namespaces):
@@ -315,7 +348,7 @@ def helper(op, user_pid, name, targets, source=None, identity=None, mode="rw", p
             if op == "add":
                 attach(c, name, trees[index], kind)
             else:
-                detach(c, name, force, kind)
+                detach(c, name, force, kind, hidden)
             reached.append(index)
     except OSError as exc:
         if op == "add":
@@ -399,7 +432,7 @@ def attach(c, name, tree, kind="dir"):
         os.close(base)
 
 
-def detach(c, name, force=False, kind="dir"):
+def detach(c, name, force=False, kind="dir", hidden=()):
     """Unmount /workspaces/NAME of the current mount namespace if something is mounted there; remove the mount
     point once no namespace has a mount on it (the tmpfs is shared, rmdir fails while one has; a file's mount point
     is removed when this namespace has none: an unlink of a mount point another namespace still uses fails with
@@ -414,6 +447,13 @@ def detach(c, name, force=False, kind="dir"):
         os.close(target)
         target = None
         if busy:
+            # --hide's blanks below it first (deepest first): a mount with mounts below it is never unmounted strictly.
+            # One the agent moved away by renaming a folder above it is not found here: the strict unmount below
+            # then refuses (--force detaches the whole tree).
+            for relative in sorted(hidden or (), reverse=True):
+                if isinstance(relative, str) and relative and not relative.startswith("/") and ".." not in \
+                        PurePosixPath(relative).parts:
+                    c.umount2(f"{WORKSPACES_DIR}/{name}/{relative}".encode(), UMOUNT_NOFOLLOW)
             path = f"{WORKSPACES_DIR}/{name}".encode()
             if c.umount2(path, UMOUNT_NOFOLLOW) < 0:
                 code = ctypes.get_errno()
@@ -444,7 +484,8 @@ def own_namespaces(found, proc=PROC):
     return [pid for pid in found["mntns"].values() if own is not None and user(pid) == own]
 
 
-def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC, runner=None, kind="dir"):
+def run_helper(op, found, name, source=None, identity=None, mode="rw", force=False, proc=PROC, runner=None, kind="dir",
+               hidden=None, blanks=None, stage=None):
     """Run helper() in a process of its own; (status, error text), and for status PARTIAL a third item:
     {"gone": [pids of the namespaces the removal left]}; for a failed add whose undo is not confirmed (killed on
     the way and the undo failed too, or its rollback failed): {"undone": False}."""
@@ -458,7 +499,8 @@ def run_helper(op, found, name, source=None, identity=None, mode="rw", force=Fal
     if gone:
         return 1, f"process {gone[0]} of the sandbox is gone (has it ended?)"
     request = {"op": op, "user": found["user"], "name": name, "targets": targets, "source": source,
-               "identity": identity, "mode": mode, "force": force, "starts": starts, "kind": kind}
+               "identity": identity, "mode": mode, "force": force, "starts": starts, "kind": kind,
+               **({"hidden": hidden} if hidden else {}), **({"blanks": blanks, "stage": stage} if blanks else {})}
     command = [sys.executable, "-I", str(Path(__file__)), "--internal-helper", json.dumps(request)]
     try:
         result = runner(command, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
@@ -469,7 +511,9 @@ def run_helper(op, found, name, source=None, identity=None, mode="rw", force=Fal
         # Killed before its own rollback: take out what it may have mounted already; only an undo that finished
         # says so ({"undone": False} keeps the entry: add()).
         undo = [sys.executable, "-I", str(Path(__file__)), "--internal-helper",
-                json.dumps({**request, "op": "remove", "source": None, "identity": None, "force": True})]
+                json.dumps({**request, "op": "remove", "source": None, "identity": None, "force": True,
+                            "hidden": [item["path"] for item in hidden or [] if isinstance(item, dict)],
+                            "blanks": None, "stage": None})]
         try:
             undone = runner(undo, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL).returncode == 0
         except (OSError, subprocess.SubprocessError):
@@ -555,9 +599,15 @@ def helper_main(argument):
     kind = request.get("kind", "dir")
     if kind not in KINDS:
         raise OSError(errno.EINVAL, f"no such kind of workspace: {kind!r}")
+    hidden = request.get("hidden") or []
+    if request["op"] == "add":
+        hidden = [item for item in hidden if isinstance(item, dict) and isinstance(item.get("path"), str)]
+    else:
+        hidden = [item for item in hidden if isinstance(item, str)]
     return helper(request["op"], int(request["user"]), request["name"], [int(p) for p in request["targets"]],
                   request.get("source"), request.get("identity"), request.get("mode", "rw"),
-                  force=bool(request.get("force")), starts=starts if isinstance(starts, dict) else None, kind=kind)
+                  force=bool(request.get("force")), starts=starts if isinstance(starts, dict) else None, kind=kind,
+                  hidden=hidden, blanks=request.get("blanks"), stage=request.get("stage"))
 
 
 # --- which processes use a workspace -----------------------------------------------------------------
@@ -713,9 +763,11 @@ def opened(value):
     return fd, real, [info.st_dev, info.st_ino], kind
 
 
-def judged(record, real, read_only=False, kind="dir"):
+def judged(record, real, read_only=False, kind="dir", warn=None):
     """The mode (ro or rw) RUN gives the workspace REAL (resolved; KIND dir or file), or ValueError: the start's
-    checks of a workspace, with what run.json recorded of the run (workspace_checks)."""
+    checks of a workspace, with what run.json recorded of the run (workspace_checks). A risk you chose (HOME,
+    sandbox-ai's own folders or launcher, the kernel's trees, what the launcher reads) is said with WARN (default:
+    the launcher's warner, standard error and launcher.log), never refused."""
     l = module("agent_sandbox")
     checks = record.get("workspace_checks")
     if not isinstance(checks, dict):
@@ -726,19 +778,22 @@ def judged(record, real, read_only=False, kind="dir"):
         raise ValueError(f"--workspace is not allowed by the administrator's policy ({l.POLICY_FILE})")
     if any(c in str(real) for c in (",", "\n", "\r")) or not str(real).isprintable():
         raise ValueError("a workspace path cannot hold commas or control characters")
-    for tree in KERNEL_TREES:  # also checked by check_workspace_scope; here too, whatever a start's version checks
-        if overlaps(real, tree):
-            raise ValueError(f"{shown(real)} {'lies in' if tree in real.parents else 'is or holds'} {tree}: the "
-                             "kernel's and the devices' trees are never a workspace (use --device for a device)")
-    # sandbox-ai's own folders as the start saw them too (another XDG_* environment than this command's).
-    l.check_workspace_scope(real, refused=[Path(value) for value in checks.get("own_folders", [])
-                                          if isinstance(value, str) and os.path.isabs(value)])
+    # You decide what a sandbox gets: each risk below is said (WARN, default: the launcher's warner), never refused.
+    say = l.warner(warn)
+    # sandbox-ai's own folders as the start saw them too (another XDG_* environment than this command's); the
+    # kernel's and the devices' trees (the launcher's KERNEL_TREES), whatever a start's version checks.
+    l.check_workspace_scope(real, warn=say, refused=[Path(value) for value in checks.get("own_folders", [])
+                                                     if isinstance(value, str) and os.path.isabs(value)])
     # The launcher the start runs (a checkout, a venv) and its package, not only this command's.
-    l.check_package_location(real, "Workspace", [(Path(value), str(label)) for value, label in (
-        entry for entry in checks.get("packages", []) if isinstance(entry, list) and len(entry) == 2)
-        if isinstance(value, str) and os.path.isabs(value)])
-    l.check_launcher_location(real, "Workspace", [Path(value) for value in checks.get("launcher", [])
-                                                  if isinstance(value, str) and os.path.isabs(value)])
+    if not read_only and not l.check_package_location(real, "Workspace", [(Path(value), str(label)) for value, label
+                                                                           in (entry for entry in
+                                                                               checks.get("packages", [])
+                                                                               if isinstance(entry, list)
+                                                                               and len(entry) == 2)
+                                                                           if isinstance(value, str)
+                                                                           and os.path.isabs(value)], warn=say):
+        l.check_launcher_location(real, "Workspace", [Path(value) for value in checks.get("launcher", [])
+                                                      if isinstance(value, str) and os.path.isabs(value)], warn=say)
     # A start lets a workspace hold the project's own .venv/bin or node_modules/.bin on your PATH, and checks what
     # the agent changed there after the run (tool_dirs_state); for a workspace added later nothing would.
     for directory in l.private_locations()[1]:
@@ -760,20 +815,23 @@ def judged(record, real, read_only=False, kind="dir"):
     for value in checks.get("trees", []):
         if overlaps(real, Path(value)):
             raise ValueError(f"{shown(real)} overlaps {shown(value)}, a mount, --state-dir or the HOME of the run")
+    safer = l.SAFER_READ_ONLY.replace("--ro, a --mount with :ro", "--ro")
     for value, label in checks.get("held", []):
         path = Path(value)
         if path == real or real in path.parents:
-            raise ValueError(f"{shown(real)} holds {shown(value)} ({label}), which the agent could then change; "
-                             "keep it outside workspaces")
-        # And the other way: a file or folder inside what the launcher reads (--privacy-rules, a --kit-dir) would
-        # let the agent change it as well (a --copy goes into the sandbox only).
-        if path in real.parents and label != "--copy":
-            raise ValueError(f"{shown(real)} lies in {shown(value)} ({label}), which the launcher reads: the agent "
-                             "could change it there; keep workspaces outside it")
+            say(f"{shown(real)} holds {shown(value)} ({label}): the agent can change what the launcher reads there, "
+                "and a link it puts in its place could make the launcher act on another file of yours; "
+                f"{safer}, or keep it outside workspaces")
+        # And the other way: a file or folder inside what the launcher reads (--privacy-rules, a --kit-dir): the
+        # agent can change it as well (a --copy goes into the sandbox only).
+        elif path in real.parents and label != "--copy":
+            say(f"{shown(real)} lies in {shown(value)} ({label}), which the launcher reads: the agent can change it "
+                f"there; {safer}, or keep workspaces outside it")
     for value, label in checks.get("private", []):
         if overlaps(real, Path(value)):
-            raise ValueError(f"{shown(real)} overlaps {shown(value)} ({label}), which the agent must not reach")
-    l.check_stores([real], [(Path(value), label) for value, label in checks.get("stores", [])])
+            say(f"{shown(real)} overlaps {shown(value)} ({label}), the run's own: the agent can read and change "
+                f"what the launcher keeps there for this run (its log, its questions, its sockets); {safer}")
+    l.check_stores([real], [(Path(value), label) for value, label in checks.get("stores", [])], warn=say)
     return "ro" if read_only or checks.get("read_only") else "rw"
 
 
@@ -998,13 +1056,20 @@ def stopped_start(entry):
         entry.get("kind") != "mcp" and bool(entry.get("keep"))
 
 
-def next_start_targets(data, options):
-    """[(host path, sandbox path)] the session whose session.json is DATA mounts when it starts with OPTIONS."""
+def next_start_targets(data, options, shared=None):
+    """[(host path, sandbox path)] the session whose session.json is DATA mounts when it starts with OPTIONS. SHARED:
+    a dict the caller keeps while it reads many sessions (starts.folders): the launcher's parser of each agent is
+    built once into it instead of once per session."""
     l = module("agent_sandbox")
     sessions = module("sessions")
+    parser = None
+    if shared is not None and isinstance(data["agent"], str):
+        if data["agent"] not in shared:
+            shared[data["agent"]] = l.build_parser(data["agent"])
+        parser = shared[data["agent"]]
     with sessions.in_directory(data["cwd"]):
         try:
-            given = l.parse_args([data["agent"], *options])
+            given = l.parse_args([data["agent"], *options], parser)
         except SystemExit:
             raise ValueError("these options do not go with the session's own; see sandbox-ai claude --help") from None
     return l.workspace_targets(given)
@@ -1018,8 +1083,14 @@ def keep_for_next_start(entry, value, read_only=False, name=None, out=print):
     workspace read-only) are refused with what to do instead."""
     sessions = module("sessions")
     key, shown_start = entry["id"], shown(entry["name"])
-    fd, real, _identity, kind = opened(value)
-    os.close(fd)
+    source = remote_source(value)
+    if source is None and module("remotefs").is_remote(value):
+        module("remotefs").parse(value)  # (says what is wrong with it)
+    if source is not None:
+        real, kind = source, "dir"  # a remote folder: mounted by its next start (nothing is mounted now)
+    else:
+        fd, real, _identity, kind = opened(value)
+        os.close(fd)
     if kind != "dir":
         raise ValueError(f"{shown_start} is stopped, and a file lasts for a run only (a start takes no file as a "
                          f"workspace): start it first (sandbox-ai resume {shown_start}), then add the file")
@@ -1035,7 +1106,7 @@ def keep_for_next_start(entry, value, read_only=False, name=None, out=print):
                              f"start mounts the others (writable: it is not started with --workspace-ro): start it "
                              f"first (sandbox-ai resume {shown_start}), then add it with --ro for that run")
         before = next_start_targets(data, options)
-        if any(os.path.realpath(os.path.expanduser(host)) == str(real) for host, _ in before):
+        if any(host_key(host) == str(real) for host, _ in before):
             raise ValueError(f"{shown(real)} is one of {shown_start}'s workspaces already (sandbox-ai resume "
                              f"{shown_start} mounts it)")
         if name is not None and any(PurePosixPath(place).name == name for _, place in before[1:]):
@@ -1045,7 +1116,7 @@ def keep_for_next_start(entry, value, read_only=False, name=None, out=print):
         if name is not None:
             options += ["--workspace-name", f"{name}={real}"]
         place = next((target for host, target in next_start_targets(data, options)
-                      if os.path.realpath(os.path.expanduser(host)) == str(real)), None)
+                      if host_key(host) == str(real)), None)
         data["options"] = options
         sessions.save(key, data)
     out(f"{shown_start} is stopped: {shown(real)} is kept for its next start, at {place or WORKSPACES_DIR} (rw); it "
@@ -1063,7 +1134,7 @@ def forget_for_next_start(entry, value, out=print):
         data = sessions.load(key)
         still_stopped(key, data, shown_start)
         options = list(data.get("options", []))
-        real = lambda path: os.path.realpath(os.path.expanduser(path))  # noqa: E731
+        real = host_key
         # Only a --workspace DIR of its own (what add and resume put there), never the first workspace option: that
         # one (or its comma list) is what the start was started with.
         given = [index for index, option in enumerate(options) if option in ("-w", "--workspace")
@@ -1072,6 +1143,8 @@ def forget_for_next_start(entry, value, out=print):
                      if options[index] == "--workspace" and index + 1 < len(options)}
         kept = [(host, place) for host, place in next_start_targets(data, options)[1:] if real(host) in removable]
         wanted = real(value) if "/" in value and not value.startswith(f"{WORKSPACES_DIR}/") else None
+        if remote_source(value) is not None:
+            wanted = remote_source(value)
         host = next((host for host, place in kept if real(host) == wanted or place == value
                      or PurePosixPath(place).name == value), None)
         if host is None:
@@ -1089,6 +1162,12 @@ def forget_for_next_start(entry, value, out=print):
     out(f"{shown_start} is stopped: {shown(host)} is no longer kept for its next start (sandbox-ai resume "
         f"{shown_start} starts without it)")
     return 0
+
+
+def host_key(path):
+    """A workspace option's value as compared: a remote source (sshfs://) in its canonical spelling, else the
+    resolved path."""
+    return remote_source(path) or os.path.realpath(os.path.expanduser(path))
 
 
 def still_stopped(key, data, shown_start):
@@ -1115,11 +1194,23 @@ def watch_file_log(record, sandbox_path, out=print):
 
 
 def add(record, value, read_only=False, out=print, runner=run_helper, finder=finder_default, remember=None,
-        watcher=None, name=None):
+        watcher=None, name=None, remote=None):
     """Mount the host directory or regular file VALUE into the running sandbox RECORD at /workspaces/<name> (NAME:
-    that name, see check_name); its sandbox path."""
+    that name, see check_name); its sandbox path. REMOTE: the remote source (sshfs://...) VALUE is the mount point
+    of (add_remote): kept for the session as that source, never as the mount point of this run."""
     l = module("agent_sandbox")
     fd, real, identity, kind = opened(value)
+    globs = [glob for glob in record.get("hide") or [] if isinstance(glob, str)]
+    hidden, hide_notes, staging = [], [], None
+    if globs and kind == "dir":  # --hide: what the run's globs match here, hidden before the sandbox sees it
+        found_hidden, hide_notes = module("hide").find(real, globs)
+        hidden = [{"path": relative, "kind": what} for relative, what in found_hidden]
+        hide_notes += [f"{relative} is hidden but Git tracks it: the agent can still read it from the repository "
+                       f"(git show HEAD:{relative})"
+                       for relative in module("hide").tracked(real, [item["path"] for item in hidden])]
+    elif globs and module("hide").matcher(globs)(real.name):
+        out(f"  warning: {shown(real.name)} matches --hide ({', '.join(shown(g, 60) for g in globs[:5])}): you added "
+            "this very file, so the agent reads it")
     try:
         # The same file added before and replaced on the host since (an editor's save): the old one goes first.
         for old in [entry for entry in present_workspaces(record) if entry.get("host") == str(real) and
@@ -1128,7 +1219,9 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
                 "first")
             remove(record, old["sandbox"], out=out, runner=runner, finder=finder)
         with locked(record):
-            mode = judged(record, real, read_only, kind)
+            # A remote folder's mount point lies in sandbox-ai's own folder for this run: nothing of the local risks
+            # applies to it (remotefs.warning said what does); overlaps are refused as for any workspace.
+            mode = judged(record, real, read_only, kind, warn=(lambda _text: None) if remote else None)
             checks = record.get("workspace_checks") or {}
             # Kept in the session's options (see below) unless read-only without --workspace-ro, or a file (a start
             # takes no file as a workspace).
@@ -1149,9 +1242,16 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             # leaves a mount the registry does not know (listed as pending, `remove` takes it out).
             entry = {"host": str(real), "sandbox": f"{WORKSPACES_DIR}/{name}", "mode": mode, "state": "pending",
                      "since": time.time(), "identity": identity, "kept": False, "kind": kind,
-                     "named": named}
+                     "named": named, **({"remote": remote} if remote else {}),
+                     **({"hidden": [item["path"] for item in hidden]} if hidden else {})}
+            if hidden:  # (made before the entry is saved: a failure here leaves no pending entry behind)
+                staging, blanks = hide_staging(record)
             save(record, load(record) + [entry])
-            result = runner("add", found, name, str(real), identity, mode, kind=kind)
+            if hidden:
+                result = runner("add", found, name, str(real), identity, mode, kind=kind, hidden=hidden,
+                                blanks=blanks, stage=str(staging / "stage"))
+            else:
+                result = runner("add", found, name, str(real), identity, mode, kind=kind)
             status, error = result[:2]
             if status:
                 undone = (result[2] if len(result) > 2 and isinstance(result[2], dict) else {}).get("undone", True)
@@ -1187,6 +1287,8 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
             pushed, why = publish_push_rules(record) if kind == "dir" else (None, None)
     finally:
         os.close(fd)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
     if not keeping:
         # Kept as --workspace it would come back writable at a restart (only --workspace-ro or the mode make further
         # workspaces read-only): this one lasts for the run. A file: a start takes none as a workspace.
@@ -1197,7 +1299,7 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
                 "start with --workspace-ro)")
     else:
         try:
-            entry["kept"] = keep(record, str(real), named=name if named else None)
+            entry["kept"] = keep(record, remote or str(real), named=name if named else None)
         except (OSError, ValueError) as exc:
             out(f"  not kept for the session's next start: {shown(exc, 500)}")
     if entry["kept"]:
@@ -1213,8 +1315,17 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
     push_note = ("; the push check takes its commits" if pushed else
                  "; its commits cannot be pushed from the sandbox (the push check could not take it: "
                  f"{shown(why, 300)}): push them from the host" if pushed is False else "")
-    out(f"added {'the file ' if kind == 'file' else ''}{shown(real)} to {shown(record.get('run'))} at "
+    out(f"added {'the file ' if kind == 'file' else ''}{shown(remote or real)} to {shown(record.get('run'))} at "
         f"{entry['sandbox']} ({mode}{', kept for the session' if entry['kept'] else ''}){push_note}")
+    if hidden:
+        paths = [f"{entry['sandbox']}/{item['path']}" for item in hidden]
+        out(f"  hidden from the agent (--hide): {', '.join(shown(path) for path in paths[:10])}"
+            + (f" and {len(paths) - 10} more" if len(paths) > 10 else "")
+            + " (an empty read-only file or folder in their place; files made later are not hidden)")
+    elif globs and kind == "dir":
+        out(f"  --hide {', '.join(shown(glob, 60) for glob in globs[:5])}: nothing matches in it now")
+    for note in hide_notes:
+        out(f"  warning: {entry['sandbox']}/{shown(note, 400)}")
     if entry["kept"] and elsewhere:
         holder = next((other for other in present_workspaces(record)
                        if PurePosixPath(other.get("sandbox") or "").name == elsewhere), None)
@@ -1229,18 +1340,76 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
     return entry["sandbox"]
 
 
+def hide_staging(record):
+    """(a private folder of the run's, {"file"|"dir": [path, identity]}) for --hide in an added directory: the empty
+    read-only file and folder put over what the globs match (as a start's, hide.py) and the staging folder the
+    helper mounts the clone on in its own mount namespace. Removed after the add."""
+    parent = record.get("directory")
+    folder = Path(tempfile.mkdtemp(prefix=".hide-", dir=parent if parent and os.path.isdir(parent) else None))
+    (folder / "stage").mkdir(mode=0o700)
+    (folder / "file").write_bytes(b"")
+    (folder / "dir").mkdir()
+    (folder / "file").chmod(0o444)
+    (folder / "dir").chmod(0o555)
+    return folder, {kind: [str(folder / kind), [(folder / kind).stat().st_dev, (folder / kind).stat().st_ino]]
+                    for kind in ("file", "dir")}
+
+
+def remote_source(value):
+    """The canonical remote source (sshfs://...) VALUE names, or None for anything else (also a damaged one)."""
+    remote = module("remotefs")
+    if not remote.is_remote(value):
+        return None
+    try:
+        return remote.parse(value)["source"]
+    except ValueError:
+        return None
+
+
+def add_remote(record, value, read_only=False, out=print, name=None, interactive=None, mounter=None,
+               unmounter=None, **given):
+    """`workspace add [RUN] sshfs://...`: the remote folder VALUE mounted on this host with sshfs (in sandbox-ai's
+    own folder for the run, remotefs.plan; MOUNTER(entry, interactive), default remotefs.mount), then added as that
+    folder (add, with GIVEN: every check of a workspace); kept for the session as its source. Unmounted again when
+    the add fails (UNMOUNTER(run, points), default remotefs.release), by `workspace remove` and at the end of the
+    run. A password or passphrase is asked only in a terminal (INTERACTIVE, default: standard input is one). Its
+    sandbox path."""
+    remote = module("remotefs")
+    spec = remote.parse(value)
+    checks = record.get("workspace_checks") if isinstance(record.get("workspace_checks"), dict) else {}
+    if any(entry.get("remote") == spec["source"] for entry in present_workspaces(record)):
+        raise ValueError(f"{shown(spec['source'])} is added already (sandbox-ai workspace list)")
+    run = record.get("run")
+    mode = "ro" if read_only or checks.get("read_only") else "rw"
+    if interactive is None:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    entry = remote.plan(run, spec["source"], mode, by="add")
+    try:
+        out(f"mounting {shown(spec['source'])} on this host")
+        (mounter or remote.mount)(entry, interactive=interactive)
+        remote.update(run, entry["point"], state="mounted", via=entry.get("via"))
+        out(f"  warning: {remote.warning(entry, 'it')}")
+        return add(record, entry["point"], read_only, out=out, name=name, remote=spec["source"], **given)
+    except BaseException:
+        (unmounter or (lambda run, points: remote.release(run, only=points, interactive=interactive)))(
+            run, [entry["point"]])
+        raise
+
+
 def matching(record, value):
     """The added workspace VALUE names: its sandbox path, its name, its host path, or any directory (relative paths
     too) that resolves to its host path. A value that names one workspace by name and another as a directory is
     refused (ambiguous)."""
     entries = present_workspaces(record)
     resolved = None
-    if not value.startswith(WORKSPACES_DIR + "/"):
+    if not value.startswith(WORKSPACES_DIR + "/") and remote_source(value) is None:
         candidate = Path(value).expanduser()
         with contextlib.suppress(OSError, RuntimeError):
             if value.startswith(("/", "~", ".")) or candidate.is_dir():
                 resolved = str(candidate.resolve())
-    by_name = [e for e in entries if value in (e["sandbox"], PurePosixPath(e["sandbox"]).name, e["host"])]
+    source = remote_source(value)
+    by_name = [e for e in entries if value in (e["sandbox"], PurePosixPath(e["sandbox"]).name, e["host"])
+               or (source is not None and e.get("remote") == source)]
     by_directory = [e for e in entries if resolved is not None and resolved == e["host"]]
     found = {e["sandbox"]: e for e in by_name + by_directory}
     if len(found) > 1:
@@ -1281,7 +1450,8 @@ def frozen(found, root=CGROUP_ROOT, wait=2.0, group=None):
                 path.write_text("0")
 
 
-def remove(record, value, force=False, out=print, runner=run_helper, finder=finder_default, using=users, taken=None):
+def remove(record, value, force=False, out=print, runner=run_helper, finder=finder_default, using=users, taken=None,
+           unmounter=None):
     taken = taken or copies
     with locked(record):
         entry = matching(record, value)
@@ -1310,7 +1480,8 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
                                  "--force (what is open stays usable, also for writing, until it is closed; only a "
                                  "restart is sure)")
             result = runner("remove", found, PurePosixPath(entry["sandbox"]).name, force=force,
-                            kind=entry.get("kind", "dir"))
+                            kind=entry.get("kind", "dir"),
+                            **({"hidden": list(entry["hidden"])} if entry.get("hidden") else {}))
         status, error = result[:2]
         if status == PARTIAL:
             # Gone in some of the sandbox's namespaces, still there in others: the registry says so, and which.
@@ -1335,7 +1506,7 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
     kept = False
     if entry.get("kept"):
         try:
-            kept = keep(record, entry["host"], add=False)  # its --workspace-name with it
+            kept = keep(record, entry.get("remote") or entry["host"], add=False)  # its --workspace-name with it
         except (OSError, ValueError) as exc:
             out(f"  still in the session's options: {shown(exc, 500)}")
         if kept:  # the kept ones after it are named anew at a restart
@@ -1351,21 +1522,33 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
         out("  warning: detached by force: whatever a process in the sandbox still holds there stays usable, also "
             "for writing, until it is closed" + (f" (open in {', '.join(str(pid) for pid, _, _ in busy)})"
                                                  if busy else "") + "; a restart takes it away for sure")
-    out(f"removed {entry['sandbox']} ({shown(entry['host'])}) from {shown(record.get('run'))}"
+    if entry.get("remote"):
+        # A remote folder: unmounted on this host as well (what the agent still holds stays usable until closed).
+        for source, point, why in (unmounter or (lambda run, points: module("remotefs").release(run, only=points)))(
+                record["run"], [entry["host"]]):
+            if why:
+                out(f"  warning: {shown(source or point)} could not be unmounted on this host ({shown(why, 300)}); "
+                    "it is unmounted when the run ends")
+    out(f"removed {entry['sandbox']} ({shown(entry.get('remote') or entry['host'])}) from {shown(record.get('run'))}"
         f"{' and from the session options' if kept else ''}; what the agent may still hold in a namespace of its own "
         "(a copy no table shows) only a restart takes away for sure")
 
 
 def listing(record):
     checks = record.get("workspace_checks") or {}
+    # The start's remote folders (sshfs://): their source by mount point (run.json "remote").
+    remote = {entry.get("point"): entry.get("source") for entry in record.get("remote") or []
+              if isinstance(entry, dict)}
     result = [{"host": e.get("host"), "sandbox": e.get("sandbox"), "mode": e.get("mode"), "source": "start",
-               "kind": "dir"} for e in checks.get("workspaces", [])]
+               "kind": "dir", **({"remote": remote[e.get("host")]} if remote.get(e.get("host")) else {})}
+              for e in checks.get("workspaces", [])]
     if not checks and record.get("workspace"):
         result.append({"host": record["workspace"], "sandbox": "/work", "mode": None, "source": "start", "kind": "dir"})
     for entry in present_workspaces(record):
         row = {"host": entry["host"], "sandbox": entry["sandbox"], "mode": entry["mode"], "source": "added",
                "kind": entry.get("kind", "dir"), "named": bool(entry.get("named")),
                "kept": bool(entry.get("kept")), "state": entry["state"],
+               **({"remote": entry["remote"]} if isinstance(entry.get("remote"), str) else {}),
                "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(entry.get("since") or 0))}
         if entry["state"] == "partial":
             row["gone_in"] = [pid for pid in entry.get("gone_in", []) if isinstance(pid, int)]
@@ -1385,22 +1568,41 @@ def list_lines(record, entries):
         source = entry["source"] + (", file" if entry.get("kind") == "file" else "") + \
             (", kept" if entry.get("kept") else "") + \
             (f", {entry['state']}" if entry.get("state") not in (None, "attached") else "")
-        rows.append([entry["sandbox"], entry["mode"] or "-", source, shown(entry["host"], 500)])
+        rows.append([entry["sandbox"], entry["mode"] or "-", source + (", remote" if entry.get("remote") else ""),
+                     shown(entry.get("remote") or entry["host"], 500)])
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
     return ["  ".join(cell.ljust(width) for cell, width in zip(row, widths)) + "  " + row[-1] for row in rows]
+
+
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
 
 
 def main(argv, out=print):
     net = module("net")
     parser = argparse.ArgumentParser(prog="sandbox-ai workspace", description=__doc__.split("\n\n")[0],
-                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     formatter_class=help_style,
                                      epilog="\n\n".join(__doc__.split("\n\n")[1:6]))
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("review", help="what a run changed that your host runs or trusts, with diffs; keep or "
+                                       "restore each file",
+                        parents=[module("workspace_review").parser(add_help=False)],
+                        description="What the agent changed in a workspace that your host runs or trusts (Git hooks "
+                                    "and configuration, editor tasks, agent settings, build scripts, CI workflows, "
+                                    "instruction files), with the diffs; per file, keep the change or restore the "
+                                    "file as it was at the start.")
     lister = commands.add_parser("list", help="the run's workspaces")
     lister.add_argument("run", nargs="?")
     lister.add_argument("--json", action="store_true", help="as JSON")
-    adder = commands.add_parser("add", help="mount a host directory or file into the running sandbox")
-    adder.add_argument("args", nargs="+", metavar="[RUN] DIR|FILE")
+    adder = commands.add_parser("add", help="mount a host directory or file, or an sshfs:// folder, into the running sandbox")
+    adder.add_argument("args", nargs="+", metavar="[RUN] DIR|FILE|sshfs://[USER@]HOST[:PORT]/PATH")
     adder.add_argument("--ro", action="store_true", help="read-only")
     adder.add_argument("--name", metavar="NAME", help="at /workspaces/NAME (default: the directory's or file's name); "
                                                       "kept for the session under that name")
@@ -1408,6 +1610,8 @@ def main(argv, out=print):
     remover.add_argument("args", nargs="+", metavar="[RUN] DIR|NAME")
     remover.add_argument("--force", action="store_true", help="also while a process in the sandbox uses it")
     args = parser.parse_args(argv)
+    if args.command == "review":  # workspace_review.py, with the same options
+        return module("workspace_review").main(list(argv[1:]), out)
     try:
         if args.command == "list":
             runs = net.running()
@@ -1430,7 +1634,9 @@ def main(argv, out=print):
             if args.command == "add":
                 return keep_for_next_start(exc.entry, value, args.ro, name=args.name, out=out)
             return forget_for_next_start(exc.entry, value, out=out)
-        if args.command == "add":
+        if args.command == "add" and module("remotefs").is_remote(value):
+            add_remote(record, value, args.ro, out=out, name=args.name)
+        elif args.command == "add":
             add(record, value, args.ro, out=out, name=args.name)
         else:
             remove(record, value, args.force, out=out)

@@ -15,6 +15,7 @@ Standard library only.
 import json
 from pathlib import Path
 import re
+import sys
 
 HERE = Path(__file__).resolve().parent
 
@@ -41,6 +42,11 @@ PROFILES = ("web", "headless", "acp", "sdk", "sdk-minimal")
 # Session, --json names the run's in its first event), so the chat runs it once per message. CHAT ("chat",
 # sandbox-ai's own word, no profile of DSH's) names it explicitly: `sandbox-ai dsh -- chat --session-id ID` continues
 # a conversation of an earlier start.
+# The rules for DSH's own tools: sandbox-ai's Cordis plugin (HOOKS_SCRIPT, read-only), inserted by the patch (a patch
+# may insert a plugin by its file path: dsh-app-boot's anchorInsertedPluginNames). DSH has no kit hooks
+# (kits.NO_HOOKS: its Claude Code hook bridge is experimental, not in the image).
+HOOKS_PLUGIN = MANAGED_DIR + "/sandbox-ai-hooks.mjs"
+HOOKS_ROW = {"id": "sandbox-ai-hooks", "name": HOOKS_PLUGIN, "config": {}}
 CHAT = "chat"
 CHAT_SCRIPT = MANAGED_DIR + "/chat.py"  # sandbox/dsh_chat.py, in the session directory's dsh/ (read-only)
 # The headless profile turns DSH's managed credential store off (keys from the launch environment only); the chat is
@@ -74,6 +80,14 @@ WEB_ONLY = ("DeepSeek Harness' web UI (-- web) runs on the sandbox's own loopbac
             "sandbox reaches: start with --browser to use it in the app's Browser tab (in the app: the Board's "
             "Browser part). The chat in the terminal: start without -- web; one task: sandbox-ai dsh -- headless "
             "\"TASK\"")
+# On a Mac (Podman in podman machine's VM) the session browser you see is refused (browser.check: its live view is
+# Linux-only for now), so these say what works there instead of --browser.
+MAC_LIVE_VIEW = "the session browser's live view (--browser) is Linux-only for now, not on this Mac"
+CHAT_NOTE_MAC = (CHAT_WHAT + ". " + APPROVALS + ". Its web UI, where DSH asks you, is shown in the session browser "
+                 "on Linux; " + MAC_LIVE_VIEW)
+WEB_ONLY_MAC = ("DeepSeek Harness' web UI (-- web) runs on the sandbox's own loopback, which no browser outside the "
+                "sandbox reaches, and " + MAC_LIVE_VIEW + ". The chat in the terminal: start without -- web; one "
+                "task: sandbox-ai dsh -- headless \"TASK\"")
 IN_BROWSER = ("DeepSeek Harness' web UI opens in the session browser (the app's Browser tab) once it is up; this "
               "window shows its log (the chat in the terminal: start without -- web)")
 OPENED = "sandbox-ai: DeepSeek Harness' web UI opened in the session browser (the app's Browser tab)"
@@ -100,14 +114,7 @@ def check(a, hooks_active=False, companions=()):
     """Refuse what DSH cannot do in a sandbox (yet), before anything starts."""
     if a.agent != "dsh" and "dsh" not in companions:
         return
-    if a.agent != "dsh" or companions:
-        raise ValueError("--with: DeepSeek Harness is not in the team image; give it another agent as a helper "
-                         "(sandbox-ai dsh --helper claude) or it to another agent (--helper dsh)")
-    if hooks_active:
-        raise ValueError("rules for the agent's own tools (a ruleset's \"tool\" rules, the security mode "
-                         "paranoid's) are not enforced for DeepSeek Harness yet; start without them, in the mode high "
-                         "or laxer (the network, MCP and device rules hold as for every agent)")
-    args = profile_words(getattr(a, "agent_args", None) or [])
+    args = profile_words(getattr(a, "agent_args", None) or []) if a.agent == "dsh" else []
     if args and args[0] in ("desktop", "plugin") or args[:2] in (["--profile", "desktop"], ["--profile", "plugin"]):
         raise ValueError(f"dsh {args[0] if args[0] != '--profile' else args[1]}: not in a sandbox (the desktop "
                          "profile is the Electron app's; plugins need pnpm and a registry, and are code in the agent's "
@@ -213,20 +220,25 @@ def model_rows(a, llm=None, note=None):
     return rows
 
 
-def patch(a, mcp=None, llm=None, note=None):
+def patch(a, mcp=None, llm=None, note=None, hooks=False):
     """DSH's /etc/dsh/sandbox-ai.patch.yml for this start: the model rows (with NOTE, the run's network note, in the
-    system prompt), the --mcp servers (MCP: mcp_rows), and, last, the telemetry pins. A patch row replaces its row's
-    whole configuration (DSH's rule)."""
+    system prompt), the --mcp servers (MCP: mcp_rows), sandbox-ai's hooks plugin when rules for DSH's own tools hold
+    (HOOKS: HOOKS_ROW) and, last, the telemetry pins. A patch row replaces its row's whole configuration (DSH's
+    rule)."""
     rows = model_rows(a, llm, note)
-    if mcp:
-        rows.append({"insert": list(mcp)})
+    inserted = [*(mcp or []), *([dict(HOOKS_ROW)] if hooks else [])]
+    if inserted:
+        rows.append({"insert": inserted})
     return [*rows, *TELEMETRY_PINNED]
 
 
 def files(a, rows):
-    """{path in the session directory: content}: the patch; for the chat its script (CHAT_SCRIPT) and patch
-    (CHAT_PATCH), and the web UI's window script (WEB_SCRIPT), which the chat runs beside it with --browser."""
+    """{path in the session directory: content}: the patch and the hooks plugin it inserts (HOOKS_SCRIPT); for the
+    chat its script (CHAT_SCRIPT) and patch (CHAT_PATCH), and the web UI's window script (WEB_SCRIPT), which the chat
+    runs beside it with --browser."""
     found = {f"{SESSION_DIR}/sandbox-ai.patch.yml": json.dumps(rows, indent=2) + "\n"}
+    if any(entry.get("name") == HOOKS_PLUGIN for row in rows for entry in row.get("insert", [])):
+        found[f"{SESSION_DIR}/{HOOKS_PLUGIN.rsplit('/', 1)[1]}"] = HOOKS_SCRIPT
     args = getattr(a, "agent_args", None) or []
     if chat_profile(args):
         found[f"{SESSION_DIR}/{CHAT_SCRIPT.rsplit('/', 1)[1]}"] = (HERE / "dsh_chat.py").read_text()
@@ -234,6 +246,72 @@ def files(a, rows):
     if interactive(args):
         found[f"{SESSION_DIR}/{WEB_SCRIPT.rsplit('/', 1)[1]}"] = (HERE / "dsh_web.py").read_text()
     return found
+
+
+# sandbox-ai's Cordis plugin for DSH 0.2.1-rc.5 (HOOKS_PLUGIN, read-only; docs/subsystems/tools.md of its release):
+# a tools/pre-execute listener asks the supervisor for every call (DSH has frozen its arguments before policy: they
+# cannot be rewritten after it), a monotonic tools.guard() refuses every call that listener did not allow (another
+# listener that answered before it, a listener that never ran: refused, never let through), tools/post-execute
+# records the call. run_code's sub-calls go through the same pipeline.
+HOOKS_SCRIPT = r'''// sandbox-ai: the rules for DeepSeek Harness' own tools (README, Rulesets: "The agent's own tools").
+// Installed read-only by the launcher and inserted by its patch. Each tool call asks the sandbox's supervisor first;
+// a refusal, or anything that goes wrong on the way, refuses the call.
+import { spawn } from "node:child_process";
+
+const HOOK = ["/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-hook", "dsh"];
+
+function hook(event, message) {
+  return new Promise((resolve) => {
+    const refused = (why) => resolve({ code: 2, reason: `sandbox-ai: the tool call is refused: ${why}` });
+    let child;
+    try {
+      child = spawn(HOOK[0], [...HOOK.slice(1), event], { stdio: ["pipe", "ignore", "pipe"] });
+    } catch (error) {
+      refused(`the hook did not start (${error})`);
+      return;
+    }
+    let reason = "";
+    child.stderr.on("data", (chunk) => { if (reason.length < 4000) reason += chunk; });
+    child.on("error", (error) => refused(`the hook did not start (${error})`));
+    child.on("close", (code) => resolve({ code: code === null ? 2 : code, reason }));
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify(message));
+  });
+}
+
+function directory(ctx, exec) {
+  try {
+    const found = exec.agent ? ctx.get("workingDirectory")?.get(exec.agent.session) : undefined;
+    return typeof found === "string" ? found : process.cwd();
+  } catch {
+    return process.cwd();
+  }
+}
+
+export const name = "sandbox-ai-hooks";
+export const inject = ["tools"];
+
+export function apply(ctx) {
+  const allowed = new WeakSet();
+  ctx.on("tools/pre-execute", async (exec, next) => {
+    const answer = await hook("PreToolUse", { tool: exec.name, args: exec.arguments, callID: exec.callId,
+                                              cwd: directory(ctx, exec) });
+    if (answer.code !== 0) {
+      return { kind: "deny", reason: answer.reason.trim() || "sandbox-ai: the tool call is refused" };
+    }
+    allowed.add(exec);
+    return next();
+  });
+  ctx.tools.guard((exec) => allowed.has(exec) ? undefined
+    : "sandbox-ai: the tool call is refused: its rules were not checked (a policy answered before them)");
+  ctx.on("tools/post-execute", async (exec, result, next) => {
+    const text = JSON.stringify(result?.content ?? null) ?? "";
+    await hook("PostToolUse", { tool: exec.name, callID: exec.callId, cwd: directory(ctx, exec),
+                                result_bytes: Buffer.byteLength(text) });
+    return next();
+  });
+}
+'''
 
 
 def environment(a):
@@ -331,11 +409,17 @@ def note(a, opens):
     """What an interactive start says first (and its window): the chat's (with OPENS the web UI beside it), the web
     UI's (OPENS: it goes to the session browser, else how to reach it); None for a start of another profile."""
     args = getattr(a, "agent_args", None) or []
+    mac = on_machine(a)
     if chat_profile(args):
-        return CHAT_AND_BROWSER if opens else CHAT_NOTE
+        return CHAT_AND_BROWSER if opens else CHAT_NOTE_MAC if mac else CHAT_NOTE
     if not web_profile(args):
         return None
-    return IN_BROWSER if opens else WEB_ONLY
+    return IN_BROWSER if opens else WEB_ONLY_MAC if mac else WEB_ONLY
+
+
+def on_machine(a):
+    """A start on this Mac with its Podman in podman machine's VM (agent_sandbox.on_machine)."""
+    return sys.platform == "darwin" and getattr(a, "backend", None) == "podman" and not getattr(a, "podman_url", None)
 
 
 def command(a, binary, args, opens=False, port=WEB_PORT):

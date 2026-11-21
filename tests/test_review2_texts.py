@@ -24,7 +24,7 @@ def load(name, path):
 
 
 s = load("review2_texts_launcher", "sandbox/agent_sandbox.py")
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 
 
 def test_a_project_file_without_an_agent_names_every_agent(tmp_path, monkeypatch):

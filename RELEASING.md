@@ -5,21 +5,35 @@ Raise it with `scripts/bump_version.py` for every change you install or ship:
 the patch counts up to 250, then the minor goes up (`0.1.250` → `0.2.0`).
 `--minor`, `--major`, `--set X.Y.Z` and `--show` cover the rest.
 
-A release consists of
+A release consists of these files - the list is `sandbox/release_assets.py`, and `scripts/make_dist.py`,
+`scripts/publish_release.py`, `scripts/release_check.py`, `scripts/release_notes.py` and the updaters take the names
+from it (`tests/test_release_assets.py`):
 
-| File | Used by |
-|---|---|
-| `sandbox-ai-bundle-X.Y.Z.tar.gz` | `install.sh` (the whole tree, reproducible) |
-| `sandbox_ai-X.Y.Z-py3-none-any.whl`, `sandbox_ai-X.Y.Z.tar.gz` | PyPI (`pip install sandbox-ai`) |
-| `install.sh` | first installs (`curl … | bash`); carries the release keys of `sandbox/release-signers` |
-| `sandbox-ai.pyz` | the command line in one file (`./sandbox-ai.pyz …` or `python3 -I sandbox-ai.pyz …`); made by `make_dist.py` from the bundle |
-| `sandbox-ai-x86_64.AppImage`, `sandbox-ai-aarch64.AppImage` | the app with sandbox-ai, Python and PySide6 inside, for Linux; built by `release.yml` |
-| `sandbox-ai-arm64.dmg`, `sandbox-ai-x86_64.dmg` | `sandbox-ai.app` for macOS (not notarised); built by `release.yml` |
-| `sandbox-ai-videos.tar` | optional: the videos about the app's pages, which the app downloads once (`make_dist.py --videos DIR`, see below) |
-| `SHA256SUMS` | `install.sh` verifies the bundle with it; it lists every file above |
-| `SHA256SUMS.sig` | `install.sh` verifies `SHA256SUMS` with it: an SSH signature by a release key |
+| File | Built by | Used by | Who updates with it |
+|---|---|---|---|
+| `sandbox-ai-bundle-X.Y.Z.tar.gz` | `make_dist.py` (CI: job `build`) | `install.sh` (the whole tree, reproducible) | install.sh's installations: `sandbox-ai update`, a system one `sudo sandbox-ai update`, other hosts `sandbox-ai hosts update NAME` |
+| `sandbox_ai_app-X.Y.Z-py3-none-any.whl` | `make_dist.py` | PyPI project `sandbox-ai-app` (`pip install sandbox-ai-app`: the command line and the web interface; `pip install 'sandbox-ai-app[gui]'`: with the desktop app) | pip and pipx installations: `sandbox-ai update` installs this file with the environment's own pip |
+| `sandbox_ai_app-X.Y.Z.tar.gz` | `make_dist.py` | PyPI (the source package) | - |
+| `install.sh` | `make_dist.py` | first installs (`curl … | bash`); carries the release keys of `sandbox/release-signers` | - |
+| `sandbox-ai.pyz` | `make_dist.py` (`make_pyz.py`) | the command line in one file (`./sandbox-ai.pyz …` or `python3 -I sandbox-ai.pyz …`) | the `.pyz`: `./sandbox-ai.pyz update` replaces the file |
+| `sandbox-ai-x86_64.AppImage`, `sandbox-ai-aarch64.AppImage` | `release.yml` (jobs `build-appimage`) | the app with sandbox-ai, Python and PySide6 inside, for Linux | the AppImage: `./sandbox-ai-ARCH.AppImage cli update` (the app: Settings › Updates) replaces the file |
+| `sandbox-ai-arm64.dmg`, `sandbox-ai-x86_64.dmg` | `release.yml` (jobs `build-macos`) | `sandbox-ai.app` for macOS (not notarised) | the macOS app: `sandbox-ai.app/Contents/MacOS/sandbox-ai update` (the app: Settings › Updates) replaces `sandbox-ai.app` with the one in the disk image |
+| `sandbox-ai-videos.tar` | the maintainer (`make_dist.py --videos DIR`, see below) | the videos about the app's pages, which the app downloads once | the app (once per version) |
+| `SHA256SUMS` | `make_dist.py` (`--sums-only` over everything) | every updater checks its file against it; it lists every file above | every kind |
+| `SHA256SUMS.sig` | the maintainer (`--sign KEY`) | every updater checks `SHA256SUMS` with it: an SSH signature by a release key | every kind |
 
-The file names carry no version, so `https://github.com/c0decave/sandbox-ai/releases/latest/download/NAME`
+Every kind of installation updates itself from these files (`sandbox-ai update`; in the app Settings › Updates ›
+Install now…): the release is found through the releases API of the source (`releases/latest` - GitHub by default,
+`https://github.com/c0decave/sandbox-ai`; `--source URL`, `update_source` or `SANDBOX_AI_SOURCE` names a Gitea or
+Forgejo), `SHA256SUMS.sig` must be a good signature of `SHA256SUMS` by a key of the installed copy's
+`sandbox/release-signers`, and the file must have the SHA-256 listed there. The version of a release is the one in its
+bundle's name, which the signed `SHA256SUMS` lists: **a release without its bundle, without `SHA256SUMS` or without
+the file of a kind cannot update that kind**, and a release that changes a name breaks every installation that asks
+for the old one. `tests/test_update_github.py` (and the app's `tests/test_update_github_e2e.py`) run every kind's
+update against a fake GitHub, with a release built by `make_dist.py`; one of them updates the files of the last
+public release (0.1.94: `tests/golden/release-0.1.94`) to the next one.
+
+The file names carry no version where they need not, so `https://github.com/c0decave/sandbox-ai/releases/latest/download/NAME`
 always names the newest (the README's install commands use that).
 
 ## Steps
@@ -28,7 +42,11 @@ always names the newest (the README's install commands use that).
 # 0. On a host with Podman and Bubblewrap (not in a sandbox): the live check, its report under
 #    ~/.local/state/sandbox-ai/live-check/ (scripts/live_check.py --help)
 scripts/live_check.py --build
-#    and the agents and parts not live-tested before (Hermes, Qwen Code, DSH, Goose, Cairn, the sandbox's own
+#    and what the development sandbox could not run (the security reviews' release gates, Firejail's blacklist, the
+#    firewall for a login's server, logins given while running, --hide on workspace add, Landlock with a real HOME,
+#    kits and plugins attached live, devices): live-check/REPORT-DATE.md (docs/LIVE_CHECK.md)
+scripts/live_check.sh
+#    and the agents and parts not live-tested before (Hermes, Qwen Code, DSH, Goose, nanobot, Letta Code, Pi, Cairn, the sandbox's own
 #    browser): their images built, each against a scripted model on this host, one MCP tool, its switches' hosts,
 #    no telemetry; send back the report.md it names (CI's job agents-live runs the same)
 scripts/live_check_agents.sh
@@ -44,14 +62,69 @@ git push origin main "v$v"
 #    python3 -m pip install --require-hashes --only-binary :all: -r packaging/requirements-ci.txt)
 python3 scripts/make_dist.py --no-isolation --sign ~/.config/sandbox-ai/release-key
 
-# 3. Publish the release with its files (a token that may write releases);
-#    SANDBOX_AI_SOURCE names your own Gitea/Forgejo repository, if you publish there
+# 3. Publish these files as a release on your own Gitea/Forgejo (SANDBOX_AI_SOURCE names it; a token that may
+#    write releases). --partial: step 2 builds no AppImage, no disk image and no videos, and publish_release.py
+#    refuses an incomplete release without it. A release on GitHub: "The checklist of a release on GitHub" below.
 export SANDBOX_AI_TOKEN=...
-python3 scripts/publish_release.py --source "${SANDBOX_AI_SOURCE:-https://github.com/c0decave/sandbox-ai}" dist/*
+python3 scripts/publish_release.py --source "$SANDBOX_AI_SOURCE" --partial dist/*
 ```
 
 `sandbox/release-signers` lists the release key since 0.1.92: sign every release (installations that trust it
 refuse an unsigned one).
+
+A release is complete or it is not published: `publish_release.py` refuses files that are not every file of the
+table above (each lacking one is named, nothing is uploaded) and a file of another version. `--partial` uploads
+without them to a Gitea or Forgejo of your own - step 2 alone builds no AppImage and no disk image, so a release
+there says what it goes up without - and is refused for GitHub. A new release is made as a **draft** and published
+after its last file is up, so `releases/latest` (what every installation asks) never names a release whose files are
+still on their way; `--draft` leaves it a draft for the check, `--publish` ends it.
+
+## The checklist of a release on GitHub
+
+A pushed tag is not a release: `release.yml` builds and checks, the release itself is signed and published from your
+machine, in the same sitting. Every step stops when something is missing.
+
+```bash
+v=X.Y.Z; src=https://github.com/c0decave/sandbox-ai; run=RUN_ID   # the run of release.yml for the tag v$v
+export GH_HOST=github.com                                          # gh: GitHub, never another host
+gh run view "$run" --json jobs --jq '.jobs[] | "\(.conclusion)\t\(.name)"'   # 1. every job: success
+gh run download "$run" -n dist -D dist                             # 2. what CI built and checked
+gh run download "$run" -p 'appimage-*' -p 'macos-*' -D packages
+python3 scripts/make_dist.py --sums-only --out dist --add packages/*/* \
+    --videos ~/videos-$v --sign ~/.config/sandbox-ai/release-key  # 3. the videos, SHA256SUMS, its signature
+python3 scripts/release_check.py "$v" --dir dist                   # 4. every file there, listed, signed, works
+export SANDBOX_AI_TOKEN=...                                        #    (a token that may write releases)
+python3 scripts/release_notes.py --version "$v" > notes.md          #    the page (at most 125,000 characters)
+python3 scripts/publish_release.py --source "$src" --draft \
+    --notes-file notes.md dist/*                                   # 5. a draft: nobody is served it
+python3 scripts/release_check.py "$v" --source "$src"              # 6. the draft, downloaded as an update would
+python3 scripts/publish_release.py --source "$src" --publish       # 7. published: releases/latest names it
+env -u SANDBOX_AI_TOKEN python3 scripts/release_check.py "$v" --source "$src"   # 8. as everybody sees it
+sandbox-ai update --check                                          # 9. an installation sees it, signed
+```
+
+- [ ] Before the tag: `python3 -m pytest -q tests` (it runs every kind's update against a fake GitHub),
+      `sandbox-ai privacy-check`, `docs/releases/vX.Y.Z.md` written, the videos rendered (below).
+- [ ] 1: `build`, `e2e-pyz` (3.9, 3.13), `build-appimage` and `e2e-appimage` (x86_64, aarch64; ubuntu:22.04,
+      debian:12), `build-macos` and `e2e-macos` (arm64, x86_64), `release` (its step "Every file CI builds is there,
+      listed in SHA256SUMS and works"), `pypi` - all green. A red job: fix, tag again; never publish around it.
+- [ ] 4 and 6 end with `sandbox-ai X.Y.Z: READY` and list twelve files: `install.sh`, `sandbox-ai-x86_64.AppImage`,
+      `sandbox-ai-aarch64.AppImage`, `sandbox-ai-arm64.dmg`, `sandbox-ai-x86_64.dmg`, `sandbox-ai.pyz`,
+      `sandbox_ai_app-X.Y.Z-py3-none-any.whl`, `sandbox_ai_app-X.Y.Z.tar.gz`, `sandbox-ai-bundle-X.Y.Z.tar.gz`,
+      `sandbox-ai-videos.tar`, `SHA256SUMS`, `SHA256SUMS.sig` - each there, listed, its SHA-256 right, its try ok.
+- [ ] 8 says `published, and the newest release (what installations are served)`.
+- [ ] 9, on an installation of the release before: `available: X.Y.Z` and `signature: good, by the trusted key …`;
+      then `sandbox-ai update` there, and on a Mac the app's Settings › Updates › Install now… (the macOS update is
+      the one path no test here runs on a real macOS: the tests' `hdiutil` is a stand-in).
+- [ ] The MCP catalog and anything else the release needs signed: in the same sitting.
+
+`scripts/release_check.py` says per file: there, listed in `SHA256SUMS`, its SHA-256, and a quick try - the bundle
+(its version; it trusts the key that signed the release, or the installations it makes would refuse the next one),
+`install.sh` (`bash -n`; it carries the signing key for first installs), the `.pyz` (started: `--version`), the
+AppImage of this machine's architecture (`--appimage-extract` of its manifest, which names the version), the disk
+images (their form; opened only on macOS), wheel and sdist (the metadata), the videos (only the series' files).
+`--dir DIR` checks a folder, `--source URL` a release (a draft with `SANDBOX_AI_TOKEN`), `--ci` what `release.yml`
+built (no videos, no signature), `--json` prints the report for programs, `--no-try` starts nothing.
 
 ## The release page
 
@@ -76,8 +149,9 @@ attach the MP4 and VTT files to the release.
 The desktop app plays the series *The desktop app, page by page* (one video per page) in its own player, and
 downloads it once from the release of its version when it is not on the computer. That download is the release file
 `sandbox-ai-videos.tar`: the series' `sandbox-ai-app-NN-PAGE-LANG.mp4` and `.vtt` files, uncompressed (MP4 is
-compressed already), sorted, with a fixed owner, mode and time. It is optional - a release without it works, the app
-then says the release has no videos - and, like every file, listed in `SHA256SUMS`: the app installs it only after the
+compressed already), sorted, with a fixed owner, mode and time. CI cannot render it, so it is added where the release
+is signed; a release on GitHub always carries it (a release without it works, the app then says the release has no
+videos - `publish_release.py --partial`, for your own Gitea). Like every file it is listed in `SHA256SUMS`: the app installs it only after the
 signature of `SHA256SUMS` is good by a key of the installed `sandbox/release-signers`, the archive has the SHA-256
 listed there and it holds nothing but the series' files.
 
@@ -94,7 +168,7 @@ python3 scripts/publish_release.py --source https://github.com/c0decave/sandbox-
 
 `make_dist.py --videos DIR` takes only the files with the series' names from DIR (nothing else ends up in the
 archive) and stops when DIR holds no video. `publish_release.py` refuses to upload `sandbox-ai-videos.tar` that
-`SHA256SUMS` does not list. To check the archive by hand: `sha256sum --ignore-missing -c SHA256SUMS`, then
+`SHA256SUMS` does not list, and a release for GitHub without it. To check the archive by hand: `sha256sum --ignore-missing -c SHA256SUMS`, then
 `tar tf sandbox-ai-videos.tar`. Users who have the files already put them into `~/.local/share/sandbox-ai/videos`
 (or name a folder with `SANDBOX_AI_VIDEOS`); the app does not download then.
 
@@ -108,8 +182,12 @@ archive) and stops when DIR holds no video. `publish_release.py` refuses to uplo
 
 All three are made from the bundle, so they carry exactly the tree `install.sh` would install, with the app
 (`projects/sandbox-ai-app`, part of this repository since 0.1.66: the bundle takes it from the same checkout). Each package has a
-`PACKAGING` file beside `sandbox/`, so `sandbox-ai update` points to the download instead of running
-`install.sh`. `scripts/e2e_package.sh KIND FILE` checks a package the way a user starts it (version, presets,
+`PACKAGING` file beside `sandbox/`, so `sandbox-ai update` replaces the package with the release's new one
+(`sandbox/package_update.py`) instead of running `install.sh`: the file it was started from (the `.pyz`, the
+AppImage: started once with `--version` before it takes the old one's place) or `sandbox-ai.app` (from the disk
+image, with `hdiutil` and `ditto`); the one before is kept in `~/.cache/sandbox-ai/update-previous` for
+`sandbox-ai update --rollback`. A package in a folder its user cannot write says the command that can
+(`sudo -H … update`). `scripts/e2e_package.sh KIND FILE` checks a package the way a user starts it (version, presets,
 doctor, a dry run, the copy in the cache, the app's `--self-test`); `release.yml` runs it for every package, the
 AppImage also in `ubuntu:22.04` and `debian:12` containers.
 
@@ -220,12 +298,14 @@ The workflow `release.yml` holds no key: once `sandbox/release-signers` lists
 one, it still tests, builds `dist/` and the packages, checks them and
 publishes to PyPI, but creates no GitHub or Gitea release. Sign and publish
 what it built and checked from your machine (the AppImages and disk images
-contain its bundle, so sign that bundle, not one rebuilt here):
+contain its bundle, so sign that bundle, not one rebuilt here): "The checklist
+of a release on GitHub" above, in short
 
 ```bash
-gh run download RUN_ID -n dist -D dist                              # the run of the tag's release.yml
-gh run download RUN_ID -p 'appimage-*' -p 'macos-*' -D packages
-python3 scripts/make_dist.py --sums-only --out dist --add packages/*/* --sign ~/.config/sandbox-ai/release-key
+GH_HOST=github.com gh run download RUN_ID -n dist -D dist           # the run of the tag's release.yml
+GH_HOST=github.com gh run download RUN_ID -p 'appimage-*' -p 'macos-*' -D packages
+python3 scripts/make_dist.py --sums-only --out dist --add packages/*/* --videos ~/videos-X.Y.Z --sign ~/.config/sandbox-ai/release-key
+python3 scripts/release_check.py --dir dist
 python3 scripts/publish_release.py --source https://github.com/c0decave/sandbox-ai dist/*
 ```
 
@@ -293,8 +373,37 @@ This checks the published `install.sh` before a first `curl … | bash` too.
   with `"require_signed_updates": true` in `/etc/sandbox-ai/policy.json`:
   `--allow-unsigned` is refused, an installation without a trusted key cannot
   update, and `--from DIR` is refused (`--from BUNDLE` is verified).
-- pip installations (`pip install -U sandbox-ai`) rely on PyPI, not on these
-  signatures.
+- A pip installation updated with `sandbox-ai update` takes the release's wheel, checked with these signatures
+  (its `[gui]` PySide6 still comes from PyPI when the release moves its pins); one updated with `pip install -U
+  sandbox-ai-app` relies on PyPI, not on these signatures.
+- A package or a pip installation of 0.1.98 or older does not replace itself: its user downloads the new file
+  once. A pip installation of 0.1.94 or older is the package `sandbox-ai` (`sandbox_ai-0.1.94-py3-none-any.whl`),
+  which the wheel of `sandbox-ai-app` is never installed over: `pip uninstall sandbox-ai`, then `pip install
+  sandbox-ai-app`.
+- The macOS app replaces `sandbox-ai.app` in place: what still runs from it loads the new files from then on, so
+  an update there waits while a sandbox or session runs (`--while-running` goes ahead) and the app is restarted
+  after it.
+
+## The package guard's copy of the known malicious packages
+
+Not a file of a release: a release of its own, tag `osv-malicious`, replaced whenever a newer copy is made (daily
+is right: new malware is listed every day). `sandbox-ai packages sync` and `sandbox-ai update` fetch it from
+`SOURCE/releases/download/osv-malicious/` and take it only when a release key signed it (the keys of
+`sandbox/release-signers`, in the namespace `sandbox-ai-osv`: a release's signature is none of a copy's), every list
+matches its SHA-256 in the signed `osv-malicious.json`, and it is not older than the copy already there.
+
+```sh
+# OSV's dumps of the four ecosystems (each every advisory of the ecosystem; only MAL-... entries are read)
+for e in npm PyPI crates.io Go; do curl -fLo "dumps/$e.zip" "https://osv-vulnerabilities.storage.googleapis.com/$e/all.zip"; done
+sandbox-ai packages build --from dumps --out osv-out --sign ~/keys/sandbox-ai-release   # where the release key is
+# osv-out: osv-malicious.json, osv-malicious.json.sig, osv-malicious-{npm,pypi,crates,go}.list.gz
+sandbox-ai packages sync --from osv-out      # check it as every installation will, before it is published
+# then replace the files of the release "osv-malicious" with them (Gitea: any day; GitHub: as its releases)
+```
+
+Until that release exists, `sandbox-ai packages sync` says that no copy is published and names
+`sandbox-ai packages sync --osv` (the copy built on the user's machine from the same dumps, unsigned and shown so).
+The signing key never comes near CI, so this is a maintainer's step (or a timer on the machine that holds the key).
 
 ## GitHub and PyPI
 
@@ -308,11 +417,22 @@ The repository runs `.github/workflows/`:
   (`ubuntu-24.04`, `ubuntu-24.04-arm`) and the macOS disk images (`macos-15`,
   `macos-15-intel`: `macos-13` is retired), checks each package end to end
   (the `.pyz` on Python 3.9 and 3.13), writes `SHA256SUMS` over all of them,
-  creates the GitHub release with all files and
-  uploads wheel and sdist to PyPI by trusted publishing (register the
-  repository, the workflow `release.yml` and the environment `pypi` on PyPI
-  first). On Gitea/Forgejo Actions the same workflow publishes with
+  stops unless every file CI builds is there, listed and works
+  (`scripts/release_check.py --dir dist --ci`),
+  creates the GitHub release with all files (only while `sandbox/release-signers`
+  lists no key: a signed release is published by the maintainer, see the checklist) and
+  uploads wheel and sdist (`sandbox_ai_app-X.Y.Z*`, nothing else) to PyPI by
+  trusted publishing. On Gitea/Forgejo Actions the same workflow publishes with
   `publish_release.py` and the secret `RELEASE_TOKEN`; PyPI is skipped there.
+
+PyPI: the project is **`sandbox-ai-app`** (the name `sandbox-ai` there is not
+ours: installing that name from PyPI would install someone else's code). One package:
+the command line `sandbox-ai` with the web interface, and the desktop app
+`sandbox-ai-app` whose PySide6 comes with the extra `[gui]` (exact pins in
+`pyproject.toml`, each at least 14 days old). Its trusted publisher on PyPI
+(project sandbox-ai-app > Publishing) must read exactly: owner `c0decave`,
+repository `sandbox-ai`, workflow `release.yml`, environment `pypi`; the GitHub
+repository needs the environment `pypi` too.
 
 `DEFAULT_SOURCE` in `install.sh` and `[project.urls]` in `pyproject.toml` point
 to `https://github.com/c0decave/sandbox-ai`.

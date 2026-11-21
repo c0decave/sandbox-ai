@@ -21,14 +21,15 @@ TOP_KEYS = {"version", "store", "kits", "agents", "marketplaces", "errors"}
 KIT_KEYS = {"name", "kind", "editable", "agents"}
 AGENT_KEYS = {"marketplaces", "kits", "config", "about", "notes"}
 MARKET_KEYS = {"name", "agent", "builtin", "origins", "description", "source", "source_value", "importable", "problem",
-               "import", "kits", "store", "agent_config", "listed_from", "plugins"}
+               "import", "kits", "store", "agent_config", "listed_from", "plugins",
+               "agent_kits"}  # agent_kits: Codex's and OpenCode 2's kits of it (Claude's format)
 CODEX_MARKET_KEYS = MARKET_KEYS | {"codex_source"}
 # Codex's config.toml needs tomllib (Python 3.11 and later) or tomli; without either its marketplaces are left out
 # with a note (test_missing_or_damaged_agent_files_are_notes_never_failures checks that note)
 HAS_TOML = any(importlib.util.find_spec(name) for name in ("tomllib", "tomli"))
 needs_toml = pytest.mark.skipif(not HAS_TOML, reason="no TOML reader before Python 3.11 without tomli")
 PLUGIN_KEYS = {"name", "id", "listed", "description", "version", "category", "homepage", "source", "kits", "store",
-               "agent"}
+               "agent", "agent_kits"}
 OPENCODE_PLUGIN_KEYS = {"name", "id", "importable", "kits", "agent"}
 
 
@@ -88,7 +89,8 @@ def test_the_json_has_the_keys_the_web_and_the_app_read(home):
     assert set(data["agents"]) == {"claude", "codex", "opencode"}
     for name, info in data["agents"].items():
         assert set(info) == AGENT_KEYS | ({"plugins", "modules"} if name == "opencode" else set()), name
-    assert data["agents"]["opencode"]["marketplaces"] is False and data["agents"]["codex"]["kits"] is False
+    assert data["agents"]["opencode"]["marketplaces"] is False
+    assert data["agents"]["codex"]["kits"] is True, "kits give Codex plugins of Claude's format (sandbox-ai's store)"
     assert "OpenCode has no marketplaces" in data["agents"]["opencode"]["about"]
     for kit in data["kits"]:
         assert set(kit) == KIT_KEYS and kit["kind"] in ("default", "builtin", "user")
@@ -330,8 +332,8 @@ def test_import_add_disable_enable_and_remove_change_only_the_kit(home):
     assert cli("kits", "enable-plugin", "team", "opencode-foo@1.0")[0] == 0
     assert cli("kits", "remove-plugin", "team", "opencode-foo@1.0")[0] == 0
     assert kit_file(home, "team", "opencode") == {"plugins": []}
-    status, _, err = cli("kits", "disable-plugin", "team", "x@y", "--agent", "codex")
-    assert status == 1 and "not supported yet" in err
+    status, _, err = cli("kits", "disable-plugin", "team", "x@y", "--agent", "hermes")
+    assert status == 1 and "not supported" in err
     assert snapshot(home) == agents_before, "the agents' own files are never changed"
 
 

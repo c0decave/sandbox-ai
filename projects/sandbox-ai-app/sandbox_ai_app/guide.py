@@ -12,8 +12,11 @@ with the node (board.problems for that node).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
+from .backend import LIST_OPTIONS
 from .i18n import N_, tr
+from .models import KnownModels
 
 
 @dataclass(frozen=True)
@@ -37,14 +40,14 @@ TOUR = (
          N_("Everything that runs or is kept: one-off runs, sessions, MCP servers, with pause, resume, stop and "
             "attach."),
          N_("Select a session to see its options and history.")),
-    Step("approvals", N_("Approvals"),
-         N_("Questions of running sandboxes: a connection that is not allowed waits here for your answer, once, "
-            "for the run, or always."),
-         N_("Leave the page open while an agent works, or let the tray tell you.")),
     Step("terminals", N_("Terminals"),
          N_("The terminals of builds, logins and sandboxes started in the app, and every running start to attach "
             "to, however it was started."),
          N_("Ctrl-b d detaches from a session; it keeps running.")),
+    Step("approvals", N_("Approvals"),
+         N_("Questions of running sandboxes: a connection that is not allowed waits here for your answer, once, "
+            "for the run, or always."),
+         N_("Leave the page open while an agent works, or let the tray tell you.")),
     Step("files", N_("File manager"),
          N_("The files of a sandbox's HOME and workspaces, to look into and to copy in or out."),
          N_("Copy a file into a running sandbox without giving it a mount.")),
@@ -86,6 +89,10 @@ TOUR = (
     Step("statistics", N_("Statistics"),
          N_("Tokens, requests and tool calls per run and per agent."),
          N_("Compare two runs of the same project.")),
+    Step("monitor", N_("System monitor"),
+         N_("What the running sandboxes use now and over time: CPU, memory of the limit, disk IO, network and "
+            "processes per run and per project, the host's totals, warnings with what helps."),
+         N_("Sort by memory to see what holds the most; select a run for its history.")),
     Step("system", N_("System"),
          N_("What sandbox-ai needs on this computer, and whether it is there: Podman, Bubblewrap, the image, the "
             "network."),
@@ -122,15 +129,20 @@ class Question:
 
 
 FORMS = ("text", "path", "flag", "list", "choice", "switches", "model", "effort", "thinking")
-# The model names each agent knows for sure and its effort levels, as the launcher (AGENT_MODELS, AGENT_EFFORTS)
-# has them; a test keeps both the same. An empty choice is the agent's own default.
-AGENT_MODELS = {"claude": ("fable", "opus", "sonnet", "haiku"), "codex": (), "opencode": (), "hermes": (),
-                "dsh": (), "qwen": (), "goose": ()}
+# The effort levels each agent takes, as the launcher (AGENT_EFFORTS) has them; a test keeps both the same. Per model
+# the table of cloud models narrows them (models.efforts). AGENT_MODELS: the model names each agent knows for sure,
+# the table's (sandbox-ai's cloud_models.json, read when first asked; the launcher's AGENT_MODELS). An empty choice is
+# the agent's own default.
+AGENT_MODELS = KnownModels()
 AGENT_EFFORTS = {"claude": ("low", "medium", "high", "xhigh", "max"),
-                 "codex": ("minimal", "low", "medium", "high", "xhigh"), "opencode": (),
+                 "codex": ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
+                 "opencode": (), "opencode2": (),
                  "hermes": ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
                  "dsh": (), "qwen": ("none", "low", "medium", "high", "xhigh", "max"),
-                 "goose": ("off", "low", "medium", "high", "max")}
+                 "goose": ("off", "low", "medium", "high", "max"),
+                 "openhands": ("none", "low", "medium", "high", "xhigh"),
+                 "nanobot": ("none", "low", "medium", "high", "xhigh", "max"), "letta": (),
+                 "pi": ("off", "minimal", "low", "medium", "high", "xhigh", "max")}
 
 NODE_QUESTIONS = {
     "workspace": (
@@ -164,17 +176,22 @@ NODE_QUESTIONS = {
     ),
     "agent": (
         Question("agent", N_("Agent"), N_("The coding agent that runs in the sandbox."), "choice",
-                 (("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode"),
+                 (("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode"), ("opencode2", "OpenCode 2"),
                   ("hermes", "Hermes Agent"), ("dsh", "DeepSeek Harness"), ("qwen", "Qwen Code"),
-                  ("goose", "Goose")), needed=True),
-        Question("model", N_("Model"), N_("The agent's model: pick one it knows or type another (Codex: its "
-                                            "model name, OpenCode: provider/model); empty: its default."), "model"),
-        Question("effort", N_("Effort"), N_("How hard the agent thinks (Claude Code: low to max, Codex: minimal to "
-                                            "xhigh); empty: its default. OpenCode sets it in its own configuration."),
+                  ("goose", "Goose"), ("openhands", "OpenHands"), ("nanobot", "nanobot"), ("letta", "Letta Code"),
+                  ("pi", "Pi")), needed=True),
+        Question("model", N_("Model"), N_("The agent's model: pick one it knows (grouped by provider; typing "
+                                            "filters them) or type another (Codex: its model name, OpenCode: "
+                                            "provider/model); empty: its default."), "model"),
+        Question("effort", N_("Effort"), N_("How hard the agent thinks (the choices list the levels the chosen "
+                                            "model takes, or the agent's for a model it does not list); empty: its "
+                                            "default. OpenCode, OpenCode 2, DSH and Letta Code set it per model in "
+                                            "their own configuration."),
                  "effort"),
         Question("thinking", N_("Show thinking"), N_("Whether the agent shows its model's thinking (reasoning) in its "
-                                                     "terminal: shown, hidden, or the agent's own default. Qwen Code "
-                                                     "has no setting for it (Ctrl+O unfolds it in the session)."),
+                                                     "terminal: shown, hidden, or the agent's own default. Qwen Code, "
+                                                     "OpenHands and Letta Code have no setting for it (Ctrl+O, a "
+                                                     "click or Ctrl+T unfolds it in the session)."),
                  "thinking"),
         Question("--dangerously-skip-permissions", N_("Act without asking"),
                  N_("The agent no longer asks before it runs a tool. The sandbox still holds, but it acts on its "
@@ -218,15 +235,39 @@ NODE_QUESTIONS = {
         Question("name", N_("Server"), N_("The MCP server by name (the MCP servers page lists them); it runs in a "
                                           "sandbox of its own."), "text", placeholder="demo", needed=True),
     ),
+    "bridge": (
+        Question("peer", N_("Other session"), N_("A running agent session of this machine (sandbox-ai list): the "
+                                                 "bridge is made once it and this board's start run."), "text",
+                 needed=True),
+        Question("direction", N_("Direction"), N_("Who reaches whom: an observer of this agent reaches it, a helper "
+                                                  "is reached by it."), "choice",
+                 (("out", N_("this agent reaches the other session")),
+                  ("in", N_("the other session reaches this agent")))),
+        Question("message", N_("Send messages (message)"), N_("Notes into the other's inbox; more (ask, files, the "
+                                                               "observer's actions) in the properties."), "flag"),
+        Question("watch", N_("Observe B (watch)"), N_("The one that reaches observes the other and alerts you."),
+                 "flag"),
+    ),
+    "team": (
+        Question("name", N_("Name"), N_("The team's name: its members are the sessions NAME-AGENT, its board the MCP "
+                                        "server team-NAME."), "text", placeholder="review", needed=True),
+        Question("lead", N_("Lead"), N_("The agent that talks to you and hands the others tasks; the members, their "
+                                        "roles and their own models in the properties."), "choice",
+                 # (sandbox-ai's team agents, backend.TEAM_AGENTS: a test keeps both the same)
+                 tuple((agent, agent) for agent in ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose",
+                                                    "openhands", "nanobot", "letta", "opencode2", "pi"))),
+    ),
     "llm": (
         Question("--llm", N_("LLM server"), N_("A server of sandbox-ai llm, NAME or NAME:MODEL: only its address is "
                                                "opened."), "text", needed=True),
     ),
     "network": (
-        Question("--allow-host", N_("Hosts"), N_("Further hosts the agent may reach over HTTPS, one per line."),
+        Question("--allow-host", N_("Hosts"), N_("Further hosts the agent may reach over HTTPS, one or more per "
+                                                 "line, separated by commas or spaces."),
                  "list", placeholder="api.example.org"),
         Question("--allow-domain", N_("Whole domains"), N_("Domains the agent may reach over HTTPS with every name "
-                                                           "below them, one per line (not github.io or co.uk)."),
+                                                           "below them, one or more per line, separated by commas or "
+                                                           "spaces (not github.io or co.uk)."),
                  "list", placeholder="example.org"),
         Question("--allow-pypi", N_("PyPI"), N_("Python packages."), "flag"),
         Question("--allow-github", N_("GitHub"), N_("GitHub and its downloads."), "flag"),
@@ -264,6 +305,21 @@ NODE_QUESTIONS = {
                  (("", N_("you")), ("agent", N_("the agent")), ("both", N_("you and the agent")))),
         Question("--browser-profile", N_("Profile"), N_("`fresh` (new at every start), `session` (kept with the session) "
                                                         "or a folder of yours."), "text", placeholder="fresh"),
+    ),
+    "cairn": (
+        Question("--cairn", N_("Cairn's board"), N_("Cairn beside the agent (its image: sandbox-ai build cairn); its "
+                                                    "board opens in the sandbox's browser."), "flag", needed=True),
+        Question("--cairn-workers", N_("Workers"), N_("The session's agents that work for Cairn, each with a model of "
+                                                      "its own if you like: claude=sonnet,codex. Empty: every agent "
+                                                      "of the session, with its own model."), "text",
+                 placeholder="claude,codex"),
+        Question("--cairn-origin", N_("Starting point"), N_("What is given: the target and the scope. With a goal, the "
+                                                    "project is made at the start."), "text",
+                 placeholder="The machine 10.10.10.5, its TCP ports 80 and 443"),
+        Question("--cairn-goal", N_("Goal"), N_("What counts as done."), "text"),
+        Question("--cairn-hint", N_("First hint"), N_("A first hint for the workers."), "text"),
+        Question("--cairn-board", N_("Board data"), N_("Its database: new at every start, or kept with the session."),
+                 "choice", (("", N_("new at every start")), ("session", N_("kept with the session")))),
     ),
     "session": (
         Question("tmux", N_("tmux"), N_("Run the agent in tmux inside the sandbox (detach and attach again)."),
@@ -327,8 +383,11 @@ def props_of(kind, answers):
             else:
                 found[question.key] = True if answer else None
         elif question.form == "list":
-            items = [line.strip() for line in (answer if isinstance(answer, list) else str(answer).splitlines())
-                     if str(line).strip()]
+            lines = answer if isinstance(answer, list) else str(answer).splitlines()
+            if question.key in LIST_OPTIONS:  # a line may list several (commas or spaces), each once
+                items = list(dict.fromkeys(item for line in lines for item in re.split(r"[\s,]+", str(line)) if item))
+            else:
+                items = [str(line).strip() for line in lines if str(line).strip()]
             found[question.key] = items or None
         else:
             text = str(answer).strip()

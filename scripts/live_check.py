@@ -11,18 +11,22 @@ Run it on the host, in a checkout (not inside a sandbox: there is no container e
     scripts/live_check.py --quick                only the new checks and the end-to-end suite
     scripts/live_check.py --agents [NAME,...] [--build]
                                                  the agents and parts not live-tested before (hermes, qwen, dsh,
-                                                 goose, cairn, browser; default all), with Podman only: each against
-                                                 a scripted model on this host, one MCP tool, its switches' hosts, no
-                                                 telemetry (scripts/live_check_agents.sh is the short form)
+                                                 goose, openhands, nanobot, letta, pi, opencode2, cairn, browser; default
+                                                 all), with
+                                                 Podman only: each against a scripted model on this host, one MCP
+                                                 tool, its switches' hosts, no telemetry (scripts/live_check_agents.sh
+                                                 is the short form)
 
 It starts real sandboxes around small scripts (sandbox-ai codex --no-auth --binary ...): no login, no model, no
 key leaves this host. The live suites are tests/test_live_check.py (a workspace added and removed while running,
 a ruleset refusing a request, a canary read, a session's whole life, the VPN), tests/test_live_e2e.py (proxy,
 push check, network changes, devices, MCP, limits, approvals), tests/test_agent_sandbox_live.py and
 tests/test_escape_live.py (namespaces, mounts, egress, an escape probe), without their tests that need a login.
-With --agents: tests/test_hermes_live.py, test_qwen_live.py, test_dsh_live.py, test_goose_live.py, test_cairn_live.py
-and test_browser_live.py (tests/live_agents.py says what each checks); --build builds their images first (codex for
-the demo MCP server; team before cairn, claude before browser). The report adds what each agent reached and was
+With --agents: tests/test_hermes_live.py, test_qwen_live.py, test_dsh_live.py, test_goose_live.py,
+test_nanobot_live.py, test_openhands_live.py, test_letta_live.py, test_opencode2_live.py, test_pi_live.py, test_cairn_live.py and
+test_browser_live.py
+(tests/live_agents.py says what each checks); --build builds their images first (codex for
+the demo MCP server; claude before cairn and browser). The report adds what each agent reached and was
 refused (the hosts, the telemetry hosts, the tool it called) - the part to send back.
 
 The result: DIR/report.md and DIR/report.json (default ~/.local/state/sandbox-ai/live-check/DATE-TIME), one line
@@ -99,9 +103,15 @@ class Report:
 # --agents: the suite of each, and the images it needs (built in this order with --build).
 AGENT_SUITES = {"hermes": "tests/test_hermes_live.py", "qwen": "tests/test_qwen_live.py",
                 "dsh": "tests/test_dsh_live.py", "goose": "tests/test_goose_live.py",
+                "openhands": "tests/test_openhands_live.py",
+                "nanobot": "tests/test_nanobot_live.py",
+                "letta": "tests/test_letta_live.py",
+                "opencode2": "tests/test_opencode2_live.py",
+                "pi": "tests/test_pi_live.py",
                 "cairn": "tests/test_cairn_live.py", "browser": "tests/test_browser_live.py"}
 AGENT_BUILDS = {"hermes": ["codex", "hermes"], "qwen": ["codex", "qwen"], "dsh": ["codex", "dsh"],
-                "goose": ["codex", "goose"], "cairn": ["team", "cairn"], "browser": ["claude", "browser"]}
+                "goose": ["codex", "goose"], "openhands": ["codex", "openhands"], "nanobot": ["codex", "nanobot"],
+                "letta": ["codex", "letta"], "pi": ["codex", "pi"], "opencode2": ["codex", "opencode2"], "cairn": ["claude", "cairn", "browser"], "browser": ["claude", "browser"]}
 
 
 def agent_names(value):

@@ -110,7 +110,7 @@ def test_resuming_a_session_of_0_1_94_with_telemetry_on_says_its_note_once(host)
     supervisor (relayed). Once; the supervisor is started without the retired level; the start goes on."""
     host.add_image("localhost/claude-sandbox:latest")
     session_of_0_1_94(host, "day1", ["--telemetry", "on", "--allow-pypi"])
-    listed = host.run("list")
+    listed = host.run("list", "--stopped")  # (the default shows what runs)
     assert "day1" in listed.stdout and "stopped" in listed.stdout, listed.stdout + listed.stderr
     resumed = host.run("resume", "day1")
     assert resumed.stderr.count("telemetry is always off since 0.1.95") == 1, resumed.stderr
@@ -228,3 +228,35 @@ def test_report_to_a_folder_or_into_a_missing_one_says_so_in_words(host):
     assert not list(host.directory.glob(".report-*")) and not list(host.workspace.glob("*"))
     written = host.run("report", "--all", "-o", host.directory / "r.md")
     assert written.returncode == 0 and (host.directory / "r.md").exists(), written.stderr
+
+
+def test_resuming_a_session_whose_agent_ends_at_once_says_so_not_failed_status_0(host):
+    """A resume whose agent ended at once (its sandbox ended well, before its terminal was there) said "Session
+    failed to start (status 0)" - a failure with a status that says none. It says what happened: the agent ended at
+    once, the sandbox with it, and where its last words are."""
+    host.add_image("localhost/claude-sandbox:latest")
+    directory = session_of_0_1_94(host, "quick", ["--allow-pypi"])
+    resumed = host.run("resume", "quick", env={"FAKE_PODMAN_RUN": "0"})
+    assert resumed.returncode != 0
+    assert "failed to start" not in resumed.stderr, resumed.stderr
+    assert "ended at once" in resumed.stderr and "status 0" in resumed.stderr, resumed.stderr
+    assert "fake podman: the sandbox runs" in resumed.stderr, "its last output is said"
+    assert str(directory / "supervisor.log") in resumed.stderr
+
+
+def test_a_start_whose_agent_exited_at_once_names_the_agents_status(tmp_path):
+    """The guard's record of the end (tmux/ended) gives the agent's own status and time: said as such."""
+    sessions = load("sandbox_sessions_deep2_ended", "sandbox/sessions.py")
+    directory = tmp_path / "s"
+    (directory / "tmux").mkdir(parents=True)
+    (directory / "supervisor.log").write_text("agent-sandbox: starting the sandbox\nError: no API key\n")
+    (directory / "tmux" / "ended").write_text('{"status": 3, "seconds": 1}')
+    with pytest.raises(RuntimeError) as failed:
+        sessions.wait_ready(directory, Mock(poll=Mock(return_value=0), returncode=0), out=lambda text: None)
+    said = str(failed.value)
+    assert "failed to start" not in said and "the agent exited with status 3 after 1 s" in said, said
+    assert "Error: no API key" in said
+    (directory / "tmux" / "ended").write_text("garbage")  # (written inside the sandbox: read as numbers only)
+    with pytest.raises(RuntimeError) as failed:
+        sessions.wait_ready(directory, Mock(poll=Mock(return_value=0), returncode=0), out=lambda text: None)
+    assert "the agent ended at once" in str(failed.value) and "status 0" in str(failed.value)

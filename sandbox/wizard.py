@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -222,16 +223,17 @@ def split_list(text):
     return [value.strip() for value in text.split(",") if value.strip()]
 
 
-def ask_list(p, question, check, default=None):
-    """Comma-separated answer; CHECK raises ValueError for an invalid entry, which is asked again.
-    With a DEFAULT (the current values when editing), Enter keeps it and "-" empties the list."""
+def ask_list(p, question, check, default=None, split=split_list):
+    """Comma-separated answer (SPLIT: the launcher's list_items for its list options, commas or spaces); CHECK
+    raises ValueError for an invalid entry, which is asked again. With a DEFAULT (the current values when editing),
+    Enter keeps it and "-" empties the list."""
     if default:
         question += " ('-' for none)"
     while True:
         answer = p.ask(question, default)
         if answer.strip() == "-":
             return []
-        values = split_list(answer)
+        values = split(answer)
         try:
             for value in values:
                 check(value)
@@ -397,19 +399,22 @@ def ask_network_extra(p, a, current=()):
     for value in ask_list(p, f"Host presets, comma-separated ({', '.join(presets)})", check_preset,
                           default("presets")):
         options.append(f"--allow-{value}")
-    for value in ask_list(p, "Further HTTPS host names, comma-separated (--allow-host)",
-                          lambda v: check_launcher(a["agent"], "--allow-host", v), default("--allow-host")):
+    items = launcher().list_items  # the launcher's list options: separated by commas or spaces
+    for value in ask_list(p, "Further HTTPS host names, separated by commas or spaces (--allow-host)",
+                          lambda v: check_launcher(a["agent"], "--allow-host", v), default("--allow-host"), items):
         options += ["--allow-host", value]
-    for value in ask_list(p, "TCP targets IP:PORT on other machines, e.g. a LAN server, comma-separated (--allow-tcp)",
-                          lambda v: check_launcher(a["agent"], "--allow-tcp", v), default("--allow-tcp")):
+    for value in ask_list(p, "TCP targets IP:PORT on other machines, e.g. a LAN server, separated by commas or spaces "
+                             "(--allow-tcp)", lambda v: check_launcher(a["agent"], "--allow-tcp", v),
+                          default("--allow-tcp"), items):
         options += ["--allow-tcp", value]
-    for value in ask_list(p, "Whole addresses or networks IP or CIDR, all ports and protocols, comma-separated "
-                             "(--allow)", lambda v: check_launcher(a["agent"], "--allow", v), default("--allow")):
+    for value in ask_list(p, "Whole addresses or networks IP or CIDR, all ports and protocols, separated by commas or "
+                             "spaces (--allow)", lambda v: check_launcher(a["agent"], "--allow", v), default("--allow"),
+                          items):
         options += ["--allow", value]
     if a["backend"] == "podman":
-        for value in ask_list(p, "Ports on this host's loopback, comma-separated, e.g. a local Git server "
+        for value in ask_list(p, "Ports on this host's loopback, separated by commas or spaces, e.g. a local Git server "
                                  "(--allow-host-port)", lambda v: check_launcher(a["agent"], "--allow-host-port", v),
-                              default("--allow-host-port")):
+                              default("--allow-host-port"), items):
             options += ["--allow-host-port", value]
     elif now["--allow-host-port"]:
         p.out("  Dropped --allow-host-port: ports on this host's loopback need the Podman backend")
@@ -479,22 +484,39 @@ def git_credentials_path():
     return Path(os.path.realpath(path)) if path.is_symlink() else path
 
 
+def secret_store():
+    spec = importlib.util.spec_from_file_location("sandbox_secret_store_for_wizard", HERE / "secret_store.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def token_secret(label):
+    """The secret that keeps a push token typed for LABEL (github.com, a server's URL): GIT_TOKEN_GITHUB_COM."""
+    return secret_store().token_secret_name(label)
+
+
 def token_entry(name, value):
-    """(URL, option, description) of an existing --git-token-* option."""
+    """(URL, option, description) of an existing --git-token-* option. A token file of the wizard's that was moved
+    into sandbox-ai secrets is offered as its secret (keeping it writes --git-token-secret)."""
     kind = name.rsplit("-", 1)[1]
     try:
         url = launcher().git_token_credential(value, kind)["url"]
     except ValueError:
         url = value.partition("=")[0]
     reference = value.partition("=")[2]
+    moved = secret_store().moved_token_name(Path(reference).expanduser()) if kind == "file" else None
+    if moved:
+        return url, ["--git-token-secret", f"{value.partition('=')[0]}={moved}"], \
+            f"secret {moved}, moved there from {reference}"
     return url, [name, value], {"file": f"file {reference}", "secret": f"secret {reference}"}.get(
         kind, f"host variable {reference}")
 
 
 def ask_git(p, a, project, pending=None, current=None):
-    """Commit identity and push tokens. A token typed here goes to a private file (mode 0600) under
-    ~/.config/sandbox-ai/tokens, never into the project configuration, which only names that file.
-    PENDING collects (path, token) to write once the configuration is confirmed.
+    """Commit identity and push tokens. A token typed here is kept in sandbox-ai secrets (GIT_TOKEN_HOST: encrypted
+    by the keyring or the primary password), never in the project configuration, which only names the secret.
+    PENDING collects (secret name, token) to keep once the configuration is confirmed.
     CURRENT (options) when editing: its identity is the default and each of its tokens can be kept."""
     pending = [] if pending is None else pending
     existing = option_groups(list(current or []))
@@ -536,8 +558,8 @@ def ask_git(p, a, project, pending=None, current=None):
     if how == "enter":
         token = ask_token(p, "github.com", launcher().GIT_TOKEN)
         if token:
-            pending.append((str(token_path("github.com")), token))
-            options += ["--git-token-file", f"https://github.com={token_path('github.com')}"]
+            pending.append((token_secret("github.com"), token))
+            options += ["--git-token-secret", f"https://github.com={token_secret('github.com')}"]
             done.add("https://github.com")
     elif how == "variable":
         default = next((n for n in ("SANDBOX_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN") if n in os.environ),
@@ -592,9 +614,9 @@ def ask_git(p, a, project, pending=None, current=None):
             token = ask_token(p, url, launcher().GIT_TOKEN)
             if not token:
                 continue
-            path = str(token_path(credential["url"]))
-            pending.append((path, token))
-            options += ["--git-token-file", f"{url}={path}"]
+            name = token_secret(credential["url"])
+            pending.append((name, token))
+            options += ["--git-token-secret", f"{url}={name}"]
         elif how == "secret":
             options += ["--git-token-secret", f"{url}={ask_secret_name(p, url, 'GIT_PUSH')}"]
         else:
@@ -753,6 +775,10 @@ def ask_extra(p, a, project, state, current=None):
                         str(state / "sandbox-ai" / "vnc" / f"{project.name or 'root'}-{digest}")]
     elif now["--gui-screen"] or now["--gui-vnc"]:
         p.out("  Dropped the display options: the virtual display is off")
+    if not any(token == "--hide" or token.startswith("--hide=") for token in now["rest"]):
+        # Secret files of the workspace kept out of the agent's sight (hide.SUGGESTED), offered, never set unasked.
+        p.out("  Files the agent should never read, such as .env: --hide .env --hide '.env.*' --hide '*.pem' "
+              "--hide '*.key' --hide 'id_*' --hide 'credentials*.json' (an empty read-only file over each)")
     while True:
         text = p.edit("Any other launcher options, as on the command line (see --help), empty for none",
                       shlex.join(now["rest"]))
@@ -1254,7 +1280,8 @@ def ask_new(p, project, fetch, tokens):
     ask_mode(p, chosen)  # first: the questions below offer only what the mode allows
     extra = p.ask("Additional workspaces, comma-separated (mounted at /workspaces/<name>)")
     workspaces = [str(Path(value.strip()).expanduser().absolute()) for value in extra.split(",") if value.strip()]
-    agent = p.choose("Agent", ["codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose"])
+    agent = p.choose("Agent", ["codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta",
+                               "pi"])
     answers = {"agent": agent, "backend": p.choose("Backend", ["podman", "bwrap"], "podman"),
                "workspaces": workspaces, "network": "default", "local": None, "llm": None, "llm_only": False,
                "danger": False, "gui": False,
@@ -1313,8 +1340,9 @@ def config_problem(document):
     l = launcher()
     if not isinstance(document, dict) or document.get("version") != 1 or set(document) - l.CONFIG_KEYS:
         return f"expected version 1 with keys {sorted(l.CONFIG_KEYS)}"
-    if document.get("agent") not in ("codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose"):
-        return "agent must be codex, claude, opencode, hermes, dsh, qwen or goose"
+    if document.get("agent") not in ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands",
+                                     "nanobot", "letta", "pi"):
+        return "agent must be codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta or pi"
     for key in ("options", "agent_args", "workspaces"):
         values = document.get(key, [])
         if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
@@ -1387,7 +1415,9 @@ def edit_part(p, choice, answers, project, fetch, tokens):
         ask_mode(p, answers)
         p.out("  The options are checked against the mode before saving.")
     elif choice == "1":
-        agent = p.choose("Agent", ["codex", "claude", "opencode", "hermes", "dsh", "qwen", "goose"], answers["agent"])
+        agent = p.choose("Agent", ["codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta",
+                                   "pi"],
+                         answers["agent"])
         if agent != "opencode" and answers["local"]:
             p.out("  A local LLM server is for OpenCode only; dropped it (network: default)")
             answers["local"], answers["network"] = None, "default"
@@ -1530,10 +1560,10 @@ def finish(p, project, target, answers, tokens, old=None):
     out = p.out
     agent, workspaces = answers["agent"], answers["workspaces"]
     document = build_document(answers)
-    # A token typed for an entry that was dropped again is not written.
+    # A token typed for an entry that was dropped again is not kept.
     named = {value.partition("=")[2] for name, value, _ in option_groups(document["options"])
-             if name == "--git-token-file" and value}
-    tokens = [(path, token) for path, token in tokens if path in named]
+             if name == "--git-token-secret" and value}
+    tokens = [(secret, token) for secret, token in tokens if secret in named]
     new_local = answers["local"] if answers["local"] and "kind" in answers["local"] else None
     new_server = answers.get("llm_new") if answers.get("llm") and \
         answers["llm"].partition(":")[0] == (answers.get("llm_new") or {}).get("name") else None
@@ -1543,12 +1573,12 @@ def finish(p, project, target, answers, tokens, old=None):
         del checked[index:index + 2]
     # The local OpenCode configuration and typed tokens are written only after confirmation.
     unwritten = {new_local["config"]} if new_local else set()
-    unwritten |= {path for path, _ in tokens}
+    unkept = {secret for secret, _ in tokens}
     index = 0
     while index < len(checked) - 1:
         option, value = checked[index], checked[index + 1]
         if (option == "--local-config" and value in unwritten
-                or option == "--git-token-file" and value.partition("=")[2] in unwritten):
+                or option == "--git-token-secret" and value.partition("=")[2] in unkept):
             del checked[index:index + 2]
         else:
             index += 1
@@ -1571,6 +1601,20 @@ def finish(p, project, target, answers, tokens, old=None):
     if not p.yes("Write configuration", default=True):
         out("Cancelled; nothing written.")
         return None
+    # Typed tokens first: a store that refuses them (no primary password and nobody to set one, locked) leaves
+    # nothing written.
+    if tokens:
+        store = secret_store()
+        try:
+            backend = store.store()
+            for secret, token in tokens:
+                backend.set(secret, token)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            out(f"Could not keep the token: {launcher().printable(exc)}; nothing written.")
+            return None
+        for secret, _ in tokens:
+            out(f"Kept the token as the secret {secret} (sandbox-ai secrets, {backend.name}; the project configuration "
+                "names only the secret)")
     project.mkdir(parents=True, exist_ok=True)
     for path in [target] + ([new_local["config"]] if new_local else []):
         refuse_symlink(path)
@@ -1590,9 +1634,6 @@ def finish(p, project, target, answers, tokens, old=None):
                 "written.")
             return None
         out(f"Registered the LLM server {new_server['name']} ({new_server['url']}) with sandbox-ai llm")
-    for path, token in tokens:
-        write_token(path, token)
-        out(f"Wrote the token to {path} (mode 0600; the project configuration names only this file)")
     text = json.dumps(document, indent=2) + "\n"
     write_file(target, text)
     launcher().trust_config(target, hashlib.sha256(text.encode()).hexdigest())
@@ -1752,8 +1793,20 @@ def forget(path, out=print):
     return 1
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def cli(argv):
-    parser = argparse.ArgumentParser(prog="sandbox-ai wizard", description="Create and trust sandbox project configurations.")
+    parser = argparse.ArgumentParser(prog="sandbox-ai wizard", formatter_class=help_style,
+                                     description="Create and trust sandbox project configurations.")
     parser.add_argument("-V", "--version", action="version", version=f"sandbox-ai {launcher().__version__}")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("new", help="Interactive setup (default); offers to edit an existing configuration")
@@ -1770,14 +1823,15 @@ def cli(argv):
     trust_parser.add_argument("-j", "--json", action="store_true", help="with --show or --list: as JSON")
     forget_parser = commands.add_parser("forget", help="Remove a configuration from the trusted list")
     forget_parser.add_argument("path", type=Path)
-    models = commands.add_parser("models", help="List the models of a local LLM server, or of one registered "
-                                                "with sandbox-ai llm (--llm NAME)")
+    models = commands.add_parser("models", help="list the models of a local LLM server",
+                                           description="List the models of a local LLM server, or of one "
+                                                       "registered with sandbox-ai llm (--llm NAME).")
     # The four local kinds have a default port for --host; with --url (or --port) any kind sandbox-ai knows works,
     # so a plain OpenAI-compatible server can be tested too (what the app's and the web's "Test connection" needs).
-    models.add_argument("-k", "--kind", choices=[*SERVERS, "openai-compatible"])
-    models.add_argument("-H", "--host")
+    models.add_argument("-k", "--kind", choices=[*SERVERS, "openai-compatible"], help="the kind of server")
+    models.add_argument("-H", "--host", help="the host the server runs on")
     models.add_argument("-l", "--llm", metavar="NAME", help="a server of sandbox-ai llm list (key, https, its CA)")
-    models.add_argument("-p", "--port", type=int)
+    models.add_argument("-p", "--port", type=int, help="the server's port")
     models.add_argument("-u", "--url", metavar="URL", help="http(s)://HOST[:PORT][/PREFIX] of a server not "
                                                            "registered yet (with --kind)")
     models.add_argument("-c", "--ca", metavar="FILE", help="with --url https://...: the PEM CA that signed its "
@@ -1790,7 +1844,7 @@ def cli(argv):
     models.add_argument("--insecure-http", action="store_true", dest="insecure_http",
                         help="with --url http://... and --api-key-secret: send the key over plain http to a server "
                              "outside your local networks (as llm add --insecure-http)")
-    models.add_argument("--sort", choices=["name", "size", "loaded"], default="loaded")
+    models.add_argument("--sort", choices=["name", "size", "loaded"], default="loaded", help="the order of the models: name, size or loaded (default: loaded)")
     models.add_argument("--status", action="store_true",
                         help="also what the server has loaded and uses now (VRAM/RAM, KV cache, requests: what its API "
                              "reports, as sandbox-ai llm status); with --json {\"models\": [...], \"status\": {...}}")
@@ -1852,7 +1906,7 @@ def cli(argv):
             found = discover(a.kind, a.host, port, fetch=fetch_json)
         else:
             models.error("models needs --kind with --host or --url, or --llm NAME")
-        found = sort_models(found, a.sort)
+        found = llm().model_support(sort_models(found, a.sort))  # the traffic light (llm models' SUPPORT)
         if a.json:
             print(json.dumps({"models": found, "status": status} if a.status else found, indent=2))
             return 0

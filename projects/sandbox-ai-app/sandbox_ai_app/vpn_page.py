@@ -9,6 +9,7 @@ argument is checked first and passed as --option=VALUE, so none of them is read 
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import re
 
@@ -19,13 +20,13 @@ from PySide6.QtWidgets import (
 
 from .files import printable, printable_text
 from . import widgets
-from .credential_tab import CredentialTab
+from .credential_tab import NOT_WHILE_RUNNING, CredentialTab
 from .i18n import N_, tr
 from .host_choice import on_host
 from .name_fields import NameField, publish
 from .widgets import (
-    ask_first, background, delete_key, disclosure, fill, multi_select, one_only, outcome, plain_label, report_each,
-    run_each, selected, selected_keys, several, show_text, table, shown_as_text,
+    ask_first, background, delete_key, disclosure, explanation, fill, multi_select, one_only, outcome, plain_label,
+    report_each, run_each, selected, selected_keys, several, show_text, table, shown_as_text,
 )
 
 LOCAL = "local"
@@ -155,15 +156,18 @@ ALL_KIND_FIELDS = {field for fields in FIELDS.values() for field in fields} - {"
 
 class VpnDialog(QDialog):
     """A new VPN profile: its name, its kind, what that kind needs and the advanced options. REMOTE: the files are
-    paths on that host (typed; no file dialog of this machine)."""
+    paths on that host (File… lists that host's folders, never this machine's)."""
 
-    def __init__(self, parent=None, host_label="", remote=False, sai=None, host=LOCAL):
+    def __init__(self, parent=None, host_label="", remote=False, sai=None, host=LOCAL, draft=None):
+        """DRAFT: the key of what was typed and not sent (drafts.py): filled in again; the key or password typed
+        never, nor Replace a profile of that name."""
         super().__init__(parent)
-        self.remote = remote
+        self.remote, self.sai = remote, sai
+        self.host = host if remote else LOCAL
         self.setWindowTitle(tr("New VPN profile on {host}", host=host_label) if host_label else tr("New VPN profile"))
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("Keys and passwords are kept as secrets of sandbox-ai and reach only the "
-                                        "VPN container, never the agent."), role="secondary"))
+        layout.addWidget(explanation(tr("Keys and passwords are kept as secrets of sandbox-ai and reach only the "
+                                        "VPN container, never the agent.")))
         self.form = QFormLayout()
         self.name = QLineEdit()
         self.name.setPlaceholderText(NAME_EXAMPLE)
@@ -249,16 +253,23 @@ class VpnDialog(QDialog):
         self.more.toggled.connect(self.advanced.setVisible)
         layout.addWidget(self.advanced)
         if remote:
-            layout.addWidget(plain_label(tr("Files are paths on that host; a key typed here is kept as a secret of "
-                                            "sandbox-ai there (standard input over SSH)."), role="secondary"))
-            self.browse.setVisible(False)
-            self.bridges_browse.setVisible(False)
+            layout.addWidget(explanation(tr(
+                "Files are paths on that host (File… lists its folders); a key typed here is kept as a secret of "
+                "sandbox-ai there (standard input over SSH).")))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.kind.currentIndexChanged.connect(self.show_fields)
         self.show_fields()
+        from . import drafts
+        self.draft = None if draft is None else drafts.Draft(self, draft, {
+            "name": self.name, "kind": self.kind, "file": self.file, "secret": self.secret, "split": self.split,
+            "location": self.location, "ipv6": self.ipv6, "exit_node": self.exit_node,
+            "login_server": self.login_server, "hostname": self.hostname, "ephemeral": self.ephemeral,
+            "tailnet_allow": self.tailnet_allow, "bridges": self.bridges, "bridge_secret": self.bridge_secret,
+            "exit_country": self.exit_country, "socks": self.socks, "dns": self.dns, "check_urls": self.check_urls,
+            "no_dns_probe": self.no_dns_probe, "provider": self.provider})
 
     @staticmethod
     def with_browse(edit, browse):
@@ -279,8 +290,9 @@ class VpnDialog(QDialog):
                 label.setText(tr(SECRET_LABELS[kind]))
 
     def choose(self, edit):
-        from .state import choose_file
-        path = choose_file(self, tr("VPN configuration"), "vpn")
+        from . import remote_chooser as RC
+        path = RC.choose_file(self, self.host, tr("VPN configuration"), "vpn", start=edit.text().strip(),
+                              sai=self.sai)
         if path:
             edit.setText(path)
 
@@ -308,7 +320,9 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
     """Ask for a new profile on HOST and add it in the background; DONE(name or None) afterwards. A typed key is kept
     as its secret there after the profile was added (Mullvad's before: it is read while added), on standard input; a
     secret of that name is replaced only after a yes, a SOCKS port only after one (vpn-socks)."""
-    dialog = VpnDialog(parent, host_label, remote=host != LOCAL, sai=sai, host=host)
+    from . import drafts
+    key = ("vpn", host)  # what was typed and not sent (Cancel, a refusal): filled in again; never the key
+    dialog = VpnDialog(parent, host_label, remote=host != LOCAL, sai=sai, host=host, draft=key)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         dialog.value.clear()
         dialog.deleteLater()
@@ -339,6 +353,8 @@ def add_profile(parent, sai, done=None, host=LOCAL, host_label=""):
         result, problem = result if error is None else (None, None)
         status, out, err = outcome(result, error)
         # (a background job's outcome: shown without waiting for its OK - widgets.inform)
+        if status == 0:
+            drafts.drop(key)  # added: what was typed is done with
         if status != 0:
             widgets.warn(parent, tr("New VPN profile"), printable_text((err or out).strip()[-1500:]))
         elif problem is not None:
@@ -395,6 +411,14 @@ class VpnBox(CredentialTab):
         self.profiles = self.set_list(table([tr("Profile"), tr("Kind"), tr("Provider")], stretch=0, compact=(1,)))
         self.add_button, self.show_button, self.check_button, self.remove_button = \
             QPushButton(tr("Add…")), QPushButton(tr("Show")), QPushButton(tr("Check")), QPushButton(tr("Remove…"))
+        self.edit_button = QPushButton(tr("Edit…"))
+        self.edit_button.setToolTip(tr("Change the profile in place (sandbox-ai vpn set): its provider, which secret "
+                                       "holds its login or auth key, its exit node ... - its keys stay, and are never "
+                                       "shown; a new key file is Add… with the same name"))
+        self.edit_button.clicked.connect(lambda _=False: self.edit())
+        # There, greyed out with the reason: a VPN cannot be given to a sandbox that runs.
+        self.give_button = QPushButton(tr("Give to a running sandbox…"))
+        widgets.set_enabled(self.give_button, False, why=tr(NOT_WHILE_RUNNING["vpn"]))
         self.show_button.setToolTip(tr("sandbox-ai vpn show: what the profile holds (no keys)"))
         self.add_button.clicked.connect(lambda _=False: add_profile(self, self.sai, lambda name: self.refresh(),
                                                                     host=self.host,
@@ -402,11 +426,14 @@ class VpnBox(CredentialTab):
         self.show_button.clicked.connect(lambda _=False: self.show_profile())
         self.check_button.clicked.connect(lambda _=False: self.check())
         self.remove_button.clicked.connect(lambda _=False: self.remove())
-        self.add_buttons(self.add_button, self.show_button, self.check_button, self.remove_button)
-        # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Show and Check one
+        self.add_buttons(self.add_button, self.edit_button, self.show_button, self.check_button, self.remove_button,
+                         self.give_button)
+        # several at once (Ctrl, Shift): Remove… and the Delete key take them all; Edit…, Show and Check one
         multi_select(self.profiles)
         delete_key(self.profiles, self.remove)
-        one_only(self.profiles, [self.show_button, self.check_button])
+        one_only(self.profiles, [self.edit_button, self.show_button, self.check_button])
+        # a double click on a profile: Edit…
+        self.profiles.cellDoubleClicked.connect(lambda _row, _column: self.edit())
 
     def set_host(self, host):
         """Show HOST's profiles from now on (the Credentials page's host chooser)."""
@@ -462,6 +489,56 @@ class VpnBox(CredentialTab):
                    done=lambda result, error: self.message.setText(printable_text("\n".join(
                        part for part in outcome(result, error)[1:] if part).strip()[-1500:])))
 
+    def edit(self):
+        """Edit…: the profile's settings as `sandbox-ai vpn show NAME --json` names them ("settings": names of
+        secrets, hosts, countries - never a key), each in a field; what changed goes to `sandbox-ai vpn set NAME`,
+        asked first."""
+        name, host = self.chosen(), self.host
+        if not name:
+            self.message.setText(tr("Choose a profile in the list first."))
+            return
+        self.message.setText(tr("Reading {name}…", name=name))
+        background(lambda: self.sai.host_run(host, "vpn", "show", name, "--json", timeout=SHOW_SECONDS), owner=self,
+                   source=self.edit_button, timeout=SHOW_SECONDS + 15,
+                   done=lambda result, error: self.edit_shown(host, name, result, error))
+
+    def edit_shown(self, host, name, result, error):
+        status, out, err = outcome(result, error)
+        try:
+            facts = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            facts = None
+        settings = facts.get("settings") if isinstance(facts, dict) else None
+        if not isinstance(settings, dict):
+            self.message.setText(tr("The sandbox-ai on {host} is older and cannot change a profile in place: update "
+                                    "it, or add the profile again (Add…).", host=self.host_label(host))
+                                 if status == 0 else printable_text((err or out).strip()[-600:]))
+            return
+        self.message.setText("")
+        dialog = VpnEditDialog(self, name, str(facts.get("type") or ""), settings, self.host_label(host))
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
+            return
+        changes = dialog.changes()
+        if not changes:
+            self.message.setText(tr("Nothing changed."))
+            return
+        text = tr("Change the VPN profile {name}? It is for the starts from now on: a sandbox that runs keeps the VPN "
+                  "it was started with.", name=name) + "\n\n" + "\n".join(
+                      f"--{key} {printable(value)}" for key, value in changes.items())
+        if not ask_first(self, "vpn-replace", tr("Edit VPN profile"), text if host == LOCAL else
+                         tr("On {host}: {text}", host=printable(host), text=text), tr("Change")):
+            return
+        args = ["vpn", "set", *[f"--{key}={value}" for key, value in changes.items()], "--", name]
+        self.message.setText(tr("Working…"))
+        background(lambda: self.sai.host_run(host, *args, timeout=REMOVE_SECONDS), owner=self, work=True,
+                   source=self.edit_button, timeout=REMOVE_SECONDS + 30,
+                   done=lambda result_, error_: self.edited(result_, error_))
+
+    def edited(self, result, error):
+        status, out, err = outcome(result, error)
+        self.message.setText(printable_text(((out if status == 0 else err or out) or "").strip()[-1500:]))
+        self.refresh()
+
     def show_profile(self):
         name, host = self.chosen(), self.host
         if not name:
@@ -516,3 +593,49 @@ class VpnBox(CredentialTab):
             return self.sai.host_run(host, "vpn", "remove", name, timeout=REMOVE_SECONDS)
         background(work, owner=self, work=True, timeout=REMOVE_SECONDS, source=self.remove_button,
                    done=lambda *_: self.refresh())
+
+
+# The settings `sandbox-ai vpn set` changes (vpn show --json "settings"), with what each field is called.
+VPN_SETTINGS = (("provider", N_("Provider")), ("auth-secret", N_("Secret with USER:PASSWORD (OpenVPN)")),
+                ("account-secret", N_("Secret with the account number (Mullvad)")),
+                ("auth-key-secret", N_("Secret with the auth key (Tailscale)")),
+                ("exit-node", N_("Exit node (Tailscale)")), ("login-server", N_("Login server (Headscale)")),
+                ("hostname", N_("Node name (Tailscale)")), ("exit-country", N_("Exit countries (Tor: de, or de,nl)")),
+                ("bootstrap-timeout", N_("Bootstrap timeout, seconds (Tor)")),
+                ("bootstrap-attempts", N_("Bootstrap attempts (Tor)")),
+                ("bootstrap-stall", N_("Bootstrap stall, seconds (Tor)")))
+
+
+class VpnEditDialog(QDialog):
+    """A VPN profile's settings (names of secrets, hosts, countries; never a key), each in a field filled in with what
+    it is now. An emptied field clears the setting ("none"; a Tor bootstrap setting: its default)."""
+
+    def __init__(self, parent, name, kind, settings, host_label=""):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Edit VPN profile {name} ({kind}) on {host}", name=name, kind=kind, host=host_label))
+        self.before, self.edits = {}, {}
+        form = QFormLayout(self)
+        for key, label in VPN_SETTINGS:
+            if key not in settings:
+                continue
+            value = settings[key]
+            self.before[key] = "" if value is None else str(value)
+            edit = QLineEdit(self.before[key])
+            edit.setAccessibleName(tr(label))
+            self.edits[key] = edit
+            form.addRow(tr(label), edit)
+        form.addRow(explanation(tr("The profile's keys stay as they are and are not shown. A new key or configuration "
+                                   "file: Add… with the same name.")))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def changes(self):
+        """{setting: new value} of what was changed ("none", or "default" for a bootstrap setting, when emptied)."""
+        found = {}
+        for key, edit in self.edits.items():
+            value = edit.text().strip()
+            if value != self.before[key]:
+                found[key] = value or ("default" if key.startswith("bootstrap-") else "none")
+        return found

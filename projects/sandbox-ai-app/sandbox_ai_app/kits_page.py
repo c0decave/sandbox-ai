@@ -17,6 +17,10 @@ A kit's hooks run only once approved. Approving is `sandbox-ai kits trust-hooks 
 hook and the full text of every file, and the human types yes there. The app never approves on its own (no
 --yes); taking an approval back is `sandbox-ai kits trust-hooks --revoke KIT`.
 
+The third tab shows what the agents of that machine have set up themselves (agent_parts_view.py: their skills,
+commands, subagents, memory, ...), read only, and imports the parts selected into a kit of yours or a project's
+memory (`sandbox-ai kits host-import`, asked first).
+
 The host chooser at the top shows and changes the kits of this machine or of a host of `sandbox-ai hosts` (over SSH:
 `sandbox-ai hosts run HOST -- kits ...` and `-- plugins claude ...`; the review of hooks in a terminal tab with ssh
 -tt).
@@ -34,7 +38,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QPalette
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QInputDialog, QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QSplitter, QTabWidget, QTreeWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMenu, QPushButton, QSplitter, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -42,13 +46,13 @@ from PySide6.QtWidgets import (
 from . import applog, backend, tables, theme, widgets
 from .files import printable, printable_text
 from .host_choice import on_host
-from .state import choose_file, choose_folder
+from . import remote_chooser as RC
 from .i18n import N_, tr
 from .short_notices import short_notice
 from .widgets import (
-    FlowLayout, MessageText, Task, ask_first, background, compact_combo, delete_key, fill, flow, multi_select,
-    outcome, plain_label, row_key, safe_tooltip, select_keys, selected_keys, selected_rows, set_enabled, several,
-    show_text, table, warn,
+    FlowLayout, MessageText, Task, ask_first, background, compact_combo, delete_key, explanation, fill, flow,
+    multi_select, outcome, plain_label, row_key, safe_tooltip, select_keys, selected_keys, selected_rows, set_enabled,
+    several, show_text, table, warn,
 )
 
 LOCAL = "local"
@@ -59,6 +63,9 @@ KIND_TITLES = {"always": N_("always (sandbox-ai)"), "default": N_("always (defau
 ENTRY_TITLES = (("skills", N_("Skills")), ("agents", N_("Agents")), ("commands", N_("Commands")),
                 ("prompts", N_("Prompts")))
 AGENTS = backend.AGENTS
+# The agents whose kits take plugins of Claude's marketplaces from sandbox-ai's one plugin store.
+STORE_AGENTS = ("claude", "codex", "opencode2")
+AGENT_TITLES = {"claude": "Claude Code", "codex": "Codex", "opencode2": "OpenCode 2"}
 NEW_KIT = "my-kit"  # the name proposed for a first kit of yours (a name, not a text)
 HOOK_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SessionStart")
 # What a kit change does to every later start with that kit (webui.KIT_WIDENS, KIT_NARROWS): widens it (asked first:
@@ -139,8 +146,32 @@ class AgentsBox(QWidget):
         return [agent for agent, box in self.boxes.items() if box.isChecked()]
 
 
+def no_source_text():
+    """What a marketplace added without its source is told (in the language chosen when said)."""
+    return tr("Type the marketplace's source first: OWNER/REPO on GitHub, or https://… of a Git server.")
+
+
 class FormDialog(QDialog):
-    """A small form with OK and Cancel."""
+    """A small form with OK and Cancel; keep_draft(KEY) keeps what was typed and not sent (drafts.py)."""
+
+    draft = None
+
+    def fields(self):
+        """{name: widget} of what a draft keeps (drafts.Draft): the dialog's fields, each agent's box."""
+        found = {}
+        for name in ("name", "description", "plugin", "agent", "source", "file", "event_box", "matcher"):
+            if isinstance(getattr(self, name, None), QWidget):
+                found[name] = getattr(self, name)
+        for agent, box in (getattr(getattr(self, "agents", None), "boxes", None) or {}).items():
+            found[f"agent:{agent}"] = box
+        return found
+
+    def keep_draft(self, key):
+        """What was typed and not sent (Cancel, a "no", a refusal) filled in again when this dialog opens for the
+        same KEY (its host and kit); drafts.drop(KEY) once sent and taken."""
+        from . import drafts
+        self.draft = drafts.Draft(self, key, self.fields())
+        return self
 
     def __init__(self, parent, title, note=None):
         super().__init__(parent)
@@ -186,13 +217,15 @@ class NewSkillDialog(FormDialog):
 
 class PluginDialog(FormDialog):
     def __init__(self, parent, known):
-        super().__init__(parent, tr("Add plugin"), tr("Claude: NAME@MARKETPLACE (a plugin of sandbox-ai's own "
-                                                      "marketplace needs no source); OpenCode: an npm package name."))
+        super().__init__(parent, tr("Add plugin"), tr("Claude, Codex, OpenCode 2: NAME@MARKETPLACE (a plugin of "
+                                                      "sandbox-ai's own marketplace needs no source; one plugin store "
+                                                      "for the three); OpenCode: an npm package name. A Codex "
+                                                      "plugin's hooks and an OpenCode 2 plugin run only once approved."))
         self.plugin = QComboBox()
         self.plugin.setEditable(True)
         self.plugin.addItems(known)
         self.agent = QComboBox()
-        self.agent.addItems(["claude", "opencode"])
+        self.agent.addItems([*STORE_AGENTS, "opencode"])
         self.source = QLineEdit()
         self.source.setPlaceholderText(tr("only for a new marketplace: OWNER/REPO or https://…"))
         self.form.addRow(tr("Plugin"), self.plugin)
@@ -220,21 +253,21 @@ class MarketplaceDialog(FormDialog):
 class HookDialog(FormDialog):
     """A hook for the kit: a script (with event, matcher and timeout), a hooks.json or an OpenCode plugin."""
 
-    def __init__(self, parent, agents, remote=False):
+    def __init__(self, parent, agents, remote=False, host=LOCAL):
         super().__init__(parent, tr("Add hook"), tr("A script runs at the event for the tools the matcher names; a "
-                                                    "hooks.json brings its own definitions; an OpenCode plugin is a "
-                                                    ".js, .mjs or .ts module. The hook runs only once you have "
-                                                    "reviewed and approved it."))
+                                                    "hooks.json brings its own definitions; a plugin is a module: "
+                                                    "OpenCode's .js, .mjs or .ts, OpenCode 2's and Pi's .js or .mjs. "
+                                                    "The hook runs only once you have reviewed and approved it."))
         self.file = QLineEdit()
         self.file.setPlaceholderText(tr("check.sh, hooks.json or plugin.js"))
-        browse = QPushButton(tr("File…"))
+        self.host = host if remote else LOCAL  # another host's file: chosen from its folders, its path there
+        browse = self.browse = QPushButton(tr("File…"))
         browse.clicked.connect(self.choose)
         if remote:
             self.file.setToolTip(tr("A path on that host"))
         row = QHBoxLayout()
         row.addWidget(self.file, 1)
         row.addWidget(browse)
-        browse.setVisible(not remote)  # another host's file: its path there, typed
         self.agents = AgentsBox(agents)
         self.event_box = QComboBox()
         self.event_box.setEditable(True)
@@ -248,7 +281,7 @@ class HookDialog(FormDialog):
         self.finish()
 
     def choose(self):
-        path = choose_file(self, tr("Hook file"), "hook")
+        path = RC.choose_file(self, self.host, tr("Hook file"), "hook", start=self.file.text().strip())
         if path:
             self.file.setText(path)
 
@@ -322,11 +355,20 @@ def in_kit(entries, kit):
                  and e.get("kind") == kit.get("kind")), None)
 
 
-def plugin_state(plugin):
-    """A plugin's state for display, as the web's Kits page says it: on or off in which kits, installed in the plugin
-    store, installed or enabled in the agent's own configuration."""
+def kit_entries(item, agent="claude"):
+    """The kits of a marketplace or plugin row (`plugins marketplaces --json`) for AGENT: Claude's "kits", Codex's and
+    OpenCode 2's "agent_kits" (the same marketplaces in Claude's format; a host without them: none)."""
+    if agent == "claude":
+        return item.get("kits") if isinstance(item.get("kits"), list) else []
+    found = item.get("agent_kits") if isinstance(item.get("agent_kits"), dict) else {}
+    return found.get(agent) if isinstance(found.get(agent), list) else []
+
+
+def plugin_state(plugin, agent="claude"):
+    """A plugin's state for display, as the web's Kits page says it: on or off in which kits (for AGENT), installed in
+    the plugin store, installed or enabled in the agent's own configuration."""
     words = []
-    for entry in plugin.get("kits") if isinstance(plugin.get("kits"), list) else []:
+    for entry in kit_entries(plugin, agent):
         if isinstance(entry, dict):
             kit = printable(entry.get("kit") or "?")
             words.append(tr("on in {kit}", kit=kit) if entry.get("enabled") else tr("off in {kit}", kit=kit))
@@ -412,9 +454,9 @@ class KitsPage(QWidget):
         self.status_button.setToolTip(tr("sandbox-ai plugins --status: the plugins declared and installed"))
         self.status_button.clicked.connect(lambda _=False: self.plugin_status())
         store_layout.addWidget(flow(self.install_button, self.update_button, self.status_button))
-        self.store_hint = plain_label(tr(
+        self.store_hint = explanation(tr(
             "Adding a plugin to a kit only declares it; installing downloads what the kits declare into this store. "
-            "A sandbox enables a plugin when a kit of its start declares it and it is installed."), role="secondary")
+            "A sandbox enables a plugin when a kit of its start declares it and it is installed."))
         self.store_hint.setWordWrap(True)
         store_layout.addWidget(self.store_hint)
         layout.addWidget(store)
@@ -431,6 +473,10 @@ class KitsPage(QWidget):
         self.tabs.setAccessibleName(tr("Kits & plugins"))
         self.tabs.addTab(self.kits_tab(), tr("Kits"))
         self.tabs.addTab(self.market_tab(), tr("Marketplaces"))
+        # what the agents of this machine (or of the host chosen) have set up themselves, to import parts of
+        from .agent_parts_view import AgentPartsTab
+        self.parts_tab = AgentPartsTab(self)
+        self.tabs.addTab(self.parts_tab, tr("This machine's agents"))
         layout.addWidget(self.tabs, 1)
         self.loaded_once = False
         self.update_buttons()
@@ -471,8 +517,8 @@ class KitsPage(QWidget):
                                               "(GitHub OWNER/REPO or a Git URL)"))
         self.marketplace_button.triggered.connect(lambda _=False: self.add_marketplace())
         self.hook_button = self.add_menu.addAction(tr("Hook…"))
-        self.hook_button.setToolTip(tr("sandbox-ai kits add-hook: a hook script, a hooks.json or an OpenCode plugin; "
-                                       "it runs once approved"))
+        self.hook_button.setToolTip(tr("sandbox-ai kits add-hook: a hook script, a hooks.json or a plugin module "
+                                       "(OpenCode, OpenCode 2, Pi); it runs once approved"))
         self.hook_button.triggered.connect(lambda _=False: self.add_hook())
         self.add_menu_button.setMenu(self.add_menu)
         self.remove_button = QPushButton(tr("Remove from the kit…"))
@@ -482,6 +528,13 @@ class KitsPage(QWidget):
         self.revoke_button = QPushButton(tr("Take the hooks' approval back"))
         self.revoke_button.setToolTip(tr("sandbox-ai kits trust-hooks --revoke: the kit's hooks no longer run"))
         self.revoke_button.clicked.connect(lambda _=False: self.revoke_hooks())
+        # A kit, or the skill or plugin chosen in "What it brings", to a sandbox that runs now (kits|plugins attach):
+        # the running start chosen in the dialog, of this machine or a host.
+        self.give_button = QPushButton(tr("Give to a running sandbox…"))
+        self.give_button.setToolTip(tr("sandbox-ai kits attach / plugins attach: the selected kit (or the skill or "
+                                       "plugin selected in What it brings) given to a sandbox while it runs, "
+                                       "read-only; the agent sees it at once, after a command or once started again"))
+        self.give_button.clicked.connect(lambda _=False: self.give())
         self.delete_button = QPushButton(tr("Delete kit…"))
         self.delete_button.setProperty("role", "danger")
         self.delete_button.clicked.connect(lambda _=False: self.delete())
@@ -492,8 +545,8 @@ class KitsPage(QWidget):
                             self.hook_button]
         self.change_buttons = [self.remove_button, self.delete_button]
         self.edit_buttons = self.add_buttons + self.change_buttons
-        holder_layout.addWidget(flow(self.use_button, self.new_button, self.add_menu_button, self.remove_button,
-                                     self.trust_button, self.revoke_button, self.delete_button))
+        holder_layout.addWidget(flow(self.use_button, self.give_button, self.new_button, self.add_menu_button,
+                                     self.remove_button, self.trust_button, self.revoke_button, self.delete_button))
         self.add_hint = plain_label(role="secondary")
         self.add_hint.setWordWrap(True)
         holder_layout.addWidget(self.add_hint)
@@ -509,7 +562,8 @@ class KitsPage(QWidget):
         delete_key(self.table, self.delete, tr("Delete kit…"))
         self.table.setColumnHidden(PROJECT_COLUMN, True)  # shown with a project of this machine (show_inventory)
         self.table.itemSelectionChanged.connect(self.selection_changed)
-        with_context_menu(self.table, lambda: [self.use_button, self.add_menu, self.remove_button, None,
+        with_context_menu(self.table, lambda: [self.use_button, self.give_button, self.add_menu, self.remove_button,
+                                               None,
                                                self.trust_button, self.revoke_button, None, self.delete_button, None,
                                                self.new_button, self.refresh_button])
         kits_layout.addWidget(self.table, 1)
@@ -520,6 +574,8 @@ class KitsPage(QWidget):
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setAccessibleName(tr("What it brings"))
+        self.tree.itemSelectionChanged.connect(lambda: self.update_buttons())
+        with_context_menu(self.tree, lambda: [self.give_button])  # a skill or plugin chosen here: given on its own
         details_layout.addWidget(self.where)
         details_layout.addWidget(self.tree, 1)
         split.addWidget(kits_box)
@@ -545,6 +601,18 @@ class KitsPage(QWidget):
         self.market_kit.currentIndexChanged.connect(lambda _=0: self.market_kit_changed())
         row.addWidget(kit_label)
         row.addWidget(self.market_kit, 1)
+        agent_label = plain_label(tr("For"), word_wrap=False)
+        self.market_agent = compact_combo(QComboBox(), 12)
+        for agent in STORE_AGENTS:
+            self.market_agent.addItem(AGENT_TITLES[agent], agent)
+        self.market_agent.setAccessibleName(tr("The agent whose plugins the marketplace actions change"))
+        self.market_agent.setToolTip(tr("Whose plugins in the kit you add, enable, disable or remove below: Claude "
+                                        "Code's, Codex's or OpenCode 2's (one plugin store, the marketplaces in "
+                                        "Claude's format)"))
+        agent_label.setBuddy(self.market_agent)
+        self.market_agent.currentIndexChanged.connect(lambda _=0: self.market_kit_changed())
+        row.addWidget(agent_label)
+        row.addWidget(self.market_agent)
         holder_layout.addLayout(row)
         self.fetch_button = QPushButton(tr("Fetch the plugin lists"))
         self.fetch_button.clicked.connect(lambda _=False: self.fetch_lists())
@@ -653,6 +721,10 @@ class KitsPage(QWidget):
         self.market_token += 1
         self.clear_rows()
         self.clear_markets()
+        host = self.host()
+        self.tabs.setTabText(self.tabs.indexOf(self.parts_tab), tr("This machine's agents") if host == LOCAL else
+                             tr("Agents of {host}", host=self.hosts.label(host)))
+        self.parts_tab.host_changed()
         if self.loaded_once:
             self.refresh()
 
@@ -788,7 +860,12 @@ class KitsPage(QWidget):
                 if values:
                     child = QTreeWidgetItem([f"{tr(title)}: {len(values)}"])
                     for value in values:
-                        child.addChild(QTreeWidgetItem([printable(value)]))
+                        item = QTreeWidgetItem([printable(value)])
+                        # what Give to a running sandbox… gives of it: the entry's own file or folder
+                        given = {"skills": "skill", "commands": "command", "prompts": "command",
+                                 "agents": "agent_file"}[key]
+                        item.setData(0, Qt.ItemDataRole.UserRole, (given, f"{info.get('path')}/{key}/{value}"))
+                        child.addChild(item)
                     top.addChild(child)
             if info.get("memory"):
                 top.addChild(QTreeWidgetItem([tr("Memory template: {name}", name=printable(info["memory"]))]))
@@ -802,8 +879,12 @@ class KitsPage(QWidget):
             if plugins or off:
                 child = QTreeWidgetItem([tr("Plugins: {count}", count=len(plugins) + len(off))])
                 for plugin in plugins:
-                    state = tr("installed") if plugin in self.installed or agent != "claude" else tr("not installed")
-                    child.addChild(QTreeWidgetItem([f"{printable(plugin)}  ({state})"]))
+                    state = tr("installed") if plugin in self.installed or agent not in STORE_AGENTS else \
+                        tr("not installed")
+                    item = QTreeWidgetItem([f"{printable(plugin)}  ({state})"])
+                    if agent in STORE_AGENTS:
+                        item.setData(0, Qt.ItemDataRole.UserRole, ("plugin", plugin))
+                    child.addChild(item)
                 for plugin in off:
                     child.addChild(QTreeWidgetItem([f"{printable(plugin)}  {tr('(off)')}"]))
                 top.addChild(child)
@@ -830,9 +911,40 @@ class KitsPage(QWidget):
         self.tree.expandToDepth(1)
         self.update_buttons()
 
+    def given(self):
+        """(kind, value) Give to a running sandbox… offers: the skill, command, subagent or plugin selected in What it
+        brings, else the selected kit; None without either."""
+        items = self.tree.selectedItems()
+        data = items[0].data(0, Qt.ItemDataRole.UserRole) if items else None
+        if isinstance(data, (tuple, list)) and len(data) == 2:
+            return tuple(data)
+        kit = self.current()
+        if kit is None or kit.get("kind") == "always" or not kit.get("name"):
+            return None
+        return ("kit", "default" if kit.get("kind") == "default" else str(kit["name"]))
+
+    def give(self):
+        """Give to a running sandbox…: what given() offers, to a running start chosen in the dialog (this machine or a
+        host), asked first (kits_live_view.give)."""
+        from .kits_live_view import GiveDialog, give
+        offered = self.given()
+        if offered is None:
+            self.show_message(tr("Select a kit, or a skill or plugin in What it brings, first."))
+            return
+        dialog = GiveDialog(self, self.sai, host=self.host() or LOCAL, kind=offered[0], value=offered[1])
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
+            return
+        host, start, kind, value, keep = dialog.values()
+        if not start:
+            return
+        give(self, self.sai, host, start, kind, value, keep, source=self.give_button)
+
     def update_buttons(self):
         if self.task.running:
             return  # a change runs: its buttons stay off until it ends (a read never holds them back)
+        offered = self.given()
+        set_enabled(self.give_button, offered is not None,
+                    None if offered is not None else tr("Select a kit, or a skill or plugin in What it brings, first."))
         kit = self.current()
         kind = kit.get("kind") if kit else None
         none = tr("Select a kit first.")
@@ -1008,7 +1120,7 @@ class KitsPage(QWidget):
                 tips.append(self.about("opencode"))
                 keys.append(key)
                 continue
-            declared = in_kit(market.get("kits"), kit)
+            declared = in_kit(kit_entries(market, self.chosen_agent()), kit)
             origins = ", ".join(tr(MARKET_ORIGINS[o]) if o in MARKET_ORIGINS else printable(o)
                                 for o in names(market.get("origins")))
             if declared:
@@ -1030,6 +1142,10 @@ class KitsPage(QWidget):
         if not selected_rows(self.market) and keys:
             select_keys(self.market, [keys[0]])
         self.market_selected()
+
+    def chosen_agent(self):
+        """The agent whose plugins the browser's kit actions change: claude, codex or opencode2."""
+        return self.market_agent.currentData() or "claude"
 
     def chosen_kit(self):
         """The kit chosen in the browser (a kit of `plugins marketplaces --json`), or None."""
@@ -1078,9 +1194,9 @@ class KitsPage(QWidget):
             self.plugins_title.setText(tr("Plugins of {marketplace} ({agent})", marketplace=printable(market["name"]),
                                           agent=printable(market.get("agent"))))
             if market.get("agent") == "codex":
-                notes.append(self.about("codex") or tr("sandbox-ai's kits give Codex no plugins yet: shown as Codex "
-                                                       "has them on that host."))
-            elif not in_kit(market.get("kits"), kit) and not market.get("importable"):
+                notes.append(self.about("codex") or tr("Codex's own marketplace, as Codex has it on that host: kits "
+                                                       "give Codex plugins of the marketplaces in Claude's format."))
+            elif not in_kit(kit_entries(market, self.chosen_agent()), kit) and not market.get("importable"):
                 notes.append(tr("Its plugins cannot go into a kit: {why}", why=printable(market.get("problem") or "?")))
             if not market.get("listed_from"):
                 notes.append(tr("Its plugin list is not fetched yet: only the plugins a kit or the agent names are "
@@ -1098,11 +1214,13 @@ class KitsPage(QWidget):
                 tr("not in its plugin list (named by a kit or the agent)") if plugin.get("listed") is False else ""))
             if words and not all(w in f"{key} {description}".lower() for w in words):
                 continue
-            mine = in_kit(plugin.get("kits"), kit)
+            agent = "opencode" if market.get("npm") else self.chosen_agent()
+            mine = in_kit(kit_entries(plugin, "claude" if agent == "opencode" else agent), kit)
             name = printable(plugin.get("name") or key) + (f" {printable(plugin['version'])}"
                                                            if plugin.get("version") else "")
             rows.append([name, (tr("on") if mine.get("enabled") else tr("off")) if mine else "–",
-                         plugin_state(plugin) or tr("in no kit"), description])
+                         plugin_state(plugin, "claude" if agent == "opencode" else agent) or tr("in no kit"),
+                         description])
             colors.append(("ok" if mine.get("enabled") else "muted") if mine else None)
             keys.append(key)
         fill(self.plugins, rows, colors, keys=keys)
@@ -1134,7 +1252,7 @@ class KitsPage(QWidget):
             why = tr("Select a marketplace first.")
         add = importing = remove = why
         if why is None:
-            declared = in_kit(market.get("kits"), kit)
+            declared = in_kit(kit_entries(market, self.chosen_agent()), kit)
             agent = market.get("agent")
             if market.get("npm"):
                 add = importing = remove = tr("OpenCode has no marketplaces: add its npm plugins below.")
@@ -1161,18 +1279,20 @@ class KitsPage(QWidget):
         kit, market, plugin = self.chosen_kit(), self.picked(), self.picked_plugin()
         why = self.kit_why(kit) or (tr("Select a plugin first.") if plugin is None else None)
         if why is None and market.get("agent") == "codex":
-            why = tr("sandbox-ai's kits give Codex no plugins yet: shown as Codex has them on that host.")
+            why = tr("Codex's own marketplace, as Codex has it on that host: kits give Codex plugins of the "
+                     "marketplaces in Claude's format.")
         if why is not None:
             return {button: why for button in self.plugin_buttons}
-        mine = in_kit(plugin.get("kits"), kit)
+        agent = "claude" if market.get("npm") else self.chosen_agent()
+        mine = in_kit(kit_entries(plugin, agent), kit)
         if market.get("npm"):
             add = None if plugin.get("importable") else tr("Not an npm package a kit can name.")
-        elif in_kit(market.get("kits"), kit) or (market.get("importable") and market.get("source_value")):
+        elif in_kit(kit_entries(market, agent), kit) or (market.get("importable") and market.get("source_value")):
             add = None
         else:
             add = tr("Its plugins cannot go into a kit: {why}", why=printable(market.get("problem") or "?"))
         default_on = any(isinstance(e, dict) and e.get("kind") == "default" and e.get("enabled")
-                         for e in plugin.get("kits", []))
+                         for e in kit_entries(plugin, agent))
         return {
             self.plugin_add_button: tr("It is in the kit already.") if mine else add,
             self.enable_button: (tr("Not in this kit: add it first.") if not mine else
@@ -1227,12 +1347,12 @@ class KitsPage(QWidget):
         if reasons[button] is not None:
             return
         kit, market, plugin = self.chosen_kit(), self.picked(), self.picked_plugin()
-        agent = "opencode" if market.get("npm") else "claude"
+        agent = "opencode" if market.get("npm") else self.chosen_agent()
         value = plugin.get("name") if market.get("npm") else plugin_key(plugin)
         label, host = self.kit_label(kit), self.hosts.label()
         options = [f"--agent={agent}"]
         if action == "add-plugin":
-            if agent == "claude" and not in_kit(market.get("kits"), kit) and market.get("source_value"):
+            if agent != "opencode" and not in_kit(kit_entries(market, agent), kit) and market.get("source_value"):
                 options.append(f"--source={market['source_value']}")  # the marketplace is declared with it
             question = tr("Add {what} to the kit {kit} on {host}? Every later start with that kit gets it.",
                           what=printable(value), kit=label, host=host)
@@ -1259,7 +1379,8 @@ class KitsPage(QWidget):
             return
         kit, market = self.chosen_kit(), self.picked()
         label = self.kit_label(kit)
-        self.run("add-marketplace", kit["name"], market["name"], market["source_value"], options=["--agent=claude"],
+        self.run("add-marketplace", kit["name"], market["name"], market["source_value"],
+                 options=[f"--agent={self.chosen_agent()}"],
                  title=tr("Marketplace added to {kit}", kit=label), market=True,
                  question=tr("Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its plugins can "
                              "then be added there.", marketplace=printable(market["name"]),
@@ -1298,7 +1419,8 @@ class KitsPage(QWidget):
                     tr("Take the marketplace {marketplace} out of {kit} on {host}? A plugin of it the kit still "
                        "names must be removed first.", marketplace=printable(market["name"]), kit=label, host=host))
         self.run("remove-marketplace", kit["name"], market["name"],
-                 options=["--agent=claude"] + (["--with-plugins"] if with_plugins else []), market=True,
+                 options=[f"--agent={self.chosen_agent()}"] + (["--with-plugins"] if with_plugins else []),
+                 market=True,
                  question=question, title=tr("{kit}: removed {value}", kit=label, value=printable(market["name"])))
 
     def new_marketplace(self):
@@ -1306,15 +1428,16 @@ class KitsPage(QWidget):
         if self.market_reasons()[self.market_new_button] is not None:
             return
         kit, host = self.chosen_kit(), self.host()
-        dialog = MarketplaceDialog(self)
+        key = ("kits", "marketplace", host, kit["name"])
+        dialog = MarketplaceDialog(self).keep_draft(key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name, source = dialog.name.text().strip(), dialog.source.text().strip()
-        if not self.valid_name(name) or not source:
+        if not self.valid_name(name) or not self.filled_in(source, no_source_text()):
             return
         label = self.kit_label(kit)
         self.run("add-marketplace", kit["name"], name, source, title=tr("Marketplace added to {kit}", kit=label),
-                 market=True, question=tr("Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its "
+                 market=True, draft=key, question=tr("Declare the marketplace {marketplace} ({source}) in {kit} on {host}? Its "
                                           "plugins can then be added there.", marketplace=printable(name),
                                           source=printable(source), kit=label, host=self.hosts.label(host)),
                  host=host)
@@ -1333,12 +1456,13 @@ class KitsPage(QWidget):
     # -- actions --
 
     def run(self, action, name, *arguments, options=(), title=None, create=False, question=None, market=False,
-            host=None):
+            host=None, draft=None):
         """`sandbox-ai kits ACTION ... NAME ARGUMENTS` in the background on HOST (default: the one chosen; one taken
         before a dialog or question: the chooser may show another by the answer); CREATE: `sandbox-ai kits new NAME`
         first (nothing more runs when that fails). What widens every later start with the kit is asked first
         (kit-add), what narrows it too (kit-remove): QUESTION, naming the host and the kit. MARKET: from the
-        marketplace browser (whose rows must be the host's chosen)."""
+        marketplace browser (whose rows must be the host's chosen). DRAFT: the key of the dialog's draft (drafts.py),
+        dropped once the command succeeded."""
         if self.busy_change():
             return
         host = self.host() if host is None else host
@@ -1370,13 +1494,14 @@ class KitsPage(QWidget):
             return status, first + out, err
         self.start_change(work, title or f"sandbox-ai kits {action}", tr("sandbox-ai kits {action} {name} is running…",
                                                                          action=action, name=printable(name)),
-                          host=host)
+                          host=host, draft=draft)
 
     def change_sources(self):
         """The buttons that change kits (or read them): off while a change runs, so two clicks never start two."""
         return [self.refresh_button, self.use_button, self.new_button, self.add_menu_button, *self.edit_buttons,
                 self.trust_button, self.revoke_button, *self.market_buttons, *self.plugin_buttons,
-                self.install_button, self.update_button, self.fetch_button]
+                self.install_button, self.update_button, self.fetch_button, self.parts_tab.import_button,
+                self.parts_tab.memory_button, self.parts_tab.refresh_button]
 
     def busy_change(self):
         """True (and said in the message area) while a change runs: one at a time."""
@@ -1385,7 +1510,7 @@ class KitsPage(QWidget):
             return True
         return False
 
-    def start_change(self, work, title, text, host=None):
+    def start_change(self, work, title, text, host=None, draft=None):
         """WORK (sandbox-ai commands, on HOST: default the one chosen) in the background with the busy bar, its output
         as it comes and Cancel; the outcome in the message area of this host's page (a late one, after another host
         was chosen, is dropped). False when another change runs - one that started while a question was open: said,
@@ -1397,7 +1522,8 @@ class KitsPage(QWidget):
                                  "again once that one has ended.", title=title), "bad")
             return False
         self.message.setText("")
-        return self.task.call_watched(self.sai, work, lambda result, error: self.done(host, title, result, error), text,
+        return self.task.call_watched(self.sai, work, lambda result, error: self.done(host, title, result, error,
+                                                                                     draft), text,
                                       source=self.change_sources())
 
     def user_kits(self):
@@ -1427,13 +1553,18 @@ class KitsPage(QWidget):
         new = new and name not in self.user_kits()
         return name, new, self.kits.get(f"user:{name}")
 
-    def done(self, host, title, result, error):
+    def done(self, host, title, result, error, draft=None):
         """What a change said, in the message area (wrapped, plain text; an error in its colour); the kits are read
-        again. For a host no longer chosen: only read again (its rows went when the host changed)."""
+        again. For a host no longer chosen: only read again (its rows went when the host changed). DRAFT: a dialog's
+        draft, done with once the change succeeded (drafts.py)."""
         status, out, err = outcome(result, error)
+        if draft is not None and status == 0 and not self.task.cancelled:
+            from . import drafts
+            drafts.drop(draft)
         text = printable_text((out + err).strip())[-4000:]
         self.update_buttons()
         self.update_market_buttons()
+        self.parts_tab.update_buttons()
         if host != self.host():
             return
         if self.task.cancelled or status == backend.CANCELLED:
@@ -1455,22 +1586,34 @@ class KitsPage(QWidget):
         self.message.setPalette(palette)
         self.message.setText(text)
 
+    def filled_in(self, value, why):
+        """VALUE is there (a dialog's field or choice); else WHY is said (an OK with it left empty did nothing at
+        all, without a word) and False."""
+        if value:
+            return True
+        warn(self, tr("Kits & plugins"), why)
+        return False
+
     def valid_name(self, name, pattern=backend.KIT_NAME):
         if re.fullmatch(pattern, name or ""):
             return True
+        if not (name or "").strip():  # (left empty: " is not a valid name." named nothing)
+            warn(self, tr("Kits & plugins"), tr("Type a name first."))
+            return False
         warn(self, tr("Kits & plugins"), tr("{name} is not a valid name.", name=printable(name)))
         return False
 
     def new_kit(self):
         host = self.host()
-        dialog = NewKitDialog(self)
+        key = ("kits", "new-kit", host)
+        dialog = NewKitDialog(self).keep_draft(key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name = dialog.name.text().strip()
-        if not self.valid_name(name) or not dialog.agents.chosen():
+        if not self.valid_name(name) or not self.filled_in(dialog.agents.chosen(), tr("Tick at least one agent.")):
             return
         self.run("new", name, options=[f"--agent={agent}" for agent in dialog.agents.chosen()], title=tr("New kit"),
-                 host=host)
+                 host=host, draft=key)
 
     def add_skill(self):
         """A skill folder (with SKILL.md) copied into a kit of yours: sandbox-ai kits add-skill checks it (a real
@@ -1481,8 +1624,7 @@ class KitsPage(QWidget):
         if target is None:
             return
         name, create, _ = target
-        path = self.remote_path(tr("Skill folder (with SKILL.md)"), host) if host != LOCAL else \
-            choose_folder(self, tr("Skill folder (with SKILL.md)"), "skill")
+        path = RC.choose_folder(self, host, tr("Skill folder (with SKILL.md)"), "skill", sai=self.sai)
         if path:
             self.run("add-skill", name, path, title=tr("Add skill"), create=create, host=host)
 
@@ -1492,26 +1634,19 @@ class KitsPage(QWidget):
         if target is None:
             return
         kit_name, create, kit = target
-        dialog = NewSkillDialog(self, (sorted(kit_agents(kit)) if kit else []) or list(AGENTS))
+        key = ("kits", "new-skill", host, kit_name)
+        dialog = NewSkillDialog(self, (sorted(kit_agents(kit)) if kit else []) or list(AGENTS)).keep_draft(key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name = dialog.name.text().strip()
-        if not self.valid_name(name, backend.SKILL_NAME) or not dialog.agents.chosen():
+        if not self.valid_name(name, backend.SKILL_NAME) or \
+                not self.filled_in(dialog.agents.chosen(), tr("Tick at least one agent.")):
             return
         options = [f"--agent={agent}" for agent in dialog.agents.chosen()]
         if dialog.description.text().strip():
             options.append(f"--description={dialog.description.text().strip()}")
-        self.run("new-skill", kit_name, name, options=options, title=tr("New skill"), create=create, host=host)
-
-    def remote_path(self, title, host=None):
-        """A path on HOST (default: the one chosen), typed (this machine's file dialog cannot see that host); None
-        when cancelled or not absolute."""
-        path, ok = QInputDialog.getText(self, title, tr("The absolute path on {host}:", host=self.hosts.label(host)))
-        path = path.strip() if ok else ""
-        if path and not backend.valid_directory(path):
-            warn(self, tr("Kits & plugins"), tr("Not an absolute path: {path}", path=printable(path)))
-            return None
-        return path or None
+        self.run("new-skill", kit_name, name, options=options, title=tr("New skill"), create=create, host=host,
+                 draft=key)
 
     def known_plugins(self):
         """The plugin ids of every Claude marketplace the browser read (for the Add plugin dialog)."""
@@ -1524,18 +1659,21 @@ class KitsPage(QWidget):
         if target is None:
             return
         name, create, _ = target
+        key = ("kits", "plugin", host, name, plugin or "")
         dialog = PluginDialog(self, self.known_plugins())
         if plugin:
             dialog.plugin.setCurrentText(plugin)
+        dialog.keep_draft(key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         plugin = dialog.plugin.currentText().strip()
-        if not plugin:
+        if not self.filled_in(plugin, tr("Type the plugin first: NAME@MARKETPLACE, or for OpenCode an npm package name.")):
             return
         options = [f"--agent={dialog.agent.currentText()}"]
         if dialog.source.text().strip():
             options.append(f"--source={dialog.source.text().strip()}")
-        self.run("add-plugin", name, plugin, options=options, title=tr("Add plugin"), create=create, host=host)
+        self.run("add-plugin", name, plugin, options=options, title=tr("Add plugin"), create=create, host=host,
+                 draft=key)
 
     def add_marketplace(self):
         host = self.host()
@@ -1543,13 +1681,15 @@ class KitsPage(QWidget):
         if target is None:
             return
         kit_name, create, _ = target
-        dialog = MarketplaceDialog(self)
+        key = ("kits", "marketplace", host, kit_name)
+        dialog = MarketplaceDialog(self).keep_draft(key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         name, source = dialog.name.text().strip(), dialog.source.text().strip()
-        if not self.valid_name(name) or not source:
+        if not self.valid_name(name) or not self.filled_in(source, no_source_text()):
             return
-        self.run("add-marketplace", kit_name, name, source, title=tr("Add marketplace"), create=create, host=host)
+        self.run("add-marketplace", kit_name, name, source, title=tr("Add marketplace"), create=create, host=host,
+                 draft=key)
 
     def remove(self):
         """A skill, plugin or hook out of a kit of yours; out of the default kit, a plugin (its skills are edited in
@@ -1584,13 +1724,17 @@ class KitsPage(QWidget):
             return
         name, create, kit = target
         agents = (sorted(kit_agents(kit)) if kit else []) or list(AGENTS)
-        dialog = HookDialog(self, agents, remote=True) if host != LOCAL else HookDialog(self, agents)
+        key = ("kits", "hook", host, name)
+        dialog = HookDialog(self, agents, remote=True, host=host) if host != LOCAL else HookDialog(self, agents)
+        dialog.keep_draft(key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
             return
         path = dialog.file.text().strip()
-        if not path or not dialog.agents.chosen():
+        if not self.filled_in(path, tr("Choose the hook's file first.")) or \
+                not self.filled_in(dialog.agents.chosen(), tr("Tick at least one agent.")):
             return
-        self.run("add-hook", name, path, options=dialog.options(), title=tr("Add hook"), create=create, host=host)
+        self.run("add-hook", name, path, options=dialog.options(), title=tr("Add hook"), create=create, host=host,
+                 draft=key)
 
     def trust_hooks(self):
         """`sandbox-ai kits trust-hooks KIT` in a terminal: the review is there, and so is the yes (or no). Refresh
@@ -1686,8 +1830,9 @@ class KitsPage(QWidget):
             self.enable_kit.emit(kit["name"])
 
     def install(self, update):
-        """`sandbox-ai plugins claude [--update]` in the background, with --kit for the built-in kits the current
-        project uses (their plugins are installed only on request). It asks nothing - each step runs in the plugin
+        """`sandbox-ai plugins all [--update]` in the background (Claude's, Codex's and OpenCode 2's kit plugins, one
+        store; another host: claude), with --kit for the built-in kits the current project uses (their plugins are
+        installed only on request). It asks nothing - each step runs in the plugin
         store's own sandbox, independent of any running sandbox - so no terminal: its output comes below the busy bar
         as it is written and, at the end, into the log window; a notification says how it went."""
         builtin = {kit["name"] for kit in self.kits.values() if kit.get("kind") == "builtin"}
@@ -1695,12 +1840,13 @@ class KitsPage(QWidget):
         kit = self.current()
         if kit is not None and kit.get("kind") == "builtin" and kit["name"] not in chosen:
             chosen.append(kit["name"])
-        self.run_plugins("sandbox-ai plugins claude" + (" --update" if update else ""),
+        everyone = self.host() == LOCAL  # another host's sandbox-ai may not know `plugins all` yet
+        self.run_plugins(f"sandbox-ai plugins {'all' if everyone else 'claude'}" + (" --update" if update else ""),
                          tr("Updating the installed plugins…") if update else
                          tr("Installing the kits' plugins into the plugin store…"),
                          tr("Plugins updated") if update else tr("Plugins installed"),
                          tr("Plugins not updated") if update else tr("Plugins not installed"),
-                         update=update, kits=chosen)
+                         update=update, kits=chosen, agent="all" if everyone else "claude")
 
     def run_plugins(self, title, text, ok_title, failed_title, **options):
         """`sandbox-ai plugins claude ...` (SandboxAI.host_plugins with OPTIONS) on the host chosen, in the page's

@@ -1106,10 +1106,13 @@ def test_a_broken_or_reachable_rules_file_stops_the_start(host):
     (host / "bad.json").write_text(json.dumps({"version": 1, "http": [{"id": "x", "host": "a.example"}]}))
     with pytest.raises(ValueError, match=r'bad.json: http rule 1 \(x\): "decision" is required'):
         s.main(["claude", "--workspace", str(host / "work"), "--rules", str(host / "bad.json"), "--dry-run"])
-    # Inside the workspace the agent could rewrite it.
+    # Inside the workspace the agent could rewrite it: you decide - given, with that warning.
     (host / "work/rules.json").write_text(json.dumps(GITHUB))
-    with pytest.raises(ValueError, match="--rules .* lies inside"):
+    said = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(s, "warner", lambda warn=None: warn or said.append)
         s.main(["claude", "--workspace", str(host / "work"), "--rules", str(host / "work/rules.json"), "--dry-run"])
+    assert any(text.startswith("--rules") and "lies inside" in text and "agent can change" in text for text in said)
     # HTTP rules without the proxy could not hold.
     with pytest.raises(ValueError, match="need the connection proxy"):
         s.main(["claude", "--workspace", str(host / "work"), "--no-proxy", "--rules", str(write(host / "gh.json", GITHUB)),
@@ -1178,7 +1181,8 @@ def test_an_mcp_server_starts_with_its_gateway(host, monkeypatch):
     cmd = started[-1]
     serve = cmd[cmd.index("--internal-mcp-serve"):]
     gateway = json.loads(__import__("base64").urlsafe_b64decode(serve[serve.index("--gateway") + 1]))
-    assert gateway == {"server": "demo", "approvals": "/sandbox/mcp-approvals", "rules": [
+    # (its questions wait as long as the start's: --ask-timeout, 60 s by default)
+    assert gateway == {"server": "demo", "approvals": "/sandbox/mcp-approvals", "timeout": 60, "rules": [
         {"name": "rules.json", "version": 1, "defaults": {"mcp": "allow"},
          "mcp": [{"id": "deletes", "decision": "ask", "priority": 100, "server": ["demo"], "tool": ["delete_*"]}]}]}
     assert cmd[cmd.index("--mcp-approvals-dir") + 1] == str(m.state_dir("demo") / "approvals")
@@ -1239,7 +1243,7 @@ def test_the_server_sandbox_mounts_the_answers_read_only(host):
                       "--mcp-approvals-dir", str(host / "approvals")])
     s.validate(a)
     _, run = s.pod_commands(a, "pod", host, host / "home")
-    assert f"type=bind,src={host / 'approvals'},dst=/sandbox/mcp-approvals,ro,nodev" in run
+    assert f"type=bind,src={host / 'approvals'},dst=/sandbox/mcp-approvals,ro,nodev,nosuid" in run
     a.backend = "bwrap"
     cmd = s.bwrap_command(a, host, host / "home")
     index = cmd.index("/sandbox/mcp-approvals")

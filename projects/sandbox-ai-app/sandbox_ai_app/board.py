@@ -19,23 +19,30 @@ refuse (and what makes no sense), badges() what weakens the sandbox, with a scor
 """
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass, field
 import ipaddress
 import itertools
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import posixpath
 import re
 import shlex
 import weakref
 
 from . import applog
 from . import backend
+from . import bridges as BR
 from . import llm_params as LP
+from . import remote_source
 from .files import printable, printable_text
 from .i18n import N_, tr
 
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
+# The agents a model server gives only the start's model (sandbox-ai's llm.ONE_MODEL; a test keeps both the same):
+# --llm-models offers no other in them.
+ONE_MODEL_AGENTS = ("openhands", "nanobot", "letta", "pi")
 LAYOUT_NAME = ".sandbox-ai.board.json"  # node positions only; the options live in .sandbox-ai.json
 LAYOUT_LIMIT = 256 << 10
 # Requests per host, as the launcher checks them (agent_sandbox.HTTP_RULE).
@@ -67,18 +74,20 @@ KINDS = {kind.key: kind for kind in (
          help=N_("Another folder or file of this machine at a path you choose (e.g. /mnt/data), read-only or "
                  "writable: data, models, caches - not where the agent works")),
     Kind("home", N_("HOME and login"), ("--state-dir", "--copy", "--copy-auth", "--no-auth", "--auth-file",
-                                        "--import-codex-auth"), column=0,
+                                        "--auth-from-session", "--import-codex-auth"), column=0,
          help=N_("The sandbox HOME (kept between runs or not) and the agent's login")),
     Kind("kits", N_("Kits, memory, plugins"), ("--kit", "--kit-dir", "--no-default-kit", "--no-memory",
                                                "--no-plugins"), column=0,
          help=N_("Kits copied into HOME, project memory and plugins")),
     Kind("agent", N_("Agent"), ("--dangerously-skip-permissions", "--local-config", "--env", "--secret-env",
                                 "--api-key", "--hermes-enable", "--qwen-enable",
-                                "--goose-enable"),
+                                "--goose-enable", "--openhands-enable", "--nanobot-enable", "--letta-enable",
+                                "--opencode2-enable",
+                                "--pi-enable"),
          required=True, column=1, help=N_("The coding agent and how it runs")),
-    Kind("approvals", N_("Approvals and rules"), ("--ask", "--rules"), column=1,
+    Kind("approvals", N_("Approvals and rules"), ("--ask", "--rules", "--hide"), column=1,
          help=N_("Ask before what the options do not allow; rulesets allow, ask or deny each request and MCP "
-                 "tool call")),
+                 "tool call; files such as .env hidden from the agent")),
     Kind("proxy", N_("Connection proxy"), ("--no-inspect", "--allow-http", "--privacy-check", "--privacy-rules"),
          required=True, column=2,
          help=N_("Every connection passes it: TLS opened and logged, pushes checked, requests per host")),
@@ -91,11 +100,12 @@ KINDS = {kind.key: kind for kind in (
          help=N_("A container of one of your images (a database, a cache, a search engine, a test target) beside the "
                  "agent, in the sandbox's pod: reached at localhost:PORT, behind the same firewall and proxy. Its image "
                  "is unchecked: nobody reviewed it")),
-    Kind("llm", N_("LLM server"), ("--llm", "--llm-models"), column=2,
+    Kind("llm", N_("LLM server"), ("--llm", "--use-case", "--llm-models", "--llm-tools", "--no-llm-profile"), column=2,
          help=N_("A model on your own server (sandbox-ai llm): only its address is opened, its key stays with "
                  "the proxy")),
     Kind("network", N_("Network"), ("--profile", *PRESET_OPTIONS, "--frontier", "--no-provider-defaults",
-                                    "--allow-host", "--allow-domain", "--allow", "--allow-tcp", "--allow-host-port",
+                                    "--allow-host", "--allow-domain", "--allow-shared-wildcard", "--allow",
+                                    "--allow-tcp", "--allow-host-port",
                                     "--dns",
                                     "--nameserver", "--offline", "--egress-all-allow", "--network", "--ip", "--ip6",
                                     "--subnet", "--subnet6"),
@@ -115,10 +125,32 @@ KINDS = {kind.key: kind for kind in (
          help=N_("A browser in its own container beside the agent (Podman), on the agent's network: firewall, proxy, "
                  "approvals, kill switch, VPN or Tor. For you (the Browser button shows it), for the agent (it drives "
                  "it through Chrome's DevTools) or both")),
+    # Cairn (--cairn): its board in a container beside the agent, opened in the sandbox's browser; the session's agents
+    # are its workers (cairn.py, cairn_relay.py).
+    Kind("cairn", N_("Cairn"), ("--cairn", "--cairn-workers", "--cairn-origin", "--cairn-goal", "--cairn-hint",
+                                "--cairn-board"), column=2,
+         help=N_("Cairn's board of facts, intents and hints in its own container beside the agent (Podman), on the "
+                 "agent's network, opened in the sandbox's browser; the session's agents (claude, codex) are its "
+                 "workers, with their own logins and models")),
     Kind("session", N_("Session and tmux"), ("--tmux", "--no-tmux"), column=0,
          help=N_("tmux inside the sandbox (sessions are started from the Start page)")),
     Kind("logs", N_("Logs"), ("--log-dir", "--log-debug"), column=1,
          help=N_("Where the logs go (hidden from the agent), and how much of what is refused they keep")),
+    # A session bridge (sandbox-ai bridge) to another running session of this machine: no launcher option - the app
+    # makes it once the board's start runs, after the human confirmed its warnings. Kept with the board's draft, never
+    # written into the project file (whoever can write a workspace must not be able to bridge sessions).
+    Kind("bridge", N_("Bridge"), single=False, column=2,
+         help=N_("Another running session of this machine the agent reaches, or that reaches it, through a session "
+                 "bridge (sandbox-ai bridge): message, ask, files, watch. Made once the board's start runs, after "
+                 "you confirm its warnings; not written into the project file")),
+    # A team (sandbox-ai team): the board's sandbox once per agent, on its project folder, with a task board between
+    # them. No launcher option of its own: with it the board's start is `team start` (team_request), on the board's
+    # host, as the Teams page and the command line start one. Kept with the board's draft, never written into the
+    # project file (it names no option of a sandbox).
+    Kind("team", N_("Team"), column=2,
+         help=N_("Several agents, a sandbox each with this board's settings, on its project folder: the lead talks to "
+                 "you and hands the others tasks on the team's board (sandbox-ai team). With it the board's Start "
+                 "starts the team; its board is shown here")),
     Kind("engine", N_("Engine"), ("--backend", "--image", "--image-variant", "--nested-containers", "--podman-url",
                                   "--binary", "--runtime"),
          column=0,
@@ -128,14 +160,18 @@ KINDS = {kind.key: kind for kind in (
 EDGES = {("workspace", "agent"), ("mount", "agent"), ("home", "agent"), ("kits", "agent"), ("agent", "proxy"),
          ("proxy", "network"), ("agent", "mcp"), ("approvals", "proxy"), ("git", "proxy"), ("devices", "agent"),
          ("limits", "agent"), ("display", "agent"), ("session", "agent"), ("logs", "proxy"), ("engine", "agent"),
-         ("vpn", "network"), ("agent", "llm"), ("agent", "service"), ("service", "proxy"), ("browser", "proxy")}
-CONNECTED_ONLY = {"workspace", "mount", "mcp", "service"}
+         ("vpn", "network"), ("agent", "llm"), ("agent", "service"), ("service", "proxy"), ("browser", "proxy"),
+         ("agent", "bridge"), ("agent", "cairn"), ("cairn", "proxy"), ("agent", "team")}
+CONNECTED_ONLY = {"workspace", "mount", "mcp", "service", "bridge", "team"}
 OWNER = {option: kind.key for kind in KINDS.values() for option in kind.options}
 # Options shown as a property of their own: proxy "enabled" (--no-proxy), workspace "readonly" (--workspace-ro),
 # the workspace, mount and MCP nodes themselves.
 OWNER.update({"--no-proxy": "proxy", "--workspace-ro": "workspace", "--workspace": "workspace", "--mount": "mount",
               "--mcp": "mcp", "--mcp-limits": "mcp", "--mcp-env": "mcp", "--service": "service",
               "--llm-param": "llm"})
+# A part's own settings (no launcher options) that are texts wherever a part has them: its name, path or choice.
+TEXT_PROPS = frozenset(("name", "path", "source", "dest", "mode", "agent", "model", "effort", "thinking", "arguments",
+                        "peer", "direction", "lead", "image", "raw", "entry"))
 LIMIT_KEYS = ("memory", "cpus", "pids", "tmp")  # an MCP node's own limits (props "limits"), --mcp-limits NAME:KEY=VALUE,...
 
 
@@ -152,17 +188,24 @@ class Node:
         name = tr(KINDS[self.kind].title)
         detail = {"workspace": self.props.get("path"), "mount": self.props.get("source"),
                   "mcp": self.props.get("name"), "service": self.props.get("name"), "agent": self.props.get("agent"),
-                  "llm": self.props.get("--llm")}.get(self.kind)
+                  "llm": self.props.get("--llm"), "bridge": self.props.get("peer"),
+                  "team": self.props.get("name")}.get(self.kind)
         return f"{name}: {printable(detail)}" if detail else name
 
     def key(self):
         """A stable name for the layout file (positions survive a reload of the options)."""
-        detail = {"workspace": "path", "mount": "source", "mcp": "name", "service": "name"}.get(self.kind)
+        detail = {"workspace": "path", "mount": "source", "mcp": "name", "service": "name",
+                  "bridge": "peer"}.get(self.kind)
         return f"{self.kind}:{self.props.get(detail, '')}" if detail else self.kind
 
 
 def snap(value, grid):
     return float(round(value / grid) * grid) if grid and grid > 1 else float(value)
+
+
+def prop_set(value):
+    """Whether a part's property VALUE sets something (an option given), not left empty or off."""
+    return value not in (None, "", [], {}, False)
 
 
 def ports(kind):
@@ -308,12 +351,45 @@ class Board:
             raise ValueError(f"not a board of this app: {exc!r}") from None
         return board
 
+    @classmethod
+    def part_problem(cls, kind, props, sai=None, policy=None):
+        """Why a part of KIND with the settings PROPS that came from outside the app cannot be shown and used, or None.
+        The clipboard holds what any program put there: a part is pasted only when its settings have the shapes this
+        app gives them (a launcher option's flag a yes or no, its list a list of texts, its value a text or number;
+        a part's own name, path or choice a text) and a board with it computes what a board shows (its title, the
+        command line, the problems, the badges) without an error."""
+        try:
+            if kind not in KINDS or not isinstance(props, dict) or not all(isinstance(key, str) for key in props):
+                return "not a part of this app"
+            options = _options(sai) if sai is not None else {}
+            for key, value in props.items():
+                option = options.get(key)
+                if option is not None and option.kind == "flag":
+                    sound = isinstance(value, bool)
+                elif option is not None and option.kind in ("list", "multi"):
+                    sound = isinstance(value, list) and all(isinstance(v, str) for v in value)
+                elif option is not None or key in TEXT_PROPS:
+                    sound = isinstance(value, str) or (option is not None and type(value) in (int, float))
+                else:
+                    sound = True
+                if not sound:
+                    return f"{key}: not what this app keeps there"
+            board = from_argv(sai, "claude", []) if sai is not None else cls()
+            node = board.first(kind) if KINDS[kind].single and board.first(kind) is not None else board.add(kind)
+            node.props = json.loads(json.dumps(props))
+            cls.checked(board.state(), sai, policy)
+        except Exception as exc:  # noqa: BLE001 - whatever a foreign part makes fail: not pasted
+            return f"{type(exc).__name__}: {exc}"
+        return None
+
     # -- layout --
 
     # The columns of layout(), by role: what configures the agent, the agent and what configures the proxy,
     # the proxy and what the agent talks to, the network. In each column, top to bottom, in this order.
     FLOW = (("workspace", "mount", "home", "kits", "engine", "devices", "limits", "display", "session"),
-            ("agent", "approvals", "git", "logs"), ("mcp", "llm", "service", "browser", "proxy", "vpn"), ("network",))
+            ("agent", "approvals", "git", "logs"),
+            ("mcp", "llm", "service", "cairn", "browser", "bridge", "team", "proxy", "vpn"),
+            ("network",))
 
     def layout(self, grid=0):
         """Left to right as the connections flow: the agent's files and settings, the agent, the proxy with the
@@ -526,14 +602,24 @@ def switch_agent(props, agent):
     model = str(props.get("model") or "")
     if model and model in AGENT_MODELS.get(before, ()) and model not in AGENT_MODELS.get(agent, ()):
         props["model"] = ""
+    from .models import keep_effort
+    keep_effort(props, agent)  # (an effort the model kept does not take in AGENT goes too)
     return props
+
+
+def set_model(props, model, sai=None):
+    """The agent part's PROPS changed in place to MODEL (the Board's Model choice): an effort the new model does not
+    take goes with it (the table of cloud models: models.efforts). The level removed, or None."""
+    from .models import keep_effort
+    props["model"] = str(model or "").strip()
+    return keep_effort(props, props.get("agent", "claude"), sai)
 
 
 def from_project(sai, document, directory):
     """The board of a project file (.sandbox-ai.json in DIRECTORY): its main workspace is DIRECTORY."""
     board = from_argv(sai, document.get("agent", ""), document.get("options", []), document.get("agent_args", []),
                       [str(directory)] + [str(w) for w in document.get("workspaces", [])])
-    # The file's other keys (mode, canaries, keep, log_debug, name, description) are no part of the board: kept for
+    # The file's other keys (mode, canaries, keep, log_debug, name, budget, description) are no part of the board: kept for
     # the file Apply writes, named above the board and in Apply's question (project_trust), never carried silently.
     # A key the launcher does not know is dropped (it would refuse the file).
     known = set(getattr(sai.launcher, "CONFIG_KEYS", ())) if sai is not None else set()
@@ -692,9 +778,10 @@ def image_problem(name, image, user_images):
               mine=your_images_text(user_images))
 
 
-def service_image_problems(sai, specs, user_images):
+def service_image_problems(sai, specs, user_images, templates=()):
     """[text] of the --service values SPECS whose image is none of USER_IMAGES (their names; None: not known, nothing
-    said): the Start page's check before a start (a value sandbox-ai's parser refuses is the launcher's to say)."""
+    said) nor of sandbox-ai's own TEMPLATES (built when the start needs one): the Start page's check before a start
+    (a value sandbox-ai's parser refuses is the launcher's to say)."""
     if user_images is None:
         return []
     module = services_module(sai)
@@ -708,15 +795,16 @@ def service_image_problems(sai, specs, user_images):
             name, _, rest = str(spec).partition(":")
             image = next((item.partition("=")[2] for item in rest.split(",") if item.startswith("image=")), name)
             props = {"name": name, "image": image}
-        if props.get("image") not in user_images:
+        if props.get("image") not in user_images and props.get("image") not in (templates or ()):
             found.append(image_problem(props.get("name", "?"), props.get("image"), user_images))
     return found
 
 
-def service_problems(sai, board, user_images=None):
+def service_problems(sai, board, user_images=None, templates=()):
     """[Problem] of the service nodes: one that cannot be read, what sandbox-ai's parser refuses, an image that is
-    none of yours (USER_IMAGES: their names, when known), two with one name or port, and the backends that have no
-    pod for them. The launcher's dry run has the last word (it also refuses them behind Tor)."""
+    none of yours (USER_IMAGES: their names, when known) nor sandbox-ai's own (TEMPLATES: built when a start needs
+    one), two with one name or port, and the backends that have no pod for them. The launcher's dry run has the last
+    word (it also refuses them behind Tor)."""
     found, names, ports = [], {}, {}
     nodes = [n for n in board.included() if n.kind == "service"]
     if not nodes:
@@ -728,6 +816,8 @@ def service_problems(sai, board, user_images=None):
         found.append(Problem(level, text, node.id))
     for node in nodes:
         props = node.props
+        if props.get("raw") and image_markers([str(props["raw"])]):
+            continue  # its image is a preset's value still: "Fill in …" says it (placeholders), read again once filled
         if props.get("raw"):
             add(tr("The service {name} cannot be read: {error}", name=printable(props.get("name") or "?"),
                    error=props.get("error") or tr("this sandbox-ai has no services (sandbox-ai update)")), node)
@@ -744,7 +834,8 @@ def service_problems(sai, board, user_images=None):
         if not str(props.get("image") or "").strip():
             add(tr("Choose the image of the service {name}: one of your images (Images page, Your images).",
                    name=printable(props["name"])), node)
-        elif user_images is not None and props.get("image") not in user_images:
+        elif user_images is not None and props.get("image") not in user_images and \
+                props.get("image") not in (templates or ()):
             add(image_problem(props["name"], props.get("image"), user_images), node)
         if props["name"] in names:
             add(tr("Two services are named {name}.", name=printable(props["name"])), node)
@@ -831,8 +922,9 @@ def values(board, sai=None):
         if agent.props.get("effort") and launcher_knows(sai, "--effort"):
             found["--effort"] = str(agent.props["effort"])
         from . import thinking
-        if agent.props.get("thinking") in thinking.VALUES and thinking.available(agent.props.get("agent", "claude")) \
-                and launcher_knows(sai, thinking.OPTION):
+        # (kept for an agent without the switch too, as a command line or project file had it: the launcher refuses it
+        # and problems() says why - nothing is dropped silently)
+        if agent.props.get("thinking") in thinking.VALUES and launcher_knows(sai, thinking.OPTION):
             found[thinking.OPTION] = str(agent.props["thinking"])
         try:
             agent_args += shlex.split(agent.props.get("arguments") or "")
@@ -853,7 +945,7 @@ def to_argv(sai, board, workspaces=True):
 
 def document_argv(board):
     """The options of the project file's own keys that no node holds (Board.document_extra): its security mode,
-    canaries, kept HOME, debug logs and name. A board start passes --no-config, so without these a paranoid
+    canaries, kept HOME, debug logs, name and budget. A board start passes --no-config, so without these a paranoid
     project would start as medium; given first, so an option the board sets itself wins (as on the command line
     over a project file)."""
     extra, argv = board.document_extra, []
@@ -868,6 +960,8 @@ def document_argv(board):
         argv.append("--log-debug")
     if isinstance(extra.get("name"), str) and extra["name"]:
         argv += ["--project-name", extra["name"]]
+    if "budget" in extra and not isinstance(extra["budget"], (bool, dict, list)) and extra["budget"] is not None:
+        argv += ["--budget", str(extra["budget"])]  # (as the launcher takes it from the file: merge_config)
     return argv
 
 
@@ -940,8 +1034,34 @@ def file_start_argv(sai, board):
     kept = {name: value for name, value in found.items() if name in forbidden or backend.project_refused(name, value)}
     argv = backend.argv_from_values(list(_options(sai).values()), kept)
     refused, extra = _refused_extra(board.extra)
-    argv += [t for t in extra if t.split("=", 1)[0] in forbidden] + refused
-    return argv + (["--workspace", workspaces[0]] if workspaces else [])
+    argv += [t for group in extra_groups(sai, extra) if group[0].split("=", 1)[0] in forbidden for t in group]
+    return argv + refused + (["--workspace", workspaces[0]] if workspaces else [])
+
+
+# Options of Board.extra a project file may not hold that are one of its keys: Apply writes them as that key (the
+# board's --mode high is the file's "mode": "high"), so the file means what the board means.
+EXTRA_KEYS = {"--mode": "mode", "--project-name": "name"}
+
+
+def extra_groups(sai, tokens):
+    """TOKENS (Board.extra) as groups: an option the launcher knows with its value (--X=V, or --X V), a flag, a token
+    of its own. What takes a project file's options apart or keeps some of them never cuts an option from its value."""
+    try:  # (every option of the parser, the hidden ones too: --session)
+        actions = sai.launcher.option_actions()
+    except Exception as _exc:  # noqa: BLE001 - an older launcher: the options the app offers
+        applog.swallowed("board", "extra_groups: an older launcher: the options the app offers", _exc)
+        actions = {name: argparse.Namespace(nargs=0 if o.kind == "flag" else None, const=o.const)
+                   for name, o in (_options(sai) if sai is not None else {}).items()}
+    tokens, groups, index = [str(t) for t in tokens], [], 0
+    while index < len(tokens):
+        name, equals, _ = tokens[index].partition("=")
+        action = actions.get(name) if tokens[index].startswith("--") else None
+        takes = action is not None and action.nargs != 0 and not equals and index + 1 < len(tokens)
+        if takes and action.nargs == "?" and tokens[index + 1].startswith("-"):
+            takes = False  # (an optional value not given: --browser alone)
+        groups.append(tokens[index:index + (2 if takes else 1)])
+        index += 2 if takes else 1
+    return groups
 
 
 def _refused_extra(tokens):
@@ -965,6 +1085,12 @@ def _refused_extra(tokens):
 
 
 def command_line(sai, board):
+    team = team_values(sai, board) if team_node(board) is not None else None
+    if team is not None and sai is not None:
+        try:
+            return shlex.join(["sandbox-ai", *sai.team_start_args("local", **team)])
+        except (ValueError, AttributeError):
+            pass  # (what is missing is a problem of the board: the start of one sandbox is shown meanwhile)
     agent, _, agent_args = values(board, sai)
     return shlex.join(["sandbox-ai", agent, *document_argv(board), *to_argv(sai, board),
                        *(["--", *agent_args] if agent_args else [])])
@@ -973,7 +1099,8 @@ def command_line(sai, board):
 def project_document(sai, board):
     """(.sandbox-ai.json document, main workspace) of the board: the first workspace is where the file lives,
     further ones are listed; options a project file may not set are left out (and kept in nothing: the
-    window shows them as problems first), and so are values it may not hold (--llm-traffic all: the
+    window shows them as problems first) - those that are a key of the file (EXTRA_KEYS: --mode, --project-name) are
+    written as that key -, and so are values it may not hold (--llm-traffic all: the
     launcher refuses the file with them; a start from the file gives them on its command line, file_start_argv)."""
     agent, found, agent_args = values(board, sai)
     workspaces = list(found.get("--workspace", []))
@@ -982,10 +1109,16 @@ def project_document(sai, board):
             if name not in forbidden and not backend.project_refused(name, value)}
     options = _options(sai)
     argv = backend.argv_from_values(list(options.values()), kept)
-    argv += [t for t in _refused_extra(board.extra)[1] if t.split("=", 1)[0] not in forbidden]
+    moved = {}
+    for group in extra_groups(sai, _refused_extra(board.extra)[1]):
+        name, equals, attached = group[0].partition("=")
+        if name not in forbidden:
+            argv += group
+        elif name in EXTRA_KEYS and (equals or len(group) == 2):
+            moved[EXTRA_KEYS[name]] = attached if equals else group[1]  # (the last one wins, as on the command line)
     known = set(getattr(sai.launcher, "CONFIG_KEYS", ()))
     document = {"version": 1, "agent": agent, "options": argv,
-                **{k: v for k, v in board.document_extra.items() if k in known}}
+                **{k: v for k, v in {**board.document_extra, **moved}.items() if k in known}}
     servers = {n.props["name"]: n.props["definition"] for n in board.of_kind("mcp")
                if n.props.get("project") and n.props.get("name") and isinstance(n.props.get("definition"), dict)}
     if servers:
@@ -1179,6 +1312,7 @@ def _domain(value):
 def _hosts_of(values_):
     """The --allow-host names, and what each --allow-domain DOMAIN stands for: DOMAIN and *.DOMAIN."""
     hosts = [str(h) for h in values_.get("--allow-host", [])]
+    hosts += [str(h).lower() for h in values_.get("--allow-shared-wildcard", [])]
     for value in values_.get("--allow-domain", []):
         hosts += [_domain(value), "*." + _domain(value)]
     return list(dict.fromkeys(hosts))
@@ -1191,10 +1325,52 @@ def _host_matches(host, pattern):
     return host == pattern
 
 
-def problems(sai, board, policy=None, user_images=None):
+def workspace_overlaps(board):
+    """[Problem] of the included workspaces that are one folder or one inside another, in the launcher's words
+    (validate: "Workspaces must not overlap"): the same folder added twice, or a folder and one below it. By their
+    paths as written (normalized, ~ kept as it is: the board may be another host's, whose HOME is not this one's; links
+    are the launcher's dry run's): nothing is read from the disk."""
+    found, seen = [], []
+    for node in board.included():
+        path = str(node.props.get("path", "")).strip() if node.kind == "workspace" else ""
+        if not path or remote_source.is_remote(path) or PLACEHOLDER.search(path) or \
+                not os.path.isabs(os.path.expanduser(path)):
+            continue
+        here = PurePosixPath(posixpath.normpath(path))
+        for other in seen:
+            if here == other or other in here.parents or here in other.parents:
+                found.append(Problem("error", tr("Workspaces must not overlap: {first} and {second}",
+                                                 first=printable(str(other)), second=printable(str(here))), node.id))
+                break
+        seen.append(here)
+    return found
+
+
+MOUNT_BASES = ("/work", "/mnt", "/opt")  # where a mount may go (agent_sandbox.safe_dest)
+
+
+def mount_dest_problem(dest):
+    """What the launcher refuses of the mount destination DEST (its safe_dest: an absolute path written plainly, at or
+    below /work, /mnt or /opt - not /mntx, not /opt/../etc), in words, or None."""
+    dest = str(dest or "")
+    path = PurePosixPath(dest)
+    if not dest.strip():
+        return tr("A mount goes under /work, /mnt or /opt.")
+    if not path.is_absolute() or ".." in path.parts or str(path) != dest:
+        return tr("The mount destination {dest} is not a plain absolute path (no .., no // and no / at the end).",
+                  dest=printable(dest) or "''")
+    if not any(path == PurePosixPath(base) or PurePosixPath(base) in path.parents for base in MOUNT_BASES):
+        return tr("A mount goes under /work, /mnt or /opt.")
+    return None
+
+
+def problems(sai, board, policy=None, user_images=None, session_logins=None, templates=()):
     """What the launcher or the administrator's POLICY would refuse ("error"), and what has no effect or
     contradicts itself ("warning"). The launcher's dry run has the last word; this is what can be said at
-    once, node by node. USER_IMAGES: the names of your images (sandbox-ai images list), when known."""
+    once, node by node. USER_IMAGES: the names of your images (sandbox-ai images list), when known; TEMPLATES: the
+    images of sandbox-ai's own Containerfiles there (images templates), built when a start needs one.
+    SESSION_LOGINS: the logins of the board's host's sessions (sandbox-ai login --status --sessions), when known."""
+    from . import thinking
     found = []
     agent_node = board.first("agent")
     agent, values_, _ = values(board)
@@ -1208,6 +1384,23 @@ def problems(sai, board, policy=None, user_images=None):
     if agent not in known:
         add("error", tr("Unknown agent {agent}: this sandbox-ai has {list}.", agent=printable(agent) or "?",
                         list=", ".join(known)), agent_node)
+    if agent_node is not None and agent in known and agent_node.props.get("thinking") in thinking.VALUES \
+            and not thinking.available(agent):
+        # (a command line or project file said it: kept, not dropped; the launcher refuses the start with it)
+        add("warning", tr("--show-thinking {value} is set, but {agent} has no such switch and the launcher refuses a "
+                          "start with it: {reason}. Set Show thinking back to the agent's default.",
+                          value=agent_node.props["thinking"], agent=agent, reason=thinking.reason(agent)), agent_node)
+    if agent_node is not None and agent in known and not values_.get("--llm"):
+        # The model and its effort, by the table of cloud models (models.py): an effort a listed model does not take
+        # is the launcher's own warning, in its words; a model the table does not list is passed on as it is.
+        from . import models as M
+        model = str(agent_node.props.get("model") or "").strip()
+        refused = M.effort_problem(agent, model, agent_node.props.get("effort"), sai)
+        if refused:
+            add("warning", refused, agent_node)
+        unknown = M.unknown_note(agent, model, sai)
+        if unknown:
+            add("warning", unknown, agent_node)
     if not board.of_kind("workspace"):
         add("warning", tr("No workspace: the folder the sandbox is started in becomes /work."))
     for node in board.nodes:
@@ -1219,20 +1412,40 @@ def problems(sai, board, policy=None, user_images=None):
             add("error", tr("A workspace needs a folder."), node)
         elif "," in path or "\n" in path:
             add("error", tr("A workspace path cannot contain commas or new lines."), node)
+        elif remote_source.is_remote(path):
+            # a folder of another machine (sshfs://...): its source checked as sandbox-ai checks it
+            try:
+                remote_source.parse(path)
+            except ValueError as exc:
+                add("error", tr("The workspace {path}: {problem}", path=printable(path), problem=str(exc)), node)
         elif not os.path.isabs(os.path.expanduser(path)) and not PLACEHOLDER.search(path):
             # (relative to what? the launcher refuses one in a project file; a start resolved it twice)
             add("error", tr("The workspace {path} is a relative path: give the folder in full (/… or ~/…).",
                             path=printable(path)), node)
+    found += workspace_overlaps(board)
     workspaces = board.of_kind("workspace")
     if len({bool(n.props.get("readonly")) for n in workspaces}) > 1:
         add("warning", tr("Read-only applies to every workspace (--workspace-ro), not to one."), workspaces[0])
     for node in board.of_kind("mount"):
+        if remote_source.is_remote(str(node.props.get("source", ""))):
+            try:
+                remote_source.parse(str(node.props["source"]))
+            except ValueError as exc:
+                add("error", tr("The mount {path}: {problem}", path=printable(node.props["source"]),
+                                problem=str(exc)), node)
+        if not str(node.props.get("source", "")).strip():
+            # (values() leaves a mount without a source out: shown on the board, it would be missing from the start)
+            add("error", tr("A mount needs a folder or file."), node)
         if node.props.get("mode") not in ("ro", "rw"):
             add("error", tr("A mount is read-only (ro) or writable (rw)."), node)
-        if not str(node.props.get("dest", "")).startswith(("/work", "/mnt", "/opt")):
-            add("error", tr("A mount goes under /work, /mnt or /opt."), node)
+        dest_problem = mount_dest_problem(node.props.get("dest", ""))
+        if dest_problem:
+            add("error", dest_problem, node)
+        elif any(c in str(node.props.get("source", "")) + str(node.props.get("dest", "")) for c in ",\n\r\0"):
+            add("error", tr("Mount paths cannot contain commas or control characters."), node)
     offline = values_.get("--offline") or "offline" in values_.get("--profile", [])
-    widening = [o for o in ("--allow", "--allow-host", "--allow-domain", "--allow-tcp", "--allow-host-port",
+    widening = [o for o in ("--allow", "--allow-host", "--allow-domain", "--allow-shared-wildcard", "--allow-tcp",
+                            "--allow-host-port",
                             "--frontier", "--dns",
                             "--nameserver", "--egress-all-allow", "--network", *PRESET_OPTIONS) if values_.get(o)]
     if offline and (widening or set(values_.get("--profile", [])) - {"offline"}):
@@ -1250,11 +1463,13 @@ def problems(sai, board, policy=None, user_images=None):
         if values_.get("--git-credentials"):
             add("error", tr("The token proxy takes --git-token-env, --git-token-file or --git-token-secret, not "
                             "--git-credentials."), git)
+        # Plain http only to a Git server on this machine's loopback (http://localhost:3000, a local Gitea): the
+        # launcher's own rule (token_proxy_target), asked of it; an older sandbox-ai without it has the last word.
         for option in tokens:
             for value in values_.get(option, []):
-                if str(value).startswith("http://"):
-                    add("error", tr("The token proxy adds tokens only to HTTPS servers: {url}",
-                                    url=printable(str(value).partition("=")[0])), git)
+                if str(value).lower().startswith("http://"):
+                    found += _checked(lambda value=str(value), kind=option.rsplit("-", 1)[1]:
+                                      sai.launcher.token_proxy_target(value, kind), git)
     if values_.get("--no-inspect") and not proxy_on:
         add("warning", tr("--no-inspect has no effect without the connection proxy."), proxy)
     for rule in values_.get("--allow-http", []):
@@ -1289,6 +1504,16 @@ def problems(sai, board, policy=None, user_images=None):
         add("error", tr("--qwen-enable is for Qwen Code only."), agent_node)
     if values_.get("--goose-enable") and agent != "goose":
         add("error", tr("--goose-enable is for Goose only."), agent_node)
+    if values_.get("--openhands-enable") and agent != "openhands":
+        add("error", tr("--openhands-enable is for OpenHands only."), agent_node)
+    if values_.get("--nanobot-enable") and agent != "nanobot":
+        add("error", tr("--nanobot-enable is for nanobot only."), agent_node)
+    if values_.get("--letta-enable") and agent != "letta":
+        add("error", tr("--letta-enable is for Letta Code only."), agent_node)
+    if values_.get("--opencode2-enable") and agent != "opencode2":
+        add("error", tr("--opencode2-enable is for OpenCode 2 only."), agent_node)
+    if values_.get("--pi-enable") and agent != "pi":
+        add("error", tr("--pi-enable is for Pi only."), agent_node)
     if values_.get("--tmux") and values_.get("--no-tmux"):
         add("error", tr("tmux cannot be both required and switched off."), board.first("session"))
     if values_.get("--copy-auth") and values_.get("--no-auth"):
@@ -1315,14 +1540,292 @@ def problems(sai, board, policy=None, user_images=None):
         found += _checked(lambda: sai.launcher.RUNTIME.Ruleset.validated(rules, "rules"), approvals)
     for node in board.of_kind("mcp"):
         definition = node.props.get("definition")
+        prefix, colon, bare = str(node.props.get("name") or "").partition(":")
+        if colon and not node.props.get("project") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", bare):
+            # (the launcher takes a server's name, never its catalog: hub:radare2 was refused as unknown - and its
+            # start's preparation added radare2, found "hub:radare2" still missing, and added it again)
+            add("error", tr("The MCP server {given}: --mcp takes the name of a server (\u201c{name}\u201d); its "
+                            "catalog ({prefix}) is chosen when it is added - give the name alone.",
+                            given=printable(node.props["name"]), name=printable(bare), prefix=printable(prefix)),
+                node)
         if node.props.get("project") and isinstance(definition, dict) and node.props.get("name"):
             found += _checked(lambda: sai.module("mcp").validated({node.props["name"]: definition},
                                                                    tr("MCP server")), node)
         found += mcp_limit_problems(sai, node)
         found += mcp_env_problems(sai, node)
     found += llm_param_problems(sai, board)
-    found += service_problems(sai, board, user_images)
+    found += service_problems(sai, board, user_images, templates)
+    found += bridge_problems(board)
+    found += team_problems(board)
+    found += session_login_problems(board, agent, values_, session_logins)
     found += policy_problems(board, values_, policy or {})
+    return found
+
+
+# -- the login of the start: "Login from" of the part HOME and login --
+
+# The choices of "Login from", each with the options it sets (the others of LOGIN_OPTIONS are taken away): the central
+# login and this computer's are both the launcher's automatic choice (the central one when one is stored).
+LOGIN_CHOICES = (("central", N_("Central login (sandbox-ai login)")), ("host", N_("This computer's login")),
+                 ("session", N_("From a session…")), ("file", N_("Login file…")), ("none", N_("No login")))
+LOGIN_OPTIONS = ("--no-auth", "--auth-file", "--auth-from-session", "--import-codex-auth")
+ROTATING_WARNING = N_("Subscription logins rotate their refresh tokens: this start and the session {name} refreshing "
+                      "one login outside the central store can log each other out. Safer: import it as the central "
+                      "login (Import as central login instead).")
+
+
+def login_choice(props, central=None):
+    """Which "Login from" PROPS (the HOME and login part's) stand for: none, file, session, else central (CENTRAL: a
+    central login is stored, or not known) or host."""
+    if props.get("--no-auth"):
+        return "none"
+    if props.get("--auth-file") or props.get("login_from") == "file":
+        return "file"
+    if "--auth-from-session" in props or props.get("login_from") == "session":
+        return "session"
+    return "host" if central is False else "central"
+
+
+def set_login_choice(props, choice, value=None):
+    """PROPS made to say CHOICE (login_choice's words): its option set (VALUE: the session's name or the file), the
+    other login options taken away."""
+    for option in LOGIN_OPTIONS:
+        props.pop(option, None)
+    props.pop("login_from", None)
+    if choice == "none":
+        props["--no-auth"] = True
+    elif choice == "file":
+        if value:
+            props["--auth-file"] = str(value)
+        else:
+            props["login_from"] = "file"
+    elif choice == "session":
+        if value:
+            props["--auth-from-session"] = str(value)
+        else:
+            props["login_from"] = "session"
+
+
+def session_login_problems(board, agent, values_, sessions):
+    """The checks of "Login from: a session" (--auth-from-session NAME): the rotating refresh tokens (always), and with
+    SESSIONS (sandbox-ai login --status --sessions of the board's host) a session that is no longer there (ended
+    without its HOME), one of another agent, one without a usable login."""
+    found = []
+    home = board.first("home")
+    node = home.id if home is not None else None
+    if home is not None and home.props.get("login_from") == "session" and not values_.get("--auth-from-session"):
+        found.append(Problem("error", tr("Login from a session: choose the session."), node))
+    if home is not None and home.props.get("login_from") == "file" and not values_.get("--auth-file"):
+        found.append(Problem("error", tr("Login from a login file: choose the file."), node))
+    name = values_.get("--auth-from-session")
+    if not name:
+        return found
+    found.append(Problem("warning", tr(ROTATING_WARNING, name=printable(name)), node))
+    if not isinstance(sessions, dict):
+        return found
+    rows = [row for row in sessions.get("sessions") or [] if isinstance(row, dict)]
+    row = next((r for r in rows if r.get("name") == name), None) or next((r for r in rows if r.get("id") == name), None)
+    if row is None:
+        found.append(Problem("error", tr("The session {name} is neither running nor kept with its HOME: it has no "
+                                         "login to give.", name=printable(name)), node))
+    elif row.get("agent") != agent:
+        found.append(Problem("error", tr("The session {name} runs {other}: its login is no {agent} login.",
+                                         name=printable(name), other=printable(str(row.get("agent"))),
+                                         agent=printable(agent)), node))
+    elif not row.get("login"):
+        found.append(Problem("error", tr("The session {name} has no usable login: {why}", name=printable(name),
+                                         why=printable(str(row.get("problem") or tr("no login")))), node))
+    return found
+
+
+# -- the Bridge part: a session bridge made once the board's start runs --
+
+BRIDGE_DIRECTIONS = (("out", N_("this agent reaches the other session")),
+                     ("in", N_("the other session reaches this agent")))
+
+
+def bridge_nodes(board):
+    """The Bridge parts connected to the agent (an unconnected one is not made)."""
+    return [node for node in board.included() if node.kind == "bridge"]
+
+
+def bridge_caps(props, strict=True):
+    """The --allow list of a Bridge part's PROPS (paths relative to the other workspace). STRICT: ValueError for what
+    the launcher would refuse; else what can be shown."""
+    try:
+        return BR.capabilities(bool(props.get("message")), bool(props.get("ask")), _texts(props.get("read")),
+                               _texts(props.get("write")), bool(props.get("watch")))
+    except ValueError:
+        if strict:
+            raise
+        return [name for name in ("message", "ask", "watch") if props.get(name)]
+
+
+def _texts(value):
+    return [str(v) for v in value if isinstance(v, (str, int, float))] if isinstance(value, list) else []
+
+
+def bridge_values(props, name, host=None):
+    """{a, b, allow, ...} (bridges.add_values) of a Bridge part's PROPS for the start NAME of the board: A reaches B -
+    the board's start reaches the other session ("out", the default) or the other one reaches it ("in"). HOST: where
+    the board starts (None or "local": this machine) - its start is HOST:NAME then, and the other session is named as
+    the board's host sees it (bridges.on_host: a bare name is a session of HOST, local:NAME this machine's).
+    ValueError: what is missing or wrong."""
+    peer = BR.on_host(str(props.get("peer") or "").strip(), host)
+    start = name if host in (None, "local") else f"{host}:{name}"
+    a, b = (start, peer) if props.get("direction", "out") == "out" else (peer, start)
+    limits = props.get("limits") if isinstance(props.get("limits"), dict) else {}
+    return BR.add_values(a, b, bridge_caps(props), both=bool(props.get("both")), until=props.get("until") or "",
+                         ask=props.get("ask_mode") or "first", watch=bool(props.get("watch")),
+                         actions=_texts(props.get("actions")) if "actions" in props else BR.DEFAULT_ACTIONS,
+                         limits={key: str(value) for key, value in limits.items() if key in dict(
+                             (k, None) for k, *_ in BR.LIMITS)})
+
+
+def bridge_problems(board):
+    """[Problem] of the Bridge parts: no other session chosen (none is made), what the launcher would refuse, and an
+    agent that reads its MCP servers only when it starts (it would not see the bridge)."""
+    found = []
+    agent = (board.first("agent").props.get("agent", "claude") if board.first("agent") else "claude")
+    for node in bridge_nodes(board):
+        if not str(node.props.get("peer") or "").strip():
+            found.append(Problem("warning", tr("Bridge: choose the running session it joins; without one no bridge "
+                                               "is made."), node.id))
+            continue
+        try:
+            bridge_values(node.props, "board-start")
+        except ValueError as exc:
+            found.append(Problem("error", tr("Bridge to {peer}: {problem}", peer=printable(node.props["peer"]),
+                                             problem=printable_text(str(exc).replace("\n", "; "))), node.id))
+        props = node.props
+        # This agent gets a tool of the bridge: it reaches the other session, or it is reached with an inbox (a
+        # message, question or hint) or both ways; only watched (or read), it needs none.
+        sees = props.get("direction", "out") == "out" or BR.peer_sees_tools(
+            props.get("message"), props.get("ask"), props.get("watch") and "hint" in _texts(props.get("actions")),
+            props.get("both"))
+        if BR.mcp_at_start(agent) and sees:
+            found.append(Problem("warning", tr("Bridge: {agent} reads its MCP servers only when it starts, so it does "
+                                               "not see a bridge made after its start (Claude Code does).",
+                                               agent=printable(agent)), node.id))
+    return found
+
+
+# -- the Team part: the board's sandbox once per agent (sandbox-ai team), started with team start --
+
+TEAM_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,19}")  # sandbox-ai's team.TEAM_NAME
+# A member's own launcher options on the Team part: (its props key, the launcher option team start gives it)
+TEAM_MEMBER_OPTIONS = (("models", "--model"), ("llms", "--llm"), ("modes", "--mode"))
+
+
+def team_label(name, host):
+    """A team's (or member's) NAME as this machine names it: NAME here, HOST:NAME of another host (as bridges and
+    the Sandboxes page name a start of a host)."""
+    return name if host in (None, "local") else f"{printable(host)}:{name}"
+
+
+def team_node(board):
+    """The board's Team part while it is connected to the agent, else None."""
+    node = board.first("team")
+    return node if node is not None and board.connected(node) else None
+
+
+def team_members(props):
+    """The agents of a Team part's PROPS, the lead first (its "lead" and "members"; team agents only, each once)."""
+    members = [a for a in props.get("members") or [] if a in backend.TEAM_AGENTS] \
+        if isinstance(props.get("members"), list) else []
+    lead = props.get("lead")
+    return list(dict.fromkeys(([lead] if lead in backend.TEAM_AGENTS else []) + members))
+
+
+def _member_map(props, key, members):
+    value = props.get(key)
+    return {agent: str(text).strip() for agent, text in value.items() if agent in members and str(text or "").strip()} \
+        if isinstance(value, dict) else {}
+
+
+def team_options(sai, board, local=True):
+    """The launcher options of every member of a team made from BOARD: the board's own (launcher_argv) without what
+    team start chooses itself (the workspace, the project's name) and without the agent's --model (the board's agent
+    is one member: its model is that member's, team_values); --no-config, as a board start has it."""
+    rules = project_rules(board)
+    copy = ["--rules", str(rules_copy(rules))] if rules is not None and local else []
+    argv, kept, index = document_argv(board) + to_argv(sai, board, workspaces=False) + copy, [], 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ("--project-name", "--model") and index + 1 < len(argv):
+            index += 2
+            continue
+        if not token.startswith(("--project-name=", "--model=")):
+            kept.append(token)
+        index += 1
+    return kept + ["--no-config"]
+
+
+def team_values(sai, board, local=True):
+    """{name, agents, workspace, options, roles, member_options, shared_openvpn} of the board's Team part - the
+    arguments of backend.team_start_args - or None without one. The board's agent, when it is a member, takes the
+    Agent part's model unless the Team part gives it another."""
+    node = team_node(board)
+    if node is None:
+        return None
+    props, members = node.props, team_members(node.props)
+    workspaces = [str(n.props.get("path") or "").strip() for n in board.included() if n.kind == "workspace"]
+    own = {}
+    for key, option in TEAM_MEMBER_OPTIONS:
+        for agent, value in _member_map(props, key, members).items():
+            own.setdefault(agent, {})[option] = value
+    agent = board.first("agent")
+    model = str(agent.props.get("model") or "").strip() if agent is not None else ""
+    chosen = agent.props.get("agent", "claude") if agent is not None else None
+    if model and chosen in members and "--model" not in own.get(chosen, {}):
+        own.setdefault(chosen, {})["--model"] = model
+    return {"name": str(props.get("name") or "").strip(), "agents": members,
+            "workspace": next((w for w in workspaces if w), ""), "options": team_options(sai, board, local),
+            "roles": _member_map(props, "roles", members), "member_options": own,
+            "shared_openvpn": bool(props.get("shared_openvpn"))}
+
+
+def team_problems(board):
+    """[Problem] of the Team part (what the app needs to ask team start at all): its name, two or more members, one
+    project folder, no Bridge part beside it, the agent's arguments (a member starts with its team prompt). The rest -
+    the options a team chooses itself, VPN profiles in several members, a member's model or mode - is team start's
+    own check (team start --dry-run on the board's host), shown as its verdict."""
+    node = team_node(board)
+    if node is None:
+        return []
+    found, props = [], node.props
+    if not TEAM_NAME.fullmatch(str(props.get("name") or "")):
+        found.append(Problem("error", tr("Team: give it a name of 1-20 of a-z, 0-9, '_' and '-', starting with a "
+                                         "letter or digit."), node.id))
+    if len(team_members(props)) < 2:
+        found.append(Problem("error", tr("Team: choose a lead and at least one more member."), node.id))
+    workspaces = [n for n in board.included() if n.kind == "workspace"]
+    if len(workspaces) > 1:
+        found.append(Problem("error", tr("Team: its members share one project folder; connect only one."), node.id))
+    if any(str(n.props.get("peer") or "").strip() for n in bridge_nodes(board)):
+        found.append(Problem("error", tr("Team: a board with a team makes no bridges (its members are the sessions "
+                                         "NAME-AGENT); remove the Bridge part or the Team part."), node.id))
+    agent = board.first("agent")
+    if agent is not None and str(agent.props.get("arguments") or "").strip():
+        found.append(Problem("warning", tr("Team: the agent's arguments are not passed on; each member starts with "
+                                           "its team prompt (and its role)."), node.id))
+    # The Agent part's effort and thinking go to every member (team start has no option of a member's own for them):
+    # a member whose agent does not take them refuses its start (agent_sandbox.check_model_effort, check_show_thinking).
+    from . import thinking
+    from .guide import AGENT_EFFORTS
+    effort = str(agent.props.get("effort") or "").strip() if agent is not None else ""
+    refusing = [a for a in team_members(props) if effort and effort not in AGENT_EFFORTS.get(a, ())]
+    if refusing:
+        found.append(Problem("error", tr("Team: --effort {level} goes to every member, and {agents} take no such "
+                                         "level (their start is refused). Set the Agent part's effort back to the "
+                                         "agent's default, or choose members that take it.", level=printable(effort),
+                                         agents=", ".join(refusing)), node.id))
+    shown = agent.props.get("thinking") if agent is not None else None
+    silent = [a for a in team_members(props) if shown in thinking.VALUES and not thinking.available(a)]
+    if silent:
+        found.append(Problem("error", tr("Team: --show-thinking {value} goes to every member, and {agents} have no "
+                                         "switch for it (their start is refused). Set Show thinking back to the "
+                                         "agent's default.", value=shown, agents=", ".join(silent)), node.id))
     return found
 
 
@@ -1386,6 +1889,18 @@ def missing_problems(missing):
                                   "Apply).", path=printable(folder)), node_id) for node_id, folder in missing]
 
 
+def tool_budget_problems(board, plan):
+    """[Problem] of the launcher's dry run PLAN when the board's model would see more MCP tools than its class copes
+    with ("mcp_tools": sandbox-ai's mcp_budget count, round 5 of the local-model research): one warning on the LLM part
+    with the servers to leave out - never an error, the start goes on; [] otherwise (an older sandbox-ai has none)."""
+    from . import model_profile as MP
+    text = MP.tool_budget_finding((plan or {}).get("mcp_tools") if isinstance(plan, dict) else None)
+    if not text:
+        return []
+    llm = board.first("llm")
+    return [Problem("warning", printable_text(text)[:800], llm.id if llm is not None else None)]
+
+
 def launcher_problems(board, message):
     """[Problem] of what the launcher's dry run refused about the board's MCP servers, each problem on its own (the
     launcher says all of them at once before anything is made: mcp.start_problems), on the MCP part it is about; []
@@ -1413,6 +1928,22 @@ def launcher_problems(board, message):
 BUILD_OFFER = re.compile(r"is not built on this host(?: \(Podman's image store: [^()\n]{1,600}\))? \(nothing is pulled "
                          r"at a start\): sandbox-ai (build(?: --variant [A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
                          r"(?:@[a-z]{2,16})?| [a-z][a-z0-9-]{0,31}))[ \t]*$", re.M)
+
+
+# A secret a start names that is not kept yet, as the launcher says it (--api-key, --secret-env, --service, --publish:
+# "no secret NAME; keep one with: sandbox-ai secrets set NAME"): only the very same name twice, so that nothing else of
+# a message is ever read as a name.
+SECRET_OFFER = re.compile(r"no secret ([A-Za-z_][A-Za-z0-9_]{0,63}); keep one with: sandbox-ai secrets set \1(?![A-Za-z0-9_])")
+
+
+def secret_offers(message):
+    """[NAME, ...] of the secrets the launcher's refusal MESSAGE says are not kept yet, each once: the Board offers to
+    keep each (a password field, then `sandbox-ai secrets set NAME` with the value on its standard input)."""
+    found = []
+    for name in SECRET_OFFER.findall(str(message or "")):
+        if name not in found:
+            found.append(name)
+    return found
 
 
 def build_offers(message):
@@ -1542,9 +2073,42 @@ SENSITIVE_PARTS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".net
 CAPABILITIES = ("read", "write", "reach", "secrets", "code")
 
 
+LAUNCHER_WARNING = re.compile(r"^(?:agent-sandbox|sandbox-ai(?: [a-z-]+)?): warning: (.+)$")
+
+
+def launcher_warnings(text):
+    """[warning] of the launcher's own in TEXT (what a sandbox-ai command said on standard error or output): each
+    line "agent-sandbox: warning: ..." (or "sandbox-ai mcp: warning: ..."), without its prefix, each once. A host
+    path you chose with a risk (HOME, sandbox-ai's own folders, the launcher's tree, a kernel tree...) is given, and
+    such a line says what it means."""
+    found = []
+    for line in str(text or "").splitlines():
+        match = LAUNCHER_WARNING.match(line.strip())
+        if match and match.group(1) not in found:
+            found.append(match.group(1))
+    return found
+
+
+def path_warnings(warnings):
+    """The launcher's WARNINGS (launcher_warnings: English, as the launcher says them) under a line of the app's own
+    in the chosen language; "" without any."""
+    if not warnings:
+        return ""
+    return tr("You decide what a sandbox gets: it is given, and the launcher says what it means (read-only is the "
+              "safer choice):") + "\n" + "\n".join(f"• {printable_text(text)}" for text in warnings)
+
+
+SYSTEM_TOPS = ("etc", "var", "usr", "boot", "root", "proc", "sys", "dev")  # /NAME: the system's, not a project's
+
+
 def sensitive(path, launcher=None):
     """Why the agent should not see host PATH ("bad"), or a note ("warn"), or None for an ordinary folder.
-    The launcher's own private_locations() (its settings, keys and program directories) count when given."""
+    The launcher's own private_locations() (its settings, keys and program directories) count when given. A folder
+    of another machine (sshfs://...) is a note of its own: the start's host mounts it, the files are that machine's."""
+    from . import remote_source
+    if remote_source.is_remote(str(path)):
+        return "warn", tr("a folder of another machine, mounted with sshfs: its files are that machine's, its traffic "
+                          "does not pass the sandbox's proxy")
     try:
         resolved = Path(os.path.expanduser(str(path))).absolute().resolve(strict=False)
     except (OSError, RuntimeError, ValueError):
@@ -1571,7 +2135,9 @@ def sensitive(path, launcher=None):
     hit = next((part for part in resolved.parts if part in SENSITIVE_PARTS), None)
     if hit:
         return "bad", tr("holds {name}: keys or settings", name=printable(hit))
-    if str(resolved).startswith(("/etc", "/var", "/usr", "/boot", "/root", "/proc", "/sys", "/dev")):
+    # A system directory, as whole path components (not /rootfs), and never inside your HOME: root's projects live
+    # under /root, a HOME may be under /var (/var/home/USER).
+    if resolved.parts[1:2] and resolved.parts[1] in SYSTEM_TOPS and home not in resolved.parents:
         return "warn", tr("a system directory")
     try:
         world = resolved.is_dir() and resolved.stat().st_mode & 0o002
@@ -1682,6 +2248,9 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
                 add("reach", "info", tr("{host} (HTTPS)", host=printable(host)), network, 1)
         for value in values_.get("--allow-domain", []):
             add("reach", "bad", tr("{domain} and every host below it", domain=printable(_domain(value))), network, 15)
+        for value in values_.get("--allow-shared-wildcard", []):
+            add("reach", "bad", tr("Every host matching {host}, below a shared service: any server anyone rents "
+                                   "there", host=printable(value)), network, 25)
         for port in values_.get("--allow-host-port", []):
             ssh = str(port) == "22"
             add("reach", "bad" if ssh else "warn",
@@ -1741,6 +2310,9 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
         add("secrets", "warn", tr("The agent's login is copied in"), home, 5)
     if values_.get("--auth-file"):
         add("secrets", "warn", tr("Login file {path}", path=printable(values_["--auth-file"])), home, 8)
+    if values_.get("--auth-from-session"):
+        add("secrets", "warn", tr("The login of the session {name} is copied in",
+                                  name=printable(values_["--auth-from-session"])), home, 5)
     if values_.get("--import-codex-auth"):
         add("secrets", "warn", tr("Codex login imported from {path}", path=printable(values_["--import-codex-auth"])),
             home, 5)
@@ -1802,6 +2374,11 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
         if profile not in ("fresh", "session"):
             add("write", "warn", tr("The browser keeps its profile (logins, cookies) in {path}", path=printable(profile)),
                 browser, 3)
+    cairn = board.first("cairn")
+    if cairn is not None and values_.get("--cairn"):
+        # Cairn hands out tasks on its own, and its workers run without their own questions (Cairn's flags).
+        add("code", "warn", tr("Cairn starts the session's agents as its workers on its own, without their approval "
+                               "prompts (the sandbox stays in force); every task spends your models' usage"), cairn, 5)
     devices = board.first("devices")
     for value in values_.get("--device", []):
         add("read", "bad", tr("Host device {path}", path=printable(value)), devices, 15)
@@ -1825,6 +2402,36 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
         level = "warn" if str(value).startswith(("gateway:", "scheduler")) else "info"
         add("reach", level, tr("Goose: {features} turned on (their hosts open)", features=printable(value)),
             agent_node, 5 if level == "warn" else 2)
+    for value in values_.get("--openhands-enable", []):
+        # OpenHands' features each open their own hosts (openhands.py); its automation backend runs automations on its
+        # own. Its telemetry is never one of them.
+        level = "warn" if "automations" in str(value) else "info"
+        add("reach", level, tr("OpenHands: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
+    for value in values_.get("--nanobot-enable", []):
+        # nanobot's features each open their own hosts (nanobot.py); its Telegram channel reaches the agent from
+        # outside, its scheduler runs turns on its own. Its telemetry is never one of them.
+        level = "warn" if str(value).startswith(("gateway:", "scheduler")) else "info"
+        add("reach", level, tr("nanobot: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
+    for value in values_.get("--letta-enable", []):
+        # Letta Code's features each open their own hosts (letta.py); cloud puts its memory in Letta Cloud. Its
+        # telemetry is never one of them.
+        level = "warn" if "cloud" in str(value).split(",") else "info"
+        add("reach", level, tr("Letta Code: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
+    for value in values_.get("--opencode2-enable", []):
+        # OpenCode 2's features each open their own hosts (opencode2.py); plugins install code from npm at run time.
+        # Its telemetry is never one of them.
+        level = "warn" if "plugins" in str(value).split(",") else "info"
+        add("reach", level, tr("OpenCode 2: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
+    for value in values_.get("--pi-enable", []):
+        # Pi's features each open their own hosts (pi.py); packages installs code from npm and GitHub that runs in
+        # the sandbox, share uploads the session. Its telemetry is never one of them.
+        level = "warn" if {"packages", "share"} & set(str(value).split(",")) else "info"
+        add("reach", level, tr("Pi: {features} turned on (their hosts open)", features=printable(value)),
+            agent_node, 5 if level == "warn" else 2)
     # Services: containers of images nobody reviewed, beside the agent (on its network, behind its firewall)
     for node in board.included():
         if node.kind != "service" or not node.props.get("name"):
@@ -1839,6 +2446,21 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
         for entry in node.props.get("secrets") or []:
             add("secrets", "warn", tr("Secret {secret} given to the service {name}", secret=printable(
                 entry.get("secret") or entry.get("name")), name=printable(node.props["name"])), node, 2)
+    # Session bridges: another running session reaches this one or is reached (its data can flow either way)
+    for node in bridge_nodes(board):
+        peer = printable(node.props.get("peer") or "?")
+        caps = printable(",".join(bridge_caps(node.props, strict=False)) or "-")
+        text = tr("Bridge: it may reach the session {peer} ({caps})", peer=peer, caps=caps) \
+            if node.props.get("direction", "out") == "out" else \
+            tr("Bridge: the session {peer} may reach it ({caps})", peer=peer, caps=caps)
+        add("reach", "warn", text + ("; " + tr("both ways") if node.props.get("both") else ""), node, 5)
+    # A team: the board's sandbox once per member, all on one project folder
+    team = team_node(board)
+    if team is not None and len(team_members(team.props)) > 1:
+        add("reach", "info", tr("Team {name}: {count} sandboxes of these settings ({members}) on one project folder; "
+                                "nothing keeps two of them from changing the same file", name=printable(
+                                    team.props.get("name") or "?"), count=len(team_members(team.props)),
+                                members=", ".join(team_members(team.props))), team, 0)
     # MCP servers: their folders and network count for the agent that uses them
     for node in board.included():
         if node.kind != "mcp":
@@ -1897,7 +2519,7 @@ def server_network(definition):
         value = options[index + 1] if index + 1 < len(options) else ""
         if option in PRESET_OPTIONS:
             reached.append(option[len("--allow-"):])
-        elif option in ("--allow-host", "--allow", "--allow-tcp"):
+        elif option in ("--allow-host", "--allow-shared-wildcard", "--allow", "--allow-tcp"):
             reached.append(value)
         elif option == "--allow-domain":
             reached.append(f"{_domain(value)}, *.{_domain(value)}")
@@ -2009,3 +2631,73 @@ def write_layout(directory, board):
             pass
         raise
     return path
+
+
+# -- a board as one self-sufficient file (sandbox-ai board export|import) --
+
+BUNDLE_APP_KINDS = ("bridge", "team")  # parts of the app alone (no launcher option): carried by the board's state
+
+
+def bundle_document(sai, board, name):
+    """The board file `sandbox-ai board export --board -` reads ("sandbox-ai-board", version 1): the board's start as
+    the launcher takes it (the project file's own keys as options, every workspace), the project's own MCP servers and
+    ruleset, and the board itself (its parts, places, labels, bridges and team: Board.state())."""
+    agent, _, agent_args = values(board, sai)
+    options = [*document_argv(board), *to_argv(sai, board)]
+    project = {}
+    rules = project_rules(board)
+    if rules is not None:
+        project["rules"] = json.loads(json.dumps(rules))
+    servers = {n.props["name"]: n.props["definition"] for n in board.included() if n.kind == "mcp"
+               and n.props.get("project") and n.props.get("name") and isinstance(n.props.get("definition"), dict)}
+    if servers:
+        project["mcp_servers"] = json.loads(json.dumps(servers))
+    if isinstance(board.document_extra.get("description"), str) and board.document_extra["description"]:
+        project["description"] = board.document_extra["description"]
+    return {"schema": "sandbox-ai-board", "version": 1, "name": str(name or "board")[:80], "agent": agent,
+            "options": options, "agent_args": agent_args, "project": project, "state": board.state()}
+
+
+def imported_board(sai, document):
+    """The board of an imported board file (`sandbox-ai board import` wrote it): made from its start as the launcher
+    takes it (from_argv: it means exactly that command line), with the places, labels, bridges and team of the board
+    it came from (its state, data: read through Board.checked's rules, a part that does not fit left out). (board,
+    the main workspace or None)."""
+    options = [str(v) for v in document.get("options", []) if isinstance(v, str)]
+    arguments = [str(v) for v in document.get("agent_args", []) if isinstance(v, str)]
+    board = from_argv(sai, str(document.get("agent") or "claude"), options, arguments)
+    state = document.get("state")
+    old = None
+    if isinstance(state, dict):
+        try:
+            old = Board.from_state(state)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            old = None
+    if old is not None:
+        # The state is the bundle's - another machine's file, which anyone may have made or edited: a part of it is
+        # used only when it is a part of this app at a place a board has (finite numbers), and a Bridge or Team part
+        # only when a board can show and use its settings (Board.part_problem). Taken as they came, a place that was
+        # a text or a setting named as one of Board.add's own arguments raised while the board was shown: the import
+        # written, the Board left with half a scene.
+        def number(value):
+            return type(value) in (int, float) and value == value and abs(value) < 1e6
+        sound = [node for node in old.nodes if node.kind in KINDS and isinstance(node.props, dict)
+                 and number(node.x) and number(node.y)]
+        board.place({"version": 1, "nodes": {node.key(): [node.x, node.y] for node in sound}})
+        board.labels = {k: list(v) for k, v in old.labels.items()}
+        agent, before = board.first("agent"), old.first("agent")
+        for node in sound:
+            if node.kind not in BUNDLE_APP_KINDS or (KINDS[node.kind].single and board.first(node.kind) is not None) \
+                    or Board.part_problem(node.kind, node.props, sai) is not None:
+                continue
+            added = board.add(node.kind, connect=False)
+            added.props = json.loads(json.dumps(node.props))  # (never as Board.add's own arguments)
+            added.x, added.y = float(node.x), float(node.y)
+            try:
+                connected = before is not None and (before.id, node.id) in old.edges
+            except TypeError:  # (an id that is no number: it names no connection)
+                connected = False
+            if connected and agent is not None:
+                board.connect(agent.id, added.id)
+    workspace = board.first("workspace")
+    return board, (str(workspace.props.get("path")) if workspace is not None and workspace.props.get("path") else None)

@@ -139,14 +139,17 @@ def test_check_refuses(options, match):
         b.check(start(*options), s)
 
 
-def test_check_edges(tmp_path, monkeypatch):
+def test_check_edges(tmp_path, monkeypatch, capsys):
     # a profile of yours: a folder outside the agent's reach (not a workspace, not in one)
     folder = tmp_path / "profiles" / "chromium"
     a = start("--browser", "--browser-profile", str(folder), "--workspace", str(tmp_path / "work"))
     assert b.check(a, s)["profile_dir"] == str(folder)
+    assert "warning" not in capsys.readouterr().err
+    # one in the workspace: you decide - given, with a warning that the agent can read and change its logins
     inside = start("--browser", "--browser-profile", str(tmp_path / "work" / "p"), "--workspace", str(tmp_path / "work"))
-    with pytest.raises(ValueError, match="outside the workspace"):
-        b.check(inside, s)
+    assert b.check(inside, s)["profile_dir"] == str(tmp_path / "work" / "p")
+    said = capsys.readouterr().err
+    assert "agent-sandbox: warning: --browser-profile" in said and "logins and cookies" in said
     (tmp_path / "file").write_text("x")
     with pytest.raises(ValueError, match="not a folder"):
         b.check(start("--browser", "--browser-profile", str(tmp_path / "file")), s)
@@ -636,3 +639,20 @@ def test_runtime_main_starts_display_then_browser_and_stops_on_sigterm(tmp_path,
     assert (tmp_path / "home" / "profile").is_dir()  # fresh: in HOME, a tmpfs of its container
     (mount / "config.json").write_text(json.dumps({"kind": "opera"}))
     assert rt.main(mount, tmp_path / "home", Runtime, popen, sleep) == 2
+
+
+@pytest.mark.parametrize("kind", ["firefox", "chromium"])
+def test_the_browser_keeps_its_shared_memory_out_of_the_pods_dev_shm(tmp_path, kind):
+    """The pod shares its IPC namespace - and with it its /dev/shm - with the agent's container. Chromium keeps its
+    shared memory in /tmp (--disable-dev-shm-usage); Firefox has no such switch: what it puts in /dev/shm (POSIX shared
+    memory where memfd is not there, named semaphores) - pages, what you type - the agent could read and change. The
+    browser's container gets a /dev/shm of its own (a tmpfs, nothing executable), whichever browser it runs."""
+    a = checked("--browser", kind)
+    a.control_dir = tmp_path / "runs" / "claude-1234abcd"
+    a.control_dir.mkdir(parents=True)
+    argv, _ = b.create_command(a, "pod", a.browser_container, tmp_path, s, set())
+    shm = [argv[index + 1] for index, flag in enumerate(argv[:-1]) if flag == "--tmpfs"
+           and argv[index + 1].startswith("/dev/shm:")]
+    assert len(shm) == 1, argv
+    assert {"rw", "nosuid", "nodev", "noexec"} <= set(shm[0].split(":", 1)[1].split(","))
+    assert "size=512m" in shm[0]

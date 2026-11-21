@@ -159,8 +159,8 @@ def test_library_is_private_and_compared_without_case_on_a_mac(mac, monkeypatch,
     assert s.check_private_location(tmp_path / ".SSH", "--workspace", said.append)  # ~/.ssh as APFS sees it
     (tmp_path / ".BashRC").write_text("")
     assert "shell or session start file" in s.check_private_location(tmp_path / ".BashRC", "--mount", said.append)
-    with pytest.raises(ValueError, match="sandbox-ai's own launcher"):
-        s.check_launcher_location(Path(str(s.HERE).upper()), "--workspace")
+    assert "sandbox-ai's own launcher" in s.check_launcher_location(Path(str(s.HERE).upper()), "--workspace",
+                                                                    warn=said.append)
     monkeypatch.setattr(sys, "platform", "linux")
     assert not any("Library" in str(path) for path in s.private_locations()[0])
     assert s.check_private_location(tmp_path / ".SSH", "--workspace", said.append) is None  # Linux: another folder

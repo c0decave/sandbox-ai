@@ -13,6 +13,8 @@ dist/
 build/
 *.egg-info/
 evidence/
+# scripts/live_check.sh's reports (docs/LIVE_CHECK.md): read where they are, never committed.
+/live-check/
 # Machine-local: the wizard's project configuration names host paths, LAN
 # addresses and ports; Claude Code's local settings are per machine too.
 .sandbox-ai.json

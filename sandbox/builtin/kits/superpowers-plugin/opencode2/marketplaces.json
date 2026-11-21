@@ -1,0 +1,14 @@
+{
+  "$comment": "Built-in kit 'superpowers-plugin': enables upstream's Superpowers plugin (obra/superpowers 7.0.1, pinned in sandbox-ai's marketplace) for opencode2. Install with: sandbox-ai plugins opencode2 --kit superpowers-plugin; use with: sandbox-ai opencode2 --kit superpowers-plugin.",
+  "marketplaces": {
+    "sandbox-ai": {
+      "source": {
+        "source": "directory",
+        "path": "/sandbox/marketplace"
+      }
+    }
+  },
+  "plugins": [
+    "superpowers@sandbox-ai"
+  ]
+}

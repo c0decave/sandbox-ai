@@ -9,9 +9,11 @@ approvals.blocked reads the newest part of each log only); every change goes thr
 the administrator's policy, Tor and the kill switch - the supervisor checks again what reaches it."""
 from __future__ import annotations
 
+import functools
 import json
 import os
 from pathlib import Path
+import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -21,12 +23,14 @@ from . import theme
 from .files import printable, printable_text
 from .i18n import tr
 from .widgets import (
-    ask_first, background, compact_combo, confirm, fill, flow, list_menu, listing, on_screen, plain_label, row_key,
-    selected_rows, set_enabled, table, warn,
+    ask_first, background, compact_combo, confirm, explanation, fill, flow, list_menu, listing, on_screen, plain_label,
+    row_key, selected_rows, set_enabled, table, warn,
 )
 
 FOLLOW, ALL = "follow", "all"
+LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 BLOCKED_INTERVAL = 5000  # ms between two reads of the Blocked list while it is shown
+REMOTE_BLOCKED_SECONDS = 30  # a start of another host: its list read over SSH at most this often (unless asked)
 ACTION_WAIT = 150        # seconds the commands of one action may take together
 
 
@@ -57,12 +61,21 @@ def why_text(entry):
                   "decides; “Allow always” adds an exception to a ruleset of yours.", rule=rule, ruleset=ruleset)
     if kind == "unanswered":
         if entry.get("ruleset"):
-            return tr("Rule {rule} of the ruleset {ruleset} asks before it, and nobody answered in time. It is "
-                      "refused for 2 minutes, then asked again. Allowing its host in the network settings does not "
-                      "change that: allow it here.", rule=rule, ruleset=ruleset)
-        return tr("It was asked about, and nobody answered in time. It is refused for 2 minutes, then asked again.")
+            return tr("Rule {rule} of the ruleset {ruleset} asks before it, and nobody answered in time. That try "
+                      "failed; the question stays open, and its answer counts for the next try. Allowing its host in "
+                      "the network settings does not change that: allow it here.", rule=rule, ruleset=ruleset)
+        return tr("It was asked about, and nobody answered in time. That try failed; the question stays open, and its "
+                  "answer counts for the next try.")
+    if kind == "denied" and entry.get("detail"):  # an allow that closed it: the name does not exist
+        return tr("Denied for this run: {detail}. “Ask again” asks again, e.g. once the name exists.",
+                  detail=printable(entry["detail"]))
     if kind == "denied":
-        return tr("You denied it for this run. “Ask again” takes that back; “Allow for this run” allows it.")
+        return tr("You denied it for this run. “Ask again” takes that back; “Always allow” allows it for the rest of "
+                  "the run.")
+    if kind == "other" and str(entry.get("what") or "").startswith("lookup of ") and \
+            "reserved name" in str(entry.get("reason") or ""):
+        return tr("A reserved name (RFC 2606/6761): it never exists, so its lookup is refused without a question. "
+                  "There is nothing to allow.")
     if kind == "mode":
         return tr("The run's security mode refuses it. Start again with a laxer mode if you mean it.")
     if kind == "policy":
@@ -139,9 +152,12 @@ class ContextHeader(QWidget):
         super().__init__()
         self.sai, self.seconds = sai, seconds
         self.runs, self.active = {}, None
+        # The running starts of the hosts of sandbox-ai hosts (as the Sandboxes page last read them): {"HOST:NAME":
+        # {"host", "name", "agent", "workspace"}} - chosen one at a time, read and changed there over SSH.
+        self.remote = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.purpose = plain_label(tr("What your sandboxes ask, what they were refused and why, and what they may "
+        self.purpose = explanation(tr("What your sandboxes ask, what they were refused and why, and what they may "
                                       "reach. What you change here holds for the running sandbox at once."))
         layout.addWidget(self.purpose)
         row = QHBoxLayout()
@@ -171,6 +187,9 @@ class ContextHeader(QWidget):
                             tr("The active tab's (none runs)"), FOLLOW)
         for name, record in sorted(self.runs.items()):
             self.choice.addItem(run_label(name, record), name)
+        for key, record in sorted(self.remote.items()):
+            self.choice.addItem(tr("{sandbox} on {host}", sandbox=printable(record.get("name")),
+                                   host=printable(record.get("host"))), key)
         self.choice.addItem(tr("All running sandboxes"), ALL)
         index = self.choice.findData(chosen)
         self.choice.setCurrentIndex(index if index >= 0 else 0)
@@ -185,24 +204,47 @@ class ContextHeader(QWidget):
         self.fill()
         return True
 
+    def set_remote(self, starts):
+        """The running starts of the other hosts ({host: [(name, record)]}): each one can be chosen (read there)."""
+        remote = {f"{host}:{name}": {**dict(record or {}), "host": host, "name": name}
+                  for host, found in (starts or {}).items() if host != LOCAL for name, record in found}
+        if remote == self.remote:
+            return False
+        self.remote = remote
+        self.fill()
+        return True
+
     def run(self):
-        """The run shown: a run's name, ALL, or None (the active tab has none running)."""
+        """The run shown: a run's name, a start of another host ("HOST:NAME"), ALL (this machine's), or None (the
+        active tab has none running)."""
         chosen = self.choice.currentData()
         if chosen == FOLLOW:  # the active tab's; when it has none running, the only one that runs, or all of them
             if self.active in self.runs:
                 return self.active
             return next(iter(self.runs)) if len(self.runs) == 1 else ALL if self.runs else None
-        return chosen if chosen == ALL or chosen in self.runs else None
+        return chosen if chosen == ALL or chosen in self.runs or chosen in self.remote else None
+
+    def remote_target(self):
+        """(host, name) of the start of another host shown, or None (this machine's)."""
+        record = self.remote.get(self.run())
+        return (record["host"], record["name"]) if record else None
 
     def records(self):
         """[(run, record)] shown."""
         run = self.run()
         if run == ALL:
             return sorted(self.runs.items())
+        if run in self.remote:
+            return [(run, self.remote[run])]
         return [(run, self.runs[run])] if run else []
 
     def show_state(self):
         run = self.run()
+        if run in self.remote:
+            record = self.remote[run]
+            self.state.setText(tr("{sandbox} on {host}", sandbox=printable(record.get("name")), host=printable(
+                record.get("host"))) + " · " + tr("read there over SSH; what you change here is done there"))
+            return
         if run == ALL:
             self.state.setText(tr("All running sandboxes ({count})", count=len(self.runs)) if
                                self.choice.currentData() == ALL else
@@ -232,6 +274,32 @@ def local_time(stamp):
     except (ValueError, OverflowError):
         return printable(str(stamp or ""))[:19]
     return time.strftime("%m-%d %H:%M:%S", time.localtime(seconds))
+
+
+def remote_blocked(sai, host, result, error):
+    """(entries, error) of `sandbox-ai approvals blocked NAME --json` on HOST (RESULT, ERROR as background gives
+    them): each entry marked with its host; "Allow always" of a request or tool call is left out (its exception rule
+    would go into a ruleset of this machine). An older sandbox-ai there: the update to do."""
+    if error is not None:
+        return None, error
+    status, out, err = result
+    if status != 0:
+        return None, ValueError(sai.too_old_text(host, result, "approvals blocked") or (err or out).strip()[-500:]
+                                or f"exit status {status}")
+    try:
+        data = json.loads(out)
+    except (ValueError, RecursionError):
+        return None, ValueError((err or out).strip()[-300:] or "no answer")
+    entries = []
+    for entry in data if isinstance(data, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        entry = {**entry, "host": host}
+        dns = entry.get("question") and entry.get("question_kind") == "dns" and entry.get("kind") != "network"
+        if not dns and not target_option(entry.get("target")):
+            entry["actions"] = [a for a in entry.get("actions") or [] if a != "allow-always"]
+        entries.append(entry)
+    return entries, None
 
 
 def target_option(target):
@@ -290,9 +358,8 @@ class BlockedSection(QWidget):
         layout.addLayout(top)
         # The actions above the list, in a row that wraps when the window is narrow.
         layout.addWidget(flow(*self.buttons.values(), self.refresh_button))
-        self.note = plain_label(tr("Opening a host in the network or VPN settings does not change what a ruleset "
-                                   "decides: a request a ruleset asks about is asked even when its host is allowed."),
-                                role="secondary")
+        self.note = explanation(tr("Opening a host in the network or VPN settings does not change what a ruleset "
+                                   "decides: a request a ruleset asks about is asked even when its host is allowed."))
         layout.addWidget(self.note)
         self.table = table([tr("Time"), tr("Sandbox"), tr("Reason"), tr("What"), tr("Tried by"), tr("Times")],
                            multi=True, stretch=3, compact=(0, 1, 2, 5), numeric=(5,))
@@ -315,8 +382,14 @@ class BlockedSection(QWidget):
     # -- reading --
 
     def refresh(self, force=False):
-        """Read the list anew in a thread (one read at a time; FORCE: also when one runs, its result is dropped)."""
+        """Read the list anew in a thread (one read at a time; FORCE: also when one runs, its result is dropped). A
+        start of another host: `sandbox-ai approvals blocked NAME --json` there, at most every
+        REMOTE_BLOCKED_SECONDS unless FORCE."""
         if self.reading is not None and not force:
+            return
+        target = self.header.remote_target()
+        if target is not None and not force and (target, self.generation) == getattr(self, "remote_read", (None, -1)) \
+                and time.monotonic() - getattr(self, "remote_at", 0) < REMOTE_BLOCKED_SECONDS:
             return
         records = self.header.records()
         runs = dict(self.header.runs)
@@ -325,6 +398,12 @@ class BlockedSection(QWidget):
         if not records:
             self.reading = None
             self.apply(token, [], None)
+            return
+        if target is not None:
+            self.remote_read, self.remote_at = (target, token), time.monotonic()
+            self.reading = background(self.sai.host_run, target[0], "approvals", "blocked", target[1], "--json",
+                                      timeout=90, done=lambda result, error: self.apply(
+                                          token, *remote_blocked(self.sai, target[0], result, error)))
             return
         self.reading = background(self.read, records, runs, timeout=60,
                                   done=lambda result, error: self.apply(token, result, error))
@@ -407,21 +486,30 @@ class BlockedSection(QWidget):
                                             "the administrator's policy)."))
             set_enabled(button, possible and not busy, why)
 
-    def act(self, action):
-        chosen = [entry for entry in self.selected() if action in (entry.get("actions") or [])]
+    def act(self, action, chosen=None):
+        """ACTION on the entries CHOSEN (default: those selected here; the Approvals table hands its Refused rows)."""
+        chosen = [entry for entry in (self.selected() if chosen is None else chosen)
+                  if action in (entry.get("actions") or [])]
         if not chosen or self.acting is not None:
             return
+        host = next((entry["host"] for entry in chosen if entry.get("host")), LOCAL)
+        where = (lambda text: text) if host == LOCAL else (lambda text: tr("On {host}: {text}", host=printable(host),
+                                                                             text=text))
         # Every one it acts on is named, or counted past the first ones (it named 12 and allowed them all).
         what = listing([printable(entry.get("what") or "") for entry in chosen])
         if action == "allow-run":
             if not ask_first(self, "net-allow", tr("Allow for this run?"),
-                             tr("The sandbox may do this until it ends:") + "\n" + what, tr("Allow for this run")):
+                             where(tr("The sandbox may do this until it ends:") + "\n" + what),
+                             tr("Allow for this run")):
                 return
         elif action == "allow-always":
             text = self.always_text(chosen)
-            if text is None or not ask_first(self, "net-allow", tr("Allow always for this project?"), text,
-                                             tr("Allow always")):
+            if text is None or not ask_first(self, "net-allow", tr("Allow always for this project?"), where(text),
+                                             tr("Always, also for later sessions")):
                 return
+        # sandbox-ai there (a start of another host: over SSH), as `sandbox-ai ARGS` here.
+        call = self.sai.call if host == LOCAL else functools.partial(self.sai.host_run, host)
+
         # In the thread, after the question above (ask_first): what each entry needs.
         def run_actions(action, chosen, records):
             """Each entry's commands (in the thread): [(entry, (status, out, err))]."""
@@ -431,31 +519,34 @@ class BlockedSection(QWidget):
                 option = target_option(entry.get("target"))
                 try:
                     if action == "ask-again":
-                        result = self.sai.call("approvals", "ask-again", question, timeout=60)
+                        result = call("approvals", "ask-again", question, timeout=60)
                     elif action == "deny-run":
-                        result = self.sai.call("approvals", "deny", question, "--scope", "run", timeout=60)
+                        result = call("approvals", "deny", question, "--scope", "run", timeout=60)
                     elif action in ("allow-run", "allow-always") and question and \
                             entry.get("question_kind") == "dns" and entry.get("kind") != "network":
                         # A lookup the agent asked about: as an answer to it, only the name's public addresses are
                         # opened (the agent chose the name; it may point at this host or the LAN), "always" kept as
                         # such an answer is (approvals allow ID: decide_again), never as the project's --allow-host.
                         scope = "always" if action == "allow-always" else "run"
-                        result = self.sai.call("approvals", "allow", question, "--scope", scope, timeout=90)
+                        result = call("approvals", "allow", question, "--scope", scope, timeout=90)
                     elif action == "allow-run" and question and entry.get("question_kind") != "dns" and not (
                             entry.get("kind") == "network" and option):
-                        result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
+                        result = call("approvals", "allow", question, "--scope", "run", timeout=60)
                     elif option:  # a destination: as sandbox-ai net allow (resolved through the run's VPN or Tor)
                         keep = ["--keep"] if action == "allow-always" else []
                         # A name the agent looked up: only its public addresses (--keep: remembered as an approval).
                         public = ["--public-only"] if option[0] == "--allow-host" else []
-                        result = self.sai.call("net", "allow", run, *option, *public, *keep, timeout=90)
+                        result = call("net", "allow", run, *option, *public, *keep, timeout=90)
                         if question and result[0] == 0:
-                            self.sai.call("approvals", "ask-again", question, timeout=60)  # no remembered deny left
+                            call("approvals", "ask-again", question, timeout=60)  # no remembered deny left
+                    elif host != LOCAL:  # an exception rule is written into a ruleset of this machine: not for there
+                        result = (1, "", tr("An exception rule is written into a ruleset of this machine: for a "
+                                            "start of another host, allow it for the run, or add the rule there."))
                     else:  # allow-always for a request or tool call: an exception rule, then allowed for this run
                         plan = self.sai.module("approvals").rule_exception(records.get(run) or {}, entry, write=True)
                         result = (0, json.dumps(plan), "")
                         if question:
-                            result = self.sai.call("approvals", "allow", question, "--scope", "run", timeout=60)
+                            result = call("approvals", "allow", question, "--scope", "run", timeout=60)
                 except (ValueError, OSError) as exc:
                     result = (1, "", str(exc))
                 done.append((entry, result))
@@ -527,6 +618,8 @@ class BlockedSection(QWidget):
         self.refresh(force=True)
 
     def cut_of(self, run):
+        if self.header.remote_target() is not None:
+            return False  # (another host's kill switch: not known here)
         record = self.header.runs.get(run)
         try:
             return bool(record) and bool(self.sai.module("net").cut_state(record["directory"]))
@@ -565,10 +658,9 @@ class AllowedSection(QWidget):
         self.table.itemSelectionChanged.connect(self.update_buttons)
         list_menu(self.table, lambda: [self.revoke, None, refresh])
         layout.addWidget(self.table, 1)
-        layout.addWidget(plain_label(tr("Listed: what was allowed while it runs (on this page, with sandbox-ai net "
+        layout.addWidget(explanation(tr("Listed: what was allowed while it runs (on this page, with sandbox-ai net "
                                         "allow, or by an answer). What its start options allow is on the Board "
-                                        "(Network); what is kept for the project, under Remembered."),
-                                     role="secondary"))
+                                        "(Network); what is kept for the project, under Remembered.")))
         self.message = plain_label(selectable=True, log="approvals")
         layout.addWidget(self.message)
         self.update_buttons()
@@ -579,6 +671,11 @@ class AllowedSection(QWidget):
         token = self.generation
         if run in (None, ALL):
             self.apply(token, None, None)
+            return
+        target = self.header.remote_target()
+        if target is not None:  # a start of another host: what it may reach, read there
+            self.reading = background(self.sai.host_run, target[0], "net", "show", target[1], "--json", timeout=90,
+                                      done=lambda result, error: self.apply(token, result, error, run))
             return
         self.reading = background(self.sai.call, "net", "show", run, "--json", timeout=60,
                                   done=lambda result, error: self.apply(token, result, error, run))
@@ -625,11 +722,21 @@ class AllowedSection(QWidget):
         run = self.rows_run
         if not chosen or run in (None, ALL):
             return
-        if not ask_first(self, "net-revoke", tr("Revoke?"), tr("The sandbox may no longer reach:") + "\n" +
-                         "\n".join(f"- {printable(r['destination'])}" for r in chosen), tr("Revoke")):
+        record = self.header.remote.get(run)
+        text = tr("The sandbox may no longer reach or use:") + "\n" + "\n".join(
+            f"- {printable(r['destination'])}" + (f" ({r['kind']}: {printable(r['names'])})"
+                                                  if r["revoke"][0] in ("--api-key", "--git-token-secret") else "")
+            for r in chosen)
+        if record:
+            text = tr("On {host}: {text}", host=printable(record["host"]), text=text)
+        if not ask_first(self, "net-revoke", tr("Revoke?"), text, tr("Revoke")):
             return
         options = [token for r in chosen for token in r["revoke"]]
         self.message.setText(tr("Working…"))
+        if record:
+            background(self.sai.host_run, record["host"], "net", "revoke", record["name"], *options, timeout=90,
+                       work=True, source=self.revoke, done=lambda result, error: self.revoked(result, error))
+            return
         background(self.sai.call, "net", "revoke", run, *options, timeout=90, work=True, source=self.revoke,
                    done=lambda result, error: self.revoked(result, error))
 
@@ -674,6 +781,22 @@ def allowed_rows(shown):
     for port in shown.get("host_ports") or []:
         rows.append({"destination": f"127.0.0.1:{port}", "names": "", "kind": tr("a port of this computer"),
                      "revoke": ["--allow-host-port", str(port)]})
+    shared = shown.get("shared_wildcards") if isinstance(shown.get("shared_wildcards"), dict) else {}
     for wildcard in shown.get("host_wildcards") or []:
-        rows.append({"destination": str(wildcard), "names": "", "kind": tr("host wildcard"), "revoke": None})
+        # Below a shared service (net show's shared_wildcards): marked as the risk you confirmed.
+        kind = tr("host wildcard below the shared service {suffix} (anyone can rent a name there)",
+                  suffix=str(shared[wildcard])) if wildcard in shared else tr("host wildcard")
+        rows.append({"destination": str(wildcard), "names": "", "kind": kind, "revoke": None})
+    # What the run was given during the run beside destinations: taken back here too (git-logins revoke, secrets
+    # revoke - the reference after "=" is not read by a revoke).
+    for login in shown.get("git") or []:
+        if isinstance(login, dict) and isinstance(login.get("url"), str):
+            rows.append({"destination": login["url"], "names": str(login.get("user") or ""),
+                         "kind": tr("Git login (token in the sandbox)") if login.get("in_sandbox") else
+                         tr("Git login (given during the run)"),
+                         "revoke": ["--git-token-secret", f"{login['url']}=REVOKE"]})
+    for key in shown.get("api_keys") or []:
+        if isinstance(key, dict) and isinstance(key.get("name"), str):
+            rows.append({"destination": str(key.get("host") or ""), "names": key["name"],
+                         "kind": tr("API key (given during the run)"), "revoke": ["--api-key", key["name"]]})
     return rows

@@ -47,12 +47,23 @@ def home(tmp_path, monkeypatch):
     (["llm", "add", "x", "--kind", ""], {"ollama", "lmstudio", "vllm"}, set()),
     (["llm", "st"], {"status"}, {"show"}),
     (["llm", "status", "--"], {"--json", "--watch"}, set()),
+    # the use cases of the local-model research (model_usecases.json): llm recommend's and a start's --use-case
+    (["llm", "recommend", "--"], {"--use-case", "--server", "--llm", "--agent", "--host", "--json"}, set()),
+    (["llm", "recommend", "untr"], {"untrusted-input"}, set()),
+    (["llm", "recommend", "--use-case", ""], {"coding", "sandbox", "code-review", "vision"}, set()),
+    (["claude", "--use-case", "co"], {"coding", "code-review"}, {"vision"}),
+    (["llm", "set", "x", "--"], {"--memory"}, set()),
     (["kits", ""], {"show", "new", "add-skill", "trust-hooks"}, set()),
     (["list", "--"], {"--all", "--json", "--history", "--flat", "--no-color", "--color"}, set()),
     (["ps", "--"], {"--all", "--json", "--history", "--flat", "--no-color", "--color"}, set()),
     (["ps", "--color", ""], {"auto", "always", "never"}, set()),
     (["list", "--color="], {"--color=auto", "--color=always", "--color=never"}, set()),
     (["completion", ""], {"bash", "zsh", "fish", "install"}, set()),
+    (["build", ""], {"claude", "pi", "opencode2", "all", "team", "cairn", "vpn", "tor", "browser"}, {c.FILES}),
+    (["build", "cl"], {"claude"}, {"codex", "all"}),
+    (["build", "claude", ""], {"codex", "team", "all"}, {c.FILES}),
+    (["build", "--"], {"--pin", "--uv", "--node", "--podman-url", "--extension-only", "--variant"}, set()),
+    (["build", "-"], {"-p", "-u", "-n", "-e", "-pu"}, set()),
     (["nothing", ""], {c.FILES}, set()),
 ])
 def test_candidates(words, expected, absent):
@@ -68,7 +79,13 @@ def test_the_names_you_have(home, monkeypatch):
     assert "tools" in c.complete(["claude", "--mcp", ""])
     monkeypatch.setitem(c.NAMED, ("attach", None, "name"), lambda: ["web", "api", "worker"])
     assert c.complete(["attach", "w"]) == ["web", "worker"]
-    assert c.complete(["claude", "--with", ""]) == ["claude", "codex", "opencode"]
+    # Every agent (0.1.98: the others are layers of the team image), as the launcher's --with takes them.
+    assert c.complete(["claude", "--with", ""]) == sorted(c.AGENTS)
+    assert c.complete(["claude", "--with", "o"]) == ["opencode", "opencode2", "openhands"]
+    # a comma list (--with hermes,qwen): the next name after the last comma, never one already named
+    assert c.complete(["claude", "--with", "hermes,q"]) == ["hermes,qwen"]
+    assert "hermes,hermes" not in c.complete(["claude", "--with", "hermes,"])
+    assert "hermes,codex" in c.complete(["claude", "--with", "hermes,"])
 
 
 def test_a_failing_lookup_completes_nothing(monkeypatch):
@@ -177,3 +194,175 @@ complete -C "sandbox-ai claude -w work/s"
     assert [line.split("\t")[0] for line in parts[0]] == ["--mode", "--mount"], (done.stdout, done.stderr)
     assert [line.split("\t")[0] for line in parts[1]] == ["allow"]
     assert [line.split("\t")[0] for line in parts[2]] == ["work/src/"]
+
+
+# --- every position of every parser has a completion -------------------------------------------------------------
+
+def every_parser():
+    """[(command, subcommand or None, parser)] of every command of sandbox-ai, its subcommands too."""
+    import argparse
+    found = []
+
+    def walk(command, sub, parser):
+        found.append((command, sub, parser))
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                hidden = {choice.dest for choice in action._choices_actions if choice.help == argparse.SUPPRESS}
+                seen = set()
+                for name, child in action.choices.items():
+                    if id(child) not in seen and name not in hidden:
+                        seen.add(id(child))
+                        walk(command, name, child)
+    for command in sorted(c.commands()):
+        if command in c.INTERNAL_COMMANDS or command.startswith("_"):
+            continue
+        parser = c.parser_of(command)
+        assert parser is not None, f"sandbox-ai {command}: its parser cannot be read"
+        walk(command, None, parser)
+    for (command, word), make in c.OWN_PARSERS.items():
+        walk(command, word, make())
+    return found
+
+
+def test_every_parser_position_has_a_completion():
+    """Each positional and each option that takes a value: a provider (the names you have, choices, a path) or an
+    entry in completion.FREE_TEXT saying why nothing can be offered - so a new command cannot miss its completion."""
+    missing = []
+    for command, sub, parser in every_parser():
+        for action in parser._actions:
+            if c.provider(command, sub, action) is None:
+                name = action.option_strings[-1] if action.option_strings else action.dest
+                missing.append(f"{command} {sub or ''} {name} ({action.metavar})")
+    assert not missing, "no completion (add a provider, or say why in FREE_TEXT):\n" + "\n".join(missing)
+
+
+def test_free_text_lists_only_what_exists():
+    """FREE_TEXT names no position that is gone (a stale entry would hide nothing, but lies)."""
+    options, positionals = set(), set()
+    for command, sub, parser in every_parser():
+        for action in parser._actions:
+            if action.option_strings:
+                options.update(action.option_strings)
+            else:
+                positionals.update({(command, sub, action.dest), (command, "*", action.dest)})
+    stale = [key for key in c.FREE_TEXT if (key not in options if isinstance(key, str) else key not in positionals)]
+    assert not stale, stale
+
+
+@pytest.mark.parametrize("words, expected, absent", [
+    (["net", "cut", ""], {"remote", "local", "api", "all", "off"}, set()),
+    (["net", "cut", "web", ""], {"remote", "local", "api", "all", "off"}, set()),
+    (["workspace", "add", ""], {c.FILES}, set()),
+    (["workspace", "add", "web", ""], {c.FILES}, set()),
+    (["workspace", "remove", ""], {c.FILES}, set()),
+    (["devices", "add", ""], {c.FILES}, set()),
+    (["completion", "install", ""], {"bash", "zsh", "fish"}, {"install"}),
+    (["completion", "install", "bash", "z"], {"zsh"}, {"bash"}),
+    (["images", "extend", ""], {"claude", "codex", "pi"}, set()),
+    (["--no-color", "net", ""], {"allow", "list"}, set()),
+    (["--color", ""], {"auto", "always", "never"}, set()),
+    (["--"], {"--help", "--version", "--no-color", "--color"}, set()),
+    (["net", "list", "--no-c"], {"--no-color"}, set()),
+    (["claude", "--with", ""], {"claude", "codex", "opencode", "hermes", "pi", "qwen"}, set()),  # every agent (0.1.98)
+    (["llm", "profiles", "qwen"], {"qwen/qwen3-coder-next"}, set()),
+])
+def test_the_gaps_found_on_2026_11_16(words, expected, absent):
+    found = set(c.complete(words))
+    assert expected <= found, found
+    assert not (absent & found), found
+
+
+def test_the_names_of_the_gaps(monkeypatch):
+    monkeypatch.setattr(c, "start_names", lambda: ["web", "api"])
+    monkeypatch.setattr(c, "run_names", lambda: ["web"])
+    monkeypatch.setattr(c, "host_names", lambda: ["box"])
+    monkeypatch.setattr(c, "bridge_ids", lambda: ["b-1234", "b-5678"])
+    monkeypatch.setattr(c, "identity_names", lambda: ["work", "private"])
+    monkeypatch.setattr(c, "git_login_urls", lambda: ["https://github.com/me"])
+    monkeypatch.setattr(c, "web_users", lambda: ["alice"])
+    monkeypatch.setattr(c, "variant_names", lambda: ["slim"])
+    assert set(c.complete(["bridge", "add", ""])) == {"web", "api", "box:"}
+    assert set(c.complete(["bridge", "add", "web", ""])) == {"web", "api", "box:"}
+    assert c.complete(["bridge", "show", "b-1"]) == ["b-1234"]
+    assert set(c.complete(["bridge", "revoke", ""])) == {"b-1234", "b-5678"}
+    assert set(c.complete(["bridge", "resume", ""])) == {"b-1234", "b-5678"}
+    assert set(c.complete(["workspace", "add", ""])) == {"web", c.FILES}
+    assert c.complete(["workspace", "add", "web", ""]) == [c.FILES]
+    assert set(c.complete(["net", "cut", ""])) == {"web", "remote", "local", "api", "all", "off"}
+    assert "web" not in c.complete(["net", "cut", "web", ""])
+    assert set(c.complete(["devices", "add", ""])) == {"web", c.FILES}
+    assert c.complete(["identities", "show", ""]) == ["private", "work"] or \
+        set(c.complete(["identities", "show", ""])) == {"work", "private"}
+    assert set(c.complete(["claude", "--identity", ""])) == {"work", "private"}
+    assert c.complete(["git-logins", "remove", ""]) == ["https://github.com/me"]
+    assert c.complete(["git-logins", "give", ""]) == ["web"]
+    assert c.complete(["web", "user", "reset", ""]) == ["alice"]
+    assert c.complete(["secrets", "give", ""]) == ["web"]
+    assert c.complete(["session", "move", "web", ""]) == ["box"]
+    assert set(c.complete(["session", "stop", ""])) == {"web", "api"}
+    assert "slim" in c.complete(["claude", "--image-variant", ""])
+    assert "slim" in c.complete(["images", "check", ""])
+    assert c.complete(["list", "--history", "w"]) == ["web"]
+    assert c.complete(["secrets", "list", "--run", ""]) == ["web"]
+
+
+def test_with_follows_the_team_image():
+    """--with: the agents of the team image, as the launcher's NOT_IN_TEAM says (never a list of its own)."""
+    launcher = c.module("agent_sandbox")
+    assert set(c.VALUES["--with"]()) == {a for a in c.AGENTS if a not in launcher.NOT_IN_TEAM}
+
+
+def test_completion_install_adds_a_block_and_says_how_a_running_shell_gets_it(home, monkeypatch, capsys):
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    monkeypatch.setattr(c.sys, "platform", "linux")
+    (home / ".bashrc").write_text("# mine\n")
+    assert c.main(["install"]) == 0
+    said = capsys.readouterr().out
+    bashrc = (home / ".bashrc").read_text()
+    assert bashrc.startswith("# mine\n# >>> sandbox-ai completion >>>\n") and bashrc.count(">>> sandbox-ai") == 1
+    assert "source ~/.local/share/bash-completion/completions/sandbox-ai" in said.replace(str(home), "~") or \
+        "source " in said
+    assert "cannot change a shell that already runs" in said
+    found = subprocess.run(["bash", "-i", "-c", "complete -p sandbox-ai"], capture_output=True, text=True,
+                           timeout=60, env={**os.environ, "HOME": str(home)})
+    assert "_sandbox_ai sandbox-ai" in found.stdout, found.stderr
+    assert c.main(["install"]) == 0 and (home / ".bashrc").read_text() == bashrc, "once"
+    # install.sh's own block sources it already; --no-rc leaves the files alone
+    (home / ".bashrc").write_text("# >>> sandbox-ai >>>\n# <<< sandbox-ai <<<\n")
+    assert c.main(["install"]) == 0 and "completion >>>" not in (home / ".bashrc").read_text()
+    (home / ".bashrc").write_text("# mine\n")
+    assert c.main(["install", "--no-rc"]) == 0 and (home / ".bashrc").read_text() == "# mine\n"
+    assert c.main(["install", "--no-rc", "bash"]) == 0
+
+
+def test_board_show_and_delete_offer_the_kept_boards(home):
+    boards = home / "config/sandbox-ai/boards"
+    boards.mkdir(parents=True)
+    for name in ("review-night", "web-app"):
+        (boards / f"{name}.json").write_text("{}")
+    (boards / "Not A Board.json").write_text("{}")  # (no board's name: not offered)
+    assert c.complete(["board", "show", ""]) == ["review-night", "web-app"]
+    assert c.complete(["board", "delete", "w"]) == ["web-app"]
+    assert c.complete(["board", "export", "--session", "x", ""]) == [c.FILES]
+
+
+def test_update_and_its_mode_complete():
+    """update has no argparse parser (install.sh takes most of its options): its options, `mode` and the modes."""
+    assert c.complete(["update", ""]) == ["mode"]
+    assert {"--apply", "--install", "--rollback", "--check", "--while-running"} <= set(c.complete(["update", "--"]))
+    assert c.complete(["update", "--ro"]) == ["--rollback"]
+    assert c.complete(["update", "mode", ""]) == ["off", "notify", "download", "auto"]
+    assert c.complete(["update", "mode", "auto", "--"]) == ["--at", "--source", "--json", "--help"]
+    assert c.complete(["update", "mode", "auto", ""]) == []
+    assert "--mode" in c.complete(["hosts", "update", "ct1", "--mo"])
+
+
+def test_workspace_review_completes_the_runs_whose_review_is_kept(tmp_path, monkeypatch):
+    """`workspace review RUN --keep|--restore PATH`: the runs whose before-state sandbox-ai keeps (ended ones too)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    folder = tmp_path / "state" / "sandbox-ai" / "workspace-review" / "logs-0123456789abcdef"
+    folder.mkdir(parents=True)
+    for name in ("claude-1a2b3c4d.json", "codex-5e6f7a8b.json", ".claude-1a2b3c4d.json.tmp"):
+        (folder / name).write_text("{}")
+    assert set(c.complete(["workspace", "review", ""])) == {"claude-1a2b3c4d", "codex-5e6f7a8b"}
+    assert c.complete(["workspace", "review", "co"]) == ["codex-5e6f7a8b"]

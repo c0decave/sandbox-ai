@@ -107,12 +107,22 @@ OTLP endpoint is configured - also from a user's `config.yaml` (measured: logs e
 `OTEL_SDK_DISABLED=true` turns every signal off, and `OTEL_{TRACES,METRICS,LOGS}_EXPORTER=none` say the same per
 signal. The source names no other analytics or crash reporting host (no Sentry, Segment, Mixpanel, Amplitude).
 
+*Langfuse tracing* (checked 2026-11-16 in the release binary, `strings`: `crates/goose/src/tracing/langfuse_layer.rs`,
+`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_INIT_PROJECT_PUBLIC_KEY`, `LANGFUSE_INIT_PROJECT_SECRET_KEY`,
+`LANGFUSE_URL`, `LANGFUSE_HOST`, `LANGFUSE_BASE_URL`, default `http://localhost:3000`): Goose 1.57.0 does have a
+Langfuse layer. Measured: with the key pair (either pair) and `LANGFUSE_URL` set, a `goose run` posts batches to
+`LANGFUSE_URL/api/public/ingestion` every few seconds; with the keys empty or unset, nothing. It is off unless a
+human or an agent's shell sets the keys, so sandbox-ai pins the four keys empty in every Goose run
+(`TELEMETRY_ENV`) and the guard (`sandbox/telemetry_guard.py`: `AGENT_PINS`, `AGENT_NAMES["goose"]`, as nanobot's)
+refuses any other `LANGFUSE_` variable with a value for `goose` typed in a shell.
+
 What sandbox-ai does in every Goose run, whatever else is enabled (sandbox/goose.py: `TELEMETRY_ENV`,
 `TELEMETRY_PINNED`, `TELEMETRY_HOSTS`, `telemetry_rules`, `check_telemetry`):
 
 - the variables are set, and they win over every configuration file Goose reads: `GOOSE_TELEMETRY_OFF=1`,
   `GOOSE_TELEMETRY_ENABLED=false`, `OTEL_SDK_DISABLED=true`, `OTEL_TRACES_EXPORTER=none`,
-  `OTEL_METRICS_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none`, `DO_NOT_TRACK=1`; the system file says
+  `OTEL_METRICS_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none`, `DO_NOT_TRACK=1`, and empty `LANGFUSE_PUBLIC_KEY`,
+  `LANGFUSE_SECRET_KEY`, `LANGFUSE_INIT_PROJECT_PUBLIC_KEY`, `LANGFUSE_INIT_PROJECT_SECRET_KEY`; the system file says
   `GOOSE_TELEMETRY_ENABLED: false` as well;
 - `*.posthog.com` is never opened: no feature names it, and a start that would open it (`--allow-host`, a wildcard
   over it), hide it from the proxy (`--no-inspect`) or go out without the proxy (`--egress-all-allow` with
@@ -172,9 +182,24 @@ that names the session.
 
 - `--with` (Goose is not in the team image): use `--helper` in either direction (`sandbox-ai goose --helper claude`,
   `sandbox-ai claude --helper goose`, which runs `goose run --text=...`).
-- Rules for the agent's own tools and kit hooks (refused, never silently unenforced - so not the mode paranoid);
-  Goose's own hooks stay the user's.
 - Teams, the activity feed of its turns, `mcp attach --live`.
+
+## Rules for its own tools and kit hooks (2026-11-16)
+
+Goose 1.57.0 runs hooks only from plugins (`crates/goose/src/hooks`, the Open Plugins format: `<plugin>/hooks/
+hooks.json`, Claude Code's) in the user's plugin folder `~/.agents/plugins` and the project's `.agents/plugins`
+(`plugins/discovery.rs`; the project's first, one per name); a plugin can be disabled in a `settings.json` or the
+`plugins` map of `config.yaml`. Exit status 2 blocks a call; a PreToolUse hook that fails lets it through unless
+`on_failure: block`; a matcher that is no regular expression (`*`) drops its rule. Hooks are loaded once, when the
+agent starts (`HookManager::load`).
+
+- sandbox-ai's plugin `/etc/goose/sandbox-ai-hooks` (read-only) holds the rule hooks (no matcher, `on_failure:
+  block`) and the approved kit hooks (`hooks.json`). The image's `goose` command (sandbox-ai's guard) links it into
+  `~/.agents/plugins` at every start and does not start Goose while it is disabled, shadowed by a project plugin of
+  the same name, or its folder moved (`GOOSE_PATH_ROOT`).
+- Tools mapped: `developer__shell` Bash, `developer__write` Write, `developer__edit` Edit (`path` `file_path`,
+  `before`/`after` `old_string`/`new_string`), `developer__tree` LS.
+- Not covered: the agent can disable the plugin for a later Goose (which then does not start).
 
 ## Go / No-Go
 

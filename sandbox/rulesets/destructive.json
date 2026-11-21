@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "description": "Shell commands that destroy what a checkpoint may not bring back: recursive rm outside /tmp, force pushes, hard resets, git clean, DROP and TRUNCATE, terraform destroy, kubectl delete, prunes, mkfs, dd to a device. Each asks with its reason. A guard rail through the agent's hooks (README: The agent's own tools), together with the checkpoints.",
+  "tool": [
+    {"id": "rm-recursive", "tool": "Bash",
+     "args": {"command": {"allOf": [
+       {"pattern": "(?s).*\\brm\\s+(?:[^;&|\\n]*\\s)?(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\\b.*"},
+       {"not": {"pattern": "(?s)\\s*rm\\s+(?:-[a-zA-Z]+\\s+|--[a-z-]+\\s+)*(?:/tmp/[^\\s;&|]+\\s*)+"}}]}},
+     "decision": "ask", "reason": "a recursive rm outside /tmp"},
+    {"id": "git-force-push", "tool": "Bash",
+     "args": {"command": {"pattern": "(?s).*\\bgit\\b[^;&|\\n]*\\bpush\\b[^;&|\\n]*(?:\\s--force\\b|\\s--force-with-lease\\b|\\s-[a-zA-Z]*f\\b|\\s--mirror\\b|\\s\\+[^\\s]+).*"}},
+     "decision": "ask", "reason": "a force push rewrites the remote's history"},
+    {"id": "git-reset-hard", "tool": "Bash",
+     "args": {"command": {"pattern": "(?s).*\\bgit\\b[^;&|\\n]*\\b(?:reset\\s+(?:[^;&|\\n]*\\s)?--hard|clean\\s+(?:[^;&|\\n]*\\s)?-[a-zA-Z]*f|checkout\\s+(?:--\\s+)?\\.(?:\\s|$)|restore\\s+(?:[^;&|\\n]*\\s)?\\.(?:\\s|$)|stash\\s+(?:drop|clear)|branch\\s+-D).*"}},
+     "decision": "ask", "reason": "discards uncommitted work or branches (git reset --hard, clean -f, checkout ., stash drop, branch -D)"},
+    {"id": "sql-drop", "tool": "Bash",
+     "args": {"command": {"pattern": "(?si).*\\b(?:drop\\s+(?:table|database|schema|index|view)|truncate\\s+(?:table\\s+)?[\\w\"`.]+|delete\\s+from\\s+[\\w\"`.]+\\s*(?:;|$|\"|')).*"}},
+     "decision": "ask", "reason": "DROP, TRUNCATE or a DELETE without WHERE"},
+    {"id": "infra-destroy", "tool": "Bash",
+     "args": {"command": {"pattern": "(?s).*\\b(?:terraform\\s+(?:[^;&|\\n]*\\s)?(?:destroy|apply\\s+[^;&|\\n]*-destroy)|tofu\\s+destroy|pulumi\\s+destroy|kubectl\\s+(?:[^;&|\\n]*\\s)?delete|helm\\s+(?:uninstall|delete)|aws\\s+s3\\s+rb|aws\\s+s3\\s+rm\\s+[^;&|\\n]*--recursive|gcloud\\s+[^;&|\\n]*\\sdelete)\\b.*"}},
+     "decision": "ask", "reason": "destroys infrastructure (terraform destroy, kubectl delete, helm uninstall, cloud deletes)"},
+    {"id": "container-prune", "tool": "Bash",
+     "args": {"command": {"pattern": "(?s).*\\b(?:docker|podman)\\s+(?:system|volume|image|container|network|builder)\\s+prune\\b.*"}},
+     "decision": "ask", "reason": "prunes containers, images or volumes"},
+    {"id": "disk-wipe", "tool": "Bash",
+     "args": {"command": {"pattern": "(?s).*(?:\\bmkfs(?:\\.\\w+)?\\b|\\bdd\\b[^;&|\\n]*\\bof=/dev/|\\bshred\\b|\\bwipefs\\b|>\\s*/dev/(?:sd|nvme|vd|hd|mmcblk)).*"}},
+     "decision": "ask", "reason": "writes over a file system or a device (mkfs, dd of=/dev/..., shred, wipefs)"},
+    {"id": "find-delete", "tool": "Bash",
+     "args": {"command": {"pattern": "(?s).*\\bfind\\b[^;&|\\n]*\\s-delete\\b.*"}},
+     "decision": "ask", "reason": "find -delete removes what it matches"}
+  ]
+}

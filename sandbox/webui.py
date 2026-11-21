@@ -42,6 +42,7 @@ import hashlib
 import hmac
 import http.server
 import importlib.util
+import io
 import ipaddress
 import json
 import os
@@ -50,6 +51,7 @@ import pty
 import re
 import secrets
 import select
+import shlex
 import signal
 import socket
 import ssl
@@ -65,6 +67,29 @@ import urllib.parse
 HERE = Path(__file__).resolve().parent
 
 
+def ready_fds(read, write=(), timeout=None):
+    """(readable, writable) of the descriptors READ and WRITE within TIMEOUT seconds, as select.select's first two -
+    for descriptors of any number: select() refuses those of 1024 and above (ValueError), which a web interface
+    that has served many terminals and downloads reaches. A hang-up or an error counts as readable (the next read
+    says which), as with select()."""
+    poller, wanted = select.poll(), {}
+    for items, mask in ((read, select.POLLIN | select.POLLPRI), (write, select.POLLOUT)):
+        for item in items:
+            fd = item if isinstance(item, int) else item.fileno()
+            wanted.setdefault(fd, []).append((item, mask))
+    for fd, entries in wanted.items():
+        poller.register(fd, functools.reduce(lambda total, entry: total | entry[1], entries, 0))
+    readable, writable = [], []
+    for fd, events in poller.poll(None if timeout is None else max(0, int(timeout * 1000))):
+        broken = events & (select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        for item, mask in wanted.get(fd, ()):
+            if mask & select.POLLOUT:
+                if events & select.POLLOUT or broken:
+                    writable.append(item)
+            elif events & (select.POLLIN | select.POLLPRI) or broken:
+                readable.append(item)
+    return readable, writable
+
 def launch_log():
     """launchlog.py, the one copy of this process (launcher.log; DEBUG lines with SANDBOX_AI_DEBUG=1)."""
     loaded = sys.modules.get("sandbox_ai_launchlog")
@@ -77,6 +102,9 @@ def launch_log():
 
 
 LOG = launch_log()
+# The client address of the request this thread answers (Service.respond sets it): an answer to a browser question
+# relays its login's callback only for a browser on this machine (API.answer, oauth_relay.py).
+REQUEST = threading.local()
 STATIC = HERE / "web"
 STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8",
                 "i18n.js": "text/javascript; charset=utf-8",
@@ -90,11 +118,11 @@ START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")  # a start's name or
 NEW_START_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # a name given to a start (SESSION_NAME)
 MCP_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 APPROVAL_ID = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}")  # never a leading "-": read as an option there
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 # The agents of the commands that take fewer: sandbox-ai login (login.AGENTS) and plugins (plugins.py); a terminal
 # for another one is refused here, not opened to fail there. A team's members are team.AGENTS (team_agents()).
-LOGIN_AGENTS = ("claude", "codex", "opencode", "hermes", "qwen")
-PLUGIN_AGENTS = ("claude", "codex", "opencode")
+LOGIN_AGENTS = ("claude", "codex", "opencode", "hermes", "qwen", "pi")
+PLUGIN_AGENTS = ("claude", "codex", "opencode", "opencode2", "all")
 
 
 def agent_words(agents=AGENTS):
@@ -140,9 +168,12 @@ def users_file():
     return config_dir() / "users.json"
 
 
-def listen_file():
-    """Where the running service says which port it has: the launcher refuses --allow-host-port for it."""
-    return config_dir() / "listen.json"
+def listen_file(pid=None):
+    """Where the running service PID (default: this process) says which port it has - a record of its own, as two
+    may run at once (loopback and the LAN): the launcher refuses --allow-host-port for each such port
+    (agent_sandbox.web_service_ports). Before 0.1.98 every service wrote listen.json, and the second wrote over
+    the first's port."""
+    return config_dir() / f"listen-{pid or os.getpid()}.json"
 
 
 _modules, _modules_lock = {}, threading.RLock()
@@ -305,14 +336,34 @@ def users_unreadable(exc):
 
 # --- the audit log ----------------------------------------------------------------------------------------
 
+AUDIT_PART = 16 << 20       # audit.jsonl is rotated at this size (statedirs.rotate: renamed and compressed beside it)
+AUDIT_ARCHIVE = 256 << 20   # its compressed older parts kept; beyond, the oldest go
+
+
+def rotation_time():
+    """The time a rotated log's older part is named by (tests: their own)."""
+    return time.time()
+
+
 def audit(event, **fields):
     record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, **fields}
     path = state_dir() / "audit.jsonl"
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    with os.fdopen(fd, "a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        stream.write(json.dumps(record, ensure_ascii=True) + "\n")
+    line = json.dumps(record, ensure_ascii=True) + "\n"
+    for attempt in range(4):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "a") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            # Another process rotated the log while this one waited for the lock: the record goes into the new one.
+            with contextlib.suppress(OSError):
+                if os.stat(path, follow_symlinks=False).st_ino != os.fstat(fd).st_ino and attempt < 3:
+                    continue
+            if os.fstat(fd).st_size >= AUDIT_PART and attempt < 3:
+                with contextlib.suppress(Exception):  # a log that cannot be rotated is written on
+                    if module("statedirs").rotate(path, AUDIT_ARCHIVE, rotation_time()):
+                        continue
+            stream.write(line)
+            return
 
 
 # --- logins: rate limits and sessions ---------------------------------------------------------------------
@@ -422,7 +473,8 @@ class Sessions:
 # its message. A code is never a reason to pass anything: it only says which of these it is.
 ERROR_CODES = ("no-host", "confirm-needed", "bad-path", "bad-name", "host-unreachable", "timeout", "command-failed",
                "unknown-preset-value", "no-preset", "login-needed", "page-outdated", "too-many-logins", "busy",
-               "changed-meanwhile", "nothing-checked", "host-too-old", "mcp-unsigned-catalog")
+               "changed-meanwhile", "nothing-checked", "host-too-old", "mcp-unsigned-catalog",
+               "shared-wildcard")
 
 # What the page sends that only newer sandbox-ai versions know: (since, what, test of the argv). A host whose last
 # status (hosts list, kept; never asked for this) names an older version is told so before anything runs there
@@ -447,7 +499,34 @@ def team_start_words(args):
     return args[2:args.index("--") if "--" in args else len(args)] if args[:2] == ["team", "start"] else []
 
 
+def with_beyond_the_trio(args):
+    """A start (or a team's options) with --with another agent than Claude Code, Codex and OpenCode, or with --with
+    behind one of the others: the team image's layers (0.1.98)."""
+    trio = {"claude", "codex", "opencode"}
+    values = [name.strip() for value in [args[i + 1] for i, x in enumerate(args[:-1]) if x in ("--with", "-wa")] +
+              [x[len("--with="):] for x in args if x.startswith("--with=")] for name in value.split(",")
+              if name.strip()]
+    return bool(values) and (bool(set(values) - trio) or bool(args[:1]) and args[0] in AGENTS and args[0] not in trio)
+
+
 NEWER = (
+    ((0, 1, 168), "net allow --allow-shared-wildcard (a wildcard below a shared service, after its confirmation)",
+     lambda a: a[:2] == ["net", "allow"] and any(x.startswith("--allow-shared-wildcard=") for x in a)),
+    ((0, 1, 98), "--with an agent beyond Claude Code, Codex and OpenCode", with_beyond_the_trio),
+    ((0, 1, 98), "team members openhands, nanobot, letta, opencode2 and pi", lambda a: any(
+        x.startswith("--agents=") and set(x[len("--agents="):].split(",")) & {"openhands", "nanobot", "letta",
+                                                                              "opencode2", "pi"}
+        for x in team_start_words(a))),
+    ((0, 1, 98), "team start --role, --member-model, --member-llm, --member-mode, --dry-run and --no-config for every "
+                 "member", lambda a: any(
+        x.startswith(("--role=", "--member-model=", "--member-llm=", "--member-mode=")) or x == "--dry-run"
+        for x in team_start_words(a)) or (a[:2] == ["team", "start"] and "--no-config" in a[a.index("--"):]
+                                          if "--" in a else False)),
+    ((0, 1, 99), "sandbox-ai board export and import", lambda a: a[:1] == ["board"]),
+    ((0, 1, 99), "sandbox-ai checkpoint", lambda a: a[:1] == ["checkpoint"]),
+    ((0, 1, 99), "sandbox-ai session memory, files and export", lambda a: a[:1] == ["session"] and
+     a[1:2] in (["memory"], ["files"], ["export"])),
+    ((0, 1, 97), "sandbox-ai shell", lambda a: a[:1] == ["shell"]),
     ((0, 1, 96), "team start --vpn, --member-vpn and --allow-shared-openvpn", lambda a: any(
         x.startswith(("--vpn=", "--member-vpn=")) or x == "--allow-shared-openvpn" for x in team_start_words(a))),
     ((0, 1, 96), "team members hermes, dsh, qwen and goose", lambda a: any(
@@ -458,6 +537,7 @@ NEWER = (
         x.startswith("--env=") and re.search(r"[=@]", x[len("--env="):]) for x in a)),
     ((0, 1, 80), "--ask allow", asks_allow),
     ((0, 1, 78), "approvals allow --no-open", lambda a: a[:2] == ["approvals", "allow"] and "--no-open" in a),
+    ((0, 1, 98), "approvals list --state", lambda a: a[:2] == ["approvals", "list"] and "--state" in a),
     ((0, 1, 78), "wizard trust --list, --show and --digest", lambda a: a[:2] == ["wizard", "trust"] and any(
         x in ("--list", "--show") or x.startswith("--digest") for x in a)),
     ((0, 1, 78), "wizard models --url", lambda a: a[:2] == ["wizard", "models"] and any(x.startswith("--url") for x in a)),
@@ -471,7 +551,24 @@ NEWER = (
     ((0, 1, 78), "mcp attach --live and --helper", lambda a: a[:2] == ["mcp", "attach"] and (
         "--live" in a or any(x.startswith("--helper") for x in a))),
     ((0, 1, 78), "mcp detach", lambda a: a[:2] == ["mcp", "detach"]),
+    ((0, 1, 98), "the primary password of the secrets (secrets status, unlock, lock, password)",
+     lambda a: a[:1] == ["secrets"] and a[1:2] and a[1] in ("status", "unlock", "lock", "password")),
+    ((0, 1, 98), "kits host-list, host-show and host-import (what the agents there have of their own)",
+     lambda a: a[:1] == ["kits"] and a[1:2] and a[1].startswith("host-")),
     ((0, 1, 78), "plugins marketplaces", lambda a: a[:2] == ["plugins", "marketplaces"]),
+    ((0, 1, 117), "the update mode (sandbox-ai update mode)", lambda a: a[:2] == ["update", "mode"]),
+    ((0, 1, 159), "a search in the session files (session files --search, --text)",
+     lambda a: a[:2] == ["session", "files"] and any(x.startswith(("--search", "--text")) for x in a)),
+    ((0, 1, 146), "a file marked as a login or key (session files|memory --show-secret)",
+     lambda a: a[:1] == ["session"] and "--show-secret" in a),
+    ((0, 1, 146), "an export with its logins and keys (session export --include-secrets)",
+     lambda a: a[:2] == ["session", "export"] and "--include-secrets" in a),
+    ((0, 1, 151), "the storage check (gc --check, --only, --compact-transcripts)", lambda a: a[:1] == ["gc"] and any(
+        x in ("--check", "--only", "--compact-transcripts") for x in a)),
+    ((0, 1, 151), "the storage check's defaults (storage_...)", lambda a: a[:1] == ["defaults"] and a[1:2] in (
+        ["set"], ["unset"]) and a[2:3] and a[2].startswith("storage_")),
+    ((0, 1, 146), "the default hide_secrets", lambda a: a[:1] == ["defaults"] and a[1:3] in (["set", "hide_secrets"],
+                                                                                            ["unset", "hide_secrets"])),
     ((0, 1, 78), "plugins --marketplaces-only", lambda a: a[:1] == ["plugins"] and "--marketplaces-only" in a),
     ((0, 1, 78), "kits enable-plugin, disable-plugin, remove-marketplace and import-marketplace",
      lambda a: a[:1] == ["kits"] and a[1:2] and a[1] in KIT_NEW_ACTIONS),
@@ -479,6 +576,10 @@ NEWER = (
      lambda a: a[:1] == ["kits"] and a[1:2] and a[1] in KIT_DEFAULT_ACTIONS and "--" in a
      and a[a.index("--") + 1:a.index("--") + 2] == ["default"]),
 )
+
+
+UPDATE_MODES = ("off", "notify", "download", "auto")  # updates.py MODES
+UPDATE_WINDOW = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9](-([01][0-9]|2[0-3]):[0-5][0-9])?")
 
 
 def version_text(key):
@@ -531,6 +632,28 @@ class Refused(Exception):
         self.params = {key: printable(str(value))[:300] for key, value in (params or {}).items()}
 
 
+# Session bridges: a session as `bridge add` takes it (NAME, or HOST:NAME of a host of that machine's), a bridge's id
+# (ID or HOST:ID), a capability, --until and a --limit value.
+BRIDGE_SESSION = re.compile(r"(?:[a-z0-9][a-z0-9_-]{0,31}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+BRIDGE_ID = re.compile(r"(?:[a-z0-9][a-z0-9_-]{0,31}:)?[0-9a-f]{8}")
+BRIDGE_CAP = re.compile(r"message|ask|watch|files:(?:ro|rw):[^,\x00-\x1f\x7f]{1,4096}")
+BRIDGE_UNTIL = re.compile(r"[0-9]{1,6}[smhd]|(?:[01]?[0-9]|2[0-3]):[0-5][0-9]|"
+                          r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.+Z-]{4,25}")
+BRIDGE_LIMIT = re.compile(r"[0-9]{1,12}[kKmMgG]?")
+
+
+def bridge_session(value, what):
+    if not (isinstance(value, str) and BRIDGE_SESSION.fullmatch(value)):
+        raise Refused(400, f"{what}: a session's name, or HOST:NAME of one on a host of yours")
+    return value
+
+
+def bridge_id(value):
+    if not (isinstance(value, str) and BRIDGE_ID.fullmatch(value)):
+        raise Refused(400, "a bridge is its id (eight hex digits), or HOST:ID")
+    return value
+
+
 def host_name(value):
     hosts = module("hosts")
     if value != hosts.LOCAL and not (isinstance(value, str) and hosts.NAME.fullmatch(value)):
@@ -543,7 +666,8 @@ def host_name(value):
 # SRV-like and service names); never a leading "-" (read as an option).
 NET_HOST = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62})(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,62}))*")
 # A host wildcard as `sandbox-ai net allow` takes it: *.DOMAIN.TLD, at least two labels below the star (*.org would
-# open a whole top-level domain). The command refuses public and shared suffixes itself (runtime.wildcard_suffix).
+# open a whole top-level domain). The command refuses public suffixes itself (runtime.wildcard_suffix); one below a
+# shared service is asked about first (NEEDS_CONFIRM "shared-wildcard"), then passed as --allow-shared-wildcard.
 NET_WILDCARD = re.compile(r"\*\.(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z][A-Za-z0-9-]{0,62}")
 NET_TCP = re.compile(r"(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5}")
 NET_GIT_URL = re.compile(r"https?://(?:[A-Za-z0-9._-]{1,64}@)?(?:[A-Za-z0-9.-]{1,253}|\[::1\])(?::[0-9]{1,5})?/?")
@@ -647,6 +771,7 @@ STARTS_HOST_SECONDS = 20  # the same for the starts of every host (GET /api/star
 
 
 CANARY_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}")
+REVIEW_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # workspace_review.RUN_ID
 SAFEGUARDS_TAIL = 500  # safeguard records a page asks a host for at most (the newest)
 # What `approvals remembered` lists for a project: a host name (or *.wildcard), IP:PORT, [IPv6]:PORT; never "-...".
 REMEMBERED_ENTRY = re.compile(r"(?:\*\.)?[A-Za-z0-9_][A-Za-z0-9_.-]{0,252}(?::[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\]:[0-9]{1,5}")
@@ -680,10 +805,81 @@ def secret_name(value):
     return value
 
 
+LAUNCHER_WARNING = re.compile(r"^(?:agent-sandbox|sandbox-ai(?: [a-z-]+)?): warning: (.+)$")
+
+
+def launcher_warnings(text):
+    """[warning] of the launcher's own in TEXT (a command's standard error and output), each once, printable and at
+    most 20 of 2000 characters: you decide what a sandbox gets - a host path with a risk (HOME, sandbox-ai's own
+    folders, a kernel tree...) is given, and such a line says what it means."""
+    found = []
+    for line in str(text or "").splitlines():
+        match = LAUNCHER_WARNING.match(line.strip())
+        if match and printable(match.group(1))[:2000] not in found:
+            found.append(printable(match.group(1))[:2000])
+    return found[:20]
+
+
+CHECKPOINT_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")  # checkpoints.ID
+
+
+def checkpoint_id(value):
+    if not (isinstance(value, str) and CHECKPOINT_ID.fullmatch(value)):
+        raise Refused(400, "a checkpoint's id is DATE-TIME-HEX (sandbox-ai checkpoint list)")
+    return value
+
+
 def start_name(value):
     if not (isinstance(value, str) and START_NAME.fullmatch(value)):
         raise Refused(400, "a start's name is 1-48 letters, digits, '_', '.' or '-'", code="bad-name",
                       params={"what": "start"})
+    return value
+
+
+# The commands of the storage check's plan (starts.start_plan, global_plan) the page may run: gc's own forms only.
+STORAGE_FLAGS = {"--only", "--caches", "--build-output", "--toolchains", "--images", "--yes"}
+STORAGE_DAYS = {"--compact-transcripts", "--transcripts", "--logs-older-than"}
+
+
+def storage_argv(argv):
+    """ARGV when it is one of the gc commands the storage check names (gc; gc --only with --caches, --build-output,
+    --toolchains, --images, --compact-transcripts DAYS, --transcripts DAYS, --logs-older-than DAYS, --home NAME,
+    --yes; gc --pack --home NAME --yes; gc --unpack NAME), else Refused (400)."""
+    refused = Refused(400, "argv is a command of the storage check's plan (sandbox-ai gc --check)")
+    if not isinstance(argv, list) or not argv or argv[0] != "gc" or len(argv) > 12 or \
+            not all(isinstance(part, str) for part in argv):
+        raise refused
+    rest = argv[1:]
+    if rest[:1] == ["--unpack"]:
+        if len(rest) == 2 and START_NAME.fullmatch(rest[1]):
+            return list(argv)
+        raise refused
+    if rest[:1] == ["--pack"]:
+        if len(rest) == 4 and rest[1] == "--home" and START_NAME.fullmatch(rest[2]) and rest[3] == "--yes":
+            return list(argv)
+        raise refused
+    if rest and rest[0] != "--only":
+        raise refused
+    index = 0
+    while index < len(rest):
+        part = rest[index]
+        if part in STORAGE_FLAGS:
+            index += 1
+        elif part in STORAGE_DAYS and index + 1 < len(rest) and re.fullmatch(r"[1-9][0-9]{0,4}", rest[index + 1]):
+            index += 2
+        elif part == "--home" and index + 1 < len(rest) and START_NAME.fullmatch(rest[index + 1]):
+            index += 2
+        else:
+            raise refused
+    return list(argv)
+
+
+def listed_file(value):
+    """A file's name as `sandbox-ai session memory|files` lists it (a path inside the start's HOME): one printable
+    line; the command takes only a name of its own listing."""
+    if not (isinstance(value, str) and value and len(value) <= 4096 and value.isprintable()
+            and not value.startswith(("/", "-"))):
+        raise Refused(400, "a file is named as the listing names it")
     return value
 
 
@@ -698,6 +894,8 @@ def new_start_name(value):
 
 # Kits (sandbox-ai kits): the names as kits.py has them; every value is checked here and again by the command.
 KIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}@[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # kits.PLUGIN_NAME twice
+LIVE_ENTRY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@+-]{0,127}")  # kits_live.ENTRY_NAME, or a kit's name
 KIT_SKILL = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")  # a new skill's name (Claude's rule)
 KIT_PLUGIN = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._^~<>=*+-]{0,200}")  # NAME@MARKETPLACE or an npm package
 KIT_ACTIONS = ("add-skill", "new-skill", "add-plugin", "add-marketplace", "remove-skill", "remove-plugin",
@@ -710,6 +908,16 @@ KIT_DEFAULT_ACTIONS = ("add-plugin", "remove-plugin", "enable-plugin", "disable-
 # (kit-remove)
 KIT_WIDENS = ("add-skill", "add-plugin", "add-marketplace", "add-hook", "enable-plugin", "import-marketplace")
 KIT_NARROWS = ("remove-skill", "remove-plugin", "remove-hook", "disable-plugin", "remove-marketplace")
+
+
+AGENT_PART = re.compile(r"[a-z0-9]{2,12}:[a-z-]{3,16}:[^\x00-\x1f\x7f]{1,500}")
+
+
+def agent_part_id(value):
+    """A part's id of sandbox-ai kits host-list (AGENT:KIND:NAME); the command checks it again."""
+    if not (isinstance(value, str) and AGENT_PART.fullmatch(value) and value.isprintable()):
+        raise Refused(400, "a part is AGENT:KIND:NAME as sandbox-ai kits host-list shows it")
+    return value
 
 
 def kit_name(value, what="a kit's name"):
@@ -770,7 +978,7 @@ MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot
 SIZE_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
 NET_PRESETS = ("pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm")  # agent_sandbox.PRESETS (a test agrees)
 NETWORK = re.compile(r"[0-9A-Fa-f:.]{2,45}(?:/[0-9]{1,3})?")
-BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}(?:@[a-z]{1,20})?")  # (NAME@AGENT: that agent's variant NAME)  # codex, claude, opencode, hermes, dsh, qwen, goose, all, team, cairn, vpn, tor, browser or a variant
+BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}(?:@[a-z]{1,20})?")  # (NAME@AGENT: that agent's variant NAME)  # codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, vpn, tor, browser or a variant
 HOOK_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 HOOK_EVENT = re.compile(r"[A-Z][A-Za-z]{1,40}")
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
@@ -843,6 +1051,23 @@ def clean_path(value, what):
     return no_dots(host_path(value, what), what)
 
 
+def remote_source(value, what):
+    """VALUE when it is a remote folder (sshfs://[USER@]HOST[:PORT]/PATH): its canonical spelling, as the launcher
+    takes it (remotefs.parse; that host mounts it with sshfs); None for anything else. 400 with what is wrong."""
+    remote = module("remotefs")
+    if not remote.is_remote(value):
+        return None
+    try:
+        return remote.parse(value)["source"]
+    except ValueError as exc:
+        raise Refused(400, f"{what}: {exc}") from None
+
+
+def path_or_remote(value, what):
+    """An absolute path on the host (clean_path) or a remote folder (remote_source)."""
+    return remote_source(value, what) or clean_path(value, what)
+
+
 def catalog_name(prefix, given=()):
     """The catalog behind PREFIX of `mcp catalog`'s lines, for people: sandbox-ai-mcp (mcp:) or axross-mcp-hub
     (hub:) of the default ones, the Nth catalog GIVEN for cN: (mcp.catalog_label)."""
@@ -880,15 +1105,43 @@ def catalog_sources(body):
 # naming the actions it may need (Api.routes' fourth element; tests/test_web.py checks every destructive or weakening
 # route against it). GET /api/policy serves it, so the page asks for exactly these, before it sends {"confirm": true}.
 NEEDS_CONFIRM = {
+    "checkpoint-restore": "a restore puts the workspaces back as the checkpoint holds them: what changed since is "
+                          "replaced or removed (a checkpoint of the state now is taken first, so it can be undone)",
+    "checkpoint-delete": "deleting a checkpoint removes it and the content only it held, for good",
+    "login-import": "every sandbox of that agent started from now on uses this session's login: the central login is "
+                    "replaced (with replace: also one of another account); the session keeps its own copy",
+    "login-give": "an agent login given to a running sandbox lets its agent work as that account from now on; the "
+                  "two then share the login",
+    "login-edit": "a changed login is what every later start that uses it logs in with (a sandbox that runs keeps "
+                  "the login it was started with)",
+    "secret-rename": "a renamed secret gets its new name in every login, VPN profile, trusted project file and kept "
+                     "start that names it",
+    "secret-send": "a secret sent to another host is kept in that host's secret store from then on: whoever controls "
+                   "that host can use it",
+    "session-export": "the archive holds the start's HOME as its agent left it - its transcripts, its memory, the "
+                      "files it kept (logins and keys are left out) - in a new file on that host",
+    "session-export-secrets": "the archive then holds the start's logins, keys and secrets too: whoever has it can "
+                              "log in as you with them, wherever it goes",
+    "show-secret-file": "the file is marked as a login or key: its text is shown on this screen, where anyone who "
+                        "sees it can read it",
+    "board-import": "importing a bundle from elsewhere writes its parts here (MCP and LLM servers, kits, presets, "
+                    "rulesets, image recipes; replaced ones when chosen) and keeps its board",
     "start-stop": "stopping a start ends what runs in it (and its HOME, unless it is kept)",
+    "kits-attach": "skills, subagents, commands or a plugin given to a running start reach its agent at once "
+                   "(read-only; a plugin's code runs as the agent; kept: also its later starts)",
+    "kits-detach": "taking a skill, subagent, command or plugin out of a running start takes it from its agent (and "
+                   "from its later starts where it was kept)",
+    "agent-restart": "restarting the agent inside the running sandbox ends what it does now (its conversation "
+                     "continues; the sandbox, network and MCP servers stay)",
     "start-delete": "deleting a start removes its kept HOME",
     "gc": "gc removes the leftovers of ended starts, and kept starts unused for that long with their HOME, for good",
-    "approval-allow-always": "an allow always is remembered for the project: every later start of it gets this "
-                             "without asking",
-    "approval-deny-always": "a deny always is remembered for the project: every later question like it is refused",
+    "storage-apply": "the chosen items of the storage check run: caches, build output, toolchains or old transcripts "
+                     "removed for good, transcripts compacted, HOMEs packed - as each one says",
     "approval-forget": "forgetting a remembered answer changes what every later start of that project gets (a "
                        "forgotten block is asked again)",
     "defaults-lower": "this lowers the protection of every later start on that host",
+    "shared-wildcard": "a host wildcard below a shared service opens every name anyone rents there: the agent could "
+                       "open any such server, and send data there",
     "net-allow": "net allow widens what the running sandbox reaches, at once (real DNS, ports on the host, host "
                  "wildcards, Git logins included)",
     "net-untaint": "untaint takes back the rules for tainted runs: the sandbox is treated as if no untrusted content "
@@ -904,6 +1157,8 @@ NEEDS_CONFIRM = {
     "kit-delete": "deleting a kit removes its folder",
     "kit-remove": "removing a skill or plugin from a kit takes it from every later start with that kit",
     "kit-add": "a skill, plugin or marketplace added to a kit is given to every later start with that kit",
+    "memory-add": "memory added to a project's memory is given to every later start of that project (it may hold "
+                  "private notes)",
     "mcp-attach": "an attached MCP server is reached by that start from its next start on (kept for its later "
                   "starts)",
     "mcp-restart": "restarting a running start ends what runs in it now, so that it reaches the MCP server (the agent "
@@ -922,10 +1177,14 @@ NEEDS_CONFIRM = {
                   "connections to it end and its calls fail (its later starts go without it)",
     "mcp-unsigned": "an MCP server from a catalog no trusted key signed is taken without that check",
     "mcp-writable-mount": "a writable mount lets the MCP server change that directory on the host",
+    "mcp-lan": "network lan lets the MCP server reach your local network and that host, not only the internet",
     "git-login-add": "a Git login is used by the connection proxy of every sandbox that reaches that server",
     "login-replace": "a login for that server or kind exists: its token is replaced by this secret's for every later "
                      "start that uses it",
     "mcp-replace": "an MCP server of that name exists: its definition is replaced for every start that uses it",
+    "mcp-copy": "an MCP server copied from another host is defined on this one, with the folders, variables and "
+                "network shown (a server of that name replaced where asked), and reached by the start it is attached "
+                "to",
     "login-remove": "removing a login or an identity takes it from every later start that uses it",
     "net-keep": "keeping what the run was given writes it into the project's .sandbox-ai.json: every later start of "
                 "that project gets it",
@@ -947,6 +1206,32 @@ NEEDS_CONFIRM = {
                     "unless kept)",
     "login-logout": "logging out forgets the stored login of that agent: its sandboxes need a new login",
     "kit-hooks-trust": "trusted hooks of a kit run in every later start with that kit",
+    "bridge-add": "a bridge lets one running session reach another as it allows (messages, questions, files, "
+                  "observing) until either session ends or it is revoked",
+    "bridge-revoke": "revoking a bridge ends it now: both sessions lose it at once",
+    "bridge-resume": "resuming a bridge lifts its suspension: the sessions reach each other again as it allows",
+    "notify-add": "a phone channel sends that host's questions and alarms - the kind, the run's name, a short what and, "
+                  "with the detail full, destinations and paths - to the service it names",
+    "notify-remove": "removing a phone channel: its questions and alarms no longer reach you there",
+    "schedule-add": "a schedule starts that agent on that host by itself, on its timetable or trigger, under the "
+                    "rules of a normal start; its questions are answered as its ask mode says (off: refused)",
+    "schedule-remove": "removing a schedule: it starts nothing any more, and without keep_history its runs' "
+                       "reports go too",
+    "schedule-timer": "the timer runs sandbox-ai schedule tick every minute as that host's user (a systemd user "
+                      "timer or a LaunchAgent): off, no schedule starts by itself",
+    "update-mode": "the update mode decides what that host's sandbox-ai does by itself: off checks nothing, notify "
+                   "announces a newer signed release, download also fetches and checks it, auto also installs it in "
+                   "its window while nothing runs (a timer as that host's user)",
+    # sandbox-ai spend raise: a running start's model requests may cost that much more than its budgets
+    "spend-raise": "raising a budget lets the running start's model requests cost that much more (its refused "
+                   "requests go again)",
+    # the workspace review (sandbox-ai workspace review RUN --restore PATH) and the MCP tool pins (mcp tools NAME)
+    "workspace-restore": "a restore puts the file back as it was at the start of the run: what the agent wrote there "
+                         "is replaced (a file it added is removed)",
+    "mcp-pin-repin": "re-pinning makes the list the server gave last the one its later lists are compared with: "
+                     "what changed in it is no longer asked about",
+    "mcp-pin-forget": "forgetting the pin lets the server's next list be pinned without a question (trust on first "
+                      "use again)",
 }
 # The actions only a terminal asks for (its query carries confirm=1): no route names them.
 TERMINAL_CONFIRM = ("login-logout", "kit-hooks-trust")
@@ -956,28 +1241,66 @@ TELEMETRY_ORDER = ("off", "strict")  # telemetry is always off: no on (an old on
 DEFAULT_MODE, DEFAULT_TELEMETRY = "medium", "off"
 # The keys of defaults.json (agent_sandbox.DEFAULTS_KEYS but "version"; tests/test_web.py checks they agree): any
 # other key is refused before anything reaches a host.
-DEFAULT_KEYS = ("canaries", "desktop_notifications", "keep_days", "llm_traffic", "llm_traffic_limit", "loop_guard",
-                "mode", "name_style", "preset_dirs", "safeguard_mute", "subnet", "subnet6", "telemetry")
+DEFAULT_KEYS = ("ask_timeout", "budget", "canaries", "checkpoint_count", "checkpoint_days", "checkpoint_every",
+                "checkpoint_exclude", "checkpoint_gb", "checkpoint_mounts", "checkpoint_start", "connection_bodies",
+                "desktop_notifications", "file_reads", "keep_days", "llm_traffic", "llm_traffic_limit", "log_days",
+                "loop_guard", "mode", "monitor_interval", "name_style", "preset_dirs", "safeguard_mute", "subnet",
+                "subnet6", "telemetry", "hide_secrets",
+                # the storage check and its automatic rules (storage.py checks each value)
+                "storage_check", "storage_threshold_gb", "storage_growth_gb", "storage_caches_days",
+                "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days")
+# (and the update mode's, changed by /update-mode: it makes the timer too)
+FILE_READS = ("folders", "files", "off")  # runtime.FILE_READS: file_reads' values
+CONNECTION_BODIES = ("text", "all")  # runtime.CONNECTION_BODIES
 LLM_TRAFFIC_MODES = ("off", "llm", "all")  # runtime.LLM_TRAFFIC_MODES: llm_traffic's values
 DESKTOP_NOTIFICATIONS = ("all", "alarms", "none")  # agent_sandbox.DESKTOP_NOTIFICATIONS
 NAME_STYLES = ("codename", "project")  # agent_sandbox.NAME_STYLES: name_style's values
 
 
-def confirmed(body, action, detail=None):
-    """Refused unless BODY carries {"confirm": true}: ACTION is a key of NEEDS_CONFIRM (its reason in the error,
-    DETAIL first when given)."""
+def shared_risk(value):
+    """(the risk in words, the shared suffix) of the host wildcard VALUE below a shared service, or None (an own
+    domain's, or one the command refuses always: it says why)."""
+    runtime = module("runtime")
+    try:
+        shared = runtime.shared_wildcard(value)
+    except ValueError:
+        return None
+    return (runtime.shared_wildcard_risk(value), shared) if shared else None
+
+
+# An action asked by a question of its own beside another one of the same request (CONFIRM_KEYS: the key its yes is
+# sent as, else "confirm"): a wildcard below a shared service in a net allow, which the net-allow yes is not.
+CONFIRM_KEYS = {"shared-wildcard": "confirm_shared_wildcard"}
+
+
+def confirmed(body, action, detail=None, code="confirm-needed", params=None):
+    """Refused unless BODY carries {"confirm": true} (the key of CONFIRM_KEYS for ACTION): ACTION is a key of
+    NEEDS_CONFIRM (its reason in the error, DETAIL first when given). CODE and PARAMS: the refusal's, for the page's
+    own words (default: confirm-needed with the action and DETAIL)."""
     if action not in NEEDS_CONFIRM:
         raise KeyError(action)  # a route asking for an action the table does not have: a bug, never a pass
-    if body.get("confirm") is not True:
+    key = CONFIRM_KEYS.get(action, "confirm")
+    if body.get(key) is not True:
         why = f"{detail}: {NEEDS_CONFIRM[action]}" if detail else NEEDS_CONFIRM[action]
-        raise Refused(400, f"{why}: send {{\"confirm\": true}}", confirm=action, code="confirm-needed",
-                      params={"action": action, "detail": detail or ""})
+        raise Refused(400, f"{why}: send {{\"{key}\": true}}", confirm=action, code=code,
+                      params=params if params is not None else {"action": action, "detail": detail or ""})
 
 
 def one_line(value, what, limit=1024):
     if not (isinstance(value, str) and value.strip() and len(value) <= limit and value.isprintable()):
         raise Refused(400, f"{what}: one line of at most {limit} characters")
     return value.strip()
+
+
+def net_items(body, key, limit=32):
+    """The items of BODY[KEY] (a list of strings) for `sandbox-ai net allow|revoke`: each string may list several,
+    separated by commas or spaces (as the launcher's list options take them: "pypi.org, *.example.com"), empty ones
+    left out, each once; at most LIMIT in all. Each is then checked on its own and passed as --flag=ITEM."""
+    items = list(dict.fromkeys(item for value in strings(body.get(key, []), key, limit)
+                               for item in re.split(r"[\s,]+", value) if item))
+    if len(items) > limit:
+        raise Refused(400, f"{key}: at most {limit} items")
+    return items
 
 
 def strings(value, what, limit=64):
@@ -1132,7 +1455,12 @@ class Api:
         self.updater = updater or (lambda host, version=None, sudo=None, from_here=False:
                                     module("hosts").update(host, version, sudo, from_here=from_here))
         self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
+        # wrong primary passwords per host: three at once, then 5 s doubling up to 5 minutes (the host's store slows
+        # them down too, whatever way they come in)
+        self.unlock_limiter = Limiter(free=3, first=5, maximum=300)
         self.approvals_fanout = FanOut(self.host_questions)
+        # Every state (open, timed out, allowed, refused): the Approvals page's tabs, read while it is shown.
+        self.approvals_all_fanout = FanOut(lambda name: self.host_questions(name, "all"))
         self.starts_fanout = FanOut(self.host_starts)
         self.every_fanout = FanOut(lambda name: self.host_starts(name, every=True))  # list --all: MCP servers too
         # hosts install: at most one per host at a time; the last result of each kept (a page whose request was cut
@@ -1143,6 +1471,7 @@ class Api:
         self.routes = [
             ("GET", r"/api/policy", self.policy, ()),
             ("GET", r"/api/approvals", self.all_approvals, ()),
+            ("GET", r"/api/approvals/all", self.all_approvals_states, ()),
             ("GET", r"/api/starts", self.all_starts, ()),
             ("GET", r"/api/hosts", self.hosts, ()),
             ("POST", r"/api/hosts", self.add_host, ()),
@@ -1159,15 +1488,53 @@ class Api:
             ("POST", H + r"/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)", self.start_action,
              ("start-stop", "start-delete", "start-restart", "workspace-writable", "mcp-attach")),
             ("POST", H + r"/starts/(?P<name>[^/]+)/rename", self.rename, ()),
+            # a session as one self-sufficient file (sandbox-ai board export), and such a file taken in (board import)
+            ("POST", H + r"/starts/(?P<name>[^/]+)/export", self.export_bundle, ()),
+            ("POST", H + r"/board-import", self.import_bundle, ("board-import",)),
             ("GET", H + r"/starts/(?P<name>[^/]+)/history", self.history, ()),
+            # a start's agent memory and session files, read only, and its folder as one archive (sandbox-ai session
+            # memory|files|export); a file is named as the listing names it (one path segment, encoded)
+            ("GET", H + r"/starts/(?P<name>[^/]+)/memory/(?P<source>auto|home|store)", self.session_memory, ()),
+            ("GET", H + r"/starts/(?P<name>[^/]+)/memory/(?P<source>auto|home|store)/(?P<file>[^/]+)",
+             self.session_memory, ()),
+            ("GET", H + r"/starts/(?P<name>[^/]+)/session-files", self.session_files, ()),
+            ("GET", H + r"/starts/(?P<name>[^/]+)/session-files/(?P<file>[^/]+)", self.session_files, ()),
+            ("GET", H + r"/starts/(?P<name>[^/]+)/session-files/(?P<file>[^/]+)/(?P<full>full)", self.session_files,
+             ()),
+            # a file marked as a login or key: its text only when confirmed (show-secret-file); POST, so a link
+            # cannot show it
+            # a search in them (sandbox-ai session files --search there): names by the file manager's patterns, text
+            ("POST", H + r"/starts/(?P<name>[^/]+)/session-files-search", self.session_files_search, ()),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/session-files/(?P<file>[^/]+)/secret", self.session_secret_file,
+             ("show-secret-file",)),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/memory/(?P<source>auto|home|store)/(?P<file>[^/]+)/secret",
+             self.memory_secret_file, ("show-secret-file",)),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/session-export", self.session_export,
+             ("session-export", "session-export-secrets")),
+            # the workspace checkpoints of a start (sandbox-ai checkpoint): listed, taken, compared, restored, deleted
+            ("GET", H + r"/starts/(?P<name>[^/]+)/checkpoints", self.checkpoints, ()),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/checkpoints", self.take_checkpoint, ()),
+            ("GET", H + r"/checkpoints/(?P<id>[^/]+)/diff", self.checkpoint_diff, ()),
+            ("GET", H + r"/checkpoints/(?P<id>[^/]+)/restore", self.checkpoint_preview, ()),
+            ("POST", H + r"/checkpoints/(?P<id>[^/]+)/restore", self.checkpoint_restore, ("checkpoint-restore",)),
+            ("POST", H + r"/checkpoints/(?P<id>[^/]+)/delete", self.checkpoint_delete, ("checkpoint-delete",)),
             ("GET", H + r"/starts/(?P<name>[^/]+)/review", self.review_home, ()),
             ("GET", H + r"/gc", self.gc_preview, ()),
+            # the storage check (sandbox-ai gc --check): its plan, of the host or of one start, and an item applied
+            ("GET", H + r"/gc/check", self.storage_check, ()),
+            ("GET", H + r"/gc/check/(?P<name>[^/]+)", self.storage_check, ()),
+            ("POST", H + r"/gc/apply", self.storage_apply, ("storage-apply",)),
             ("GET", H + r"/gc/(?P<days>[^/]+)", self.gc_preview, ()),
             ("POST", H + r"/gc", self.gc, ("gc",)),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/attach", self.mcp_attach, ("mcp-attach", "mcp-restart")),
             # an MCP server (or a helper agent) into a running start now, and out of it (mcp attach|detach --live)
             ("POST", H + r"/starts/(?P<name>[^/]+)/mcp-live", self.mcp_live_attach, ("mcp-attach",)),
             ("POST", H + r"/starts/(?P<name>[^/]+)/mcp-live/remove", self.mcp_live_detach, ("mcp-detach",)),
+            # Skills, subagents, commands and plugins for the running start (sandbox-ai kits|plugins attach|detach), and
+            # its agent started again inside the sandbox (kits restart-agent)
+            ("POST", H + r"/starts/(?P<name>[^/]+)/kits-live", self.kits_live_attach, ("kits-attach",)),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/kits-live/remove", self.kits_live_detach, ("kits-detach",)),
+            ("POST", H + r"/starts/(?P<name>[^/]+)/agent-restart", self.agent_restart, ("agent-restart",)),
             # out of a start that does not run (stopped, paused): its later starts go without it (mcp detach)
             ("POST", H + r"/starts/(?P<name>[^/]+)/mcp/remove", self.mcp_detach, ("mcp-detach",)),
             ("GET", H + r"/plugins-status", self.plugins_status, ()),
@@ -1176,11 +1543,14 @@ class Api:
             ("GET", H + r"/approvals-history/(?P<run>[^/]+)", self.approvals_history, ()),
             ("GET", H + r"/remembered", self.remembered, ()),
             ("POST", H + r"/remembered/forget", self.forget, ("approval-forget",)),
-            ("POST", H + r"/approvals/(?P<id>[^/]+)", self.answer, ("approval-allow-always", "approval-deny-always")),
+            ("POST", H + r"/approvals/(?P<id>[^/]+)", self.answer, ()),
+            ("POST", H + r"/approvals/(?P<id>[^/]+)/ask-again", self.ask_again, ()),
             ("GET", H + r"/doctor", self.doctor, ()),
             ("GET", H + r"/llm", self.llm, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/models", self.llm_models, ()),
             ("GET", H + r"/llm-status", self.llm_status, ()),
+            # the best tested model and harness per use case, from that host's servers (llm recommend --json)
+            ("GET", H + r"/llm-recommend", self.llm_recommend, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)/status", self.llm_status, ()),
             ("POST", H + r"/llm-models", self.llm_models_of_url, ("llm-insecure",)),
             ("POST", H + r"/llm", self.add_llm, ("llm-insecure", "llm-replace")),
@@ -1189,34 +1559,67 @@ class Api:
             ("GET", H + r"/defaults", self.defaults, ()),
             ("POST", H + r"/defaults", self.set_default, ("defaults-lower",)),
             ("GET", H + r"/net/(?P<name>[^/]+)", self.net_show, ()),
-            ("POST", H + r"/net/(?P<name>[^/]+)", self.net_change, ("net-allow", "net-keep")),
+            # what a running start was refused, why, and what to do (sandbox-ai approvals blocked NAME there)
+            ("GET", H + r"/blocked/(?P<name>[^/]+)", self.blocked, ()),
+            ("POST", H + r"/net/(?P<name>[^/]+)", self.net_change, ("net-allow", "net-keep", "shared-wildcard")),
             ("POST", H + r"/net/(?P<name>[^/]+)/untaint", self.net_untaint, ("net-untaint",)),
             ("GET", H + r"/workspaces/(?P<name>[^/]+)", self.workspaces, ()),
             ("POST", H + r"/workspaces/(?P<name>[^/]+)", self.workspace_add, ("workspace-writable",)),
             ("POST", H + r"/workspaces/(?P<name>[^/]+)/remove", self.workspace_remove, ("workspace-force",)),
+            # the devices of that host a start could be given (sandbox-ai devices scan there: read-only)
+            ("GET", H + r"/device-scan", self.device_scan, ()),
             ("GET", H + r"/devices/(?P<name>[^/]+)", self.devices, ()),
             ("POST", H + r"/devices/(?P<name>[^/]+)", self.device_add, ("device-add",)),
             ("POST", H + r"/devices/(?P<name>[^/]+)/remove", self.device_remove, ()),
             ("GET", H + r"/limits/(?P<name>[^/]+)", self.limits, ()),
             ("POST", H + r"/limits/(?P<name>[^/]+)", self.set_limits, ("limits-raise",)),
             ("GET", H + r"/presets", self.presets, ()),
+            ("GET", H + r"/models", self.cloud_models, ()),
             ("GET", H + r"/preset-categories", self.preset_categories, ()),
             ("GET", H + r"/vpn", self.vpn_list, ()),
             ("POST", H + r"/vpn", self.vpn_add, ("vpn-socks", "vpn-replace")),
             ("POST", H + r"/vpn/(?P<name>[^/]+)/check", self.vpn_check, ()),
+            ("POST", H + r"/vpn/(?P<name>[^/]+)/set", self.vpn_set, ("vpn-replace",)),
             ("DELETE", H + r"/vpn/(?P<name>[^/]+)", self.vpn_remove, ("vpn-remove",)),
             ("GET", H + r"/kits", self.kits, ()),
             ("GET", H + r"/marketplaces", self.marketplaces, ()),
             ("POST", H + r"/kits", self.kit_new, ()),
             ("POST", H + r"/kits/(?P<name>[^/]+)/(?P<action>[a-z-]+)", self.kit_change, ("kit-remove", "kit-add")),
             ("DELETE", H + r"/kits/(?P<name>[^/]+)", self.kit_delete, ("kit-delete",)),
+            # what the agents on that host have of their own (sandbox-ai kits host-list), one part, and an import
+            ("GET", H + r"/agent-parts", self.agent_parts, ()),
+            ("GET", H + r"/agent-parts/(?P<id>[^/]+)", self.agent_part, ()),
+            ("POST", H + r"/agent-parts-import", self.agent_parts_import, ("kit-add", "memory-add")),
             ("GET", H + r"/canaries", self.canaries, ()),
             ("GET", H + r"/canaries/(?P<run>[^/]+)", self.canaries, ()),
+            # the system monitor: what runs now (sandbox-ai top) and over a window (sandbox-ai stats usage)
+            ("GET", H + r"/monitor", self.monitor, ()),
+            ("GET", H + r"/monitor/usage/(?P<since>[0-9]{1,3}[mhd])", self.monitor_usage, ()),
+            # what a start's model requests cost so far, its budgets (sandbox-ai spend run), and a raise of them
+            ("GET", H + r"/spend/(?P<name>[^/]+)", self.spend_run, ()),
+            ("POST", H + r"/spend/(?P<name>[^/]+)/raise", self.spend_raise, ("spend-raise",)),
             ("GET", H + r"/safeguards", self.safeguards, ()),
+            # what runs changed in files the host runs or trusts (sandbox-ai workspace review): kept or restored per
+            # file; the MCP tool definitions pinned per project (sandbox-ai mcp tools): shown, re-pinned, forgotten
+            ("GET", H + r"/workspace-review", self.workspace_reviews, ()),
+            ("POST", H + r"/workspace-review/keep", self.workspace_review_keep, ()),
+            ("POST", H + r"/workspace-review/restore", self.workspace_review_restore, ("workspace-restore",)),
+            ("GET", H + r"/mcp-tools", self.mcp_tool_pins, ()),
+            ("POST", H + r"/mcp-tools/show", self.mcp_tool_pin, ()),
+            ("POST", H + r"/mcp-tools/repin", self.mcp_tool_repin, ("mcp-pin-repin",)),
+            ("POST", H + r"/mcp-tools/forget", self.mcp_tool_forget, ("mcp-pin-forget",)),
             ("GET", H + r"/safeguards/(?P<run>[^/]+)", self.safeguards, ()),
             ("GET", H + r"/secrets", self.secrets, ()),
             ("POST", H + r"/secrets/(?P<name>[^/]+)", self.secret_set, ("secret-replace",)),
+            # another name for a secret, in everything that names it; a secret kept on another host as well
+            ("POST", H + r"/secrets/(?P<name>[^/]+)/rename", self.secret_rename, ("secret-rename",)),
+            ("POST", H + r"/secrets/(?P<name>[^/]+)/send", self.secret_send, ("secret-send", "secret-replace")),
             ("DELETE", H + r"/secrets/(?P<name>[^/]+)", self.secret_delete, ("secret-delete",)),
+            # the primary password of the host's private files (secrets status, unlock, lock, password set)
+            ("GET", H + r"/vault", self.secrets_protection, ()),
+            ("POST", H + r"/vault/unlock", self.secrets_unlock, ()),
+            ("POST", H + r"/vault/lock", self.secrets_lock, ()),
+            ("POST", H + r"/vault/new", self.secrets_password, ()),
             # project configurations (sandbox-ai wizard trust)
             ("GET", H + r"/projects", self.projects, ()),
             ("POST", H + r"/projects/review", self.project_review, ()),
@@ -1224,18 +1627,47 @@ class Api:
             ("POST", H + r"/projects/forget", self.project_forget, ("project-forget",)),
             # MCP servers (sandbox-ai mcp)
             ("GET", H + r"/mcp", self.mcp_list, ()),
-            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount", "mcp-replace")),
+            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount", "mcp-replace", "mcp-lan")),
             ("POST", H + r"/mcp-catalog", self.mcp_catalog, ()),
+            # MCP servers of another host copied to this one (sandbox-ai mcp copy, run here: it reaches both)
+            ("POST", H + r"/mcp-copy", self.mcp_copy, ("mcp-copy",)),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/start", self.mcp_start, ("mcp-attach", "mcp-restart")),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/stop", self.mcp_stop, ("mcp-stop",)),
             # logins and identities (sandbox-ai git-logins, publish-logins, identities): secrets only by name
+            # phone notifications (sandbox-ai notify): channels with secret names, never a token
+            ("GET", H + r"/notify", self.notify_list, ()),
+            ("POST", H + r"/notify", self.notify_add, ("notify-add",)),
+            ("POST", H + r"/notify/(?P<name>[^/]+)/remove", self.notify_remove, ("notify-remove",)),
+            ("POST", H + r"/notify/(?P<name>[^/]+)/test", self.notify_test, ()),
+            ("POST", H + r"/notify-link", self.notify_link, ()),
+            # scheduled runs (sandbox-ai schedule): the list, a schedule's history and reports, add, run now, pause,
+            # resume, remove and the timer
+            ("GET", H + r"/schedules", self.schedules, ()),
+            ("POST", H + r"/schedules", self.schedule_add, ("schedule-add",)),
+            ("GET", H + r"/schedules/(?P<name>[^/]+)", self.schedule_show, ()),
+            ("GET", H + r"/schedules/(?P<name>[^/]+)/history", self.schedule_history, ()),
+            ("GET", H + r"/schedules/(?P<name>[^/]+)/report", self.schedule_report, ()),
+            ("GET", H + r"/schedules/(?P<name>[^/]+)/report/(?P<run>[^/]+)", self.schedule_report, ()),
+            ("POST", H + r"/schedules/(?P<name>[^/]+)/run", self.schedule_run, ()),
+            ("POST", H + r"/schedules/(?P<name>[^/]+)/pause", self.schedule_pause, ()),
+            ("POST", H + r"/schedules/(?P<name>[^/]+)/resume", self.schedule_resume, ()),
+            ("POST", H + r"/schedules/(?P<name>[^/]+)/remove", self.schedule_remove, ("schedule-remove",)),
+            ("POST", H + r"/schedules-timer", self.schedule_timer, ("schedule-timer",)),
             ("GET", H + r"/git-logins", self.git_logins, ()),
-            ("POST", H + r"/git-logins", self.git_login_add, ("git-login-add",)),
+            ("POST", H + r"/git-logins", self.git_login_add, ("git-login-add", "login-replace")),
             ("POST", H + r"/git-logins/remove", self.git_login_remove, ("login-remove",)),
+            ("POST", H + r"/git-logins/edit", self.git_login_edit, ("login-edit",)),
+            ("POST", H + r"/publish-logins/(?P<kind>[^/]+)/edit", self.publish_login_edit, ("login-edit",)),
             ("POST", H + r"/git-logins/check", self.git_login_check, ()),
             ("GET", H + r"/publish-logins", self.publish_logins, ()),
             ("GET", H + r"/publish-logins/kinds", self.publish_kinds, ()),
             ("GET", H + r"/login-status", self.login_status, ()),
+            # the logins of the sessions (login --status --sessions), and one imported as the central login (login
+            # AGENT --from-session NAME --yes --expect FINGERPRINT: only the login that was shown; confirmed)
+            ("GET", H + r"/session-logins", self.session_logins, ()),
+            ("POST", H + r"/session-logins/import", self.import_session_login, ("login-import",)),
+            # an agent login for a sandbox that runs (sandbox-ai login give): the central one, or a session's
+            ("POST", H + r"/session-logins/give", self.give_session_login, ("login-give",)),
             ("POST", H + r"/publish-logins", self.publish_login_add, ("login-replace",)),
             ("POST", H + r"/publish-logins/check", self.publish_login_check, ()),
             ("POST", H + r"/publish-logins/(?P<kind>[^/]+)/remove", self.publish_login_remove, ("login-remove",)),
@@ -1267,6 +1699,13 @@ class Api:
             ("GET", H + r"/kits/(?P<name>[^/]+)", self.kit_show, ()),
             ("GET", H + r"/llm/(?P<name>[^/]+)", self.llm_show, ()),
             ("GET", H + r"/vpn/(?P<name>[^/]+)", self.vpn_show, ()),
+            # session bridges (sandbox-ai bridge), run by HOST's sandbox-ai: with --hosts and HOST:NAME it reaches the
+            # sessions and bridges of its own hosts over SSH (the page asks the service's machine, "local")
+            ("GET", H + r"/bridges", self.bridges, ()),
+            ("GET", H + r"/bridges/(?P<id>[^/]+)", self.bridge_show, ()),
+            ("POST", H + r"/bridges", self.bridge_add, ("bridge-add",)),
+            ("POST", H + r"/bridges/(?P<id>[^/]+)/(?P<action>revoke|resume)", self.bridge_action,
+             ("bridge-revoke", "bridge-resume")),
             # logs of a directory or project, the privacy check, the activity
             ("POST", H + r"/logs", self.logs_of, ()),
             ("POST", H + r"/privacy-check", self.privacy_check, ()),
@@ -1274,6 +1713,9 @@ class Api:
             # the doctor of one backend, the version in full, images, the demo device
             ("GET", H + r"/doctor/(?P<backend>[^/]+)", self.doctor, ()),
             ("GET", H + r"/version", self.version_of, ()),
+            # the update mode (sandbox-ai update mode): shown, and changed asked first
+            ("GET", H + r"/update-mode", self.update_mode, ()),
+            ("POST", H + r"/update-mode", self.update_mode_set, ("update-mode",)),
             ("GET", H + r"/images", self.images, ()),
             ("GET", H + r"/demo-device", self.demo_status, ()),
             ("POST", H + r"/demo-device/start", self.demo_start, ()),
@@ -1354,10 +1796,16 @@ class Api:
             raise self.failed(host, args, status, out, err) from None
 
     def done(self, host, args, timeout=120, input=None):
+        """{"output"} of a sandbox-ai command that succeeded on HOST, and its "warnings" (launcher_warnings) when it
+        said any: a host path you chose with a risk is given, and the page shows what it means."""
         status, out, err = self.run(host, args, timeout, input)
         if status != 0:
             raise self.failed(host, args, status, out, err)
-        return {"output": printable(out.strip()[-4000:])}
+        result = {"output": printable(out.strip()[-4000:])}
+        said = launcher_warnings(f"{err}\n{out}")
+        if said:
+            result["warnings"] = said
+        return result
 
     # hosts (the list lives on the machine of the service)
     def hosts(self, params, body):
@@ -1420,6 +1868,7 @@ class Api:
     def forget_host(self, name):
         """What the fan-outs keep of NAME (its questions, its starts): it was added, changed or removed."""
         self.approvals_fanout.forget(name)
+        self.approvals_all_fanout.forget(name)
         self.starts_fanout.forget(name)
 
     def edit_host(self, params, body):
@@ -1684,7 +2133,7 @@ class Api:
         it (workspace-writable), an MCP server is reached by it (mcp-attach); all asked first."""
         options, widens = [], []
         for value in strings(body.get("workspaces", []), "workspaces", 16):
-            options.append(f"--workspace={clean_path(value, 'a workspace')}")
+            options.append(f"--workspace={path_or_remote(value, 'a workspace')}")
             widens.append(value)
         mounts = body.get("mounts", [])
         if not isinstance(mounts, list) or len(mounts) > 16:
@@ -1692,10 +2141,10 @@ class Api:
         for mount in mounts:
             if not isinstance(mount, dict) or set(mount) - {"source", "destination", "mode"}:
                 raise Refused(400, "a mount is {source, destination, mode: ro or rw}")
-            source = clean_path(mount.get("source"), "a mount's source")
+            source = path_or_remote(mount.get("source"), "a mount's source")
             destination = clean_path(mount.get("destination"), "a mount's destination")
             mode = mount.get("mode") or "ro"
-            if mode not in ("ro", "rw") or ":" in source + destination:
+            if mode not in ("ro", "rw") or ":" in (source if not remote_source(source, "") else "") + destination:
                 raise Refused(400, "a mount is SOURCE:DESTINATION with ro or rw (no ':' in the paths)")
             options.append(f"--mount={source}:{destination}:{mode}")
             if mode == "rw":
@@ -1719,12 +2168,191 @@ class Api:
         old, new = start_name(params["name"]), new_start_name(body.get("new"))
         return self.done(params["host"], ["rename", old, new], 60)
 
+    def export_bundle(self, params, body):
+        """sandbox-ai board export --session NAME -: the session's bundle (one JSON document; the images go along only
+        from the command line or the app: --images makes an archive), for the page to offer as a download. Never a
+        secret's value in it (the command's own rule); this machine's paths and names are."""
+        name = start_name(params["name"])
+        status, out, err = self.run(params["host"], ["board", "export", f"--session={name}", "-"], 300)
+        if status != 0:
+            raise self.failed(params["host"], ["board", "export"], status, out, err)
+        try:
+            bundle = json.loads(out)
+        except (ValueError, RecursionError):
+            raise Refused(502, "sandbox-ai board export: not a bundle") from None
+        if not isinstance(bundle, dict) or bundle.get("schema") != "sandbox-ai-bundle":
+            raise Refused(502, "sandbox-ai board export: not a bundle")
+        file = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-.") or "session"
+        return {"file": f"{file}.sandbox-ai-bundle.json", "bundle": bundle}
+
+    def import_bundle(self, params, body):
+        """sandbox-ai board import - --json (--check | --yes): BODY {"bundle": the bundle's document, "map": {marker or
+        path: folder there}, "values": {name: value}, "as": board name, "replace": ["KIND:NAME"], "check": true} -
+        the plan (check, nothing written), or, confirmed (board-import), its parts written and the board kept (never
+        started)."""
+        bundle = body.get("bundle")
+        if not isinstance(bundle, dict) or bundle.get("schema") != "sandbox-ai-bundle":
+            raise Refused(400, "bundle is the document of a sandbox-ai board export")
+        check = body.get("check", True)
+        if not isinstance(check, bool):
+            raise Refused(400, "check is true or false")
+        args = ["board", "import", "-", "--json", "--check" if check else "--yes"]
+        maps, values = body.get("map") or {}, body.get("values") or {}
+        if not isinstance(maps, dict) or not isinstance(values, dict) or len(maps) > 200 or len(values) > 200:
+            raise Refused(400, "map and values are objects")
+        for old, new in maps.items():
+            old, new = one_line(old, "a folder of the bundle", 4096), one_line(new, "a folder there", 4096)
+            if not new.startswith(("/", "~/")):
+                raise Refused(400, f"{printable(new)[:200]}: give the folder as an absolute path")
+            args.append(f"--map={old}={new}")
+        for name, value in values.items():
+            if not (isinstance(name, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", name)):
+                raise Refused(400, "a value's name is its placeholder's (lower-case letters, digits and -)")
+            args.append(f"--value={name}={one_line(value, 'a value', 4096)}")
+        if body.get("as") not in (None, ""):
+            if not (isinstance(body["as"], str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", body["as"])):
+                raise Refused(400, "as is a board's name: lower-case letters, digits, _ and -", code="bad-name",
+                              params={"what": "board"})
+            args.append(f"--as={body['as']}")
+        for item in strings(body.get("replace", []), "replace", 50):
+            if not re.fullmatch(r"(?:mcp|llm|kit|variant|preset|image|board):[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}", item):
+                raise Refused(400, "replace takes KIND:NAME (mcp, llm, kit, variant, preset, image, board)")
+            args.append(f"--replace={item}")
+        if body.get("unsigned") is True:  # an MCP server of a catalog not signed (as mcp import --unsigned)
+            args.append("--unsigned")
+        if not check:
+            confirmed(body, "board-import")
+        text = json.dumps(bundle)
+        if len(text) > BODY_LIMIT:
+            raise Refused(413, "the bundle is too large for the web interface: import it with sandbox-ai board import")
+        found = self.json_of(params["host"], args, 300, input=text)
+        if not isinstance(found, dict) or not isinstance(found.get("problems"), list):
+            raise Refused(502, "sandbox-ai board import: not a plan")
+        return found
+
+    def checkpoints(self, params, body):
+        """sandbox-ai checkpoint list NAME --json: the checkpoints of a start's workspaces, newest first ([] when it
+        has none yet)."""
+        args = ["checkpoint", "list", start_name(params["name"]), "--json"]
+        status, out, err = self.run(params["host"], args, 60)
+        if status != 0 and "has checkpoints" in (err or ""):
+            return []  # (no start of that name has any to go by: as the app says it)
+        if status != 0:
+            raise self.failed(params["host"], args, status, out, err)
+        try:
+            found = json.loads(out)
+        except (ValueError, RecursionError):
+            raise self.failed(params["host"], args, status, out, err) from None
+        return found if isinstance(found, list) else []
+
+    def take_checkpoint(self, params, body):
+        """sandbox-ai checkpoint create NAME --json [--label TEXT]: a checkpoint of its workspaces now (adds, removes
+        nothing)."""
+        args = ["checkpoint", "create", start_name(params["name"]), "--json"]
+        if body.get("label") not in (None, ""):
+            args.append(f"--label={one_line(body['label'], 'label', 500)}")
+        return self.json_of(params["host"], args, 1800, ok=(0,))
+
+    def checkpoint_diff(self, params, body):
+        """sandbox-ai checkpoint diff ID --json: what changed in its folders since (at most 2000 paths per kind)."""
+        return self.json_of(params["host"], ["checkpoint", "diff", checkpoint_id(params["id"]), "--json"], 600,
+                            ok=(0,))
+
+    def checkpoint_preview(self, params, body):
+        """sandbox-ai checkpoint restore ID --dry-run --json: what a restore would change (nothing is written)."""
+        return self.json_of(params["host"], ["checkpoint", "restore", checkpoint_id(params["id"]), "--dry-run",
+                                             "--json"], 600, ok=(0,))
+
+    def checkpoint_restore(self, params, body):
+        """sandbox-ai checkpoint restore ID --yes --json [--path P]...: confirmed (checkpoint-restore), the folders
+        (or the paths P) put back; a checkpoint of the state before is taken first (its id: "before")."""
+        ident = checkpoint_id(params["id"])
+        paths = [one_line(path, "a path", 4096) for path in strings(body.get("paths", []), "paths", 50)]
+        confirmed(body, "checkpoint-restore", f"restore {ident}")
+        return self.json_of(params["host"], ["checkpoint", "restore", ident, "--yes", "--json",
+                                             *(f"--path={path}" for path in paths)], 1800, ok=(0,))
+
+    def checkpoint_delete(self, params, body):
+        """sandbox-ai checkpoint delete ID --yes: confirmed (checkpoint-delete), it and the content only it held go."""
+        ident = checkpoint_id(params["id"])
+        confirmed(body, "checkpoint-delete", f"delete {ident}")
+        return self.done(params["host"], ["checkpoint", "delete", ident, "--yes"], 300)
+
     def history(self, params, body):
         """sandbox-ai list --history NAME --json: what happened to NAME (start, exit, pause, resume, rename)."""
         found = self.json_of(params["host"], ["list", "--history", start_name(params["name"]), "--json"], 30)
         if not isinstance(found, list):
             raise Refused(502, "sandbox-ai list --history: not a list")
         return [entry for entry in found if isinstance(entry, dict)]
+
+    def session_memory(self, params, body):
+        """sandbox-ai session memory NAME --from SOURCE --json [--file F]: the agent's memory of a start - its files,
+        or one file with its text (F: a name of that list)."""
+        args = ["session", "memory", start_name(params["name"]), f"--from={params['source']}", "--json"]
+        if params.get("file") is not None:
+            args.append(f"--file={listed_file(params['file'])}")
+        return self.json_of(params["host"], args, 120, ok=(0,))
+
+    def session_files(self, params, body):
+        """sandbox-ai session files NAME --json [--file F [--full]]: the agents' session files of a start, or one as a
+        conversation."""
+        args = ["session", "files", start_name(params["name"]), "--json"]
+        if params.get("file") is not None:
+            args.append(f"--file={listed_file(params['file'])}")
+            if params.get("full"):
+                args.append("--full")
+        return self.json_of(params["host"], args, 300, ok=(0,))
+
+    def session_files_search(self, params, body):
+        """sandbox-ai session files NAME --json --search PATTERN [--text TEXT] [--case] on the start's host: the session
+        files whose name (with a /: path) matches PATTERN - *, ?, [abc], ** for any folders, a part of the name without
+        a wildcard - and with TEXT those that hold it, each with its line; bounded there, a login or key never looked
+        into (session_inspect.search). Read only."""
+        pattern, text, case = body.get("pattern", ""), body.get("text"), body.get("case", False)
+        for what, value in (("pattern", pattern), ("text", text)):
+            if value is not None and (not isinstance(value, str) or len(value) > 500 or not value.isprintable()):
+                raise Refused(400, f"{what}: one line of printable text, at most 500 characters")
+        if not isinstance(case, bool):
+            raise Refused(400, "case is true or false")
+        args = ["session", "files", start_name(params["name"]), "--json", f"--search={pattern.strip()}",
+                *([f"--text={text}"] if text else []), *(["--case"] if case else [])]
+        found = self.json_of(params["host"], args, 300, ok=(0,))
+        if not isinstance(found, dict) or not isinstance(found.get("search"), dict):
+            raise Refused(502, "not what sandbox-ai session files --search says")
+        return found
+
+    def session_secret_file(self, params, body):
+        """sandbox-ai session files NAME --json --file F [--full] --show-secret: confirmed (show-secret-file), the text
+        of a session file marked as a login or key."""
+        name, file = start_name(params["name"]), listed_file(params["file"])
+        confirmed(body, "show-secret-file", f"show {file} of {name}")
+        if not isinstance(body.get("full", False), bool):
+            raise Refused(400, "full is true or false")
+        return self.json_of(params["host"], ["session", "files", name, "--json", f"--file={file}",
+                                             *(["--full"] if body.get("full") else []), "--show-secret"], 300, ok=(0,))
+
+    def memory_secret_file(self, params, body):
+        """sandbox-ai session memory NAME --from SOURCE --json --file F --show-secret: confirmed (show-secret-file),
+        the text of a memory file marked as a login or key."""
+        name, file = start_name(params["name"]), listed_file(params["file"])
+        confirmed(body, "show-secret-file", f"show {file} of {name}")
+        return self.json_of(params["host"], ["session", "memory", name, f"--from={params['source']}", "--json",
+                                             f"--file={file}", "--show-secret"], 120, ok=(0,))
+
+    def session_export(self, params, body):
+        """sandbox-ai session export NAME PATH --json [--include-secrets --yes]: confirmed (session-export; with
+        include_secrets: session-export-secrets, its logins and keys taken in), the start's folder as a new tar.gz at
+        PATH on its host; what was left out is in the answer."""
+        name = start_name(params["name"])
+        path = clean_path(body.get("path"), "the archive")
+        include = body.get("include_secrets", False)
+        if not isinstance(include, bool):
+            raise Refused(400, "include_secrets is true or false")
+        confirmed(body, "session-export-secrets" if include else "session-export",
+                  f"export {name} to {path}" + (" with its logins and keys" if include else ""))
+        return self.json_of(params["host"], ["session", "export", name, "--json",
+                                             *(["--include-secrets", "--yes"] if include else []), "--", path], 3600,
+                            ok=(0,))
 
     @staticmethod
     def gc_days(value):
@@ -1772,6 +2400,19 @@ class Api:
                     f"{key} {item}" for key, item in more[:10]) + (" ..." if len(more) > 10 else "")
                               + "): nothing was removed; preview it again")
         return self.json_of(params["host"], ["gc", "--json", *days], 300)
+
+    def storage_check(self, params, body):
+        """sandbox-ai gc --check --dry-run --json [--home NAME]: what could be freed, each with how much, its command
+        and whether it is safe while starts run (nothing is applied or recorded: the page shows it)."""
+        name = params.get("name")
+        return self.json_of(params["host"], ["gc", "--check", "--dry-run", "--json",
+                                             *(["--home", start_name(name)] if name is not None else [])], 900)
+
+    def storage_apply(self, params, body):
+        """One item of the storage check's plan: {"argv": the item's argv} run on the host (only gc's forms the plan
+        names: storage_argv), asked first (the page shows the plan)."""
+        confirmed(body, "storage-apply")
+        return self.json_of(params["host"], [*storage_argv(body.get("argv")), "--json"], 3600)
 
     def review_home(self, params, body):
         """sandbox-ai resume NAME --review-home --json: what changed in the start files of its kept HOME since its
@@ -1827,6 +2468,69 @@ class Api:
         confirmed(body, "mcp-detach", f"{shown} from {start}")
         return self.json_of(params["host"], ["mcp", "detach", *server, start, "--live", "--json"], timeout=120)
 
+    def kits_live_attach(self, params, body):
+        """sandbox-ai kits attach START (KIT | --skill DIR | --command FILE | --agent-file FILE) --json, or with
+        {"plugin": NAME@MARKETPLACE} sandbox-ai plugins attach START PLUGIN --json: given to the running start now,
+        read-only (asked first: kits-attach); {"keep": true} also for its later starts, {"restart": true} its agent
+        started again inside the sandbox afterwards. Its JSON says what the agent needs to see it ("reload")."""
+        start = start_name(params["name"])
+        keep, restart = body.get("keep", False), body.get("restart", False)
+        findings = body.get("allow_findings", False)  # what the hidden-text checker finds is refused unless this
+        if not isinstance(keep, bool) or not isinstance(restart, bool) or not isinstance(findings, bool):
+            raise Refused(400, "keep, restart and allow_findings are true or false")
+        given = [key for key in ("kit", "skill", "command", "agent_file", "plugin") if body.get(key) not in (None, "")]
+        if len(given) != 1:
+            raise Refused(400, "name one: kit, skill (a folder), command (a file), agent_file (a file) or plugin")
+        key = given[0]
+        flags = [*(["--keep"] if keep else []), *(["--restart"] if restart else []),
+                 *(["--allow-findings"] if findings else []), "--json"]
+        if key == "plugin":
+            plugin = body["plugin"]
+            if not (isinstance(plugin, str) and PLUGIN_ID.fullmatch(plugin)):
+                raise Refused(400, "a plugin is NAME@MARKETPLACE")
+            confirmed(body, "kits-attach", f"the plugin {plugin} to {start}, now while it runs")
+            return self.json_of(params["host"], ["plugins", "attach", start, plugin, *flags], timeout=900)
+        if key == "kit":
+            value = body["kit"] if body["kit"] == "default" else kit_name(body["kit"])
+            argv = ["kits", "attach", start, value]
+        else:
+            value = clean_path(body[key], key)
+            argv = ["kits", "attach", start, f"--{key.replace('_', '-')}={value}"]
+        confirmed(body, "kits-attach", f"{key.replace('_', ' ')} {value} to {start}, now while it runs")
+        return self.json_of(params["host"], [*argv, *flags], timeout=300)
+
+    def kits_live_detach(self, params, body):
+        """sandbox-ai kits detach START NAME [--kind KIND] --json, or with {"plugin"} sandbox-ai plugins detach START
+        PLUGIN --json: what attach gave the running start out of it again (and of its later starts where it was
+        kept). Asked first: kits-detach."""
+        start = start_name(params["name"])
+        restart = body.get("restart", False)
+        if not isinstance(restart, bool):
+            raise Refused(400, "restart is true or false")
+        flags = [*(["--restart"] if restart else []), "--json"]
+        if body.get("plugin") not in (None, ""):
+            plugin = body["plugin"]
+            if not (isinstance(plugin, str) and PLUGIN_ID.fullmatch(plugin)):
+                raise Refused(400, "a plugin is NAME@MARKETPLACE")
+            confirmed(body, "kits-detach", f"the plugin {plugin} from {start}")
+            return self.json_of(params["host"], ["plugins", "detach", start, plugin, *flags], timeout=120)
+        name, kind = body.get("name"), body.get("kind")
+        if not (isinstance(name, str) and LIVE_ENTRY.fullmatch(name)):
+            raise Refused(400, "name is the skill, subagent or command (its file name), or the kit")
+        if kind not in (None, "", "skills", "agents", "commands", "prompts"):
+            raise Refused(400, "kind is skills, agents, commands or prompts")
+        confirmed(body, "kits-detach", f"{name} from {start}")
+        return self.json_of(params["host"], ["kits", "detach", start, name, *([f"--kind={kind}"] if kind else []),
+                                             *flags], timeout=120)
+
+    def agent_restart(self, params, body):
+        """sandbox-ai kits restart-agent START --json: the agent of the running start started again in its tmux window,
+        inside the sandbox (its network, MCP servers and kits stay; the conversation continues). Asked first:
+        agent-restart."""
+        start = start_name(params["name"])
+        confirmed(body, "agent-restart", start)
+        return self.json_of(params["host"], ["kits", "restart-agent", start, "--json"], timeout=120)
+
     def plugins_status(self, params, body):
         """sandbox-ai plugins --status: what the kits declare and what is installed, as it says it."""
         return self.done(params["host"], ["plugins", "--status"], 120)
@@ -1844,6 +2548,10 @@ class Api:
     def net_show(self, params, body):
         return self.json_of(params["host"], ["net", "show", start_name(params["name"]), "--json"], 30)
 
+    def blocked(self, params, body):
+        """sandbox-ai approvals blocked NAME --json on its host: what the running start refused, newest first."""
+        return self.json_of(params["host"], ["approvals", "blocked", start_name(params["name"]), "--json"], 60)
+
     def net_change(self, params, body):
         """sandbox-ai net allow|revoke NAME with what BODY names; each value is checked and passed as --flag=VALUE,
         so nothing in it is read as another option. A Git login names where its token is (a variable or a secret
@@ -1852,11 +2560,21 @@ class Api:
         if op not in ("allow", "revoke"):
             raise Refused(400, "op is allow or revoke")
         args = ["net", op, start_name(params["name"])]
-        for value in strings(body.get("allow_host", []), "allow_host", 32):
+        shared = {}
+        for value in net_items(body, "allow_host"):
             if not (NET_HOST.fullmatch(value) or NET_WILDCARD.fullmatch(value)):
                 raise Refused(400, f"not a host name or *.DOMAIN.TLD: {printable(value)}")
-            args.append(f"--allow-host={value}")
-        for value in strings(body.get("allow_tcp", []), "allow_tcp", 32):
+            risk = shared_risk(value) if op == "allow" and value.startswith("*.") else None
+            if risk:  # below a shared service: only after its own confirmation, then as that confirmation
+                shared[value.lower()] = risk
+                args.append(f"--allow-shared-wildcard={value}")
+            else:
+                args.append(f"--allow-host={value}")
+        if shared:  # asked by itself (its own key): the net-allow yes is not this one
+            confirmed(body, "shared-wildcard", "; ".join(risk[0] for risk in shared.values()), code="shared-wildcard",
+                      params={"wildcards": ", ".join(shared),
+                              "suffix": ", ".join(sorted({risk[1] for risk in shared.values()}))})
+        for value in net_items(body, "allow_tcp"):
             if not NET_TCP.fullmatch(value):
                 raise Refused(400, f"IP:PORT or [IPv6]:PORT: {printable(value)}")
             args.append(f"--allow-tcp={value}")
@@ -1865,7 +2583,7 @@ class Api:
                 isinstance(p, int) and not isinstance(p, bool) and 1 <= p <= 65535 for p in ports):
             raise Refused(400, "host_ports is a list of at most 16 ports")
         args += [f"--allow-host-port={port}" for port in ports]
-        for value in strings(body.get("allow", []), "allow", 32):
+        for value in net_items(body, "allow"):
             args.append(f"--allow={ip_value(value, 'allow', network=True)}")
         presets = strings(body.get("presets", []), "presets", len(NET_PRESETS))
         if not set(presets) <= set(NET_PRESETS):
@@ -1873,7 +2591,7 @@ class Api:
         args += [f"--allow-{preset}" for preset in dict.fromkeys(presets)]
         if body.get("dns") is True:
             args.append("--dns")
-        for value in strings(body.get("nameservers", []), "nameservers", 8):
+        for value in net_items(body, "nameservers", 8):
             args.append(f"--nameserver={ip_value(value, 'a nameserver')}")
         login = body.get("git_login")
         if login is not None:
@@ -1886,6 +2604,26 @@ class Api:
             if login["kind"] == "file":
                 clean_path(login["ref"], "the token file")
             args.append(f"--git-token-{login['kind']}={login['url']}={login['ref']}")
+            if login.get("in_sandbox") is True and op == "allow":
+                # A run whose proxy cannot log in (no proxy, --no-inspect, an older start): the login into the
+                # sandbox's session directory instead, where the agent can read the token - only on the human's
+                # word (the page asks, naming it), never by default.
+                args.append("--git-token-in-sandbox")
+        key = body.get("api_key")
+        if key is not None and op == "revoke":
+            # A key given during the run taken back by the variable it was given as (net revoke --api-key NAME: its
+            # host and secret are not read, the page sends the row as it listed it).
+            if not (isinstance(key, dict) and isinstance(key.get("name"), str) and NET_REF.fullmatch(key["name"])):
+                raise Refused(400, "api_key is {name: the variable the key was given as}, for revoke")
+            args.append(f"--api-key={key['name']}")
+        elif key is not None:  # a secret of that host as an API key the run's proxy puts in for HOST (never the key)
+            if not (isinstance(key, dict) and isinstance(key.get("host"), str)
+                    and NET_HOST.fullmatch(key["host"]) and "." in key["host"]
+                    and isinstance(key.get("name"), str) and NET_REF.fullmatch(key["name"])
+                    and isinstance(key.get("secret"), str) and NET_REF.fullmatch(key["secret"])):
+                raise Refused(400, "api_key is {host: a host name, name: the variable, secret: a secret of that "
+                                   "host}, for allow ({name} alone for revoke)")
+            args.append(f"--api-key={key['host']}={key['name']}={key['secret']}")
         if len(args) == 3:
             raise Refused(400, "nothing to change")
         if flag(body, "keep"):
@@ -1919,7 +2657,8 @@ class Api:
         if ("path" in body) == ("directory" in body):
             raise Refused(400, "path is the directory or file on that host (or directory, as before; not both)")
         what = "path" if "path" in body else "directory"
-        path = no_dots(host_path(body.get(what), what), what)
+        # A folder of another machine (sshfs://...): that host mounts it with sshfs, then adds it as a folder.
+        path = remote_source(body.get(what), what) or no_dots(host_path(body.get(what), what), what)
         read_only = body.get("read_only", False)
         if not isinstance(read_only, bool):
             raise Refused(400, "read_only is true or false")
@@ -1940,7 +2679,9 @@ class Api:
         sandbox, its host directory, or its name below /workspaces)."""
         name = start_name(params["name"])
         value, force = body.get("workspace"), body.get("force", False)
-        if isinstance(value, str) and value.startswith("/"):
+        if remote_source(value, "workspace"):
+            value = remote_source(value, "workspace")
+        elif isinstance(value, str) and value.startswith("/"):
             no_dots(host_path(value, "workspace"), "workspace")
         elif not (isinstance(value, str) and WORKSPACE_NAME.fullmatch(value) and value.strip() == value):
             raise Refused(400, "workspace is its path (in the sandbox or on the host) or its name below /workspaces")
@@ -1952,6 +2693,11 @@ class Api:
 
     def devices(self, params, body):
         return self.json_of(params["host"], ["devices", "list", start_name(params["name"]), "--json"], 30)
+
+    def device_scan(self, params, body):
+        """sandbox-ai devices scan --json on that host: {"devices": [{"kind", "value", "option", "label", "nodes",
+        "refused", "note", ...}], "notes"} - what the page offers to add (that host's devices, never this one's)."""
+        return self.json_of(params["host"], ["devices", "scan", "--json"], 60, ok=(0,))
 
     def device_add(self, params, body):
         """sandbox-ai devices add NAME DEVICE: with --device's checks and the run's device rules there (an "ask"
@@ -2015,6 +2761,55 @@ class Api:
             if limit_number(key, value) > now:
                 above.append(f"{key} {value} is above the current {key} limit")
         return "; ".join(above) or None
+
+    # session bridges (sandbox-ai bridge): every value checked here as the command takes it, nothing an option
+    def bridges(self, params, body):
+        """bridge list --hosts --json: this host's bridges and those of its own hosts, each once (HOST:ID)."""
+        return self.json_of(params["host"], ["bridge", "list", "--hosts", "--json"], 150, ok=(0,))
+
+    def bridge_show(self, params, body):
+        return self.json_of(params["host"], ["bridge", "show", bridge_id(params["id"]), "--json"], 150, ok=(0,))
+
+    def bridge_add(self, params, body):
+        """bridge add A B --allow ... --json (dry_run: --dry-run, nothing made, no confirmation needed). A and B: a
+        session of that host, or HOST:NAME of one of its hosts (both of one host: made there; of two: relayed)."""
+        a, b = (bridge_session(body.get(side), side.upper()) for side in ("a", "b"))
+        caps = strings(body.get("allow"), "allow", 64)
+        if not caps or any(not BRIDGE_CAP.fullmatch(cap) for cap in caps):
+            raise Refused(400, "allow: message, ask, watch, files:ro:PATH or files:rw:PATH (a path without a comma "
+                               "or a control character)")
+        args = ["bridge", "add", a, b, "--allow=" + ",".join(caps)]
+        if body.get("both") is True:
+            args.append("--both")
+        until = body.get("until")
+        if until not in (None, ""):
+            if not (isinstance(until, str) and BRIDGE_UNTIL.fullmatch(until.strip())):
+                raise Refused(400, "until: 30m, 2h, 1d, HH:MM or an ISO time")
+            args.append(f"--until={until.strip()}")
+        ask = body.get("ask", "first")
+        if ask not in ("each", "first", "never"):
+            raise Refused(400, "ask: each, first or never")
+        args.append(f"--ask={ask}")
+        actions = body.get("observer_actions")
+        if actions is not None:
+            if not (isinstance(actions, list) and all(x in ("alert", "hint", "net-cut", "pause") for x in actions)):
+                raise Refused(400, "observer_actions: some of alert, hint, net-cut, pause")
+            args.append("--observer-actions=" + ",".join(dict.fromkeys(actions)))
+        limits = body.get("limits") or {}
+        if not isinstance(limits, dict) or any(key not in ("rate", "size", "ask-timeout", "daily") or
+                                               not (isinstance(value, str) and BRIDGE_LIMIT.fullmatch(value))
+                                               for key, value in limits.items()):
+            raise Refused(400, "limits: rate, size, ask-timeout, daily, each a number (k, m, g for sizes)")
+        args += [f"--limit={key}={value}" for key, value in limits.items()]
+        if body.get("dry_run") is True:
+            return self.json_of(params["host"], [*args, "--dry-run", "--json"], 150, ok=(0,))
+        confirmed(body, "bridge-add", f"{a} -> {b}")
+        return self.json_of(params["host"], [*args, "--json"], 240, ok=(0,))
+
+    def bridge_action(self, params, body):
+        ident, action = bridge_id(params["id"]), params["action"]
+        confirmed(body, f"bridge-{action}", ident)
+        return self.done(params["host"], ["bridge", action, ident], 150)
 
     # VPN profiles (sandbox-ai vpn): a profile names the secret that holds its key; the web never carries a key
     def vpn_list(self, params, body):
@@ -2123,6 +2918,61 @@ class Api:
         document = self.json_of(params["host"], ["canaries", "log", *([run] if run else []), "--json"], 60)
         return [document] if run else document
 
+    # the workspace review after each run (sandbox-ai workspace review): every project's runs, each change with its
+    # diff, findings, whether its before-state was kept and what was decided; Keep, and Restore (confirmed)
+    def workspace_reviews(self, params, body):
+        return self.json_of(params["host"], ["workspace", "review", "--all", "--json"], 120, ok=(0,))
+
+    @staticmethod
+    def review_target(body):
+        """(log folder, run, path) of a Keep or Restore: the review's log folder, its run id, the file as the review
+        names it (its path in the sandbox)."""
+        run = body.get("run")
+        if not (isinstance(run, str) and REVIEW_RUN.fullmatch(run)):
+            raise Refused(400, "a run is 1-128 letters, digits, '_', '.' or '-' (sandbox-ai workspace review lists them)")
+        return clean_path(body.get("log_dir"), "log_dir"), run, one_line(body.get("path"), "a path", 4096)
+
+    def workspace_review_keep(self, params, body):
+        """sandbox-ai workspace review RUN --log-dir DIR --keep PATH --json: the change is recorded as wanted."""
+        log_dir, run, path = self.review_target(body)
+        return self.json_of(params["host"], ["workspace", "review", run, f"--log-dir={log_dir}", f"--keep={path}",
+                                             "--json"], 120, ok=(0,))
+
+    def workspace_review_restore(self, params, body):
+        """sandbox-ai workspace review RUN --log-dir DIR --restore PATH --yes --json: confirmed (workspace-restore),
+        the file put back as it was at the start from its kept before-state (an added one removed)."""
+        log_dir, run, path = self.review_target(body)
+        confirmed(body, "workspace-restore", f"restore {path}")
+        return self.json_of(params["host"], ["workspace", "review", run, f"--log-dir={log_dir}", f"--restore={path}",
+                                             "--yes", "--json"], 120, ok=(0,))
+
+    # the MCP tool definitions pinned per project (sandbox-ai mcp tools)
+    def mcp_tool_pins(self, params, body):
+        return self.json_of(params["host"], ["mcp", "tools", "--all", "--json"], 60, ok=(0,))
+
+    def pin_target(self, body):
+        return self.mcp_server(body.get("server")), clean_path(body.get("project"), "project")
+
+    def mcp_tool_pin(self, params, body):
+        """sandbox-ai mcp tools NAME --project DIR --json: the pinned definitions, the list seen last, what differs."""
+        server, project = self.pin_target(body)
+        return self.json_of(params["host"], ["mcp", "tools", server, "--json", f"--project={project}"], 60, ok=(0,))
+
+    def mcp_tool_repin(self, params, body):
+        """sandbox-ai mcp tools NAME --repin: confirmed (mcp-pin-repin); refused there when the list holds hidden
+        text."""
+        server, project = self.pin_target(body)
+        confirmed(body, "mcp-pin-repin", f"re-pin {server}")
+        return self.json_of(params["host"], ["mcp", "tools", server, "--repin", "--json", f"--project={project}"], 60,
+                            ok=(0,))
+
+    def mcp_tool_forget(self, params, body):
+        """sandbox-ai mcp tools NAME --forget: confirmed (mcp-pin-forget)."""
+        server, project = self.pin_target(body)
+        confirmed(body, "mcp-pin-forget", f"forget the pin of {server}")
+        return self.json_of(params["host"], ["mcp", "tools", server, "--forget", "--json", f"--project={project}"], 60,
+                            ok=(0,))
+
     # what the safeguards refused or ended (sandbox-ai safeguards): why, the process, the command that would allow
     # it; redacted there (no secret values), the newest SAFEGUARDS_TAIL of every run or of one
     def safeguards(self, params, body):
@@ -2144,8 +2994,46 @@ class Api:
                 records.append(record)
         return records
 
+    def monitor(self, params, body):
+        """What runs on the host now, as its collectors recorded it (sandbox-ai top --json --no-measure: nothing is
+        measured for the page, no sleep): runs with their project, sample, spark and warnings; the host's totals."""
+        return self.json_of(params["host"], ["top", "--json", "--no-measure"], 60, ok=(0,))
+
+    def monitor_usage(self, params, body):
+        """The window SINCE (1-999 minutes, hours or days) of the host's series: per run its averages, peaks, totals and
+        series (at most 240 points), the idle runs, the warnings, the host's (sandbox-ai stats usage)."""
+        since = params["since"]
+        return self.json_of(params["host"], ["stats", "usage", "--since", since, "--json", "--series", "--by", "run"],
+                            90, ok=(0,))
+
+    def spend_run(self, params, body):
+        """sandbox-ai spend run NAME --json: the cost of its model requests so far, tokens, its budgets and how much of
+        each is used, whether a request was refused."""
+        return self.json_of(params["host"], ["spend", "run", start_name(params["name"]), "--json"], 60, ok=(0,))
+
+    def spend_raise(self, params, body):
+        """sandbox-ai spend raise NAME USD: the running start may spend USD more than its budgets (its refused requests
+        go again). Needs {"confirm": true}."""
+        name = start_name(params["name"])
+        usd = body.get("usd")
+        if isinstance(usd, str):
+            try:
+                usd = float(usd.strip().removeprefix("$"))
+            except ValueError:
+                usd = None
+        if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not 0 < usd <= 1_000_000:
+            raise Refused(400, "usd is a number of USD above 0 (at most 1000000)")
+        amount = f"{usd:.6f}".rstrip("0").rstrip(".")
+        confirmed(body, "spend-raise", f"USD {amount} more for {name}")
+        return self.done(params["host"], ["spend", "raise", name, amount], 60)
+
     def presets(self, params, body):
         return self.json_of(params["host"], ["presets", "list", "--json"], 30)
+
+    def cloud_models(self, params, body):
+        """sandbox-ai models --json of the host: each agent's cloud models with their effort levels (the table its
+        launcher refuses an --effort by), for the start form's Model and Effort choices."""
+        return self.json_of(params["host"], ["models", "--json"], 30, ok=(0,))
 
     def preset_categories(self, params, body):
         """sandbox-ai presets categories --json of the host: the categories its presets are listed under, in order, with
@@ -2185,6 +3073,91 @@ class Api:
         name = secret_name(params["name"])
         confirmed(body, "secret-delete", name)
         return self.done(params["host"], ["secrets", "delete", name], 30)
+
+    def secret_rename(self, params, body):
+        """sandbox-ai secrets rename OLD NEW (asked first: secret-rename): another name for the secret, carried
+        through what that host's sandbox-ai keeps (logins, identities, VPN profiles, trusted project files, kept
+        starts); what still names the old one is in the answer. The value is never read here."""
+        old, new = secret_name(params["name"]), secret_name(body.get("new"))
+        if old == new:
+            raise Refused(400, "new is another name")
+        confirmed(body, "secret-rename", f"{old} to {new}")
+        return self.done(params["host"], ["secrets", "rename", old, new], 120)
+
+    def secret_send(self, params, body):
+        """sandbox-ai secrets send NAME TARGET --yes [--as=NAME] [--replace] on that host (asked first: secret-send;
+        with replace: secret-replace too): its secret NAME kept on TARGET, another host of its `sandbox-ai hosts`, as
+        well - the value goes from that host's store over SSH on standard input, never through this service."""
+        name = secret_name(params["name"])
+        target = host_name(body.get("host"))
+        if target == "local":
+            raise Refused(400, "host is another host of sandbox-ai hosts")
+        args = ["secrets", "send", name, target, "--yes"]
+        if body.get("as") not in (None, ""):
+            args.append(f"--as={secret_name(body.get('as'))}")
+        confirmed(body, "secret-send", f"{name} to {target}")
+        if flag(body, "replace"):
+            confirmed(body, "secret-replace", f"{name} on {target}")
+            args.append("--replace")
+        return self.done(params["host"], args, 180)
+
+    # The primary password of a host's private files (docs/SECRETS_DESIGN.md): what protects its secrets, and the
+    # unlock step. The password is sent once, as {"password": TEXT} (a field the audit log leaves out), over this
+    # service's HTTPS, and goes to `secrets unlock --password-stdin` there on its standard input (over SSH for
+    # another host): never on a command line, in a response or in a log. Changing or removing it is the command
+    # line's: it takes the current password and decrypts or rewrites everything.
+    def secrets_protection(self, params, body):
+        info = self.json_of(params["host"], ["secrets", "status", "--json"], 30, ok=(0,))
+        if not isinstance(info, dict):
+            raise Refused(502, "sandbox-ai secrets status: not understood")
+        plain = info.get("plain")
+        left = info.get("left")
+        return {"backend": printable(str(info.get("backend")))[:32], "protection": printable(str(info.get("protection")))[:32],
+                "password": info.get("password") is True, "locked": info.get("locked") if isinstance(
+                    info.get("locked"), bool) else None,
+                "left": left if isinstance(left, int) and not isinstance(left, bool) else None,
+                "plain": len(plain) if isinstance(plain, list) else 0,
+                "encrypted": info.get("encrypted") if isinstance(info.get("encrypted"), int) else 0,
+                "kdf": printable(str(info["kdf"]))[:80] if info.get("kdf") else None,
+                "plain_choice": info.get("plain_choice") is True}
+
+    @staticmethod
+    def primary_password(body, least=1):
+        value = body.get("password")
+        if not (isinstance(value, str) and least <= len(value) <= 1024 and not any(ord(c) < 32 or ord(c) == 127
+                                                                                   for c in value)):
+            raise Refused(400, f"the primary password is one line of {max(least, 1)}-1024 characters")
+        return value
+
+    def secrets_unlock(self, params, body):
+        host, password = host_name(params["host"]), self.primary_password(body)
+        args = ["secrets", "unlock", "--password-stdin"]
+        if body.get("for") not in (None, ""):
+            if not (isinstance(body["for"], str) and re.fullmatch(r"[1-9][0-9]{0,6}[smhd]", body["for"])):
+                raise Refused(400, "for: a duration such as 30m, 8h or 2d")
+            args += ["--for", body["for"]]
+        wait = self.unlock_limiter.wait(host)
+        if wait > 0:
+            raise Refused(429, f"too many wrong primary passwords for {host}: wait {int(wait) + 1} s")
+        status, out, err = self.run(host, args, 60, input=password + "\n")
+        if status != 0 and "too many wrong passwords" in err:
+            raise Refused(429, printable(err.strip()[-300:]))
+        if status != 0 and "wrong primary password" in err:
+            self.unlock_limiter.failed(host)
+            raise Refused(403, f"wrong primary password for the secrets of {host}")
+        if status != 0:
+            raise self.failed(host, args, status, out, err)
+        self.unlock_limiter.succeeded(host)
+        return {"output": printable(out.strip()[-1000:])}
+
+    def secrets_lock(self, params, body):
+        return self.done(params["host"], ["secrets", "lock"], 30)
+
+    def secrets_password(self, params, body):
+        """A first primary password for the host's private files (it encrypts what is there, and unlocks)."""
+        password = self.primary_password(body, least=8)
+        return self.done(params["host"], ["secrets", "password", "set", "--password-stdin"], 120,
+                         input=password + "\n")
 
     # kits (sandbox-ai kits): every change is that command on the host, so its checks apply (a skill folder is a
     # real folder with SKILL.md, nothing followed, limits, a note when it lies where sandboxes can write; built-in
@@ -2293,6 +3266,47 @@ class Api:
         result = self.done(params["host"], ["kits", action, *options, "--", name, *values], 300)
         return {"output": first + result["output"]}
 
+    # what the agents on that host have set up themselves (sandbox-ai kits host-list, host-show: read only), and the
+    # parts chosen copied into a kit or a project's memory there (host-import, with its checks: nothing followed out of
+    # an agent's folder, secret-looking lines refused unless allow_secrets, hooks never imported)
+    def agent_parts(self, params, body):
+        return self.json_of(params["host"], ["kits", "host-list", "--json"], 150, ok=(0,))
+
+    def agent_part(self, params, body):
+        return self.json_of(params["host"], ["kits", "host-show", "--json", "--", agent_part_id(params["id"])], 150,
+                            ok=(0,))
+
+    def agent_parts_import(self, params, body):
+        """{parts: [ID...], kit: NAME, new?: bool} or {parts, project: DIR}; agents?: [AGENT...], allow_secrets?: bool,
+        allow_findings?: bool (the hidden-text checker's). Only the parts named are imported."""
+        parts = strings(body.get("parts"), "parts", 200)
+        if not parts:
+            raise Refused(400, "parts: the ids of the parts chosen (nothing is imported without a choice)")
+        parts = [agent_part_id(part) for part in parts]
+        options = []
+        if (body.get("kit") in (None, "")) == (body.get("project") in (None, "")):
+            raise Refused(400, "give kit (a kit of yours) or project (a project's folder on that host)")
+        for key in ("new", "allow_secrets", "allow_findings"):
+            if body.get(key) not in (None, False, True):
+                raise Refused(400, f"{key} is true or false")
+        if body.get("kit") not in (None, ""):
+            kit = kit_name(body.get("kit"))
+            confirmed(body, "kit-add", f"{', '.join(parts[:3])} to {kit}")
+            options += [f"--kit={kit}", *(["--new"] if body.get("new") is True else [])]
+        else:
+            project = clean_path(body.get("project"), "project")
+            confirmed(body, "memory-add", f"{', '.join(parts[:3])} to the memory of {project}")
+            options.append(f"--project={project}")
+        agents = strings(body.get("agents", []), "agents", len(AGENTS))
+        if not all(agent in AGENTS for agent in agents):
+            raise Refused(400, "an " + agent_words())
+        options += [f"--agent={agent}" for agent in dict.fromkeys(agents)]
+        if body.get("allow_secrets") is True:
+            options.append("--allow-secrets")
+        if body.get("allow_findings") is True:
+            options.append("--allow-findings")
+        return self.done(params["host"], ["kits", "host-import", *options, "--", *parts], 300)
+
     def kit_delete(self, params, body):
         name = kit_name(params["name"])
         confirmed(body, "kit-delete", name)
@@ -2312,11 +3326,15 @@ class Api:
         self.watching([params["host"]])
         return self.json_of(params["host"], ["approvals", "list", "--json"], 30)
 
-    def host_questions(self, name):
-        """NAME's open questions; a browser question of a host whose sandbox-ai is known to be older than 0.1.78
-        carries "host_too_old" (its version): it cannot be allowed without opening a browser there (--no-open), so
-        the page says to update it instead of opening the link here first."""
-        listed = self.json_of(name, ["approvals", "list", "--json"], APPROVALS_HOST_SECONDS)
+    def host_questions(self, name, state="open"):
+        """NAME's questions in STATE (open; "all": also those timed out, allowed and refused - a host whose sandbox-ai
+        is older than 0.1.98 lists its open ones only); a browser question of a host whose sandbox-ai is known to be
+        older than 0.1.78 carries "host_too_old" (its version): it cannot be allowed without opening a browser there
+        (--no-open), so the page says to update it instead of opening the link here first."""
+        args = ["approvals", "list", "--json"]
+        if state != "open" and not newer_needed(name, ["approvals", "list", "--state", state]):
+            args += ["--state", state]
+        listed = self.json_of(name, args, APPROVALS_HOST_SECONDS)
         if not isinstance(listed, list):
             raise Refused(502, f"sandbox-ai approvals on {name}: not a list of questions")
         older = newer_needed(name, ["approvals", "allow", "-", "--no-open"])
@@ -2348,9 +3366,35 @@ class Api:
             seen[name] = round(info["seen"], 3)
         return {"questions": questions, "errors": errors, "age": age, "seen": seen}
 
+    def all_approvals_states(self, params, body):
+        """The questions of every host in every state (the Approvals page's tabs), as all_approvals gives the open ones."""
+        names, errors = host_names()
+        self.watching(names)
+        found = self.approvals_all_fanout.gather(names, APPROVALS_HOST_SECONDS)
+        questions, age, seen = [], {}, {}
+        for name in names:
+            info = found[name]
+            if "error" in info:
+                errors[name] = info["error"]
+                continue
+            questions += [{**question, "host": name} for question in info["result"]]
+            age[name] = round(info["age"], 3)
+            seen[name] = round(info["seen"], 3)
+        return {"questions": questions, "errors": errors, "age": age, "seen": seen}
+
+    def ask_again(self, params, body):
+        """sandbox-ai approvals ask-again ID: what the run decided about question ID is forgotten, its next request
+        asked anew (one still open says so)."""
+        ident = params["id"]
+        if not APPROVAL_ID.fullmatch(ident):
+            raise Refused(400, "no such question")
+        self.approvals_all_fanout.forget(params["host"])
+        return self.done(params["host"], ["approvals", "ask-again", ident], 60)
+
     def answer(self, params, body):
-        """allow or deny a question with a scope. An "always" (a rule remembered for the project, allowed or
-        denied) needs {"confirm": true}; "no_open": true allows a browser question without opening the browser
+        """allow or deny a question with a scope - an open one, one nobody answered in time (still open) or one
+        answered already (the run's decision changed). Answered at once, as clicked: no confirmation, not even for
+        "always" (the page offers to undo it); "no_open": true allows a browser question without opening the browser
         on that host (the user opened its link)."""
         ident = params["id"]
         if not APPROVAL_ID.fullmatch(ident):
@@ -2362,13 +3406,55 @@ class Api:
             raise Refused(400, "scope is once, run or always")
         if not isinstance(no_open, bool) or no_open and decision != "allow":
             raise Refused(400, "no_open is true or false, and only for an allow")
-        if scope == "always":
-            confirmed(body, f"approval-{decision}-always")
+        callback = self.login_callback(params["host"], ident) if decision == "allow" and no_open else None
+        self.approvals_all_fanout.forget(params["host"])  # (the page reads that host's list anew)
         # An "always" waits up to approvals.VERIFY_WAIT for the sandbox before it is remembered; the call (over ssh,
         # perhaps, with a name to resolve) must outlast that clearly, or the "always" is lost.
-        return self.done(params["host"], ["approvals", decision, ident, *(["--scope", scope] if scope else []),
-                                          *(["--no-open"] if no_open else [])],
-                         module("approvals").VERIFY_WAIT + 60)
+        result = self.done(params["host"], ["approvals", decision, ident, *(["--scope", scope] if scope else []),
+                                            *(["--no-open"] if no_open else [])],
+                           module("approvals").VERIFY_WAIT + 60)
+        if callback:
+            note = self.relay_callback(params["host"], ident, callback)
+            result["output"] = "\n".join(part for part in (result.get("output"), note) if part)
+        # Allowed, but its name does not exist: the question is closed (denied for the run) - the page says so in
+        # one line, not as "allowed" (approvals.close_missing).
+        closed = module("approvals").closed_note(result.get("output")) if decision == "allow" else None
+        if closed:
+            result["closed"] = printable(closed[:600])
+        return result
+
+    def login_callback(self, host, ident):
+        """The URL of browser question IDENT of HOST when it sends the browser back to the sandbox's loopback (its
+        "callback": approvals list --json), else None: from the page's last read of HOST's questions, else - for a
+        browser on this machine, where the catcher can start - read now (before the answer: then it is listed no
+        more)."""
+        cached = self.approvals_fanout.cached(host_name(host))
+        listed = cached.get("result") if cached else None
+        if not any(isinstance(q, dict) and q.get("id") == ident for q in listed or []):
+            if not loopback_address(getattr(REQUEST, "address", None)):
+                return None
+            try:
+                listed = self.json_of(host, ["approvals", "list", "--json"], APPROVALS_HOST_SECONDS)
+            except Refused:
+                return None
+        for question in listed if isinstance(listed, list) else []:
+            if isinstance(question, dict) and question.get("id") == ident and question.get("kind") == "browser" \
+                    and isinstance(question.get("callback"), dict) and isinstance(question.get("url"), str):
+                return question["url"]
+        return None
+
+    def relay_callback(self, host, ident, url):
+        """After "Open" of a browser question whose login returns to the sandbox's loopback: where the browser runs
+        on this machine (the page's client is this machine's loopback), the one-shot catcher starts here
+        (`sandbox-ai approvals relay`, forwarding to HOST's sandbox, over SSH for another host); else what to do."""
+        if not loopback_address(getattr(REQUEST, "address", None)):
+            return ("Its login's callback goes to the sandbox's own loopback, which your browser (on another machine "
+                    "than this web interface) cannot reach: use the agent's device-code login (Codex: codex login "
+                    "--device-auth).")
+        hosts = module("hosts")
+        status, out, err = self.run(hosts.LOCAL, ["approvals", "relay", ident, "--url", url,
+                                                  *([] if host == hosts.LOCAL else ["--host", host])], 30)
+        return printable((out or err).strip()[-600:]) or f"the callback is not relayed (exit status {status})"
 
     def approvals_history(self, params, body):
         """sandbox-ai approvals history [RUN]: the questions with their answers (the command's table)."""
@@ -2478,6 +3564,12 @@ class Api:
             args.append(f"--vpn={vpn_name(body['vpn'])}")
         if flag(body, "anthropic"):
             args.append("--anthropic")
+        memory = body.get("memory_gb")
+        if memory not in (None, ""):  # the server's memory for what fits it (0: forgotten)
+            if isinstance(memory, bool) or not isinstance(memory, (int, float)) or not (memory == 0 or
+                                                                                        1 <= memory <= 65536):
+                raise Refused(400, "memory_gb is the server's memory in GB, 1 to 65536 (0 forgets it)")
+            args.append(f"--memory={memory:g}")
         if flag(body, "replace"):
             confirmed(body, "llm-replace", printable(name)[:64])
             args.append("--replace")
@@ -2493,6 +3585,12 @@ class Api:
         if name is not None and (name.startswith("-") or not MCP_NAME.fullmatch(name)):
             raise Refused(400, "no such server")
         return self.json_of(params["host"], ["llm", "status", *([name] if name else []), "--json"], 60)
+
+    def llm_recommend(self, params, body):
+        """sandbox-ai llm recommend --json on the host: per use case of the local-model research its best tested
+        choice from the models of that host's servers (what is loaded, what fits), else the nearest, with why; every
+        server asked once (a few seconds each)."""
+        return self.json_of(params["host"], ["llm", "recommend", "--json"], 120, ok=(0,))
 
     def llm_models(self, params, body):
         if params["name"].startswith("-"):
@@ -2535,6 +3633,8 @@ class Api:
             raise Refused(400, "canaries is false, a list of categories, all or none")
         if key == "telemetry" and value is not None and value not in TELEMETRY_ORDER:
             raise Refused(400, "telemetry is off or strict: the agents' telemetry is always off (there is no on)")
+        if key == "hide_secrets" and value is not None and not isinstance(value, bool):
+            raise Refused(400, "hide_secrets is true or false (true: logins and keys are left out of the file views)")
         if key == "name_style" and value is not None and value not in NAME_STYLES:
             raise Refused(400, f"name_style is {' or '.join(NAME_STYLES)}")
         if key == "desktop_notifications" and value is not None and value not in DESKTOP_NOTIFICATIONS:
@@ -2544,19 +3644,48 @@ class Api:
         if key == "llm_traffic_limit" and value is not None and not (
                 isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 64):
             raise Refused(400, "llm_traffic_limit is a number of MiB from 1 to 64")
+        if key == "budget" and value is not None and not (
+                isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1_000_000):
+            raise Refused(400, "budget is a number of USD from 0 to 1000000 (a start's --budget; sandbox-ai spend)")
+        if key == "file_reads" and value is not None and value not in FILE_READS:
+            raise Refused(400, f"file_reads is {', '.join(FILE_READS)}")
+        if key == "connection_bodies" and value is not None and value not in CONNECTION_BODIES:
+            raise Refused(400, f"connection_bodies is {' or '.join(CONNECTION_BODIES)}")
+        if key == "ask_timeout" and value is not None and not (
+                isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 3600):
+            raise Refused(400, "ask_timeout is a number of seconds from 5 to 3600")
         if key == "loop_guard" and value is not None:
             # The launcher's own check (llm.check_loop): a value it refuses would stop every start on that host.
             try:
                 module("llm").check_loop(value, "the default")
             except (ValueError, TypeError, AttributeError) as exc:
                 raise Refused(400, str(exc) if "loop_guard" in str(exc) else f"loop_guard: {exc}") from None
+        if key.startswith("checkpoint_") and value is not None:
+            # The launcher's own check (checkpoints.check_setting): a value it refuses would stop every start there.
+            try:
+                module("checkpoints").check_setting(key, value, "the default")
+            except ValueError as exc:
+                raise Refused(400, str(exc)) from None
+        if key == "checkpoint_start" and value is False:  # no checkpoint at a start: what an agent does stays
+            confirmed(body, "defaults-lower", "checkpoint_start false: no checkpoint of the workspaces when a start "
+                                              "begins (an agent's changes cannot be undone)")
+        if key.startswith("storage_") and value is not None:
+            # The launcher's own check (storage.check_value): a value it refuses would stop every start there.
+            why = module("storage").check_value(key, value)
+            if why:
+                raise Refused(400, why)
         if key == "safeguard_mute" and value is not None and not (
                 isinstance(value, list) and all(isinstance(item, str) for item in value)):
             raise Refused(400, "safeguard_mute is a list of kinds (sandbox-ai safeguards kinds)")
         # How starts are named, which safeguard warnings pop up and how a local model is kept from looping protect
         # nothing (the safeguards still refuse, and every record stays listed): no step down to confirm. Fewer desktop
         # notifications are one (lowered_default): "none" silences a canary's alarm while the app is closed.
-        if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute", "loop_guard"):
+        # (hide_secrets: hiding logins and keys in the file views protects; listing them again, the default, shows a
+        # file's name, size and date only - its text is asked for each time: nothing to confirm either way)
+        # (the storage settings: when the check runs, what it says, and its rules - each opt-in, each action of a
+        # rule logged and said: no protection lowered)
+        if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute", "loop_guard",
+                                                           "hide_secrets") and not key.startswith("storage_"):
             weakest = {"mode": MODE_ORDER[0]}.get(key)
             if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
@@ -2594,15 +3723,53 @@ class Api:
                     f"canaries: no {' and '.join(fewer)} canary files any more")
         before = values.get(key)
         if key == "keep_days":
-            if value is None:
-                return None  # no keep_days: kept starts are never removed for their age
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 36500:
-                raise Refused(400, "keep_days is a whole number of days (1-36500)")
-            if isinstance(before, bool) or not isinstance(before, int):
-                return f"keep_days {value}: kept starts unused for {value} days are removed (there is no keep_days now)"
-            if value < before:
-                return f"keep_days {value} instead of {before}: kept starts are removed sooner"
-            return None
+            # Without keep_days the stopped kept starts unused for 90 days go (sandbox-ai gc and its daily pass:
+            # starts.DEFAULT_KEEP_DAYS); 0: never. Removed sooner, or at all where they never were, lowers it.
+            def effective(days):
+                if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+                    return 90
+                return None if days == 0 else days
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                      or not 0 <= value <= 36500):
+                raise Refused(400, "keep_days is a whole number of days (1-36500), or 0: kept starts never expire")
+            after, now_ = effective(value), effective(before)
+            if after is None or (now_ is not None and after >= now_):
+                return None
+            shown = f"keep_days {value}" if value is not None else "no keep_days (the default: 90 days)"
+            return (f"{shown}: kept starts unused for {after} days are removed" + (" (they never are now)"
+                    if now_ is None else f", sooner than now ({now_} days)"))
+        if key == "package_min_age_days":
+            # The package guard asks before a download of a version younger than this (runtime.PACKAGE_DEFAULTS: 14
+            # days without the key; 0: no age check). Fewer days, or none, lowers it.
+            def asked_below(days):
+                return 14 if isinstance(days, bool) or not isinstance(days, int) or not 0 <= days <= 3650 else days
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                      or not 0 <= value <= 3650):
+                raise Refused(400, "package_min_age_days is a whole number of days (0-3650); 0: no age check")
+            after, now_ = asked_below(value), asked_below(before)
+            if after >= now_:
+                return None
+            shown = f"package_min_age_days {value}" if value is not None else \
+                "no package_min_age_days (the default: 14 days)"
+            return (f"{shown}: the package guard " + ("no longer asks about young package versions at all"
+                    if after == 0 else f"asks only about package versions younger than {after} days")
+                    + f" (now: {now_} days)")
+        if key == "log_days":
+            # Without log_days the logs older than 30 days go (sandbox-ai gc and its daily pass: statedirs.LOG_DAYS);
+            # 0: never. Removed sooner, or at all where they never were, lowers it.
+            def kept_for(days):
+                if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+                    return 30
+                return None if days == 0 else days
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                      or not 0 <= value <= 36500):
+                raise Refused(400, "log_days is a whole number of days (1-36500), or 0: logs are never removed by age")
+            after, now_ = kept_for(value), kept_for(before)
+            if after is None or (now_ is not None and after >= now_):
+                return None
+            shown = f"log_days {value}" if value is not None else "no log_days (the default: 30 days)"
+            return (f"{shown}: logs older than {after} days are removed" + (" (they never are now)"
+                    if now_ is None else f", sooner than now ({now_} days)"))
         if key == "preset_dirs":
             if value is None:
                 return None  # fewer places presets are read from
@@ -2623,6 +3790,10 @@ class Api:
                 "the launchers show nothing on that host's desktop while its app is closed, not even a canary's "
                 "alarm" if after == "none" else "only a canary's alarm is shown on that host's desktop while its "
                 "app is closed, no question or safeguard"))
+        if key in ("file_reads", "connection_bodies", "ask_timeout"):
+            return None  # what the logs keep of reads and downloads: no protection either way (both checked above)
+        if key.startswith("checkpoint_"):
+            return None  # the checkpoints' timing and limits (checked above; turning them off is asked above)
         if key in ("subnet", "subnet6"):
             if value == before:
                 return None
@@ -2722,6 +3893,52 @@ class Api:
             raise Refused(400, "restart goes with for (a start)")
         return self.done(params["host"], [*args, name], 300)
 
+    def mcp_copy(self, params, body):
+        """sandbox-ai mcp copy NAME... --from HOST --to THIS --json, run on the service's machine (it reaches both
+        hosts): {"dry_run": true} checks (what is copied, changed, and what this host cannot take as it is: nothing
+        written), else asked first (mcp-copy). The choices that resolve what the check said: "as" (one server), "paths"
+        ({OLD: NEW}), "drop_paths", "secrets_later", "pull_image" or "copy_image", "no_vpn", "current_pin",
+        "unsigned", "replace", and "attach": a running start of this host to attach them to now."""
+        target = host_name(params["host"])
+        source = host_name(body.get("from"))
+        if source == target:
+            raise Refused(400, "copy from another host: from and to are the same")
+        names = strings(body.get("names"), "names", 16)
+        if not names or not all(MCP_NAME.fullmatch(name) for name in names):
+            raise Refused(400, "names: the servers to copy (1-32 letters, digits, '_' or '-' each)")
+        flags = ("dry_run", "secrets_later", "pull_image", "copy_image", "no_vpn", "current_pin", "unsigned", "replace")
+        if not all(isinstance(body.get(key, False), bool) for key in flags):
+            raise Refused(400, f"{', '.join(flags)} are true or false")
+        if body.get("pull_image") and body.get("copy_image"):
+            raise Refused(400, "pull_image or copy_image: one of them")
+        args = ["mcp", "copy", *dict.fromkeys(names), "--from", source, "--to", target, "--json"]
+        if body.get("as") not in (None, ""):
+            if len(names) != 1 or not (isinstance(body["as"], str) and MCP_NAME.fullmatch(body["as"])):
+                raise Refused(400, "as: a new name for the one server copied")
+            args.append(f"--as={body['as']}")
+        paths = body.get("paths", {})
+        if not isinstance(paths, dict) or len(paths) > 16:
+            raise Refused(400, "paths: {the source's folder: one of this host}")
+        for old, new in paths.items():
+            args.append(f"--path={no_dots(host_path(old, 'paths'), 'paths')}={no_dots(host_path(new, 'paths'), 'paths')}")
+        for old in strings(body.get("drop_paths", []), "drop_paths", 16):
+            args.append(f"--drop-path={no_dots(host_path(old, 'drop_paths'), 'drop_paths')}")
+        for key, flag in (("secrets_later", "--secrets-later"), ("pull_image", "--pull-image"),
+                          ("copy_image", "--copy-image"), ("no_vpn", "--no-vpn"), ("current_pin", "--current-pin"),
+                          ("unsigned", "--unsigned")):
+            if body.get(key):
+                args.append(flag)
+        if body.get("attach") not in (None, ""):
+            args.append(f"--attach={start_name(body['attach'])}")
+        if body.get("replace"):
+            args += ["--replace", "--yes"]  # (asked first here: mcp-copy says so)
+        if body.get("dry_run"):
+            args.append("--dry-run")
+        else:
+            confirmed(body, "mcp-copy", f"{', '.join(names)} from {source} to {target}"
+                      + (", replacing one of that name" if body.get("replace") else ""))
+        return self.json_of(module("hosts").LOCAL, args, timeout=3600)
+
     def mcp_stop(self, params, body):
         name = self.mcp_server(params["name"])
         confirmed(body, "mcp-stop", name)
@@ -2792,8 +4009,10 @@ class Api:
                 "output": printable(out.strip()[-20000:])}
 
     def mcp_add(self, params, body):
-        """sandbox-ai mcp add ENTRY with --as, --mount, --env, --network, --memory, --pids, --catalog, --no-pull,
-        --backend, --unsigned (asked: mcp-unsigned) and --vpn; a writable mount is asked first (mcp-writable-mount)."""
+        """sandbox-ai mcp add ENTRY with --as, --mount, --env, --network (none, full: the internet without your local
+        network, allowlist: only the entry's hosts, lan: your network too - asked first: mcp-lan), --memory, --pids,
+        --catalog, --no-pull, --backend, --unsigned (asked: mcp-unsigned) and --vpn; a writable mount is asked first
+        (mcp-writable-mount)."""
         entry = body.get("entry")
         if not (isinstance(entry, str) and MCP_ENTRY.fullmatch(entry)):
             raise Refused(400, "entry is a catalog entry: duckduckgo or hub:binwalk")
@@ -2816,8 +4035,10 @@ class Api:
         for value in strings(body.get("env", []), "env", 64):
             args.append(f"--env={mcp_env_spec(value)}")
         if body.get("network") not in (None, ""):
-            if body["network"] not in ("none", "full"):
-                raise Refused(400, "network is none or full")
+            if body["network"] not in ("none", "full", "allowlist", "lan"):
+                raise Refused(400, "network is none, full, allowlist or lan")
+            if body["network"] == "lan":
+                confirmed(body, "mcp-lan", entry)
             args.append(f"--network={body['network']}")
         if body.get("memory") not in (None, ""):
             if not (isinstance(body["memory"], str) and SIZE_VALUE.fullmatch(body["memory"])):
@@ -2858,6 +4079,121 @@ class Api:
         return {"output": printable(out.strip()[-4000:])}
 
     # logins and identities: the token is always a secret of that host, named, never a value here
+    # phone notifications (sandbox-ai notify on that host): its channels, by secret names
+    def notify_list(self, params, body):
+        return self.json_of(params["host"], ["notify", "list", "--json"], 30)
+
+    def notify_add(self, params, body):
+        """notify add with a channel's fields (notify.json's names), checked as sandbox-ai checks them before
+        anything reaches the host; asked first (notify-add): that host's questions and alarms go to the service it
+        names. {"check_only": true}: only checked."""
+        notify = module("notify")
+        fields = {key: body.get(key) for key in notify.FIELDS if body.get(key) not in (None, "")}
+        try:
+            args = notify.add_arguments(fields)
+            channel = notify.check_channel(fields)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise Refused(400, printable(str(exc))[:500]) from None
+        if flag(body, "check_only"):
+            return {"ok": True}
+        confirmed(body, "notify-add", printable(f"{channel['name']}: {notify.where(channel)}")[:300])
+        return self.done(params["host"], args, 30)
+
+    @staticmethod
+    def notify_name(params):
+        name = params["name"]
+        if not module("notify").NAME.fullmatch(name):
+            raise Refused(400, "a channel's name is letters, digits, _ . - (up to 32)")
+        return name
+
+    def notify_remove(self, params, body):
+        name = self.notify_name(params)
+        confirmed(body, "notify-remove", name)
+        return self.done(params["host"], ["notify", "remove", name], 30)
+
+    def notify_test(self, params, body):
+        """notify test NAME: {"ok", "output"} - a message that could not be sent is its answer, not an error."""
+        return self.checked(params["host"], ["notify", "test", self.notify_name(params)], 60)
+
+    def notify_link(self, params, body):
+        """notify link URL (the web interface's public https address in the messages), or --none (url null)."""
+        url = body.get("url")
+        if url in (None, ""):
+            return self.done(params["host"], ["notify", "link", "--none"], 30)
+        try:
+            url = module("notify").check_link(url)
+        except ValueError as exc:
+            raise Refused(400, printable(str(exc))[:300]) from None
+        return self.done(params["host"], ["notify", "link", url], 30)
+
+    # scheduled runs (sandbox-ai schedule on that host): checked here as the command checks them
+    def schedules(self, params, body):
+        """schedule list --json: {"schedules": [...], "problems", "timer"}."""
+        return self.json_of(params["host"], ["schedule", "list", "--json"], 30, ok=(0,))
+
+    @staticmethod
+    def schedule_name(params):
+        name = params["name"]
+        if not module("schedule").NAME.fullmatch(name):
+            raise Refused(400, "a schedule's name is 1-24 lower-case letters, digits, _ and -")
+        return name
+
+    def schedule_show(self, params, body):
+        return self.json_of(params["host"], ["schedule", "show", self.schedule_name(params), "--json"], 30, ok=(0,))
+
+    def schedule_history(self, params, body):
+        return self.json_of(params["host"], ["schedule", "history", self.schedule_name(params), "--json"], 30,
+                            ok=(0,))
+
+    def schedule_report(self, params, body):
+        """schedule report NAME [RUN]: {"markdown"} - the run's summary and the start's report (.../report/RUN;
+        default: the last)."""
+        name, run = self.schedule_name(params), params.get("run")
+        if run and not module("schedule").RUN_ID.fullmatch(run):
+            raise Refused(400, "a run of the schedule's history (YYYYMMDD-hhmmss-xxxx)")
+        status, out, err = self.run(params["host"], ["schedule", "report", name, *([run] if run else [])], 60)
+        if status != 0:
+            raise self.failed(params["host"], ["schedule", "report"], status, out, err)
+        return {"markdown": printable(out[-(4 << 20):])}
+
+    def schedule_add(self, params, body):
+        """schedule add with the form's fields (schedule.add_arguments: checked as the command checks them); asked
+        first (schedule-add): the host starts that agent by itself. {"check_only": true}: only checked."""
+        fields = {key: body.get(key) for key in (
+            "name", "every", "at", "cron", "on_push", "agent", "options", "agent_args", "prompt", "preset",
+            "preset_values", "board", "workdir", "ask", "limit", "missed", "keep_starts", "commit", "push", "notify",
+            "replace") if body.get(key) is not None}
+        try:
+            args = module("schedule").add_arguments(fields)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise Refused(400, printable(str(exc))[:500]) from None
+        if flag(body, "check_only"):
+            return {"ok": True}
+        confirmed(body, "schedule-add", printable(f"{fields.get('name')}: {fields.get('agent') or 'board'}, ask "
+                                                  f"{fields.get('ask') or 'off'}")[:300])
+        return self.done(params["host"], args, 120)
+
+    def schedule_run(self, params, body):
+        return self.done(params["host"], ["schedule", "run-now", self.schedule_name(params)], 60)
+
+    def schedule_pause(self, params, body):
+        return self.done(params["host"], ["schedule", "pause", self.schedule_name(params)], 30)
+
+    def schedule_resume(self, params, body):
+        return self.done(params["host"], ["schedule", "resume", self.schedule_name(params)], 30)
+
+    def schedule_remove(self, params, body):
+        name = self.schedule_name(params)
+        confirmed(body, "schedule-remove", name)
+        return self.done(params["host"], ["schedule", "remove", name, *(["--keep-history"]
+                                                                         if flag(body, "keep_history") else [])], 60)
+
+    def schedule_timer(self, params, body):
+        """schedule enable ({"on": true}) or disable: the user-level timer of that host; asked first."""
+        on = flag(body, "on")
+        confirmed(body, "schedule-timer", "on" if on else "off")
+        return self.done(params["host"], ["schedule", "enable" if on else "disable"], 120)
+
     def git_logins(self, params, body):
         return self.json_of(params["host"], ["git-logins", "list", "--json"], 30)
 
@@ -2886,6 +4222,20 @@ class Api:
             args.append(f"--user={body['user']}")
         self.login_server_checked(url)
         if flag(body, "check_only"):
+            # git-logins add replaces the login of that server (the same server as sandbox-ai tells them apart):
+            # asked first, as the app asks and as a publish login of that kind is - in the check the page sends
+            # before it stores a token and asks git-login-add (whose yes, {"confirm": true}, answers both)
+            if body.get("confirm") is not True:
+                server = module("agent_sandbox").git_server
+                wanted = server(url, "the Git server")["url"]
+
+                def same(entry):
+                    with contextlib.suppress(ValueError, TypeError, KeyError):
+                        return server(entry["url"], "the Git server")["url"] == wanted
+                    return False
+                if any(isinstance(entry, dict) and same(entry) for entry in
+                       self.json_of(params["host"], ["git-logins", "list", "--json"], 30, ok=(0,)) or []):
+                    confirmed(body, "login-replace", wanted)
             return {"ok": True}
         confirmed(body, "git-login-add", url)
         return self.done(params["host"], [*args, url], 30)
@@ -2894,6 +4244,68 @@ class Api:
         url = git_url(body.get("url"))
         confirmed(body, "login-remove", url)
         return self.done(params["host"], ["git-logins", "remove", url], 30)
+
+    def git_login_edit(self, params, body):
+        """git-logins edit [--url=NEW] [--user=USER] [--secret=NAME] -- URL (asked first: login-edit): the login for
+        URL changed in place. With {"check_only": true} only what is sent is checked: nothing runs on the host."""
+        url = git_url(body.get("url"))
+        args = ["git-logins", "edit"]
+        if body.get("new_url") not in (None, ""):
+            new = git_url(body.get("new_url"))
+            self.login_server_checked(new)
+            args.append(f"--url={new}")
+        if body.get("user") not in (None, ""):
+            if not (isinstance(body["user"], str) and LOGIN_USER.fullmatch(body["user"])):
+                raise Refused(400, "user is 1-64 letters, digits, '.', '_' or '-'")
+            args.append(f"--user={body['user']}")
+        if body.get("secret") not in (None, ""):
+            args.append(f"--secret={secret_name(body.get('secret'))}")
+        if len(args) == 2:
+            raise Refused(400, "nothing to change: new_url, user or secret")
+        if flag(body, "check_only"):
+            return {"ok": True}
+        confirmed(body, "login-edit", url)
+        return self.done(params["host"], [*args, "--", url], 60)
+
+    def publish_login_edit(self, params, body):
+        """publish-logins edit KIND [--secret=NAME] [--url=URL|default] (asked first: login-edit)."""
+        kind = publish_kind(params["kind"])
+        args = ["publish-logins", "edit"]
+        if body.get("secret") not in (None, ""):
+            args.append(f"--secret={secret_name(body.get('secret'))}")
+        if body.get("url") == "default":
+            args.append("--url=default")
+        else:
+            args += self.publish_url(body)
+        if len(args) == 2:
+            raise Refused(400, "nothing to change: secret or url (\"default\": the service's public server)")
+        if body.get("url") not in (None, "", "default"):
+            self.login_server_checked(body["url"], kind)
+        confirmed(body, "login-edit", kind)
+        return self.done(params["host"], [*args, kind], 60)
+
+    def give_session_login(self, params, body):
+        """sandbox-ai login give RUN [AGENT] [--from-session=NAME] --json on that host: an agent login for a sandbox
+        that runs there - the central one, or session NAME's. With {"check_only": true} it is only shown (--dry-run:
+        whose login it is, what it replaces; never a token); given (asked first: login-give) only with the
+        fingerprint that was shown (--yes --expect), "restart": its agent started again inside the sandbox."""
+        run = start_name(body.get("run"))
+        args = ["login", "give", run]
+        if body.get("agent") not in (None, ""):
+            if body["agent"] not in LOGIN_AGENTS:
+                raise Refused(400, agent_words(LOGIN_AGENTS))
+            args.append(body["agent"])
+        if body.get("from_session") not in (None, ""):
+            args.append(f"--from-session={start_name(body.get('from_session'))}")
+        if flag(body, "check_only"):
+            return self.json_of(params["host"], [*args, "--dry-run", "--json"], 120, ok=(0,))
+        fingerprint = body.get("fingerprint")
+        if not (isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{8}", fingerprint)):
+            raise Refused(400, "fingerprint is the 8 hex characters the login was shown with")
+        confirmed(body, "login-give", f"the login {fingerprint} to {run}")
+        return self.json_of(params["host"], [*args, "--yes", f"--expect={fingerprint}",
+                                             *(["--restart"] if flag(body, "restart") else []), "--json"], 300,
+                            ok=(0,))
 
     def git_login_check(self, params, body):
         url = body.get("url")
@@ -2905,6 +4317,30 @@ class Api:
     def login_status(self, params, body):
         """sandbox-ai login --status: which login each agent's sandboxes get on that host."""
         return self.done(params["host"], ["login", "--status"], 30)
+
+    def session_logins(self, params, body):
+        """sandbox-ai login --status --sessions --json: which login each running or kept session uses (its account as
+        the file says, kind, expiry, a fingerprint - never a token)."""
+        found = self.json_of(params["host"], ["login", "--status", "--sessions", "--json"], 120, ok=(0,))
+        if not isinstance(found, dict) or not isinstance(found.get("sessions"), list):
+            raise Refused(502, "sandbox-ai login --status --sessions: not a list of sessions")
+        return found
+
+    def import_session_login(self, params, body):
+        """sandbox-ai login AGENT --from-session NAME --yes --expect FINGERPRINT [--replace] --json: confirmed
+        (login-import), that session's login - the one shown, by its fingerprint - becomes the central login."""
+        agent = body.get("agent")
+        if agent not in LOGIN_AGENTS:  # (session_login.AGENTS: the agents the central store takes)
+            raise Refused(400, agent_words(LOGIN_AGENTS))
+        name = start_name(body.get("name"))
+        fingerprint = body.get("fingerprint")
+        if not (isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{8}", fingerprint)):
+            raise Refused(400, "fingerprint is the 8 hex characters the list shows")
+        replace = flag(body, "replace")
+        confirmed(body, "login-import", f"import the {agent} login of {name}")
+        return self.json_of(params["host"], ["login", agent, "--from-session", name, "--yes",
+                                             f"--expect={fingerprint}", *(["--replace"] if replace else []), "--json"],
+                            180, ok=(0,))
 
     def publish_kinds(self, params, body):
         return self.done(params["host"], ["publish-logins", "kinds"], 30)
@@ -3103,6 +4539,28 @@ class Api:
     def vpn_show(self, params, body):
         return self.json_of(params["host"], ["vpn", "show", vpn_name(params["name"]), "--json"], 30)
 
+    VPN_SETTINGS = ("provider", "auth-secret", "account-secret", "auth-key-secret", "exit-node", "login-server",
+                    "hostname", "exit-country", "bootstrap-timeout", "bootstrap-attempts", "bootstrap-stall")
+
+    def vpn_set(self, params, body):
+        """sandbox-ai vpn set NAME --SETTING=VALUE ... (asked first: vpn-replace): the profile changed in place - the
+        settings `vpn show --json` names ("settings"), each one line without a control character; "none" clears one
+        (a bootstrap setting: "default"). Its keys are not touched, and no value of a secret is sent: a secret is
+        named."""
+        name = vpn_name(params["name"])
+        settings = body.get("settings")
+        if not isinstance(settings, dict) or not settings or set(settings) - set(self.VPN_SETTINGS):
+            raise Refused(400, f"settings is an object of {', '.join(self.VPN_SETTINGS)}")
+        args = ["vpn", "set"]
+        for key in self.VPN_SETTINGS:
+            if key in settings:
+                value = settings[key]
+                if not (isinstance(value, str) and 0 < len(value) <= 300 and value.isprintable()):
+                    raise Refused(400, f"{key}: one line of at most 300 characters (\"none\" clears it)")
+                args.append(f"--{key}={value}")
+        confirmed(body, "vpn-replace", name)
+        return self.done(params["host"], [*args, "--", name], 60)
+
     # logs of a directory or project, the privacy check of repositories, the activity of runs
     def logs_of(self, params, body):
         """sandbox-ai logs --json [--project PROJECT] [DIRECTORY]: one log directory, or a project's (one of them:
@@ -3195,6 +4653,22 @@ class Api:
     # the version in full, the images, the demo device
     def version_of(self, params, body):
         return self.done(params["host"], ["version", "--verbose"], 30)
+
+    def update_mode(self, params, body):
+        """update mode --json: the mode, the last check and what it found (a newer version), the next check, the
+        timer, how a copy that does not update itself is updated."""
+        return self.json_of(params["host"], ["update", "mode", "--json"], 60, ok=(0,))
+
+    def update_mode_set(self, params, body):
+        """update mode MODE [--at WINDOW] --json, asked first (update-mode): what that host does by itself."""
+        mode, at = body.get("mode"), body.get("at")
+        if mode not in UPDATE_MODES:
+            raise Refused(400, f"mode is one of {', '.join(UPDATE_MODES)}")
+        if at not in (None, "") and (mode != "auto" or not isinstance(at, str) or not UPDATE_WINDOW.fullmatch(at)):
+            raise Refused(400, "at is the window of mode auto: HH:MM or HH:MM-HH:MM")
+        confirmed(body, "update-mode", mode + (f", window {at}" if at else ""))
+        return self.json_of(params["host"], ["update", "mode", mode, *([f"--at={at}"] if at else []), "--json"], 180,
+                            ok=(0,))
 
     def images(self, params, body):
         return self.json_of(params["host"], ["images", "--json"], 120)
@@ -3433,13 +4907,19 @@ def as_given_on(host, runner=None):
 
 
 def terminal_command(query, runner=None):
-    """argv of a terminal the browser opens (QUERY: the WebSocket URL's parameters): attach to a start, or a new
-    start of an agent (in its own terminal, detachable as every start)."""
+    """argv of a terminal the browser opens (QUERY: the WebSocket URL's parameters): attach to a start, a shell in a
+    running one, or a new start of an agent (in its own terminal, detachable as every start)."""
     hosts = module("hosts")
     host = host_name(query.get("host", ""))
     kind = query.get("kind")
     if kind == "attach":
         return host, hosts.argv(host, ["attach", start_name(query.get("name"))], tty=True)
+    if kind == "shell":  # a shell of the human in a running start, under the agent's rules (sandbox-ai shell)
+        args = ["shell", start_name(query.get("name"))]
+        older = newer_needed(host, args)
+        if older:
+            raise older
+        return host, hosts.argv(host, args, tty=True)
     if kind == "start":
         agent = query.get("agent")
         if agent not in AGENTS:
@@ -3450,8 +4930,11 @@ def terminal_command(query, runner=None):
         options = strings(json.loads(query.get("options") or "[]"), "options")
         if query.get("workspace"):
             workspace = query["workspace"]
-            if not workspace.startswith(("/", "~")) or "\0" in workspace:
-                raise Refused(400, "the workspace is an absolute path (or ~/...)")
+            # (a folder of another machine, sshfs://...: that host mounts it with sshfs for the start)
+            workspace = remote_source(workspace, "the workspace") or workspace
+            if not workspace.startswith(("/", "~")) and not remote_source(workspace, "the workspace") \
+                    or "\0" in workspace:
+                raise Refused(400, "the workspace is an absolute path (or ~/..., or sshfs://[USER@]HOST/PATH)")
             args += ["--workspace", workspace]
         elif not names_workspace(options):
             # Without one the launcher takes the directory it runs in: this service's own, or the SSH login's HOME.
@@ -3575,6 +5058,41 @@ def team_vpn_args(host, agents, query, runner=None):
             *(["--allow-shared-openvpn"] if shared else [])]
 
 
+TEAM_MEMBER_KEYS = {"model": "--member-model", "llm": "--member-llm", "mode": "--member-mode"}
+
+
+def team_member_args(agents, query):
+    """Each member's role and its own model, LLM server and mode from QUERY: roles (a JSON object {agent: text}) and
+    member_options (a JSON object {agent: {model, llm, mode}}), for members of AGENTS: --role=AGENT=TEXT,
+    --member-model=AGENT=MODEL ... Their values are team start's to check (team.check_roles, check_member_options);
+    here only their shape and that they are strings of one line."""
+    def json_object(key):
+        try:
+            value = json.loads(query.get(key) or "{}")
+        except (ValueError, RecursionError):
+            value = None
+        if not isinstance(value, dict):
+            raise Refused(400, f"{key} is a JSON object {{agent: ...}}")
+        for agent in value:
+            if agent not in agents:
+                raise Refused(400, f"{key}: {printable(agent)[:40]} is no member of this team ({', '.join(agents)})")
+        return value
+
+    def line(value, what):
+        if not isinstance(value, str) or not value.isprintable() or len(value) > 1000:
+            raise Refused(400, f"{what} is one line of text (at most 1000 characters)")
+        return value.strip()
+
+    args = [f"--role={agent}={line(text, 'a role')}" for agent, text in json_object("roles").items()
+            if line(text, "a role")]
+    for agent, own in json_object("member_options").items():
+        if not isinstance(own, dict) or set(own) - set(TEAM_MEMBER_KEYS):
+            raise Refused(400, "member_options: {agent: {model, llm, mode}}")
+        args += [f"{TEAM_MEMBER_KEYS[key]}={agent}={line(value, key)}" for key, value in own.items()
+                 if line(value, key)]
+    return args
+
+
 def tool_command(kind, query, runner=None):
     """The sandbox-ai arguments of the interactive tools a terminal runs (None: no such kind): an agent's login (or
     its logout, asked first), the plugin store, an image build, a kit's hooks trusted (asked first; the command
@@ -3612,7 +5130,8 @@ def tool_command(kind, query, runner=None):
     if kind == "build":
         target = query.get("target")
         if not (isinstance(target, str) and BUILD_TARGET.fullmatch(target)):
-            raise Refused(400, "target is codex, claude, opencode, hermes, dsh, qwen, goose, all, team, cairn, vpn, tor, browser or a "
+            raise Refused(400, "target is codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, vpn, tor, browser "
+                                "or a "
                                 "variant's name")
         only = {"1": True, "0": False, None: False, "": False}.get(query.get("extension_only"), "bad")
         if only == "bad" or only and target in ("team", "vpn", "tor"):
@@ -3662,6 +5181,7 @@ def tool_command(kind, query, runner=None):
         hosts = module("hosts")
         host = host_name(query.get("host") or hosts.LOCAL)
         vpns = team_vpn_args(host, agents, query, runner)
+        vpns += team_member_args(agents, query)
         # Every member's /work is the team's workspace (team.py passes --workspaces-as-given itself from 0.1.78 on;
         # a remote host of that version whose team.py is older gets it here).
         given = ["--workspaces-as-given"] if host != hosts.LOCAL and as_given_on(host, runner) \
@@ -3825,7 +5345,7 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
             except BlockingIOError:
                 if clock() - since > WS_DEADLINE:
                     return False
-                select.select([], [master], [], 0.5)
+                ready_fds((), [master], 0.5)
             except OSError:
                 return False
         return True
@@ -3834,7 +5354,7 @@ def bridge(ws, argv, cols=100, rows=30, alive=None, every=2.0, clock=time.monoto
         try:
             while True:
                 try:
-                    ready, _, _ = select.select([master], [], [], 0.5)
+                    ready = ready_fds([master], (), 0.5)[0]
                     if ws.closed or ending.is_set():
                         break
                     if gone():
@@ -4006,6 +5526,7 @@ class Service:
                 self.sessions.drop(self.cookie(headers))
                 audit("logout", user=session["user"], address=address)
                 return self.json(200, {"ok": True}, [("Set-Cookie", self.set_cookie("", 0))])
+            REQUEST.address = address
             result = self.api.dispatch(method, path, data)
             if method != "GET":
                 LOG.info("webui", f"{session['user']} from {address}: {method} {path}: done")
@@ -4029,8 +5550,9 @@ class Service:
 
     def login(self, data, address):
         user, password, code = data.get("user"), data.get("password"), data.get("code")
-        if not all(isinstance(v, str) and 0 < len(v) <= 1024 for v in (user, password, code)):
-            raise Refused(400, "user, password and code are needed")
+        if not all(isinstance(v, str) and 0 < len(v) <= 1024 for v in (user, password)) or \
+                not (isinstance(code, str) and len(code) <= 1024):
+            raise Refused(400, "user, password and code are needed")  # (a login without TOTP: an empty code)
         # ADDRESS is the socket's peer (Handler.answer): no X-Forwarded-For is read, there is no trusted proxy to
         # take it from, and a header any client can send would let it choose the address it is throttled as.
         local = (f"address:{address}", f"address-user:{address}|{user}")
@@ -4055,8 +5577,10 @@ class Service:
             with users_locked() as users:
                 record = users.get(user) if USER_NAME.fullmatch(user) else None
                 ok = check_password(password, (record or {}).get("password"))
-                counter = check_totp(record["totp"], code, record.get("totp_counter")) if ok else None
-                if ok and counter is not None:
+                second = bool(ok and record.get("totp"))  # False: a login you made without TOTP (--no-totp)
+                counter = (check_totp(record["totp"], code, record.get("totp_counter")) if second else
+                           "password only") if ok else None
+                if second and counter is not None:
                     record["totp_counter"] = counter
         except ValueError as exc:
             raise users_unreadable(exc) from None
@@ -4068,9 +5592,9 @@ class Service:
             raise Refused(401, "wrong user, password or code")
         self.limiter.succeeded(*local, user_key)
         token = self.sessions.new(user, address, user_fingerprint(record))
-        audit("login", user=user, address=address)
+        audit("login", user=user, address=address, **({} if second else {"second_factor": False}))
         session = self.sessions.get(token)
-        return self.json(200, {"user": user, "csrf": session["csrf"]},
+        return self.json(200, {"user": user, "csrf": session["csrf"], "second_factor": second},
                          [("Set-Cookie", self.set_cookie(token, LIFETIME))])
 
     def claim_terminal(self, session):
@@ -4339,6 +5863,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version, sys_version = "sandbox-ai", ""
     service = None  # set by serve()
+    # TCP_NODELAY (socketserver sets it in setup): what is written goes out at once. With Nagle's algorithm a small
+    # piece waited for the browser's ACK of the one before, which the browser's system holds back (40 ms on Linux, up
+    # to 200 ms on Windows): a terminal's output frame behind the frame before it, an answer's body behind its headers.
+    disable_nagle_algorithm = True
 
     def setup(self):
         handshake = getattr(self.request, "do_handshake", None)
@@ -4391,15 +5919,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.rfile = head.rfile if isinstance(head, Deadline) else head
 
     def send(self, status, headers, body):
-        self.send_response(status)
-        for key, value in [*headers, ("Content-Length", str(len(body))), ("Content-Security-Policy", CSP),
-                           ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
-                           ("X-Frame-Options", "DENY"), ("Cross-Origin-Opener-Policy", "same-origin"),
-                           ("Strict-Transport-Security", "max-age=31536000")]:
-            self.send_header(key, value)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        """The answer in one write: its status line and headers (which http.server writes when they end) are taken
+        into a buffer and go out with the body. In two writes the body waited for the browser's ACK of the headers
+        (Nagle's algorithm; see disable_nagle_algorithm): every request of the page took 42 ms and more, on this
+        machine itself, and was two TLS records."""
+        wire, self.wfile = self.wfile, io.BytesIO()
+        try:
+            self.send_response(status)
+            for key, value in [*headers, ("Content-Length", str(len(body))), ("Content-Security-Policy", CSP),
+                               ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
+                               ("X-Frame-Options", "DENY"), ("Cross-Origin-Opener-Policy", "same-origin"),
+                               ("Strict-Transport-Security", "max-age=31536000")]:
+                self.send_header(key, value)
+            self.end_headers()
+            head = self.wfile.getvalue()
+        finally:
+            self.wfile = wire
+        self.wfile.write(head if self.command == "HEAD" else head + body)
 
     def answer(self):
         length = self.headers.get("Content-Length")
@@ -4614,6 +6150,45 @@ def make_certificate(names, renew=False):
     return cert, key
 
 
+def certificate_names(cert):
+    """The names (DNS: lower case) and addresses the certificate CERT is for (its subjectAltName, read with openssl),
+    or None when they cannot be read."""
+    try:
+        done = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-ext", "subjectAltName"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    found = set()
+    for entry in done.stdout.replace("\n", ",").split(","):
+        kind, _, value = entry.strip().partition(":")
+        if kind == "DNS":
+            found.add(value.strip().lower())
+        elif kind in ("IP Address", "IP"):
+            with contextlib.suppress(ValueError):
+                found.add(str(ipaddress.ip_address(value.strip())))
+    return found
+
+
+def unnamed_by(cert, names):
+    """Which of NAMES (service_names': a name, an address, an IPv6 address in brackets) the certificate CERT does not
+    name, sorted ([] when it names them all or its names cannot be read)."""
+    found = certificate_names(cert)
+    if found is None:
+        return []
+    missing = []
+    for name in names:
+        bare = name.strip("[]")
+        try:
+            key = str(ipaddress.ip_address(bare))
+        except ValueError:
+            key = bare.lower().rstrip(".")
+        if key not in found:
+            missing.append(name)
+    return sorted(missing)
+
+
 def fingerprint(cert):
     der = ssl.PEM_cert_to_DER_cert(Path(cert).read_text())
     digest = hashlib.sha256(der).hexdigest().upper()
@@ -4643,7 +6218,10 @@ def service_names(host, port, extra):
         names |= {socket.gethostname(), socket.getfqdn()}
         with contextlib.suppress(OSError):
             names |= {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)}
-    return {name for name in names if name}, {f"{name}:{port}" for name in names if name}
+    # An IPv6 address as a browser's Host header names it: in brackets ("[fd00::7]:8443"; an address found here or
+    # given as --hostname fd00::7 was compared as "fd00::7:8443", which no browser sends - refused with 421).
+    names = {f"[{name}]" if ":" in name and not name.startswith("[") else name for name in names if name}
+    return names, {f"{name}:{port}" for name in names}
 
 
 def serve(listen=DEFAULT_LISTEN, hostnames=(), cert=None, key=None, out=print, ready=None):
@@ -4651,38 +6229,57 @@ def serve(listen=DEFAULT_LISTEN, hostnames=(), cert=None, key=None, out=print, r
     if not load_users():
         raise ValueError("no login yet: sandbox-ai web user add NAME")
     names, with_port = service_names(host, port, hostnames)
+    cert_given, unnamed = bool(cert or key), []
     if cert or key:
         if not (cert and key):
             raise ValueError("--cert and --key go together")
     else:
         cert, key = make_certificate(names)
+        # Made at the first start, for the names of then: a name given (or found) later is not in it, and a browser
+        # there says the name does not match. Said, with the command that makes one for every name (no new one
+        # unasked: its fingerprint, which you trusted, would change).
+        unnamed = unnamed_by(cert, names)
     server = Server((host, port), context_for(cert, key), ipv6=":" in host)
     actual = server.server_address[1]
     names, with_port = service_names(host, actual, hostnames)
     Handler.service = Service(with_port | (names if actual == 443 else set()))
-    write_private(listen_file(), json.dumps({"address": host, "port": actual, "pid": os.getpid()}).encode())
-    audit("serve", address=host, port=actual)
-    shown = host if ":" not in host else f"[{host}]"
-    out(f"sandbox-ai web: https://{'localhost' if shown in ('127.0.0.1', '[::1]') else shown}:{actual}/")
-    out(f"  certificate SHA-256 {fingerprint(cert)}")
-    if ready:
-        ready(server)
     previous = {}
-    if threading.current_thread() is threading.main_thread():
-        # SIGTERM (systemd, kill) and SIGHUP (its terminal closed) end it as Ctrl-C does, through the clean-up
-        # below: they ended the process at once, and listen.json stayed with its port (the launcher refused
-        # --allow-host-port for that port while another process had the PID).
-        def ended(signum, _frame):
-            raise SystemExit(128 + signum)
-        previous = {sig: signal.signal(sig, ended) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
+        if threading.current_thread() is threading.main_thread():
+            # SIGTERM (systemd, kill) and SIGHUP (its terminal closed) end it as Ctrl-C does, through the clean-up
+            # below: they ended the process at once, and listen.json stayed with its port (the launcher refused
+            # --allow-host-port for that port while another process had the PID). Installed before listen.json is
+            # written, and inside the try: a signal right after the write still removes it.
+            def ended(signum, _frame):
+                raise SystemExit(128 + signum)
+            for sig in (signal.SIGTERM, signal.SIGHUP):
+                previous[sig] = signal.signal(sig, ended)
+        write_private(listen_file(), json.dumps({"address": host, "port": actual, "pid": os.getpid()}).encode())
+        audit("serve", address=host, port=actual)
+        shown = host if ":" not in host else f"[{host}]"
+        out(f"sandbox-ai web: https://{'localhost' if shown in ('127.0.0.1', '[::1]') else shown}:{actual}/")
+        out(f"  certificate SHA-256 {fingerprint(cert)}")
+        for line in no_totp_warnings(load_users(), listen):
+            out(line)
+        if unnamed and not cert_given:
+            renew = ["sandbox-ai", "web", "cert", "--renew", "--listen", listen,
+                     *[word for name in hostnames for word in ("--hostname", name)]]
+            out(f"warning: the certificate does not name {printable(', '.join(unnamed))}: a browser there says the "
+                f"name does not match; {printable(shlex.join(renew))} makes one that does (a new fingerprint to "
+                "trust)")
+        # Into a log or a pipe (nohup, systemd, | tee) at once: Python buffers a non-terminal's output, and the
+        # service runs until it ends (-I: PYTHONUNBUFFERED is not read) - the address, the fingerprint and the
+        # warning about logins without TOTP stayed unseen.
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            sys.stdout.flush()
+        if ready:
+            ready(server)
         server.serve_forever()
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
         with contextlib.suppress(OSError):
-            if json.loads(listen_file().read_text()).get("pid") == os.getpid():
-                listen_file().unlink()
+            listen_file().unlink()
         module("approvals").end_heartbeat()  # no page here watches the questions any more
         server.server_close()
 
@@ -4698,13 +6295,36 @@ def ask(prompt, from_stdin):
     return getpass.getpass(prompt)
 
 
-def enrol(name, from_stdin, out):
-    """A password and a TOTP secret for NAME, the secret confirmed with a code."""
+def no_totp_warnings(users, listen):
+    """The lines `web serve` says at its start about the logins without TOTP (USERS: load_users()), louder when it
+    listens beyond this machine (LISTEN: ADDRESS:PORT); [] when every login has TOTP."""
+    names = sorted(name for name, record in users.items() if isinstance(record, dict) and not record.get("totp"))
+    if not names:
+        return []
+    host, _ = parse_listen(listen)
+    wide = not loopback_address(host.strip("[]"))
+    return [f"warning: login{'s' if len(names) > 1 else ''} without a second factor (TOTP): {', '.join(names)}"
+            + (" - and this service listens beyond this machine: anyone who reaches it and learns a password gets "
+               "in (sandbox-ai web user reset NAME gives a login TOTP)" if wide else
+               " (sandbox-ai web user reset NAME gives a login TOTP)")]
+
+
+NO_TOTP_RISK = ("a login without a second factor: whoever learns its password can do everything this service does - "
+                "terminals in the sandboxes, starts, approvals - here and on every host of sandbox-ai hosts")
+
+
+def enrol(name, from_stdin, out, totp=True):
+    """A password and a TOTP secret for NAME, the secret confirmed with a code; TOTP False (--no-totp, your choice):
+    the password only, with the warning of what that means."""
     password = ask("Password (12 characters or more): ", from_stdin)
     if len(password) < MIN_PASSWORD:
         raise ValueError(f"the password needs {MIN_PASSWORD} characters or more")
     if ask("Again: ", from_stdin) != password:
         raise ValueError("the two passwords differ")
+    if not totp:
+        out(f"warning: {name}: {NO_TOTP_RISK} (add it later: sandbox-ai web user reset {name})")
+        return {"password": hash_password(password), "totp": None, "totp_counter": None,
+                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     secret = new_totp_secret()
     out("Add this to your TOTP app (it is shown only now):")
     out(f"  {otpauth_uri(name, secret)}")
@@ -4718,34 +6338,51 @@ def enrol(name, from_stdin, out):
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
+def help_style(prog):
+    """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
+    loaded = sys.modules.get("sandbox_ai_helpstyle")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_helpstyle", HERE / "helpstyle.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        sys.modules["sandbox_ai_helpstyle"] = loaded
+    return loaded.CommandsFormatter(prog)
+
+
 def cli(argv, out=print):
-    parser = argparse.ArgumentParser(prog="sandbox-ai web", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="sandbox-ai web", formatter_class=help_style,
+                                     description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    user = commands.add_parser("user", help="the logins")
+    user = commands.add_parser("user", help="the logins", formatter_class=help_style,
+                               description="The logins of the web interface: a password and a TOTP app each.")
     users = user.add_subparsers(dest="action", required=True)
-    for action in ("add", "remove", "reset"):
-        sub = users.add_parser(action)
+    for action, text in (("add", "a login: a password (12 characters or more) and a TOTP app"),
+                         ("remove", "forget a login"), ("reset", "a new password and TOTP app for a login")):
+        sub = users.add_parser(action, help=text)
         sub.add_argument("name")
         if action != "remove":
             sub.add_argument("--stdin", action="store_true", help="read the password twice and the code from "
                                                                   "standard input, one per line")
-    users.add_parser("list")
+            sub.add_argument("--no-totp", dest="no_totp", action="store_true",
+                             help="the password only, without a TOTP app (your choice; warned about here, in the "
+                                  "list, when the service starts and at each login)")
+    users.add_parser("list", help="the logins")
     commands.add_parser("vendor", help="download xterm.js for the terminals (pinned, checked)")
     run = commands.add_parser("serve", help="run the service")
-    run.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS:PORT")
+    run.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS:PORT", help="the address and port to listen on")
     run.add_argument("--hostname", action="append", default=[], metavar="NAME",
                      help="a further name the browser uses for this machine (repeatable)")
-    run.add_argument("--cert", type=Path)
-    run.add_argument("--key", type=Path)
+    run.add_argument("--cert", type=Path, help="the TLS certificate (PEM) to serve with")
+    run.add_argument("--key", type=Path, help="the TLS private key (PEM) of that certificate")
     cert = commands.add_parser("cert", help="the certificate's fingerprint")
-    cert.add_argument("--renew", action="store_true")
-    cert.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS:PORT")
-    cert.add_argument("--hostname", action="append", default=[], metavar="NAME")
+    cert.add_argument("--renew", action="store_true", help="make a new certificate even if the current one is still valid")
+    cert.add_argument("--listen", default=DEFAULT_LISTEN, metavar="ADDRESS:PORT", help="the address and port to listen on")
+    cert.add_argument("--hostname", action="append", default=[], metavar="NAME", help="a name the certificate is valid for (repeatable)")
     a = parser.parse_args(argv)
     if a.command == "user":
         if a.action == "list":
             for name, record in sorted(load_users().items()):
-                out(f"{name}  since {record.get('created', '?')}")
+                out(f"{name}  since {record.get('created', '?')}" + ("" if record.get("totp") else "  (no TOTP)"))
             return 0
         if not USER_NAME.fullmatch(a.name):
             raise ValueError("a user name is 1-32 lowercase letters, digits, '_', '.' or '-', starting with a letter")
@@ -4761,10 +6398,11 @@ def cli(argv, out=print):
             raise ValueError(f"user {a.name} exists; sandbox-ai web user reset {a.name} gives it a new password")
         if a.action == "reset" and not exists:
             raise ValueError(f"no user {a.name}")
-        record = enrol(a.name, a.stdin, out)
+        record = enrol(a.name, a.stdin, out, totp=not a.no_totp)
         with users_locked() as current:
             current[a.name] = record
-        audit("user-" + ("added" if a.action == "add" else "reset"), user=a.name)
+        audit("user-" + ("added" if a.action == "add" else "reset"), user=a.name,
+              **({"second_factor": False} if a.no_totp else {}))
         out(f"{'added' if a.action == 'add' else 'reset'} {a.name}")
         return 0
     if a.command == "vendor":

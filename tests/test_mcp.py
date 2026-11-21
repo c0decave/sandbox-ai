@@ -168,14 +168,14 @@ def test_mcp_socket_dirs_are_mounted_read_only(tmp_path):
     s.validate(a)
     host = s.mcp_socket_dir("demo")
     _, run = s.pod_commands(a, "pod", tmp_path, tmp_path / "home")
-    assert f"type=bind,src={host},dst=/sandbox/mcp-upstream/demo,ro,nodev" in run
+    assert f"type=bind,src={host},dst=/sandbox/mcp-upstream/demo,ro,nodev,nosuid" in run
     a.backend = "bwrap"
     cmd = s.bwrap_command(a, tmp_path, tmp_path / "home")
     index = cmd.index("/sandbox/mcp-upstream/demo")
     assert cmd[index - 2:index] == ["--ro-bind", str(host)]
     server = s.parse_args(["codex", "--workspace", str(tmp_path / "w"), "--mcp-socket-dir", str(tmp_path / "sock")])
     s.validate(server)
-    assert f"type=bind,src={tmp_path / 'sock'},dst=/sandbox/mcp-sock,rw,nodev" in s.pod_commands(server, "p", tmp_path, tmp_path)[1]
+    assert f"type=bind,src={tmp_path / 'sock'},dst=/sandbox/mcp-sock,rw,nodev,nosuid" in s.pod_commands(server, "p", tmp_path, tmp_path)[1]
 
 
 def test_mcp_names_validated():
@@ -486,6 +486,22 @@ def test_wrapper_script(tmp_path):
     assert result.stdout.splitlines()[1].split()[:2] == ["demo", "stopped"]
 
 
+def test_set_of_a_server_defined_nowhere_says_so_and_how_to_add_it(tmp_path):
+    """`sandbox-ai mcp set NAME` for a name no mcp.json, built-in server or team's board defines: it is defined
+    nowhere (it said "defined elsewhere (the project file's mcp_servers ...)"), and mcp add / the catalog adds it."""
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path / "st"), "XDG_CONFIG_HOME": str(tmp_path / "c"),
+           "HOME": str(tmp_path)}
+    result = subprocess.run([str(ROOT / "sandbox-ai"), "mcp", "set", "nosuchserver", "--memory", "1g"],
+                            capture_output=True, text=True, env=env, timeout=30)
+    assert result.returncode != 0
+    assert "defined nowhere" in result.stderr and "defined elsewhere" not in result.stderr
+    assert "sandbox-ai mcp add nosuchserver" in result.stderr and "sandbox-ai mcp catalog" in result.stderr
+    # built in and a team's board keep their own words
+    for name, word in (("demo", "built in"), ("team-x", "a team's board")):
+        with pytest.raises(ValueError, match=word):
+            m.set_definition(name, {"memory": "1g"})
+
+
 def test_review_status_follows_the_supervisor_not_the_socket(tmp_path, monkeypatch):
     # The untrusted server can delete its socket; it must still count as running and be stoppable.
     fake_supervisor(tmp_path, 99, "demo")
@@ -649,9 +665,9 @@ def test_catalog_entry_becomes_a_checked_definition(tmp_path):
     firmware = tmp_path / "firmware"
     firmware.mkdir()
     out = []
-    # An allowlist entry needs the full network granted explicitly.
-    with pytest.raises(ValueError, match="add --network full"):
-        m.add("duckduckgo", catalogs=sources, pull=False, out=out.append)
+    # An allowlist entry reaches only its hosts (the egress rules hold it to them); --network full is the internet.
+    definition = m.add("duckduckgo", catalogs=sources, pull=False, out=out.append)
+    assert definition["network"] == "allowlist" and definition["hosts"] == ["html.duckduckgo.com:443"]
     definition = m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=out.append)
     assert definition["image"] == f"ghcr.io/c0decave/sandbox-ai-mcp-duckduckgo@{DIGEST}" and definition["network"] == "full"
     assert any("html.duckduckgo.com:443" in line for line in out)
@@ -724,7 +740,10 @@ def test_image_server_starts_as_a_bridge_on_the_host(tmp_path, monkeypatch):
     # Each connection's container under the watch (what ends its processes is recorded), then podman run.
     assert cmd[7:10] == ["-I", str(ROOT / "sandbox/mcp.py"), "--internal-watch"] and cmd[10] == str(m.state_dir("ddg"))
     assert cmd[11:16] == ["ddg", "64m", "512m", "128", "--"]
-    assert cmd[16:18] == ["podman", "run"] and "--env=KEY" in cmd and "value" not in " ".join(cmd)
+    # With network: through the egress guard (its rules in the container's namespace before it runs), then podman run.
+    assert cmd[16:20] == [sys.executable, "-I", str(ROOT / "sandbox/mcp_egress.py"), "--internal-egress-guard"]
+    assert cmd[21] == "--" and cmd[22:24] == ["podman", "run"]
+    assert "--env=KEY" in cmd and "value" not in " ".join(cmd)
 
 
 def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
@@ -794,7 +813,8 @@ def test_git_credentials_are_not_allowed_for_mcp_servers():
 
 
 def test_image_mounts_pass_the_host_path_policy(tmp_path, monkeypatch):
-    """An image server's folder inside an agent's workspace could be swapped for a link to ~/.config."""
+    """An image server's folder inside an agent's workspace could be swapped for a link to ~/.config: given (your
+    folder), said (each connection checks it is still the same folder); a link planted on the way: refused."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     work = tmp_path / "proj"
@@ -802,8 +822,9 @@ def test_image_mounts_pass_the_host_path_policy(tmp_path, monkeypatch):
     l = m.launcher()
     l.remember_exposed(None, [work])
     inside = {"image": "x", "mounts": [{"host": str(work / "extracted"), "target": "/out", "mode": "rw"}]}
-    with pytest.raises(ValueError, match="lies inside .*proj"):
-        m.check_image_mounts("bw", inside)
+    said = []
+    m.check_image_mounts("bw", inside, warn=said.append)
+    assert any(re.search("lies inside .*proj.*replace the folder with a link", text) for text in said), said
     planted = tmp_path / "other"
     planted.mkdir()
     (work / "link").symlink_to(planted)
@@ -1003,6 +1024,52 @@ TELEGRAM = {"id": "mcp:telegram", "name": "telegram", "title": "Telegram bot", "
                     {"name": "TELEGRAM_ALLOWED_CHATS", "required": False, "secret": False}]}
 
 
+# sandbox-ai-mcp's axross entry (servers/axross/server.json) as sandbox-ai reads it: no network of its own, three
+# folders the human chooses, a password secret (JSON of the profiles' passwords) and the write switch.
+AXROSS = {"id": "mcp:axross", "name": "axross", "title": "axross files (a folder and your SFTP connections)",
+          "kind": "oci", "image": "ghcr.io/c0decave/sandbox-ai-mcp-axross", "network": "none",
+          "env": [{"name": "AXROSS_WRITE", "required": False, "secret": False},
+                  {"name": "AXROSS_PASSWORDS", "required": False, "secret": True},
+                  {"name": "AXROSS_MCP_REMOTE_TIMEOUT", "required": False, "secret": False}],
+          "mounts": [{"target": "/work", "required": False}, {"target": "/axross", "required": False},
+                     {"target": "/ssh", "required": False}],
+          "tor": {"support": "yes", "note": "Without network (the default) it reaches nothing."}}
+
+
+def test_the_axross_entry_waits_for_its_digest_then_takes_folders_password_and_one_host(tmp_path):
+    """axross (pending in sandbox-ai-mcp until CI publishes its image) is refused with the reason, and says nothing of
+    "added"; once it has a digest: local only by default (network none), the three folders read-only unless :rw is
+    asked for, AXROSS_PASSWORDS only from sandbox-ai secrets (never a value in the definition), AXROSS_WRITE=1 as a
+    value, a host of your network opened with --allow-tcp alone, and nothing it does not declare."""
+    work, config, ssh = (tmp_path / n for n in ("work", "axross", "ssh"))
+    for folder in (work, config, ssh):
+        folder.mkdir()
+    out = []
+    with pytest.raises(ValueError, match="axross: the catalog has no digest for it yet"):
+        m.add("axross", mounts=[f"/work={work}"], catalogs=catalog(tmp_path, [AXROSS], signed=False), pull=False,
+              out=out.append, unsigned=True)
+    assert not any("added" in line for line in out)
+    sources = catalog(tmp_path, [{**AXROSS, "digest": DIGEST}], signed=False)
+    local = m.add("axross", mounts=[f"/work={work}"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert local["network"] == "none" and local["mounts"] == [{"target": "/work", "host": str(work), "mode": "ro"}]
+    assert "env" not in local or not local["env"]
+    with pytest.raises(ValueError, match="takes AXROSS_PASSWORDS as a secret"):
+        m.add("axross", env=["AXROSS_PASSWORDS={\"box\": \"pw\"}"], catalogs=sources, pull=False, out=out.append,
+              unsigned=True)
+    with pytest.raises(ValueError, match="does not use AXROSS_MCP_TOOLS"):
+        m.add("axross", env=["AXROSS_MCP_TOOLS=all"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    with pytest.raises(ValueError, match="axross takes /work, /axross, /ssh"):
+        m.add("axross", mounts=[f"/home={work}"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    remote = m.add("axross", local="axross-sftp", network="full", allow_tcp=["192.168.1.20:22"],
+                   env=["AXROSS_PASSWORDS", "AXROSS_WRITE=1"],
+                   mounts=[f"/work={work}:rw", f"/axross={config}:ro", f"/ssh={ssh}"],
+                   catalogs=sources, pull=False, out=out.append, unsigned=True)
+    assert remote["network"] == "full" and remote["allow_tcp"] == ["192.168.1.20:22"]
+    assert remote.get("env_optional") == ["AXROSS_PASSWORDS"] and remote.get("env_values") == {"AXROSS_WRITE": "1"}
+    assert {(x["target"], x["mode"]) for x in remote["mounts"]} == {("/work", "rw"), ("/axross", "ro"), ("/ssh", "ro")}
+    assert "pw" not in json.dumps(remote)
+
+
 def test_an_unsigned_entry_refused_afterwards_is_not_said_to_be_added(tmp_path):
     """The catalog of sandbox-ai-mcp as it is published now: unsigned, its entries without a digest. `mcp add telegram
     --unsigned` is refused for the missing digest, and says nothing of "added"; once it has one, it is added with
@@ -1013,8 +1080,6 @@ def test_an_unsigned_entry_refused_afterwards_is_not_said_to_be_added(tmp_path):
         m.add("telegram", env=["TELEGRAM_BOT_TOKEN"], catalogs=sources, pull=False, out=out.append, unsigned=True)
     assert not any("added" in line for line in out)
     sources = catalog(tmp_path, [{**TELEGRAM, "digest": DIGEST}], signed=False)
-    with pytest.raises(ValueError, match="needs api.telegram.org:443.*--network full"):
-        m.add("telegram", env=["TELEGRAM_BOT_TOKEN"], catalogs=sources, pull=False, out=out.append, unsigned=True)
     with pytest.raises(ValueError, match="needs --env TELEGRAM_BOT_TOKEN"):
         m.add("telegram", network="full", catalogs=sources, pull=False, out=out.append, unsigned=True)
     assert not any("added" in line for line in out)
@@ -1344,6 +1409,24 @@ def test_attach_live_keeps_every_check_of_a_start(live, monkeypatch, tmp_path):
     assert live.started == [("demo", "podman", ["demo"], [])]  # only the one the supervisor then refused
 
 
+def test_attach_live_whose_server_cannot_start_leaves_the_run_as_it_was(live, monkeypatch, tmp_path):
+    """User report 2026-11-20 (a full file system): a server that cannot start (its folder not writable: No space
+    left on device; Podman exit status 125) is refused with why - the run's MCP list, the agent's configuration and
+    the start's options stay as they were, and the run goes on."""
+    import errno
+    run, relays = live.make()
+
+    def full(name, a, vpn=None):
+        raise OSError(errno.ENOSPC, "No space left on device", str(tmp_path / "mcp" / name / "mcp.json"))
+    monkeypatch.setattr(m, "ensure_running", full)
+    with pytest.raises(OSError) as caught:
+        m.attach_live("demo", "web", out=live.out)
+    assert "inodes" in m.full_text(caught.value)  # what the command says of it (its file system, its room)
+    assert json.loads((run / "run.json").read_text())["mcp_servers"] == []
+    assert relays.names() == [] and not (live.home / ".claude.json").exists()
+    assert "demo" not in live.sessions.load("web")["options"]
+
+
 def test_what_cannot_take_a_server_while_it_runs(live, tmp_path):
     live.make("old", record={"mcp_live": False})
     with pytest.raises(ValueError, match="cannot take an MCP server while it runs.*--restart"):
@@ -1451,18 +1534,21 @@ def test_the_supervisor_takes_the_descriptor_over_its_control_socket(live):
 
 
 def test_image_mounts_get_every_check_a_mount_gets(tmp_path, monkeypatch):
-    """Finding M1: read-only too, an image server's folder is no folder of sockets, no kernel file system and none
-    of sandbox-ai's own folders (the container runs as root, you); a private location warns."""
+    """Finding M1: read-only too, an image server's folder in a folder of sockets, a kernel file system or
+    sandbox-ai's own folders hands the server (a container running as root, you) what is there; you decide - given,
+    each with its warning, as a private location is."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     (tmp_path / "run" / "bus").mkdir(parents=True)
     (tmp_path / "cfg" / "sandbox-ai").mkdir(parents=True)
-    for host, why in ((tmp_path / "run" / "bus", "a socket there"), (Path("/proc/self"), "kernel's own"),
+    for host, why in ((tmp_path / "run" / "bus", "a socket there"), (Path("/proc/self"), "kernel"),
                       (tmp_path / "cfg" / "sandbox-ai", "sandbox-ai's own folder"),
                       (tmp_path / "cfg", "sandbox-ai's own folder")):
-        with pytest.raises(ValueError, match=why):
-            m.check_image_mounts("bw", {"image": "x", "mounts": [{"host": str(host), "target": "/in", "mode": "ro"}]})
+        warned = []
+        m.check_image_mounts("bw", {"image": "x", "mounts": [{"host": str(host), "target": "/in", "mode": "ro"}]},
+                             warn=warned.append)
+        assert any(why in text for text in warned), (host, warned)
     said = []
     monkeypatch.setattr(m.launcher(), "check_private_location",
                         lambda path, option, warn=None, own=(), refused=(): said.append(str(path)))
@@ -1614,7 +1700,8 @@ def test_a_catalog_text_never_makes_another_row_and_full_network_is_said(tmp_pat
     out = []
     m.add("helper", catalogs=catalog(tmp_path, [{**ENTRY, "name": "helper", "network": "full"}]), pull=False,
           out=out.append, unsigned=True)
-    assert any("helper gets the full outside network (its catalog entry asks for it)" in line for line in out)
+    assert any("helper reaches the internet, not your local network (its catalog entry asks for it)" in line
+               for line in out)
 
 
 def test_servers_that_reach_the_network_run_behind_the_starts_vpn(tmp_path, monkeypatch):
@@ -1795,7 +1882,7 @@ def test_a_server_running_without_the_starts_vpn_is_refused_before_a_restart(tmp
     attach = source[source.index("def attach("):source.index("def net_module(")]
     # The check comes before anything is started or stopped.
     assert attach.index("check_running_vpn(instance_of(a, name), server_vpn(a, name, vpn))") < \
-        attach.index("sessions.stop(key)")
+        attach.index("sessions.stop(key, by=")
     assert attach.index("check_running_vpn(instance_of(a, name), server_vpn(a, name, vpn))") < \
         attach.index("ensure_running(")
 
@@ -1975,6 +2062,9 @@ def test_add_creates_a_writable_folder_that_is_not_there_yet(tmp_path):
         m.add("binwalk", mounts=[f"/work={tmp_path / 'missing'}"], catalogs=sources, pull=False, out=out.append,
               unsigned=True)
     assert "TARGET is the folder inside the server's container, HOST the folder on this machine" in str(caught.value)
+    # Said with the machine's name (user report 2026-11-19: run on another host, "this machine" was read as the one
+    # the human sat at)
+    assert f"is not there on this machine ({socket.gethostname()})" in str(caught.value)
     (tmp_path / "file").write_text("x")
     with pytest.raises(ValueError, match="is not a folder"):
         m.add("binwalk", mounts=[f"/work={work}", f"/out={tmp_path / 'file'}:rw"], catalogs=sources, pull=False,
@@ -2257,10 +2347,11 @@ def test_a_dry_run_shows_the_folder_and_checks_it_without_making_it(tmp_path, mo
         s.main([*base, "--mcp-mount", f"brain:/data={tmp_path / 'gone'}:ro", "--dry-run"])
     with pytest.raises(ValueError, match="the server mounts /data, not /etc"):
         s.main([*base, "--mcp-mount", f"brain:/etc={folder}:rw", "--dry-run"])
-    # Never inside what the agent writes: it could change what the server keeps, or swap the folder for a link.
-    with pytest.raises(ValueError, match="--mcp-mount: .* lies in .*, which the agent can write"):
-        s.main([*base, "--mcp-mount", f"brain:/data={work / '.brain'}:rw", "--dry-run"])
+    # Inside what the agent writes: it could change what the server keeps, or swap the folder for a link - you
+    # decide: given, said.
     capsys.readouterr()
+    s.main([*base, "--mcp-mount", f"brain:/data={work / '.brain'}:rw", "--dry-run"])
+    assert re.search("--mcp-mount: .* lies in .*, which the agent can write", capsys.readouterr().err)
     s.main(["codex", "--workspace", str(work), "--no-tmux", "--mcp-mount", f"brain:/data={folder}", "--dry-run"])
     assert "this start does not use the MCP server brain" in capsys.readouterr().err
     assert "--mcp-mount" in m.forbidden(), "never in an MCP server's own sandbox"
@@ -2423,7 +2514,8 @@ def test_out_of_memory_the_process_limit_and_a_full_tmp_become_records_with_the_
     assert listed["last_problem"]["why"].startswith("podman could not start")
     assert m.cli(["list"]) == 0
     out = capsys.readouterr().out
-    assert "stopped (!)" in out and "playwright: " in out and "Fix: read the server's log" in out
+    # (no log was written in its folder: said so with the folder's room, never a path that is not there)
+    assert "stopped (!)" in out and "playwright: " in out and "Fix: its log was never written in" in out
 
 
 def test_the_watch_runs_the_command_with_its_stdio_and_records_an_end_nobody_asked_for(tmp_path):

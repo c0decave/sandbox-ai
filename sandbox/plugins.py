@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""sandbox-ai plugins: Claude plugin marketplaces and plugins, kept for all sandboxes.
+"""sandbox-ai plugins: plugin marketplaces and plugins of Claude's format, kept for all sandboxes.
 
   sandbox-ai plugins [--status]                  what the kits declare and what is installed
-  sandbox-ai plugins claude [launcher options]   install what the default kit and every kit declare
+  sandbox-ai plugins claude [launcher options]   install what the default kit and every kit declare for Claude
+  sandbox-ai plugins codex|opencode2             the same for Codex or OpenCode 2 (one plugin store for all three)
   sandbox-ai plugins claude --update             also update the marketplaces and installed plugins
   sandbox-ai plugins claude --kit egm            also install what the built-in kit egm declares
   sandbox-ai plugins claude --marketplaces-only  fetch the declared marketplaces (their plugin lists), install nothing
@@ -14,13 +15,26 @@
   sandbox-ai plugins claude trust-hooks PLUGIN [--yes|--revoke]
                                                  review a plugin's hooks and approve them: they run while the
                                                  agent's managed hooks are on (tool rules, kit hooks)
+  sandbox-ai plugins codex trust-hooks PLUGIN    the same for Codex: a plugin's hooks run only once approved
+  sandbox-ai plugins attach START NAME@MARKETPLACE [--keep] [--restart]
+                                                 install (if needed), review and enable a plugin in a running sandbox
+                                                 (Claude Code: at once; Codex, OpenCode 2: kept for its next start)
+  sandbox-ai plugins detach START NAME@MARKETPLACE [--restart]
+                                                 a plugin plugins attach gave, off again
+  sandbox-ai plugins opencode2 trust-hooks PLUGIN
+                                                 an OpenCode 2 plugin is code in OpenCode 2's own process: the whole
+                                                 plugin runs only once approved
 
 The kits declare marketplaces and plugins in AGENT/marketplaces.json ("plugins": enabled, "disabled": declared but
 off; change them with sandbox-ai kits add-plugin, enable-plugin, disable-plugin, add-marketplace ...). Installing runs
 `claude plugin ...` inside a sandbox whose HOME is the plugin store ~/.local/share/sandbox-ai/plugins/claude,
 with network access to the marketplaces' hosts only. Every Claude sandbox then gets the store
-read-only and enables the plugins its kits list, so no sandbox can change another one's plugins.
+read-only and enables the plugins its kits list, so no sandbox can change another one's plugins. Codex and OpenCode 2
+read the same installed folders: a kit names them in codex/ or opencode2/marketplaces.json, `sandbox-ai plugins codex`
+(or opencode2) installs them into the same store, and each of their sandboxes gets only its kits' plugins, read-only.
 """
+STORE_AGENTS = ("claude", "codex", "opencode2")
+AGENT_TITLES = {"claude": "Claude", "codex": "Codex", "opencode2": "OpenCode 2"}
 import argparse
 import importlib.util
 import json
@@ -102,18 +116,42 @@ def run_in_store(args, options=(), sources=(), runner=None):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def sync(options=(), update=False, out=None, runner=None, builtin=(), marketplaces_only=False):
-    """Install every marketplace and plugin the kits declare, enabled or disabled (and the built-in kits named in
-    BUILTIN); with UPDATE also refresh them; with MARKETPLACES_ONLY only fetch (or refresh) the marketplaces, so
-    their plugin lists can be browsed. 0 if all is there."""
+def store_declarations(agent, builtin=(), check=None):
+    """kits.declarations (every declared plugin, off or on) of AGENT's kits, or with AGENT "all" of Claude's, Codex's
+    and OpenCode 2's together (one store): a marketplace two of them declare with different sources is an error."""
+    k = kits()
+    if agent != "all":
+        return k.declarations(agent, k.all_plugin_files(agent, builtin), with_disabled=True, check=check)
+    marketplaces, plugins, notes, origins = {}, [], [], {}
+    for name in builtin:
+        if not any(name in k.kit_names(k.BUILTIN_KITS, one) for one in STORE_AGENTS):
+            k.all_plugin_files("claude", [name])  # says which built-in kits there are
+    for one in STORE_AGENTS:
+        found = k.all_plugin_files(one, [name for name in builtin if name in k.kit_names(k.BUILTIN_KITS, one)])
+        declared, listed, more = k.declarations(one, found, with_disabled=True, check=check)
+        for name, source in declared.items():
+            if name in marketplaces and marketplaces[name] != source:
+                raise ValueError(f"marketplace {name} is declared for {origins[name]} and {one} with different "
+                                 "sources; keep one")
+            marketplaces[name], origins[name] = source, one
+        plugins += [p for p in listed if p not in plugins]
+        notes += more
+    return marketplaces, plugins, notes
+
+
+def sync(options=(), update=False, out=None, runner=None, builtin=(), marketplaces_only=False, agent="claude"):
+    """Install every marketplace and plugin the kits declare for AGENT (Claude, Codex or OpenCode 2: one store),
+    enabled or disabled (and the built-in kits named in BUILTIN); with UPDATE also refresh them; with
+    MARKETPLACES_ONLY only fetch (or refresh) the marketplaces, so their plugin lists can be browsed. 0 if all is
+    there."""
     out = out or (lambda line: print(line, file=sys.stderr))
     k = kits()
-    if k.ensure_default_home("claude"):
-        out(f"sandbox-ai plugins: created the default kit {k.default_home('claude')} with examples")
+    for one in STORE_AGENTS if agent == "all" else [agent]:
+        if k.ensure_default_home(one):
+            out(f"sandbox-ai plugins: created the default kit {k.default_home(one)} with examples")
     # Each marketplaces.json checked link by link: one reached through a symlink an agent planted would choose the
     # plugins (programs) this installs.
-    marketplaces, plugins, notes = k.declarations("claude", k.all_plugin_files("claude", builtin), with_disabled=True,
-                                                  check=module("agent_sandbox").kit_check())
+    marketplaces, plugins, notes = store_declarations(agent, builtin, check=module("agent_sandbox").kit_check())
     for note in notes:
         out(f"sandbox-ai plugins: {note}")
     known, _ = k.installed()
@@ -157,14 +195,69 @@ def sync(options=(), update=False, out=None, runner=None, builtin=(), marketplac
             out(f"sandbox-ai plugins: updating the marketplace {name} and trying {plugin} again")
             run_in_store(["marketplace", "update", name], options, [marketplaces[name]], runner)
             run_in_store(["install", plugin], options, source, runner)
+    before = installed
     known, installed = k.installed()
+    # What came in or changed now: through the hidden-text checker (the agent reads its skills, commands, agents).
+    for plugin in plugins:
+        if plugin in installed and (plugin not in before or update or before.get(plugin) != installed.get(plugin)):
+            for line in plugin_findings_lines(plugin, installed[plugin]):
+                out(f"sandbox-ai plugins: {line}")
     missing = [p for p in plugins if p not in installed] + [f"marketplace {m}" for m in marketplaces if m not in known]
     if missing:
         out(f"sandbox-ai plugins: not installed: {', '.join(missing)}")
         return 1
-    out(f"sandbox-ai plugins: {len(installed)} plugin(s) in {k.plugin_store('claude')}; every Claude sandbox "
-        "enables those its kits list")
+    for one in ("codex", "opencode2") if agent == "all" else [agent] if agent != "claude" else []:
+        _, listed, _ = store_declarations(one, builtin)
+        for info in k.stage_store_plugins(one, [p for p in listed if p in installed], installed):
+            for line in store_plugin_report(one, info):
+                out(f"sandbox-ai plugins: {line}")
+    who = "Claude, Codex and OpenCode 2" if agent == "all" else AGENT_TITLES[agent]
+    out(f"sandbox-ai plugins: {len(installed)} plugin(s) in {k.plugin_store('claude')}; every {who} sandbox "
+        + ("enables those its kits list" if agent == "claude" else "gets those its kits list, read-only"))
     return 0
+
+
+def plugin_findings(plugin, entries=None):
+    """The hidden-text checker's findings (lint.py) in the installed PLUGIN's folder ([] when it is not installed)."""
+    k = kits()
+    if entries is None:
+        entries = k.installed()[1].get(plugin)
+    where = k.plugin_install(plugin, entries) if entries is not None else None
+    if where is None:
+        return []
+    return module("lint").check_tree(where[0])
+
+
+def plugin_findings_lines(plugin, entries=None):
+    """Warning lines about PLUGIN's findings (none without): sandboxes of its kits read what it brings."""
+    findings = plugin_findings(plugin, entries)
+    if not findings:
+        return []
+    lint = module("lint")
+    return [f"warning: {plugin} holds text its agents read that may hide instructions ({lint.summary(findings)}); "
+            f"look at it before you use it (sandbox-ai kits disable-plugin KIT {plugin} turns it off):",
+            *(f"  {printable(line)}" for line in lint.lines(findings, limit=8))]
+
+
+def store_plugin_report(agent, info):
+    """What a Codex or OpenCode 2 sandbox makes of one installed plugin (INFO: kits.stage_store_plugins)."""
+    plugin = info["plugin"]
+    if info["errors"]:
+        return [f"{plugin}: not for {AGENT_TITLES[agent]}: {info['errors'][0]}"]
+    if agent == "opencode2":
+        return [f"{plugin}: OpenCode 2 loads {info['entry']}; it runs only once approved: sandbox-ai plugins "
+                f"opencode2 trust-hooks {plugin}" if not info["trusted"] else
+                f"{plugin}: OpenCode 2 loads {info['entry']} (approved)"]
+    lines = []
+    if info["apps"]:
+        lines.append(f"{plugin}: not for Codex: it brings ChatGPT apps (connectors), which run at chatgpt.com")
+    if info["mcp"]:
+        lines.append(f"{plugin}: its MCP servers ({', '.join(info['mcp'])}) do not run in Codex sandboxes")
+    if info["declared"]:
+        lines.append(f"{plugin}: {len(info['hooks'])} hook(s), "
+                     + ("approved" if info["trusted"] else
+                        f"not approved: sandbox-ai plugins codex trust-hooks {plugin}"))
+    return lines
 
 
 def status(out=print):
@@ -195,17 +288,23 @@ def status(out=print):
             state = ", ".join(f"{p}{'' if p in installed else ' (not installed)'}" for p in own) or "no plugins"
             hint = "" if all(p in installed for p in own) else f" -> sandbox-ai plugins claude --kit {name}"
             out(f"          built-in kit {name} (--kit {name}): {state}{hint}")
-    for agent in ("opencode", "codex"):
+    for agent in ("codex", "opencode2"):
         try:
-            _, listed, notes = k.declarations(agent, k.all_plugin_files(agent))
+            _, listed, _ = k.declarations(agent, k.all_plugin_files(agent), with_disabled=True)
         except ValueError as exc:
             out(f"{agent:9} {exc}")
             continue
-        if agent == "opencode":
-            out(f"opencode  npm plugins from the kits: {', '.join(listed) or 'none'} (loaded by OpenCode itself; "
-                "needs --allow-host registry.npmjs.org)")
-        else:
-            out("codex     plugins: not supported yet" + (f" ({len(notes)} kit(s) declare some)" if notes else ""))
+        missing = [p for p in listed if p not in installed]
+        out(f"{agent:9} plugins from the kits (the same store): "
+            + (", ".join(p + ("" if p in installed else " (not installed)") for p in listed) or "none")
+            + (f" -> sandbox-ai plugins {agent}" if missing else ""))
+    try:
+        _, listed, notes = k.declarations("opencode", k.all_plugin_files("opencode"))
+    except ValueError as exc:
+        out(f"opencode  {exc}")
+        return 0
+    out(f"opencode  npm plugins from the kits: {', '.join(listed) or 'none'} (loaded by OpenCode itself; "
+        "needs --allow-host registry.npmjs.org)")
     return 0
 
 
@@ -217,8 +316,9 @@ def printable(text):
     return module("agent_sandbox").printable(str(text))
 
 
-def plugin_hooks(plugin):
-    """read_plugin_hooks of the installed PLUGIN (NAME@MARKETPLACE)."""
+def plugin_hooks(plugin, agent="claude"):
+    """The hooks of the installed PLUGIN (NAME@MARKETPLACE) as AGENT runs them (kits.read_store_plugin); OpenCode 2:
+    the whole plugin, which is code in its process."""
     k = kits()
     _, installed = k.installed()
     if plugin not in installed:
@@ -226,22 +326,31 @@ def plugin_hooks(plugin):
     where = k.plugin_install(plugin, installed[plugin])
     if where is None:
         raise ValueError(f"{plugin}: the plugin store does not say where it is installed")
-    info = k.read_plugin_hooks(plugin, *where)
+    info = k.read_store_plugin(agent, plugin, *where)
     if not info["declared"]:
-        raise ValueError(f"{plugin} has no hooks")
+        raise ValueError(f"{plugin} has no hooks" + (" Codex runs" if agent == "codex" else ""))
     return info
 
 
 def review(info, out):
-    """Each hook of the plugin, the full text of every file its commands name, and what else its folder holds."""
+    """Each hook of the plugin, the full text of every file its commands name, and what else its folder holds; for
+    OpenCode 2 the module it loads in full."""
     k = kits()
-    out(f"{info['plugin']}: hooks in {printable(info['path'])}")
     named = set()
+    if info.get("entry"):  # OpenCode 2: the plugin is its module, and whatever that imports
+        out(f"{info['plugin']}: an OpenCode 2 plugin in {printable(info['path'])}: OpenCode 2 runs its module "
+            f"{printable(info['entry'])} in its own process, with the whole plugin context (tools and their hooks, "
+            "skills, sessions, MCP servers, the shell)")
+        named.update(module_imports(info))
+    else:
+        out(f"{info['plugin']}: hooks in {printable(info['path'])}")
     for hook in info["hooks"]:
+        if "event" not in hook:
+            continue
         out(f"  {hook['event']}, matcher {printable(hook['matcher'] or 'every tool')}: {printable(hook['command'])}")
         for item in info["files"]:
-            if f"{k.PLUGIN_ROOT_VARIABLE}/{item['path']}" in hook["command"] or \
-                    f"$CLAUDE_PLUGIN_ROOT/{item['path']}" in hook["command"]:
+            if any(f"{prefix}/{item['path']}" in hook["command"] for prefix in (
+                    k.PLUGIN_ROOT_VARIABLE, "$CLAUDE_PLUGIN_ROOT", "${PLUGIN_ROOT}", "$PLUGIN_ROOT")):
                 named.add(item["path"])
     for note in info["notes"]:
         out(f"  note: {printable(note)}")
@@ -266,35 +375,74 @@ def review(info, out):
         f"them all (read them in {printable(info['path'])})")
 
 
-def trust_hooks(argv, out=print):
-    parser = argparse.ArgumentParser(prog="sandbox-ai plugins claude trust-hooks",
-                                     description="Review a Claude plugin's hooks and approve them")
+IMPORT = re.compile(r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["'](\.{1,2}/[^"'\s]{1,300})["']""")
+
+
+def module_imports(info, limit=50):
+    """The plugin's entry module (INFO: kits.read_opencode2_plugin) and the files of the plugin it imports by a
+    relative path, and those theirs, as far as a plain reading finds them (what a review shows in full)."""
+    k = kits()
+    files = {item["path"]: item for item in info["files"]}
+    found, todo = [], [info["entry"]]
+    while todo and len(found) < limit:
+        name = todo.pop(0)
+        if name in found or name not in files or "link" in files[name]:
+            continue
+        found.append(name)
+        data, _ = k.read_at_path(info["path"], name) if files[name]["size"] <= REVIEW_LIMIT else (None, None)
+        if data is None:
+            continue
+        base = os.path.dirname(name)
+        for target in IMPORT.findall(data.decode("utf-8", "replace")):
+            path = os.path.normpath(os.path.join(base, target))
+            candidates = [path] + [path + suffix for suffix in k.OPENCODE2_MODULE_SUFFIXES] + \
+                [f"{path}/index{suffix}" for suffix in k.OPENCODE2_MODULE_SUFFIXES]
+            todo += [c for c in candidates if c in files and not c.startswith("..")][:1]
+    return found
+
+
+def trust_hooks(argv, out=print, agent="claude"):
+    whole = agent == "opencode2"
+    what = ("Review an OpenCode 2 plugin (code that runs in OpenCode 2's process) and approve it" if whole else
+            f"Review a {AGENT_TITLES[agent]} plugin's hooks and approve them")
+    parser = argparse.ArgumentParser(prog=f"sandbox-ai plugins {agent} trust-hooks", description=what)
     parser.add_argument("plugin", metavar="NAME@MARKETPLACE")
     choice = parser.add_mutually_exclusive_group()
     choice.add_argument("--yes", action="store_true", help="approve what is shown without asking")
     choice.add_argument("--revoke", action="store_true", help="take the approval back")
     a = parser.parse_args(argv)
     k = kits()
-    info = plugin_hooks(a.plugin)
+    info = plugin_hooks(a.plugin, agent)
     key = k.plugin_trust_key(a.plugin)
     if a.revoke:
-        k.change_trust("claude", info, key, approve=False)
-        out(f"{a.plugin}: the approval of its hooks is taken back")
+        k.change_trust(agent, info, key, approve=False)
+        out(f"{a.plugin}: the approval of {'the plugin' if whole else 'its hooks'} for {AGENT_TITLES[agent]} is "
+            "taken back")
         return 0
     review(info, out)
     if info["errors"]:
-        raise ValueError(f"these hooks cannot be approved: {printable(info['errors'][0])}")
+        raise ValueError(f"{'this plugin' if whole else 'these hooks'} cannot be approved: "
+                         f"{printable(info['errors'][0])}")
     if not a.yes:
         if not sys.stdin.isatty():
-            raise ValueError("review the hooks above, then approve them with --yes")
-        answer = input("Approve exactly these hooks and this plugin's files? Any change takes the approval away. "
-                       "[y/N] ")
+            raise ValueError(f"review the {'plugin' if whole else 'hooks'} above, then approve "
+                             f"{'it' if whole else 'them'} with --yes")
+        answer = input(("Approve exactly this plugin's files, to run in OpenCode 2? " if whole else
+                        "Approve exactly these hooks and this plugin's files? ")
+                       + "Any change takes the approval away. [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
             out("not approved")
             return 1
-    k.change_trust("claude", info, key)
-    out(f"{a.plugin}: {len(info['hooks'])} hook(s) approved (sha256 {info['sha256'][:16]}); they run while the "
-        "managed hooks are on, until the plugin changes")
+    k.change_trust(agent, info, key)
+    if whole:
+        out(f"{a.plugin}: approved for OpenCode 2 (sha256 {info['sha256'][:16]}); OpenCode 2 sandboxes whose kits "
+            "list it load it after sandbox-ai's rule plugin, until the plugin changes")
+    elif agent == "codex":
+        out(f"{a.plugin}: {len(info['hooks'])} hook(s) approved for Codex (sha256 {info['sha256'][:16]}); they run "
+            "as managed hooks after the rule and kit hooks, until the plugin changes")
+    else:
+        out(f"{a.plugin}: {len(info['hooks'])} hook(s) approved (sha256 {info['sha256'][:16]}); they run while the "
+            "managed hooks are on, until the plugin changes")
     return 0
 
 
@@ -550,7 +698,7 @@ def kit_declarations(agent, errors):
         except (OSError, ValueError, RecursionError) as exc:
             errors.append({"kit": entry["name"], "agent": agent, "error": clean(str(exc), 1000)})
             continue
-        declared = document.get("marketplaces", {}) if agent == "claude" else {}
+        declared = document.get("marketplaces", {}) if agent in STORE_AGENTS else {}
         found.append((entry, {"marketplaces": {name: value["source"] for name, value in declared.items()},
                               "plugins": list(document.get("plugins", [])),
                               "disabled": list(document.get("disabled", []))}))
@@ -614,10 +762,12 @@ def plugin_rows(name, listing, ids, state):
     return rows
 
 
-def claude_marketplaces(declared, problems):
+def claude_marketplaces(declared, problems, others=None):
     """The Claude marketplaces: sandbox-ai's own, those the kits declare, those in sandbox-ai's plugin store and
     those Claude itself knows on this machine (known_marketplaces.json, extraKnownMarketplaces), and the default
-    kit's examples (suggested)."""
+    kit's examples (suggested). OTHERS: {agent: kit_declarations} of Codex and OpenCode 2, whose kits take plugins of
+    the same marketplaces: each marketplace and plugin row has "agent_kits" {agent: its kits for that agent}."""
+    others = others or {}
     k = kits()
     known, installed = k.installed()
     home = claude_home()
@@ -630,7 +780,8 @@ def claude_marketplaces(declared, problems):
     template = k.read_store_json(k.TEMPLATES / "claude" / k.PLUGINS_FILE) or {}
     suggested = template.get("marketplaces") if isinstance(template.get("marketplaces"), dict) else {}
     valid = lambda name: isinstance(name, str) and re.fullmatch(k.PLUGIN_NAME, name)  # noqa: E731
-    names = ["sandbox-ai"] + [n for _, d in declared for n in d["marketplaces"]] + list(known) + \
+    names = ["sandbox-ai"] + [n for _, d in declared for n in d["marketplaces"]] + \
+        [n for found in others.values() for _, d in found for n in d["marketplaces"]] + list(known) + \
         [n for n in own_known if isinstance(own_known[n], dict)] + [n for n in extra if isinstance(extra[n], dict)] + \
         list(suggested)
     result = []
@@ -672,7 +823,8 @@ def claude_marketplaces(declared, problems):
             description = clean(manifest.get("description")) or clean(metadata.get("description"))
         else:
             listed_from = None
-        ids = [p for _, d in declared for p in d["plugins"] + d["disabled"] if p.endswith(f"@{name}")]
+        ids = [p for _, d in [*declared, *(e for found in others.values() for e in found)]
+               for p in d["plugins"] + d["disabled"] if p.endswith(f"@{name}")]
         ids += [p for p in installed if p.endswith(f"@{name}")]
         ids += [p for p in list(own_installed) + list(enabled) if isinstance(p, str) and p.endswith(f"@{name}")
                 and re.fullmatch(f"{k.PLUGIN_NAME}@{k.PLUGIN_NAME}", p)]
@@ -683,6 +835,7 @@ def claude_marketplaces(declared, problems):
                 if isinstance(versions, list) else None
             switch = enabled.get(plugin)
             return {"kits": kit_states(declared, plugin),
+                    "agent_kits": {agent: kit_states(found, plugin) for agent, found in others.items()},
                     "store": {"installed": plugin in installed, "version": clean(version, 64)},
                     "agent": {"installed": plugin in own_installed,
                               "enabled": switch if isinstance(switch, bool) else None}}
@@ -694,6 +847,10 @@ def claude_marketplaces(declared, problems):
             "source": source, "source_value": source_value(source) if source else None,
             "importable": source is not None, "problem": problem, "import": None,
             "kits": kits_of, "store": {"fetched": name in known},
+            "agent_kits": {agent: [{"kit": entry["name"], "kind": entry["kind"],
+                                    "source": source_value(d["marketplaces"][name])}
+                                   for entry, d in found if name in d["marketplaces"]]
+                           for agent, found in others.items()},
             "agent_config": {"known": agent_entry is not None, "settings": extra_entry is not None,
                              "fetched": listed_from == "claude"} if agent_entry or extra_entry else None,
             "listed_from": listed_from, "plugins": plugin_rows(name, listing, ids, state)})
@@ -761,7 +918,7 @@ def codex_marketplaces(problems):
 
         def state(plugin, installed=installed):
             switch = switches.get(plugin) if isinstance(switches.get(plugin), dict) else {}
-            return {"kits": [], "store": None,
+            return {"kits": [], "agent_kits": {}, "store": None,
                     "agent": {"installed": plugin.split("@")[0] in installed,
                               "enabled": switch.get("enabled") if isinstance(switch.get("enabled"), bool) else None}}
         target, problem = codex_import(name, entry, relative, manifest)
@@ -774,7 +931,8 @@ def codex_marketplaces(problems):
             "description": clean(interface.get("displayName")), "source": None,
             "source_value": raw.get("source") if isinstance(raw.get("source"), str) else None,
             "codex_source": json.loads(json.dumps(raw, default=str)),
-            "importable": target is not None, "problem": problem, "import": target, "kits": [], "store": None,
+            "importable": target is not None, "problem": problem, "import": target, "kits": [], "agent_kits": {},
+            "store": None,
             "agent_config": {"known": entry is not None, "settings": False, "fetched": manifest is not None},
             "listed_from": "codex" if manifest is not None else None,
             "plugins": plugin_rows(name, listing, ids, state)})
@@ -815,11 +973,12 @@ def marketplaces(agent=None, name=None):
     given)."""
     k = kits()
     errors, notes = [], {a: [] for a in k.AGENTS}
-    declared = {a: kit_declarations(a, errors) for a in ("claude", "opencode")}
+    declared = {a: kit_declarations(a, errors) for a in ("claude", "opencode", "codex", "opencode2")}
     listed = []
     claude_config = codex_file = None
     if agent in (None, "claude"):
-        listed += claude_marketplaces(declared["claude"], notes["claude"])
+        listed += claude_marketplaces(declared["claude"], notes["claude"],
+                                      {a: declared[a] for a in ("codex", "opencode2")})
         claude_config = str(claude_home())
     if agent in (None, "codex"):
         listed += codex_marketplaces(notes["codex"])
@@ -837,9 +996,11 @@ def marketplaces(agent=None, name=None):
     agents = {
         "claude": {"marketplaces": True, "kits": True, "config": claude_config, "about": None,
                    "notes": notes["claude"]},
-        "codex": {"marketplaces": True, "kits": False, "config": codex_file,
-                  "about": "sandbox-ai's kits give Codex no plugins yet: Codex's marketplaces and plugins are shown as "
-                           "Codex has them on this machine; one in Claude's format can be imported for Claude",
+        "codex": {"marketplaces": True, "kits": True, "config": codex_file,
+                  "about": "Codex's own marketplaces, as Codex has them on this machine: a kit gives Codex plugins of "
+                           "the marketplaces in Claude's format (sandbox-ai's own, those the kits declare) from "
+                           "sandbox-ai's plugin store (add one --agent codex); one of these in Claude's format can be "
+                           "imported",
                   "notes": notes["codex"]},
         "opencode": {"marketplaces": False, "kits": True, "config": str(oc_where) if oc_where else None,
                      "about": "OpenCode has no marketplaces: its plugins are npm packages (\"plugin\" in opencode.json), "
@@ -858,6 +1019,10 @@ def state_words(plugin):
     """What the text listing says about one plugin's state."""
     words = [f"{kit['kit']}{'' if kit['enabled'] else ' (off)'}" for kit in plugin["kits"]]
     parts = [f"kits: {', '.join(words)}"] if words else []
+    for agent, found in (plugin.get("agent_kits") or {}).items():
+        if found:
+            parts.append(f"{agent} kits: " + ", ".join(f"{kit['kit']}{'' if kit['enabled'] else ' (off)'}"
+                                                       for kit in found))
     if plugin.get("store") and plugin["store"]["installed"]:
         parts.append("in the store")
     agent = plugin.get("agent") or {}
@@ -946,8 +1111,10 @@ def marketplaces_cli(argv, out=print):
 
 
 def cli(argv):
-    if argv[:2] == ["claude", "trust-hooks"]:
-        return trust_hooks(argv[2:])
+    if argv[:1] in (["attach"], ["detach"]):  # a plugin for a running sandbox (kits_live.py)
+        return module("kits_live").plugins_cli(argv)
+    if len(argv) >= 2 and argv[0] in STORE_AGENTS and argv[1] == "trust-hooks":
+        return trust_hooks(argv[2:], agent=argv[0])
     if argv[:1] == ["marketplaces"]:
         return marketplaces_cli(argv[1:])
     passthrough = None
@@ -958,8 +1125,10 @@ def cli(argv):
                                      epilog="Launcher options (e.g. --backend bwrap) are passed on to the "
                                             "plugin store's sandbox. Every marketplace with its plugins and their "
                                             "state: sandbox-ai plugins marketplaces [--json] (see its --help).")
-    parser.add_argument("agent", nargs="?", choices=["claude", "codex", "opencode", "marketplaces"],
-                        help="the agent whose plugins to install, or marketplaces: list every marketplace")
+    parser.add_argument("agent", nargs="?", choices=["claude", "codex", "opencode2", "all", "opencode",
+                                                     "marketplaces"],
+                        help="the agent whose plugins to install (claude, codex, opencode2 - one plugin store - or "
+                             "all three), or marketplaces: list every marketplace")
     parser.add_argument("-s", "--status", action="store_true", help="Show declared and installed plugins")
     parser.add_argument("-u", "--update", action="store_true", help="Also update marketplaces and installed plugins")
     parser.add_argument("--kit", action="append", default=[], metavar="NAME",
@@ -972,18 +1141,16 @@ def cli(argv):
         return marketplaces_cli(options)
     if a.status or not a.agent:
         return status()
-    if a.agent != "claude":
-        print(f"sandbox-ai plugins: {a.agent} has no plugin store; "
-              + ("OpenCode loads the npm plugins its kits list by itself" if a.agent == "opencode"
-                 else "plugins for Codex are not supported yet"), file=sys.stderr)
+    if a.agent not in (*STORE_AGENTS, "all"):
+        print(f"sandbox-ai plugins: {a.agent} has no plugin store; OpenCode loads the npm plugins its kits list by "
+              "itself", file=sys.stderr)
         return 1
     if passthrough is not None:
-        marketplaces, plugins, _ = kits().declarations("claude", kits().all_plugin_files("claude", a.kit),
-                                                       with_disabled=True)
+        marketplaces, plugins, _ = store_declarations(a.agent, a.kit)
         sources = list(marketplaces.values())
         sources += [s for p in plugins for s in plugin_sources(p, marketplaces[p.split("@")[1]])[1:]]
         return run_in_store(passthrough, options, sources)
-    return sync(options, a.update, builtin=a.kit, marketplaces_only=a.marketplaces_only)
+    return sync(options, a.update, builtin=a.kit, marketplaces_only=a.marketplaces_only, agent=a.agent)
 
 
 if __name__ == "__main__":

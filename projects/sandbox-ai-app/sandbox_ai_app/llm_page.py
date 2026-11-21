@@ -48,19 +48,21 @@ from PySide6.QtWidgets import (
 )
 
 from .files import printable, printable_text
-from .host_choice import follow_hosts, on_host
+from .host_choice import follow_hosts, follow_note, on_host
 from . import applog
 from . import backend, theme, widgets
 from . import llm_params as LP
 from . import llm_loaded_view as LLV
 from . import llm_params_view as LPV
 from . import wizard_llm as WL
+from . import model_profile as MP
+from . import model_profile_view as MPV
 from .i18n import N_, tr
 from .model_combo import searchable
 from .name_fields import NameField
 from .widgets import (
-    ask_first, background, delete_key, fill, flow, multi_select, outcome, plain_label, report_each, row_key, run_each,
-    safe_tooltip, selected_keys, set_enabled, several, show_text, table, warn,
+    ask_first, background, delete_key, explanation, fill, flow, multi_select, outcome, plain_label, report_each,
+    row_key, run_each, safe_tooltip, selected_keys, set_enabled, several, show_text, table, warn,
 )
 
 # As sandbox-ai llm checks them (llm.py: NAME, SECRET, MODEL_NAME, VPN_PROFILE, URL).
@@ -77,7 +79,7 @@ LOCAL = "local"  # this machine, as sandbox-ai hosts names it
 HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 KINDS = (("lmstudio", N_("LM Studio")), ("ollama", N_("Ollama")), ("llamacpp", N_("llama.cpp server")),
          ("vllm", N_("vLLM")), ("openai-compatible", N_("OpenAI-compatible server (a gateway, LiteLLM, …)")))
-AGENTS = ("claude", "codex", "opencode", "hermes", "dsh", "qwen", "goose")
+AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 NAME_EXAMPLE = WL.NAME_EXAMPLE
 URL_EXAMPLE = "http://192.168.1.20:1234"
 MODEL_EXAMPLE = "qwen2.5-coder:7b"
@@ -162,9 +164,12 @@ class LlmDialog(QDialog):
     closes only once it saved (finish); failed(message) keeps it open with everything typed."""
 
     def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=(), require=None,
-                 sai=None, host=LOCAL):
+                 sai=None, host=LOCAL, draft=None):
+        """DRAFT (a new server only): the key of what was typed and not saved (drafts.py), filled in again - never
+        the key typed, nor plain http outside the local networks or Replace (chosen anew each time)."""
         super().__init__(parent)
         self.remote, self.existing, self.run, self.taken = remote, existing, run, set(taken or ())
+        self.sai = sai  # this machine's sandbox-ai: the models' traffic light (model_profile.support_of)
         self.host_label, self.require = host_label, require
         self.insecure_confirmed = None  # the URL plain http outside the local networks was allowed for (Test)
         self.on_save, self.saved, self.saving, self.check_after, self.tests = None, False, False, False, 0
@@ -264,7 +269,7 @@ class LlmDialog(QDialog):
         note = tr("A key typed here is kept as a secret of sandbox-ai on the server's host (standard input, over SSH "
                   "for another host, never a command line); the server's entry only names that secret, and the proxy "
                   "adds the key on the wire.")
-        layout.addWidget(plain_label(note, role="secondary"))
+        layout.addWidget(explanation(note))
         self.note = plain_label()
         self.note.setAccessibleName(tr("Status"))
         self.note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -288,6 +293,10 @@ class LlmDialog(QDialog):
             self.form.setRowVisible(self.replace, False)
         self.show_fields()
         self.check_name()
+        from . import drafts  # an edit shows the server as it is (prefill): no draft
+        self.draft = None if draft is None or editing else drafts.Draft(self, draft, {
+            "name": self.name, "kind": self.kind, "url": self.url, "model": self.model_box, "vpn": self.vpn,
+            "anthropic": self.anthropic, "secret": self.secret, "headers": self.headers, "ca": self.ca})
 
     def prefill(self, fields):
         """The dialog's fields as FIELDS (wizard_llm.fields_of) say."""
@@ -442,12 +451,8 @@ class LlmDialog(QDialog):
             self.test_result.setText(text)
             colored(self.test_result, "bad")
             return
-        usable = [m["name"] for m in models]
         loaded = sum(1 for m in models if m.get("loaded") is True)
-        typed = self.model.text()
-        self.model_box.clear()
-        self.model_box.addItems(usable)
-        self.model_box.setEditText(typed or (usable[0] if len(usable) == 1 else ""))
+        self.fill_model_box(models)
         if not models:
             text = tr("Reachable, but the server lists no models: load or pull one first.")
         else:
@@ -464,6 +469,17 @@ class LlmDialog(QDialog):
             self.test_result.setToolTip(safe_tooltip(WL.status_detail(server)))
         self.test_result.setText(text)
         colored(self.test_result, "ok")
+
+    def fill_model_box(self, models):
+        """The Default model's list: the MODELS Test connection listed, each with its traffic light; what was typed
+        stays (the only one listed when nothing was)."""
+        usable = [m["name"] for m in models]
+        typed = self.model.text()
+        self.model_box.clear()
+        for name in usable:
+            self.model_box.addItem(name, name)
+        MPV.mark_combo(self.model_box, self.sai, self.model_box.itemData)
+        self.model_box.setEditText(typed or (usable[0] if len(usable) == 1 else ""))
 
     def ask_insecure(self, fields):
         """sandbox-ai refused to send the key over plain http to an address outside the local networks: asked as the
@@ -542,9 +558,9 @@ class LlmPage(QWidget):
         self.params_old = set()  # hosts whose sandbox-ai has no `llm params` (asked once)
         self.params_dialog = None
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(tr("LLM servers (sandbox-ai llm) the agents can use: start one with --llm NAME. "
+        layout.addWidget(explanation(tr("LLM servers (sandbox-ai llm) the agents can use: start one with --llm NAME. "
                                         "Keys stay secrets of sandbox-ai; the connection proxy adds them on the wire, "
-                                        "so an agent only sees a placeholder."), role="secondary"))
+                                        "so an agent only sees a placeholder.")))
         top = QHBoxLayout()
         top.addWidget(plain_label(tr("Host"), word_wrap=False))
         self.host_box = QComboBox()
@@ -552,6 +568,8 @@ class LlmPage(QWidget):
         self.host_box.setToolTip(tr("This machine, or a host of sandbox-ai hosts (over SSH)"))
         self.host_box.currentIndexChanged.connect(lambda *_: self.refresh() if self.isVisible() else None)
         top.addWidget(self.host_box, 1)
+        self.follow_note = follow_note()  # whose servers, when the window's pages follow the Sandboxes page's host
+        top.addWidget(self.follow_note)
         layout.addLayout(top)
         self.servers = table([tr("Name"), tr("Kind"), tr("URL"), tr("Model"), tr("Key"), tr("VPN"), tr("Agents")],
                              stretch=2, compact=(1, 5, 6))
@@ -662,6 +680,12 @@ class LlmPage(QWidget):
         self.model_table.itemSelectionChanged.connect(self.update_model_buttons)
         self.model_table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: self.apply_filter())
         box.addWidget(self.model_table, 1)
+        # The selected model's traffic light in detail: per agent what worked and what failed, the settings, the speed
+        self.support_panel = MPV.SupportPanel()
+        self.support_area = MPV.scrolled(self.support_panel)
+        box.addWidget(self.support_area)
+        self.support_area.hide()
+        self.model_table.itemSelectionChanged.connect(self.show_support)
         buttons = QHBoxLayout()
         self.default_button = QPushButton(tr("Use as default"))
         self.default_button.setAccessibleName(tr("Use as default"))
@@ -866,7 +890,8 @@ class LlmPage(QWidget):
             return
         taken = [e["name"] for e in self.entries] if host == self.loaded_host else []
         self.open_dialog(LlmDialog(self, self.host_label(host), remote=host != "local", run=self.runner(host),
-                                   taken=taken, require=self.requirement(host), sai=self.sai, host=host), host, None)
+                                   taken=taken, require=self.requirement(host), sai=self.sai, host=host,
+                                   draft=("llm", host)), host, None)
 
     def edit(self):
         """The dialog prefilled from `llm show NAME --json` (and the CA's path from `llm show NAME`)."""
@@ -906,6 +931,8 @@ class LlmPage(QWidget):
         finally:
             # The typed key is passed on and kept nowhere else (not in a hidden dialog of the page).
             dialog.value.clear()
+            if dialog.saved and getattr(dialog, "draft", None) is not None:
+                dialog.draft.sent()  # saved: what was typed is done with (cancelled: kept, drafts.py)
             self.dialog = None
             dialog.deleteLater()
 
@@ -1081,10 +1108,12 @@ class LlmPage(QWidget):
         same = self.models_of == (host, name)
         scope = (self.chosen_model() if same else None) or LP.SCOPE_ALL
         models = [m["name"] for m in self.model_list] if same else list(view.get("models") or [])
+        # Ollama: the window it serves each listed model with, in words (the models table's listing).
+        served = {m["name"]: WL.served_text(m) for m in self.model_list if WL.served_text(m)} if same else {}
         # The loop guard's layers: this machine's sandbox-ai knows their ranges; a host's: the layers it shows.
         spec = LP.loop_spec(self.sai if host == LOCAL else None, view)
         dialog = LPV.ParamsDialog(view, catalogue, scope=scope, models=models, host_label=self.host_label(host),
-                                  spec=spec, server_only=view.get("server_only"), parent=self)
+                                  spec=spec, server_only=view.get("server_only"), served=served, parent=self)
         self.open_params(dialog, host, name)
 
     def open_params(self, dialog, host, name):
@@ -1135,7 +1164,7 @@ class LlmPage(QWidget):
             return
         entry = next((e for e in self.entries if e.get("name") == name), {})
         kind = entry.get("kind") if entry.get("kind") in {k for k, _ in KINDS} else None
-        dialog = LLV.LoadedDialog(self.runner(host), name, kind, self.host_label(host), host, self)
+        dialog = LLV.LoadedDialog(self.runner(host), name, kind, self.host_label(host), host, self, sai=self.sai)
         self.loaded_dialog = dialog
         try:
             dialog.exec()
@@ -1188,6 +1217,10 @@ class LlmPage(QWidget):
             self.status.setText(tr("Could not list the models of {name}: {error}", name=name,
                                    error=failure(result, error)))
             return
+        for model in models:  # the traffic light: how far the research supports each model, per agent
+            found = MP.support_of(self.sai, model["name"])
+            if found is not None:
+                model["support"] = found
         entry = next((e for e in self.entries if e.get("name") == name), {})
         self.models_of, self.model_list = (host, name), models
         self.models_default = entry.get("model") if isinstance(entry.get("model"), str) else ""
@@ -1213,13 +1246,41 @@ class LlmPage(QWidget):
             sorts.append([value for _, value in cells])
             default = model["name"] == self.models_default
             tips.append("\n".join(part for part in (
-                model["name"], model.get("details") or "", model.get("arch") or "",
+                model["name"], model.get("details") or "", model.get("arch") or "", WL.served_text(model),
                 tr("the default model of {name}", name=name) if default else "") if part))
             icons.append("ok" if default else None)
         fill(widget, rows, tooltips=tips, icons=icons, sort=sorts, keys=[m["name"] for m in models])
+        self.mark_support(columns)
         self.models_box.show()
         self.apply_filter()
         self.update_model_buttons()
+        self.show_support()
+
+    def mark_support(self, columns):
+        """The Support column's cells: the light's icon (a shape per colour), its words as tooltip and accessible
+        text."""
+        keys = [key for key, _ in columns]
+        if "support" not in keys:
+            return
+        widget, column = self.model_table, keys.index("support")
+        by_name = {m["name"]: m for m in self.model_list}
+        for row in range(widget.rowCount()):
+            model = by_name.get(row_key(widget, row))
+            item = widget.item(row, column)
+            found = model.get("support") if model else None
+            if item is None or not found:
+                continue
+            item.setIcon(MPV.light_icon(found["light"]))
+            item.setToolTip(safe_tooltip(MP.light_summary(found) + "\n" + tr("Select the model for the details.")))
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, MP.light_accessible(found, model["name"]))
+
+    def show_support(self):
+        """The detail panel of the selected model's light (hidden without a selection or a light)."""
+        model = self.chosen_model()
+        found = next((m.get("support") for m in self.model_list or [] if m.get("name") == model), None) \
+            if model else None
+        self.support_panel.set(found)
+        self.support_area.setVisible(found is not None)
 
     def apply_filter(self):
         text = self.model_filter.text().strip().lower()

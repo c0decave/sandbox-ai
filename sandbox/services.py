@@ -171,9 +171,21 @@ def default_name(parsed):
 
 def read_registry(path=None):
     """{name: record} of your images; {} without a file. ValueError for a damaged one (it is never rewritten then)."""
+    found, damaged = read_registry_parts(path)
+    if damaged:
+        name, problem = next(iter(damaged.items()))
+        raise ValueError(f"{Path(path or registry_path())}: {name!r}: {problem}")
+    return found
+
+
+def read_registry_parts(path=None):
+    """({name: record}, {name: why it is damaged}) of your images: a record sandbox-ai no longer takes (a name that
+    became an agent's since, a hand edit) apart from the others, which stay usable - before, one such record made the
+    whole file unreadable (images list failed, the Board's list was empty, every --service start was refused).
+    ValueError for a file that cannot be read at all."""
     path = Path(path or registry_path())
     if not path.exists() and not path.is_symlink():
-        return {}
+        return {}, {}
     data = images_module().read_limited(path, REGISTRY_LIMIT)
     try:
         document = json.loads(data)
@@ -181,13 +193,20 @@ def read_registry(path=None):
         raise ValueError(f"{path}: {exc}") from None
     if not isinstance(document, dict) or document.get("version") != 1 or not isinstance(document.get("images"), dict):
         raise ValueError(f"{path}: expected version 1 with an object \"images\"")
-    found = {}
+    found, damaged = {}, {}
     for name, record in document["images"].items():
         problem = record_problem(name, record)
         if problem:
-            raise ValueError(f"{path}: {name!r}: {problem}")
-        found[name] = record
-    return found
+            damaged[name] = problem
+        else:
+            found[name] = record
+    return found, damaged
+
+
+def damaged_note(damaged):
+    """What is said of the DAMAGED records ({name: why}) of your images: each left out, and where it is."""
+    return [f"sandbox-ai images: the record of your image {name!r} in {registry_path()} is damaged ({problem}): left "
+            "out; correct or delete it there, then add the image again" for name, problem in sorted(damaged.items())]
 
 
 def record_problem(name, record):
@@ -595,6 +614,20 @@ def builtin_containerfile(template):
     return BUILTIN_IMAGES / template / "Containerfile"
 
 
+def templates(found=None):
+    """[{template, description, image, built}] of sandbox-ai's own Containerfiles (builtin_images): IMAGE is the name
+    an image of it gets when a start needs it (the template's own), BUILT the names of your images built from it
+    (FOUND: read_registry_parts; a record that cannot be read: none)."""
+    if found is None:
+        try:
+            found = read_registry_parts()[0]
+        except ValueError:
+            found = {}
+    return [{"template": template, "description": description, "image": template,
+             "built": sorted(name for name, entry in found.items() if entry.get("builtin") == template)}
+            for template, description in builtin_images().items()]
+
+
 BUILD_NETWORK_NOTE = ("its RUN steps reach the network from this host directly - outside the sandbox's firewall, VPN "
                       "and Tor, with your own address")
 
@@ -755,10 +788,12 @@ def base_problem(entry):
     return None
 
 
-def listing(podman=None, run=None, check=True):
+def listing(podman=None, run=None, check=True, damaged=None):
     """[{name, ...record, present, unchecked, used_by, base_problem}] of your images; PRESENT is None when Podman
-    could not be asked (or CHECK is false)."""
-    found = read_registry()
+    could not be asked (or CHECK is false). A damaged record is left out (DAMAGED, a dict, gets {name: why})."""
+    found, left_out = read_registry_parts()
+    if damaged is not None:
+        damaged.update(left_out)
     ids = present_ids(podman or images_module().podman(), run) if check and found else None
     rows = []
     for name in sorted(found):
@@ -773,7 +808,7 @@ def listing(podman=None, run=None, check=True):
 def show_rows(rows, out):
     if not rows:
         out("no images of yours; add one: sandbox-ai images pull REFERENCE [--as NAME], or "
-            "sandbox-ai images build-image NAME --file Containerfile")
+            "sandbox-ai images build-image NAME --file Containerfile (sandbox-ai's own: sandbox-ai images templates)")
         return
     for row in rows:
         state = "" if row["present"] is not False else "  MISSING from Podman: add it again (--replace)"
@@ -964,15 +999,24 @@ def reserved_ports(l, a):
     return found
 
 
-def service_record(value, service, found):
+def service_record(value, service, found, damaged=None):
     """The record of the image of SERVICE (parse_spec of the --service VALUE) in FOUND (read_registry), else ValueError
     naming the service, the image it looked for (without image= its name is its image), how to add that image and
-    which images there are to name instead."""
+    which images there are to name instead. DAMAGED: {name: why} of the records left out (read_registry_parts); one
+    of sandbox-ai's own templates (service-images) is named with its build."""
     if service["image"] in found:
         return found[service["image"]]
     image, name = service["image"], service["name"]
-    given = any(item.partition("=")[0].strip() == "image" for item in value.partition(":")[2].split(",") if item)
+    if image in (damaged or {}):
+        raise ValueError(f"--service {name}: the record of your image {image} in {registry_path()} is damaged "
+                         f"({damaged[image]}); correct or delete it there, then add the image again")
     mine = ", ".join(sorted(found)[:20]) + (", ..." if len(found) > 20 else "") if found else "none yet"
+    if image in builtin_images():
+        raise ValueError(f"--service {name}: no image {image} of yours; it is one of sandbox-ai's own Containerfiles, "
+                         f"built once with: sandbox-ai images build-image {image} --builtin {image} (the app's start "
+                         f"builds it when needed, after asking), or give image=NAME of one of yours; your images: "
+                         f"{mine}; see sandbox-ai images list")
+    given = any(item.partition("=")[0].strip() == "image" for item in value.partition(":")[2].split(",") if item)
     lacks = (f"no image {image} of yours" if given else
              f"no image of yours named {image} (without image= a service's name is its image)")
     raise ValueError(f"--service {name}: {lacks}; add it with: sandbox-ai images pull REFERENCE --as {image} (or "
@@ -1003,13 +1047,15 @@ def check(a, l=None, found=None):
                          "without one of them")
     if len(values) > SERVICE_LIMIT:
         raise ValueError(f"--service: at most {SERVICE_LIMIT} services")
-    found = read_registry() if found is None else found
+    damaged = {}
+    if found is None:
+        found, damaged = read_registry_parts()
     uids, ports, services, seen = reserved_uids(l), reserved_ports(l, a), [], {}
     for value in values:
         service = parse_spec(value)
         if service["name"] in {s["name"] for s in services}:
             raise ValueError(f"--service {service['name']} is given twice")
-        entry = service_record(value, service, found)
+        entry = service_record(value, service, found, damaged)
         user = service["user"] or entry.get("user")
         if user is None:
             raise ValueError(f"--service {service['name']}: the user its image runs as ({entry.get('config_user')!r}) "
@@ -1195,13 +1241,28 @@ def prepare(a, l=None, run=None):
 
 
 def members(a):
-    """The containers started beside the agent: the services (--service) and the sandbox's browser (--browser:
-    browser.check made it a service of sandbox-ai's own image)."""
-    browser = getattr(a, "browser_container", None)
-    return [*(getattr(a, "services", None) or []), *([browser] if browser else [])]
+    """The containers started beside the agent: the services (--service), Cairn's board (--cairn: cairn.check) and
+    the sandbox's browser (--browser: browser.check), the last two services of sandbox-ai's own images. Cairn's
+    before the browser, which starts on its board."""
+    cairn, browser = getattr(a, "cairn_container", None), getattr(a, "browser_container", None)
+    return [*(getattr(a, "services", None) or []), *([cairn] if cairn else []), *([browser] if browser else [])]
 
 
 _browser = None
+_cairn = None
+
+
+def cairn_module():
+    """cairn.py (Cairn's container: its podman create line), loaded once."""
+    global _cairn
+    if _cairn is None:
+        spec = importlib.util.spec_from_file_location("cairn_for_services", HERE / "cairn.py")
+        with LOADING:
+            if _cairn is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _cairn = loaded
+    return _cairn
 
 
 def browser_module():
@@ -1344,7 +1405,8 @@ def launch(a, pod, session, alive, l=None, run=None, sleep=time.sleep, out=None,
                         raise ValueError(f"the volume {volume} for {path}: {(made.stderr or '').strip()[-300:]}")
             # Created, initialised (its namespaces made, nothing of the image run: podman init), proven, and only then
             # started: nothing of it ever runs outside the pod's user namespace or the VPN's network namespace.
-            argv, env = (browser_module().create_command if service.get("browser") else create_command)(
+            argv, env = (browser_module().create_command if service.get("browser") else
+                         cairn_module().create_command if service.get("cairn") else create_command)(
                 a, pod, service, session, l, limits)
             done = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
                        env={**os.environ, **env})
@@ -1437,25 +1499,36 @@ def main(argv, out=print, run=None):
     sub = parser.add_subparsers(dest="command", required=True)
     pulling = sub.add_parser("pull")
     pulling.add_argument("reference")
-    pulling.add_argument("--as", dest="name")
-    pulling.add_argument("--replace", action="store_true")
-    pulling.add_argument("-j", "--json", action="store_true")
+    pulling.add_argument("--as", dest="name", help="its name (default: the repository's last part)")
+    pulling.add_argument("--replace", action="store_true", help="replace an image of that name")
+    pulling.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     building = sub.add_parser("build-image")
     building.add_argument("name")
     source = building.add_mutually_exclusive_group(required=True)
-    source.add_argument("-f", "--file")
-    source.add_argument("--builtin", metavar="TEMPLATE")
-    building.add_argument("--context")
-    building.add_argument("--replace", action="store_true")
+    source.add_argument("-f", "--file", help="the Containerfile to build")
+    source.add_argument("--builtin", metavar="TEMPLATE", help="one of sandbox-ai's own Containerfiles instead")
+    building.add_argument("--context", help="the build context (default: the Containerfile's folder)")
+    building.add_argument("--replace", action="store_true", help="replace an image of that name")
     building.add_argument("--trust-agent-written", action="store_true",
                           help="build a Containerfile or context that lies where a sandbox can write (you reviewed it)")
     building.add_argument("--build-network", action="store_true",
                           help="give its RUN steps the network: this host's own, outside the sandbox's firewall, VPN "
                                "and Tor (default: none)")
-    building.add_argument("-j", "--json", action="store_true")
+    building.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     listed = sub.add_parser("list")
-    listed.add_argument("-j", "--json", action="store_true")
+    listed.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    own = sub.add_parser("templates")
+    own.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     args = parser.parse_args(argv)
+    if args.command == "templates":
+        rows = templates()
+        if args.json:
+            out(json.dumps(rows, indent=2))
+        for row in [] if args.json else rows:
+            built = f"; built as: {', '.join(row['built'])}" if row["built"] else ""
+            out(f"{row['template']:18} {row['description']}{built}")
+            out(f"  build: sandbox-ai images build-image {row['image']} --builtin {row['template']}")
+        return 0
     if args.command == "pull":
         name, entry = pull(args.reference, args.name, args.replace, run=run,
                            out=(lambda text: print(text, file=sys.stderr)) if args.json else out)
@@ -1470,7 +1543,10 @@ def main(argv, out=print, run=None):
         if args.json:
             out(json.dumps({"name": name, **entry}, indent=2))
         return 0
-    rows = listing(run=run)
+    damaged = {}
+    rows = listing(run=run, damaged=damaged)
+    for line in damaged_note(damaged):  # (standard error: --json's standard output is the JSON alone)
+        print(line, file=sys.stderr)
     if args.json:
         out(json.dumps(rows, indent=2))
     else:

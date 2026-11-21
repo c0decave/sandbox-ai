@@ -20,11 +20,17 @@ dashboard, the launcher's own answer script:
   never asks); the collection gate and the sending policy are off; the Shared Metrics setup says MESSAGE; the managed
   configuration is always /etc/hermes.
 
+While rules for Hermes' own tools hold (HOOKS_MARKER, written by the launcher), it keeps their shell hooks: a Hermes
+command with --safe-mode is refused, HERMES_SAFE_MODE dropped, and the arguments a plugin or shell hook changes asked
+of the rules again before the call runs (patch_plugins).
+
 Standalone, standard library only: it runs in the sandbox, under Hermes' CPython, before Hermes is imported.
 """
 import functools
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 MESSAGE = "sandbox-ai: Hermes' telemetry is always off in sandbox-ai and cannot be turned on"
@@ -46,6 +52,15 @@ SWITCHES = (("telemetry", "shared_metrics", "enabled"), ("telemetry", "shared_me
 # `hermes config set|unset KEY`: refused for these keys and everything below them.
 CONFIG_KEYS = ("telemetry", "monitoring", "computer_use.cua_telemetry")
 CLI_MODULES = ("hermes_cli.main", "hermes_cli")  # python -m MODULE: Hermes' command line
+# Rules for Hermes' own tools (sandbox/hermes.py: HOOKS_MARKER_NAME, written when they hold): their shell hooks are in
+# the managed configuration, and the guard keeps them in every Hermes of the sandbox - --safe-mode and
+# HERMES_SAFE_MODE (no shell hook registered at all) are refused or dropped, and the arguments a plugin or shell hook
+# changes ("modify") are asked of the rules again (patch_plugins).
+HOOKS_MARKER = MANAGED_DIR + "/sandbox-ai-hooks.json"
+SAFE_MODE_MESSAGE = ("Hermes then registers no shell hook, and the rules for its own tools (a ruleset's \"tool\" "
+                     "rules) hold through them")
+HOOK_COMMAND = ["/usr/bin/python3", "-I", "/sandbox/runtime.py", "--internal-hook", "hermes", "PreToolUse"]
+HOOK_WAIT = 130  # seconds: the hook client's own wait (runtime.HOOK_TIMEOUT) and a margin
 
 
 def refused(args):
@@ -60,6 +75,42 @@ def refused(args):
             if any(key == name or key.startswith(name + ".") for name in CONFIG_KEYS):
                 return f"hermes config {words[0]} {key}", "the telemetry switches are pinned off"
     return None
+
+
+def hooks_hold():
+    """Rules for Hermes' own tools hold in this sandbox (HOOKS_MARKER)."""
+    return os.path.exists(HOOKS_MARKER)
+
+
+def safe_mode_arg(args):
+    """--safe-mode among Hermes' ARGS before a "--" (it registers no shell hook), else None."""
+    options = list(args[:args.index("--")]) if "--" in args else list(args)
+    return "--safe-mode" if "--safe-mode" in options else None
+
+
+def hooks_refused(args):
+    """The refusal of a Hermes command line ARGS that would drop the rule hooks while they hold, else None."""
+    found = safe_mode_arg(args) if hooks_hold() else None
+    return f"sandbox-ai: {found} is refused: {SAFE_MODE_MESSAGE}" if found else None
+
+
+def recheck(tool_name, args, run=None):
+    """None if the rules allow Hermes' TOOL_NAME with ARGS (the hook client, as Hermes' own shell hook runs it), else
+    the refusal; whatever goes wrong refuses."""
+    run = run or subprocess.run
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    try:
+        done = run(HOOK_COMMAND, input=json.dumps({"tool_name": tool_name, "tool_input": args, "cwd": cwd},
+                                                  default=repr), capture_output=True, timeout=HOOK_WAIT)
+    except Exception as exc:  # noqa: BLE001 - refused, never let through
+        return f"sandbox-ai: the tool call is refused: its rules could not be checked ({type(exc).__name__})"
+    if done.returncode == 0:
+        return None
+    text = done.stderr.decode("utf-8", "replace") if isinstance(done.stderr, bytes) else str(done.stderr or "")
+    return text.strip()[:2000] or "sandbox-ai: the tool call is refused"
 
 
 def refused_environment(environ):
@@ -124,10 +175,13 @@ def scrub(config):
 
 
 def pin_environment(environ):
-    """ENVIRON with the opt-out variables set and SCOPE_ENV dropped (in place)."""
+    """ENVIRON with the opt-out variables set and SCOPE_ENV dropped (in place); HERMES_SAFE_MODE too while rules for
+    Hermes' own tools hold (hooks_hold)."""
     environ.update(PINNED_ENV)
     for name in SCOPE_ENV:
         environ.pop(name, None)
+    if hooks_hold():
+        environ.pop("HERMES_SAFE_MODE", None)
 
 
 def say(stream=None):
@@ -148,11 +202,19 @@ def warn(what):
         pass
 
 
-def wrap(module, name, make):
-    """Replace MODULE.NAME by make(original) once; warn when Hermes has no such function."""
+def warn_hooks(what):
+    try:
+        sys.stderr.write(f"sandbox-ai: the guard could not patch {what}: arguments a Hermes plugin or shell hook "
+                         "changes are not asked of the rules again (the rule hooks still check every call)\n")
+    except Exception:
+        pass
+
+
+def wrap(module, name, make, warning=None):
+    """Replace MODULE.NAME by make(original) once; warn (WARNING, else warn) when Hermes has no such function."""
     original = getattr(module, name, None)
     if not callable(original):
-        warn(f"{module.__name__}.{name}")
+        (warning or warn)(f"{module.__name__}.{name}")
         return None
     if getattr(original, "_sandbox_ai_guard", False):
         return original
@@ -255,7 +317,28 @@ def patch_scope(module):
     wrap(module, "get_managed_dir", managed_dir)
 
 
+def patch_plugins(module):
+    """hermes_cli.plugins, while rules hold: a call's arguments as a plugin's or shell hook's "modify" left them
+    (Hermes runs every pre_tool_call hook on the same arguments and applies the changes after them, so the rule hook
+    never saw these) are asked of the rules again; a refusal blocks the call with the rules' reason."""
+    if not hooks_hold():
+        return
+
+    def dispatch(original):
+        def checked(tool_name, args, *more, **kwargs):
+            block, modified = original(tool_name, args, *more, **kwargs)
+            if block is None and modified is not None and modified != args:
+                why = recheck(tool_name, modified)
+                if why:
+                    return why, modified
+            return block, modified
+        return checked
+
+    wrap(module, "_dispatch_pre_tool_call_hooks", dispatch, warn_hooks)
+
+
 PATCHES = {
+    "hermes_cli.plugins": patch_plugins,
     "hermes_cli.config": patch_config,
     "hermes_cli.managed_scope": patch_scope,
     "hermes_cli.setup": patch_setup,
@@ -325,6 +408,13 @@ def install(argv=None, environ=None):
     environ = os.environ if environ is None else environ
     args = cli_args(list(argv if argv is not None else process_argv()))
     if args is not None:
+        hooks = hooks_refused(args)
+        if hooks:
+            try:
+                sys.stderr.write(hooks + "\n")
+                sys.stderr.flush()
+            finally:
+                os._exit(2)
         found = refused(args) or refused_environment(environ)
         if found:
             try:

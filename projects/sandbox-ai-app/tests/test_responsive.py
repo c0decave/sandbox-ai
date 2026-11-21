@@ -45,12 +45,16 @@ def slow(result, calls=None, seconds=SLOW):
 def responsive(qapp, click, finished, calls, timeout=20):
     """CLICK, then the event loop until FINISHED(): it never stands still for MAX_GAP (from the click on, the click
     itself included); the slow call (CALLS) ran off the GUI thread and has ended."""
+    # (each tick with the time other processes kept this one from running so far: a loaded machine - another test
+    # suite, a build - delays the window without the app doing anything slow; the gap is measured without that, as
+    # test_responsive_pages measures its own. The test failed in full runs beside other suites: 0.26 s, 0.28 s.)
+    from test_responsive_pages import held_back
     stamps = []
     timer = QTimer()
     timer.setInterval(20)
-    timer.timeout.connect(lambda: stamps.append(time.monotonic()))
+    timer.timeout.connect(lambda: stamps.append((time.monotonic(), held_back())))
     timer.start()
-    began = time.monotonic()
+    began, held = time.monotonic(), held_back()
     click()
     returned = time.monotonic() - began
     while not finished() and time.monotonic() - began < timeout:
@@ -59,8 +63,8 @@ def responsive(qapp, click, finished, calls, timeout=20):
     qapp.processEvents()
     ended = time.monotonic()
     timer.stop()
-    points = [began, *stamps, ended]
-    gap = max(b - a for a, b in zip(points, points[1:]))
+    points = [(began, held), *stamps, (ended, held_back())]
+    gap = max((b[0] - a[0]) - max(0.0, b[1] - a[1]) for a, b in zip(points, points[1:]))
     assert finished(), "what the click started has finished"
     assert calls and calls[0][0] == "began" and calls[0][1] is False, f"the slow call ran on the GUI thread: {calls}"
     assert any(entry[0] == "ended" for entry in calls), "the slow call has ended"

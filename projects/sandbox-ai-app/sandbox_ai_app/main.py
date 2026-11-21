@@ -25,6 +25,20 @@ def broken_pyside(version=None, python=None):
     return None
 
 
+def missing_qt_network(importer=None):
+    """A message when Qt's network module (the app's local sockets: one instance, the browser tab) does not load for
+    a missing system library - Debian 12 without libgssapi-krb5-2 (the AppImage's e2e test) - else None."""
+    try:
+        (importer or (lambda: __import__("PySide6.QtNetwork")))()
+    except ImportError as exc:
+        text = str(exc)
+        name = text.split(":", 1)[0].strip() if ".so" in text else text
+        package = " (Debian/Ubuntu: libgssapi-krb5-2)" if "gssapi" in text else ""
+        return (f"sandbox-ai-app: Qt's network module does not load: {text}\n"
+                f"sandbox-ai-app: install the system library {name}{package}, then start the app again")
+    return None
+
+
 # Without the GPU, also without Chromium's Vulkan features (its own, and ANGLE's Vulkan backend, a default on Linux):
 # the --disable-vulkan used before is no Chromium switch, and the log still showed a Vulkan instance failing ("Failed
 # to create Vulkan instance: -9"). Qt WebEngine merges this --disable-features with its own.
@@ -82,8 +96,49 @@ def self_test_report(sai, window, app):
             + (f", {pages} pages" if pages else "") + ")")
 
 
+def version_text(directory=None):
+    """sandbox-ai-app --version: the app's version and the folder it runs from, sandbox-ai's (the one it would load:
+    $SANDBOX_AI_HOME, the Settings' choice, else the one found) and its folder."""
+    from . import __version__
+    lines = [f"sandbox-ai-app {__version__} from {backend.printable(backend.PACKAGE_DIR)}"]
+    try:
+        override = None if directory else backend.sandbox_ai_home_override()
+        if override:
+            os.environ["SANDBOX_AI_HOME"] = override
+        sai = backend.SandboxAI(directory)
+        lines.append(f"sandbox-ai {backend.printable(sai.version())} from {backend.printable(sai.directory)}")
+    except Exception as exc:  # noqa: BLE001 - the app's own version all the same
+        lines.append(f"sandbox-ai: not found ({backend.printable(str(exc))[:300]})")
+    return "\n".join(lines)
+
+
+def tell_about_the_running_app(app, instance):
+    """A start that ends because another app runs: what runs (an older one that stays, too old to be asked, a newer
+    one) on stderr, and in a message box when the app runs on a display and the older one stays."""
+    from .files import printable_text
+    text = instance.notice_text()  # (English: the language is chosen once sandbox-ai is loaded)
+    if text is None:
+        print("sandbox-ai-app: already running - its window is brought to the front", file=sys.stderr)
+        return
+    print(f"sandbox-ai-app: {printable_text(text)}", file=sys.stderr)
+    if not instance.alert or app.platformName() in ("offscreen", "minimal"):
+        return
+    from PySide6.QtWidgets import QMessageBox
+    from . import i18n
+    from .widgets import shown_as_text
+    try:
+        i18n.set_language(backend.setting("language") or "system")
+    except Exception:  # noqa: BLE001 - the system's language then
+        i18n.set_language("system")
+    QMessageBox.warning(None, i18n.tr("sandbox-ai-app is still running"),
+                        shown_as_text(printable_text(instance.notice_text())))
+
+
 def main(argv=None):
     arguments = sys.argv if argv is None else argv
+    if "--version" in arguments[1:] or "-V" in arguments[1:]:  # before Qt: no display needed
+        print(version_text())
+        return 0
     # --self-test: build the main window against the sandbox-ai found, load its launcher, quit with 0 (what the
     # AppImage's, the macOS app's and CI's checks run, e.g. with QT_QPA_PLATFORM=offscreen). No dialog, no intro,
     # no tour; a problem is printed and ends it with 1.
@@ -96,7 +151,7 @@ def main(argv=None):
         backend.wait_for_exit(int(waited[-1][len(backend.WAIT_FOR_PID):]))  # before any window: nothing to paint yet
     # Set by the AppImage's or the macOS app's start for this process only (see backend.installed_launcher).
     backend.PACKAGE_LAUNCHER = os.environ.pop("SANDBOX_AI_APP_PACKAGE_LAUNCHER", None) or backend.PACKAGE_LAUNCHER
-    problem = broken_pyside()
+    problem = broken_pyside() or missing_qt_network()
     if problem:
         print(problem, file=sys.stderr)
         return 1
@@ -120,12 +175,14 @@ def main(argv=None):
                                                                        if arg != "--self-test"]])
     # One app per user (single_instance.py): a second start shows the first one's window and ends - two would write
     # the same state file, the last to quit overwriting the other's unapplied board changes.
+    # After an update the running app is the older one: it makes way (quits as its own Quit does) or the human is told
+    # which one runs, from where, and how to quit it.
     instance = None
     if not self_test and not os.environ.get("SANDBOX_AI_APP_ANOTHER"):
         from .single_instance import Instance
         instance = Instance()
         if not instance.claim(hidden="--hidden" in arguments[1:]):
-            print("sandbox-ai-app: already running - its window is brought to the front", file=sys.stderr)
+            tell_about_the_running_app(app, instance)
             return 0
     from . import crashguard, logview
     logview.hub()  # every entry from now on reaches the log window, also those before the window is made
@@ -151,6 +208,8 @@ def main(argv=None):
         return 1
     try:
         applog.set_sandbox_ai(sai.version(), sai.directory)
+        if instance is not None:
+            instance.details["sandbox_ai"] = sai.version()  # (what "info" tells a later start)
     except Exception:  # noqa: BLE001 - a launcher that does not load is reported below
         applog.set_sandbox_ai("unknown", getattr(sai, "directory", None))
     settings = sai.settings()
@@ -229,6 +288,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, lambda *_: window.terminate())
     if instance is not None:  # a later start of the app: this window, to the front (a start for the tray: nothing)
         instance.asked.connect(lambda word: word == "show" and bring_to_front(window))
+        instance.quit_handler = window.quit_for_another_start  # a newer start: this app makes way
     if guard is not None:
         from PySide6.QtCore import QTimer
         ticks = QTimer(window)

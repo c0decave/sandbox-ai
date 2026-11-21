@@ -107,3 +107,40 @@ def test_check_refuses_a_file_inside_a_workspace_and_all_rules_lists_every_rules
     assert f"--rules github.json — from {tmp_path / 'config' / 'github.json'}" in text
     assert "no-gists: deny" in text and "files-deletes: ask" in text
     assert rules_tools.all_rules_text({"rulesets": []}).startswith("This start has no rulesets")
+
+
+def test_ready_made_rulesets_are_added_and_checked(tools, wait):
+    """Ready-made… offers sandbox-ai's own rulesets (--rules builtin:NAME); one picked is added once, and Check asks
+    the launcher, which reads it."""
+    actions = tools.builtin_button.menu().actions()
+    assert [action.text().split(" — ")[0] for action in actions] == [
+        "builtin:github-persistence", "builtin:destructive", "builtin:mcp-no-credentials", "builtin:secret-files"]
+    actions[1].trigger()
+    tools.add_builtin("destructive")
+    assert tools.listed == ["builtin:destructive"], "added once"
+    tools.check()
+    assert wait(lambda: tools.result.text().startswith(("✔", "✘")), 90), tools.result.text()
+    assert tools.result.text().startswith("✔"), tools.result.text()
+
+
+def test_the_board_and_the_start_page_take_files_to_hide(qapp, monkeypatch, env):  # noqa: F811
+    from test_projects import close, make_window
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    window = make_window(monkeypatch)
+    try:
+        board = window.board
+        board.add_node("approvals", **{"--hide": []})
+        board.inspect(board.board.first("approvals"))
+        field = board.option_fields["--hide"]
+        lines = field.findChild(QtWidgets.QPlainTextEdit)
+        assert ".env" in lines.placeholderText()
+        suggest = [b for b in field.findChildren(QtWidgets.QPushButton) if b.text() == "Suggested"][0]
+        suggest.click()
+        assert lines.toPlainText().splitlines() == list(rules_tools.HIDE_SUGGESTED)
+        assert board.board.first("approvals").props["--hide"] == list(rules_tools.HIDE_SUGGESTED)
+        start = window.launch.form.widgets["--hide"]
+        assert ".env" in start.edit.placeholderText()
+        window.launch.form.set_values({"--hide": [".env"]})
+        assert window.launch.form.values()["--hide"] == [".env"]
+    finally:
+        close(window)
