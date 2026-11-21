@@ -241,7 +241,7 @@ def test_session_copy_to_an_unreachable_host_says_it_was_not_reached(host):
 # --- a start on a full XDG_RUNTIME_DIR (a small tmpfs): "[Errno 28] No space left on device: PATH" -----------------
 
 FULLSHIM = '''"""python3 whose writes below FAKE_FULL fail with ENOSPC, as on a full file system (os.geteuid as UIDSHIM)."""
-import builtins, errno, io, os, runpy, sys
+import builtins, errno, functools, io, os, runpy, sys
 prefix = os.environ["FAKE_FULL"].rstrip("/")
 def under(path):
     try:
@@ -264,7 +264,11 @@ def mkdir(path, *args, **kwargs):
     if under(path) and not os.path.isdir(path):
         full(path)
     return _mkdir(path, *args, **kwargs)
-builtins.open, io.open, os.open, os.mkdir = open_, open_, osopen, mkdir
+# functools.partial, not the functions: Python 3.9's pathlib takes os.open and os.mkdir as attributes of its
+# _NormalAccessor class, where a plain function is bound as a method (TypeError: open() takes at most 3
+# positional arguments (4 given)); a partial is never bound.
+builtins.open, io.open = open_, open_
+os.open, os.mkdir = functools.partial(osopen), functools.partial(mkdir)
 if os.environ.get("FAKE_FULL_EUID"):
     os.geteuid = lambda: 1000
 sys.executable = os.environ["FAKE_PYTHON"]

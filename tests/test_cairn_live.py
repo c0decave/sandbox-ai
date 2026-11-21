@@ -45,6 +45,11 @@ for table in ("/proc/net/tcp", "/proc/net/tcp6"):
         if fields[3] == "0A" and int(fields[1].split(":")[1], 16) == 8000:
             listening.add(fields[1].split(":")[0])
 print("RESULT listen", ",".join(sorted(listening)) or "none", flush=True)
+# The relay comes up beside the board, not before it: wait for its socket (a moment after the board answers).
+for _ in range(60):
+    if os.path.exists("/sandbox/cairn/relay.sock"):
+        break
+    time.sleep(1)
 print("RESULT relay", "socket" if os.path.exists("/sandbox/cairn/relay.sock") else "none", flush=True)
 try:
     with urllib.request.urlopen(base + "/projects", timeout=30) as answer:

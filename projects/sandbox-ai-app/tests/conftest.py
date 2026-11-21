@@ -113,11 +113,71 @@ def qapp():
     from sandbox_ai_app import widgets
     widgets.collect_on_gui_thread()  # as the app does: the cycle collector never deletes a Qt object in a worker
     widgets.nonblocking_dialogs()  # as the app does (main.py): dialogs block no window
+    watch_unanswered_dialogs()
     # (not fitting_dialogs: offscreen's screen is 800x600, and the layout tests size dialogs as laptops of their own;
     # test_logview tests the fitting itself)
     yield app
     if "sandbox_ai_app.terminal" in sys.modules:  # web pages before their profile, or Chromium aborts
         sys.modules["sandbox_ai_app.terminal"].shutdown()
+
+
+# A dialog run with exec() that no test answers (one AUTO_ANSWER does not cover: QMessageBox's statics, a dialog of
+# its own) waits in its event loop for a click that never comes: the test, and the CI job with it, hung until the
+# job's timeout killed it with no word of where (0.1.187's app job, at 80 %). Past UNANSWERED_LIMIT seconds it is
+# cancelled (rejected) instead, and the test that left it fails with its title and text (unanswered_dialogs).
+UNANSWERED_LIMIT = 120.0
+UNANSWERED = []
+
+
+def dialog_words(dialog):
+    """"Type 'title': text" of DIALOG, for the failure of the test that left it unanswered."""
+    try:
+        text = dialog.text() if callable(getattr(dialog, "text", None)) else ""
+        return f"{type(dialog).__name__} {dialog.windowTitle()!r}: {' '.join(str(text).split())[:300]}"
+    except RuntimeError:  # deleted meanwhile
+        return "a dialog (deleted)"
+
+
+def watch_unanswered_dialogs():
+    """QDialog.exec (nonblocking_dialogs' own) with a watch: a dialog still open after UNANSWERED_LIMIT seconds is
+    noted in UNANSWERED and rejected, so that exec() returns (Cancel) and the test goes on to fail."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog
+    inner = QDialog.exec
+    if getattr(inner, "watched", False):
+        return
+
+    def watched_exec(dialog, *args):
+        timer = QTimer()
+        timer.setSingleShot(True)
+
+        def overdue():
+            UNANSWERED.append(dialog_words(dialog))
+            try:
+                dialog.reject()
+            except RuntimeError:
+                pass
+        timer.timeout.connect(overdue)
+        timer.start(int(UNANSWERED_LIMIT * 1000))
+        try:
+            return inner(dialog, *args)
+        finally:
+            timer.stop()
+    watched_exec.watched = True
+    watched_exec.nonblocking = getattr(inner, "nonblocking", False)
+    QDialog.exec = watched_exec
+
+
+@pytest.fixture(autouse=True)
+def unanswered_dialogs():
+    """A test that left a dialog open without an answer fails, naming it (watch_unanswered_dialogs)."""
+    del UNANSWERED[:]
+    yield
+    if UNANSWERED:
+        found = list(UNANSWERED)
+        del UNANSWERED[:]
+        pytest.fail(f"a dialog nobody answered for {UNANSWERED_LIMIT:g} s was cancelled (answer it in the test - "
+                    "widgets.AUTO_ANSWER covers widgets' own questions only): " + "; ".join(found), pytrace=False)
 
 
 def sweep_widgets(before=()):

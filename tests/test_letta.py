@@ -254,6 +254,39 @@ def test_the_start_script_becomes_letta_named_by_its_name_alone(tmp_path):
     assert result.returncode == 0 and "letta ran: ['-p', 'hi']" in result.stdout, result.stderr
 
 
+def test_a_first_start_with_a_model_goes_on_with_the_agent_that_has_the_servers(start, tmp_path):
+    """CI 0.1.187 (agents-live letta: "the model was never offered the demo server's tool"): the launcher puts
+    --model HANDLE (--model, --llm) before the arguments, and the start script took the handle for a subcommand, so a
+    first start with --mcp did not go on with the agent it made and laid the servers into - Letta Code made another
+    one, without them. A subcommand (letta agents ...) still gets no --agent, nor does a start that chooses one."""
+    server = {"name": "demo", "command": "python3", "args": ["/bridge", "demo"]}
+    config = {"servers": [server], "model": "openai-compat/live-model", "cloud": False}
+    calls, settings = start(config, "--model", "openai-compat/live-model", "--yolo", "-p", "--", "hi")
+    assert calls == [["agents", "create", "--model", "openai-compat/live-model"],
+                     ["--agent", "agent-local-1", "--model", "openai-compat/live-model", "--yolo", "-p", "--", "hi"]]
+    assert settings["agents"][0]["mcpServers"] == [server]
+    for args in (["--model", "m", "agents", "list"], ["-m", "m", "--name", "x", "-p", "--", "hi"]):
+        (tmp_path / "home/.letta/settings.json").unlink()
+        calls, _ = start(config, *args)
+        assert calls[0][:2] == ["agents", "create"] and calls[1] == args, args
+
+
+def test_a_failed_agent_creation_is_said(tmp_path):
+    """When `letta agents create` makes no agent, the --mcp servers have none to go into: said, Letta Code starts."""
+    script = tmp_path / "start.py"
+    script.write_text(letta.START_SCRIPT.replace(letta.START_CONFIG, str(tmp_path / "start.json")))
+    (tmp_path / "start.json").write_text(json.dumps({"servers": [{"name": "demo", "command": "x"}], "cloud": False}))
+    fake = tmp_path / "letta"
+    fake.write_text(f"#!{sys.executable}\nimport sys\nif sys.argv[1:3] == ['agents', 'create']:\n"
+                    "    sys.exit('error: no provider for live-model')\nprint('letta ran')\n")
+    fake.chmod(0o755)
+    result = subprocess.run([sys.executable, "-I", str(script), str(fake)], capture_output=True, text=True,
+                            env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"}, timeout=60)
+    assert result.returncode == 0 and "letta ran" in result.stdout, result.stderr
+    assert "letta agents create did not make the agent for the --mcp servers (exit 1: error: no provider for " \
+        "live-model)" in result.stderr
+
+
 def test_the_start_script_never_follows_a_symlink_and_starts_letta_anyway(start, tmp_path):
     (tmp_path / "home/.letta").mkdir(parents=True)
     target = tmp_path / "elsewhere.json"

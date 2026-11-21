@@ -518,6 +518,11 @@ def sync(letta):
             created = json.loads(made.stdout).get("id") if made.returncode == 0 else None
         except (ValueError, AttributeError):
             created = None
+        if not (isinstance(created, str) and created.startswith("agent-")):  # (said: its servers would be missing)
+            why = [line for line in (made.stderr or made.stdout or "").splitlines() if line.strip()]
+            print(f"sandbox-ai: letta agents create did not make the agent for the --mcp servers (exit "
+                  f"{made.returncode}{': ' + why[-1][:300] if why else ''}); Letta Code makes one without them",
+                  file=sys.stderr)
         settings = read_json(settings_path)
         agents = settings.get("agents") if isinstance(settings, dict) else None
     if not isinstance(agents, list):
@@ -549,6 +554,27 @@ def sync(letta):
 # The arguments that choose an agent or conversation themselves: then the created agent is not named.
 CHOOSING = ("--agent", "-a", "--new-agent", "--name", "-n", "--conv", "--conversation", "--resume", "-r",
             "--ephemeral", "--from-agent")
+# Letta Code's options that take a value as the next word: that word is no subcommand. --model above all: the launcher
+# puts --model HANDLE before the arguments (--model, --llm), and its handle counted as a subcommand, so a first start
+# with --mcp went on without the agent made for it - Letta Code made another one, without the servers (CI 0.1.187).
+VALUED = ("--model", "-m", "--agent", "-a", "--name", "-n", "--conv", "--conversation", "--from-agent", "--system",
+          "--toolset", "--permission-mode", "--output-format", "--input-format", "--max-turns", "--tools",
+          "--allowedTools", "--disallowedTools", "--backend", "--listen", "--memory-blocks", "--init-blocks",
+          "--block-value", "--base-tools", "--skills", "--from-af")
+
+
+def subcommand(options):
+    """Letta Code's subcommand among OPTIONS: the first word that is neither an option nor a VALUED option's value,
+    or None."""
+    skip = False
+    for arg in options:
+        if skip:
+            skip = False
+        elif arg in VALUED:
+            skip = True
+        elif not arg.startswith("-"):
+            return arg
+    return None
 
 
 RULE_HOOK = "--internal-hook letta "
@@ -611,8 +637,7 @@ def main():
               "--letta-enable project-hooks", file=sys.stderr)
         sys.exit(1)
     options = args[:args.index("--")] if "--" in args else args
-    first = next((arg for arg in options if not arg.startswith("-")), None)
-    if created and first is None and not any(arg.split("=", 1)[0] in CHOOSING for arg in options):
+    if created and subcommand(options) is None and not any(arg.split("=", 1)[0] in CHOOSING for arg in options):
         args = ["--agent", created, *args]  # the first start goes on with the agent made for it
     # (a name, as the launcher gives it under Podman - "letta" - is looked up in PATH, as sync's subprocess does)
     os.execvp(letta, [letta, *args])

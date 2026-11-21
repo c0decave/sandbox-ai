@@ -282,3 +282,18 @@ def test_the_red_jobs_say_what_failed_in_full(name, title, steps):
 def test_the_killswitch_job_can_list_its_connections():
     """conntrack shows where a redirected lookup went and with which address it left (the probe's facts)."""
     assert "wireguard-tools passt uidmap conntrack" in job("killswitch")
+
+
+def test_a_hung_test_of_any_pytest_step_prints_where_it_waits():
+    """CI 0.1.187: the app job hung at 80 % until its timeout killed it, and its annotation said only the test's name -
+    its pytest ran without faulthandler_timeout, unlike the core tests'. Every step that runs the test suites under a
+    timeout prints the stacks of a test that runs longer than 5 minutes, and the app step's annotation carries them."""
+    text = WORKFLOW.read_text()
+    runs = [line for line in text.splitlines() if "-m pytest" in line and "timeout " in line]
+    assert len(runs) >= 2, runs  # (the core tests' parts and the app's)
+    for line in runs:
+        step = text[text.index(line):text.index(line) + 400]
+        assert "faulthandler_timeout=300" in step, line
+    app = text[text.index("name: Tests (offscreen, Qt required)"):]
+    app = app[:app.index("exit \"$status\"")]
+    assert "grep -E -A20000 '^Timeout \\(' tests.txt" in app and '"$hung"' in app

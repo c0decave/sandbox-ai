@@ -113,7 +113,13 @@ class Fleet:
                 process.communicate(timeout=60)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.communicate()
+                try:  # (bounded too: a process it started may hold its output open - the guard ends that one)
+                    process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    for stream in (process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
+                    process.wait(timeout=10)
         for server, short in self.relays:
             server.close()
             shutil.rmtree(short, ignore_errors=True)
