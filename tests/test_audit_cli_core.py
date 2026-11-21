@@ -1,13 +1,18 @@
 """The in-depth audit of the command line and the core before the 2026-11-21 release (audit/cli-core): each function
 driven as a user does - the real ./sandbox-ai with live_fakes.py's host (Podman, tmux, npm faked) - and what it SAYS
 read: every message true, naming what exists, with a fix that works. One block per finding."""
+import importlib.util
 import json
 import subprocess
 import time
 
 import pytest
 
-from live_fakes import Host
+from live_fakes import Host, ROOT
+
+_SPEC = importlib.util.spec_from_file_location("runtime_audit_cli_core_test", ROOT / "sandbox" / "runtime.py")
+RUNTIME = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(RUNTIME)
 
 ENOSPC_RUNDIR = "Error: creating pod: mkdir /run/user/1000/libpod/tmp/pod-x: no space left on device"
 
@@ -468,7 +473,9 @@ def running(host):
                                               "pid": supervisor.pid, "start": "web", "session_dir": str(session_dir),
                                               "workspace": str(host.workspace)}))
     server = socket.socket(socket.AF_UNIX)
-    server.bind(str(run / "control.sock"))
+    # As the supervisor binds it (runtime.listen_unix): a long tmp path (CI's /tmp/pytest-of-runner/...) is too long
+    # a name for bind().
+    RUNTIME.bind_long(server, run / "control.sock")
     server.listen(4)
     requests = []
 

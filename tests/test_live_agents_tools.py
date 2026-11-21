@@ -4,6 +4,7 @@ streamed or not, and tells a script what it saw -, the reading of a run's logs (
 scripts/live_check.py --agents and scripts/live_check_agents.sh, and CI's job agents-live."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import urllib.request
@@ -123,6 +124,25 @@ def test_the_switches_checked_and_the_lookup_script():
     done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=60)
     found = L.lookups(done.stdout)
     assert set(found) == {"a.example", "b.example"} and set(found.values()) <= {"ok", "refused"}
+
+
+@pytest.mark.parametrize("agent", sorted(L.AGENTS))
+def test_the_lookup_probe_passes_the_launchers_own_check_of_the_agents_arguments(agent, tmp_path):
+    """CI 0.1.186 (agents-live nanobot, "the probe did not run"): the switch checks ran --binary /bin/sh -c SCRIPT, and
+    nanobot's check of its arguments - which holds under --binary too - refused the shell's -c as its config file.
+    The probe's arguments (probe_args) pass each agent's check, here through the launcher's own dry run."""
+    args, content = L.probe_args(agent, L.lookups_script(["a.example"]))
+    assert (content is None) == (args[0] == "-c") and (content is None or args == [L.PROBE])
+    work = tmp_path / "work"
+    work.mkdir()
+    env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "config"),
+           "XDG_STATE_HOME": str(tmp_path / "state")}
+    done = subprocess.run([str(L.SAI), agent, "--dry-run", "--workspace", str(work), "--no-config", "--no-auth",
+                           "--no-tmux", "--binary", "/bin/sh", "--", *args], capture_output=True, text=True,
+                          env=env, timeout=120, stdin=subprocess.DEVNULL)
+    assert done.returncode == 0 and "arguments:" not in done.stderr, done.stderr
+    if agent == "nanobot":  # (its -c is its config file: still refused, as an argument of nanobot's)
+        assert args == [L.PROBE] and L.load_module("nanobot").refused_arg(["-c", "x"]) is not None
 
 
 def test_skip_reasons_name_what_to_build(monkeypatch):

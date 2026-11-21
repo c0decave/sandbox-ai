@@ -41,9 +41,10 @@ FIXTURE_TOKEN = "fixture-token-not-a-credential"
 
 
 @pytest.fixture
-def home(tmp_path):
-    """A sandbox HOME with an agent's login and state, credentials, and what a project needs of a HOME."""
-    made = tmp_path / "home"
+def home(untrusted_place):
+    """A sandbox HOME with an agent's login and state, credentials, and what a project needs of a HOME - outside the
+    folders an untrusted command may change, as /root is (untrusted_place, conftest.py)."""
+    made = untrusted_place / "home"
     for folder in (".codex/sessions", ".claude/projects", ".config/gh", ".config/git", ".config/tool", ".ssh",
                    ".local/bin", ".local/share/opencode", ".cache"):
         (made / folder).mkdir(parents=True)
@@ -101,7 +102,7 @@ def test_an_untrusted_command_cannot_read_the_agents_logins_state_or_credentials
 
 
 @needs_landlock
-def test_an_untrusted_command_reads_the_rest_of_home_and_changes_none_of_it(home, tmp_path):
+def test_an_untrusted_command_reads_the_rest_of_home_and_changes_none_of_it(home):
     """What a project needs of a HOME is there to read and run; what the agent's own shell reads at its next start
     cannot be changed by it."""
     done = run(home, "sh", "-c", f"cat {home}/.config/tool/settings {home}/.config/git/config && {home}/.local/bin/tool")
@@ -115,10 +116,10 @@ def test_an_untrusted_command_reads_the_rest_of_home_and_changes_none_of_it(home
 
 
 @needs_landlock
-def test_an_untrusted_command_works_in_the_workspace_and_tmp(home, tmp_path):
+def test_an_untrusted_command_works_in_the_workspace_and_tmp(home, untrusted_place):
     """The workspace (here: a folder given with --write, as /work is by itself) and /tmp are its to change; its exit
     status and output are the command's."""
-    work = tmp_path / "work"
+    work = untrusted_place / "work"  # (outside /tmp: else it would be writable without --write)
     work.mkdir()
     done = run(home, "sh", "-c", "echo built > out.txt && mkdir -p sub/dir && mv out.txt sub/dir/ && cat sub/dir/out.txt"
                " && t=$(mktemp) && echo ok > $t && cat $t && rm $t && exit 7", options=("--write", str(work)), cwd=work)
@@ -172,12 +173,13 @@ def test_an_untrusted_command_cannot_read_another_process_of_the_sandbox(home):
 @needs_landlock
 @pytest.mark.skipif(SUPPORT is not None and not SUPPORT["unix"],
                     reason="this kernel's Landlock has no access right for a Unix socket's path")
-def test_an_untrusted_command_cannot_connect_to_the_agents_terminal_hooks_or_relays(home, tmp_path, monkeypatch):
+def test_an_untrusted_command_cannot_connect_to_the_agents_terminal_hooks_or_relays(home, untrusted_place,
+                                                                                    monkeypatch):
     """SAI-21, SAI-22, SAI-23, SAI-14 for a confined command: the Unix sockets in the folders it has no access to -
     tmux's, the hooks', the MCP relays', the terminal relays' - cannot be connected, stream or datagram; one in the
     workspace can."""
-    protected = tmp_path / "protected"
-    work = tmp_path / "work"
+    protected = untrusted_place / "protected"
+    work = untrusted_place / "work"
     for folder in (protected / "tmux-0", work):
         folder.mkdir(parents=True)
     served = []
@@ -267,6 +269,23 @@ def test_a_command_that_cannot_be_confined_is_not_run(home, monkeypatch, capsys)
     assert rt.untrusted(["--no-such-option", "true"], environ={"HOME": str(home)}) == 2
 
 
+def test_a_home_in_a_folder_the_command_may_change_is_refused(untrusted_place, capsys):
+    """HOME below /tmp or /var/tmp (both the command's to change): the agents' folders below it would be changeable
+    and readable through that rule - Landlock has no "all but" - so the command is not run. (GitHub's runner puts
+    pytest's tmp under /tmp: the tests' made-up HOME lies outside, as /root and /home/USER do.)"""
+    for folder in ("/tmp", "/var/tmp"):
+        home = f"{folder}/sandbox-ai-test-no-such-place/home"
+        with pytest.raises(ValueError, match=f"--write {folder}: it holds, or lies in, what an untrusted command gets "
+                                             f"no access to \\({home}/"):
+            rt.untrusted_plan(home)
+        executed = []
+        assert rt.untrusted(["--", "true"], environ={"HOME": home}, execute=lambda *a: executed.append(a)) == 126
+        assert executed == [] and "not run - the command cannot be confined" in capsys.readouterr().err
+    # The tests' own HOME is where a real one is: outside every folder the command may change.
+    real = os.path.realpath(untrusted_place)
+    assert not any(real == item or real.startswith(item + "/") for item in rt.UNTRUSTED_WRITABLE), real
+
+
 def test_the_paths_named_are_everything_but_the_protected(tmp_path):
     """Landlock has no "all but": the rules name every entry beside a protected one, on the way down to it. A link is
     never named (one planted where an entry is allowed would open its target)."""
@@ -348,21 +367,21 @@ def test_a_symlinked_way_to_home_does_not_open_the_protected(tmp_path):
 
 
 @needs_landlock
-def test_a_symlinked_way_to_home_keeps_the_login_unreadable(home, tmp_path):
-    (tmp_path / "via").symlink_to(tmp_path)
-    linked = tmp_path / "via" / "home"
+def test_a_symlinked_way_to_home_keeps_the_login_unreadable(home, untrusted_place):
+    (untrusted_place / "via").symlink_to(untrusted_place)
+    linked = untrusted_place / "via" / "home"
     done = run(linked, sys.executable, "-c", READ, str(home / ".codex" / "auth.json"))
     assert done.returncode == 0 and "REFUSED 13" in done.stdout and FIXTURE_TOKEN not in done.stdout
 
 
 @needs_landlock
-def test_a_home_with_many_entries_is_confined_correctly_and_quickly(home, tmp_path):
+def test_a_home_with_many_entries_is_confined_correctly_and_quickly(home, untrusted_place):
     """Regression: a HOME (or a folder above it) with more than 20000 entries was refused ("more than 20000 entries
     on the way to the protected folders"), so a full test run's shared temp folder failed every test here. The
     folders beside the way are not walked whatever they hold; a crowded folder on the way is bounded."""
     import time
     # Many files in folders not on the way: never looked into.
-    for folder in (home / ".cache" / "deep", tmp_path / "project" / "node_modules"):
+    for folder in (home / ".cache" / "deep", untrusted_place / "project" / "node_modules"):
         folder.mkdir(parents=True)
         for index in range(15000):
             (folder / f"f{index:05}").touch()
@@ -370,12 +389,12 @@ def test_a_home_with_many_entries_is_confined_correctly_and_quickly(home, tmp_pa
     for index in range(rt.UNTRUSTED_SIBLINGS + 1500):
         (home / f"junk{index:05}").touch()
     for index in range(12000):
-        (tmp_path / f"beside{index:05}").touch()
+        (untrusted_place / f"beside{index:05}").touch()
     script = ("import sys\nfor path in sys.argv[1:]:\n    try:\n        open(path).read(); print('READ', path)\n"
               "    except OSError as exc:\n        print('REFUSED', exc.errno, path)\n")
     targets = [home / ".codex" / "auth.json", home / ".git-credentials", home / ".ssh" / "id_ed25519",
                home / ".bashrc", home / ".config" / "tool" / "settings", home / ".cache" / "deep" / "f14999",
-               home / "junk00000", home / f"junk{rt.UNTRUSTED_SIBLINGS + 1499:05}", tmp_path / "beside00000"]
+               home / "junk00000", home / f"junk{rt.UNTRUSTED_SIBLINGS + 1499:05}", untrusted_place / "beside00000"]
     started = time.monotonic()
     done = run(home, sys.executable, "-c", script, *map(str, targets))
     took = time.monotonic() - started

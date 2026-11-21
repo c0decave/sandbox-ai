@@ -1092,6 +1092,31 @@ def test_a_system_install_puts_tab_completion_where_the_shells_look(tmp_path):
     assert gone.returncode == 0 and not any(f.exists() for f in files), gone.stderr
 
 
+def test_any_user_may_check_a_system_installation_and_only_root_changes_it(tmp_path):
+    """CI 0.1.186: a user's `sandbox-ai update --check` of a system installation (root's, /usr/local: they cannot
+    write it) runs install.sh --check --system --prefix P - which said "--system needs root" before it checked
+    anything, so the app's and notify's daily check failed for every user but root. --check only reads; installing,
+    fetching and uninstalling there still need root (or a prefix the user may write). (A fake `id` says uid 1000 and
+    the prefix is not there, so not writable - as root too.)"""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "id").write_text('#!/bin/sh\n[ "$1" = "-u" ] && { echo 1000; exit 0; }\nexec /usr/bin/id "$@"\n')
+    (fake / "id").chmod(0o755)
+    prefix = tmp_path / "usr-local"  # (not there: -w is false for root too)
+    env = environment(tmp_path, PATH=f"{fake}:/usr/bin:/bin")
+
+    def run(*args):
+        return subprocess.run(["bash", str(ROOT / "install.sh"), "--system", "--prefix", str(prefix), *args],
+                              capture_output=True, text=True, env=env, timeout=120)
+    check = run("--check", "--from", str(ROOT))
+    assert check.returncode == 0, check.stderr
+    assert f"installed: none ({prefix}/lib/sandbox-ai)" in check.stdout and "needs root" not in check.stderr
+    for args in (["--from", str(ROOT), "--no-app"], ["--uninstall"], ["--fetch", str(tmp_path / "fetched")]):
+        refused = run(*args)
+        assert refused.returncode != 0 and "--system needs root" in refused.stderr, (args, refused.stderr)
+    assert not prefix.exists() and not (tmp_path / "fetched").exists()
+
+
 def test_install_sh_colours_on_a_terminal_only(tmp_path):
     """install.sh says its errors red on a terminal (FORCE_COLOR stands in for one here), never with NO_COLOR or
     --no-color, never in a pipe."""

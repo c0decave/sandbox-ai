@@ -139,6 +139,15 @@ class Live:
                 process.wait(timeout=120)
         return process.returncode, stdout, stderr, logs
 
+    def probe(self, agent, options, script, name):
+        """start with --binary /bin/sh running SCRIPT (probe_args: -c SCRIPT, or SCRIPT as a file in the workspace)."""
+        args, content = probe_args(agent, script)
+        if content is not None:
+            work = self.tmp / f"work-{name}"
+            work.mkdir(exist_ok=True)
+            (work / PROBE.rsplit("/", 1)[1]).write_text(content)
+        return self.start(agent, [*options, "--binary", "/bin/sh"], args, name)
+
     def plan(self, agent, options):
         """The dry run's plan (JSON) of a start of AGENT with OPTIONS."""
         work = self.tmp / "work-plan"
@@ -262,6 +271,20 @@ def lookups_script(names):
             "EOF\n")
 
 
+PROBE = "/work/.sandbox-ai-probe.sh"  # (the workspace's place in the sandbox)
+
+
+def probe_args(agent, script):
+    """(/bin/sh's arguments for SCRIPT in AGENT's sandbox - --binary /bin/sh -, the probe file's content or None):
+    -c SCRIPT; but the agent's own check of its arguments holds under --binary too, and where it takes the shell's -c
+    for its own option (nanobot: -c is its config file, refused - CI 0.1.186, "the probe did not run"), SCRIPT goes
+    as a file in the workspace (PROBE), which no check takes for an option."""
+    refused = getattr(load_module(agent), "refused_arg", None)
+    if refused is None or refused(["-c", script]) is None:
+        return ["-c", script], None
+    return [PROBE], script
+
+
 def lookups(stdout):
     """{name: "ok" | "refused"} of the RESULT dns lines of lookups_script."""
     found = {}
@@ -332,8 +355,8 @@ def check_no_switch_opens_nothing(tmp_path, agent):
         assert not plan["https_hosts"] and not plan.get("host_wildcards"), \
             f"a start without switches plans hosts: {plan['https_hosts']} {plan.get('host_wildcards')}"
         names = [*telemetry_samples(module), "example.com"]
-        status, stdout, stderr, logs = live.start(agent, [*options, "--binary", "/bin/sh"],
-                                                  ["-c", lookups_script(names)], f"live-{agent}-closed")
+        status, stdout, stderr, logs = live.probe(agent, options, lookups_script(names),
+                                                  f"live-{agent}-closed")
         found = lookups(stdout)
         _, refused = reached_and_refused(logs)
         report(f"{agent}-closed", {"agent": agent, "lookups": found, "refused": sorted(refused)})
@@ -356,8 +379,8 @@ def check_switch_opens_only_its_hosts(tmp_path, agent, feature, hosts):
         others = sorted({h for _, other in features_to_check(module) for h in other} - set(hosts))
         unrelated = ["example.com"]
         names = [*hosts, *others, *telemetry_samples(module), *unrelated]
-        status, stdout, stderr, logs = live.start(agent, [*options, "--binary", "/bin/sh"],
-                                                  ["-c", lookups_script(names)], f"live-{agent}-{feature}")
+        status, stdout, stderr, logs = live.probe(agent, options, lookups_script(names),
+                                                  f"live-{agent}-{feature}")
         text = run_report(status, stdout, stderr)
         found = lookups(stdout)
         _, refused = reached_and_refused(logs)

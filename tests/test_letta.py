@@ -234,6 +234,26 @@ def test_the_start_script_lays_the_servers_in_and_becomes_letta(start, tmp_path)
     assert calls == [["--new"]] and settings["agents"][0]["mcpServers"] == [{"name": "mine", "command": "x"}]
 
 
+def test_the_start_script_becomes_letta_named_by_its_name_alone(tmp_path):
+    """CI 0.1.186 (agents-live letta): under Podman the launcher gives the start script the binary's name - "letta",
+    found in the image's PATH (/usr/local/bin/letta) - and os.execv, which looks in no PATH, said FileNotFoundError
+    after the servers were laid in (`letta agents create` went through PATH). Now it becomes the letta of PATH."""
+    script = tmp_path / "start.py"
+    script.write_text(letta.START_SCRIPT.replace(letta.START_CONFIG, str(tmp_path / "start.json")))
+    (tmp_path / "start.json").write_text(json.dumps({"servers": [], "cloud": False}))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "letta"
+    fake.write_text(f"#!{sys.executable}\nimport sys\nprint('letta ran:', sys.argv[1:])\n")
+    fake.chmod(0o755)
+    work = tmp_path / "work"  # (the workspace, the start's folder: no letta there)
+    work.mkdir()
+    result = subprocess.run([sys.executable, "-I", str(script), "letta", "-p", "hi"], capture_output=True, text=True,
+                            cwd=work, env={"HOME": str(tmp_path / "home"), "PATH": f"{bin_dir}:/usr/bin:/bin"},
+                            timeout=60)
+    assert result.returncode == 0 and "letta ran: ['-p', 'hi']" in result.stdout, result.stderr
+
+
 def test_the_start_script_never_follows_a_symlink_and_starts_letta_anyway(start, tmp_path):
     (tmp_path / "home/.letta").mkdir(parents=True)
     target = tmp_path / "elsewhere.json"

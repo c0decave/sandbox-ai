@@ -77,6 +77,9 @@ PAUSE_LIMIT = 900
 PAUSED = 75  # the worker's exit status while the relay pauses (EX_TEMPFAIL)
 REFUSED = 2
 LOG_LIMIT = 1 << 20
+# Where `--help` (Cairn's check at its start, no task: no project folder) runs - the agent's workspace, or "/" where
+# there is none (the relay's tests on a host without /work).
+HELP_CWD = "/work"
 RESTARTS = 5  # restarts of a relay that ended, within RESTART_WINDOW seconds (supervise)
 RESTART_WINDOW = 600
 RESTART_DELAYS = (1, 2, 5, 10, 30)  # seconds before the 1st, 2nd, ... restart within the window
@@ -365,6 +368,7 @@ def handle(connection, cfg, guard, popen=subprocess.Popen):
         return answer(PAUSED, f"the workers are paused for {int(wait) + 1} s more after {guard.failures} failed "
                               "tasks in a row (every attempt spends the model's usage); stop the project on Cairn's "
                               "board if it keeps failing")
+    run_in = cwd or (HELP_CWD if os.path.isdir(HELP_CWD) else "/")
     folders = {os.path.dirname(path) for path in files}  # this call's snapshots: kept while its worker runs
     with BUSY_LOCK:
         BUSY.update(folders)
@@ -372,7 +376,7 @@ def handle(connection, cfg, guard, popen=subprocess.Popen):
         try:
             if cwd:
                 prepare(cwd, files)
-            child = popen(argv, cwd=cwd or "/work", env={**os.environ, **extra}, stdin=subprocess.DEVNULL,
+            child = popen(argv, cwd=run_in, env={**os.environ, **extra}, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         except (OSError, ValueError) as exc:
             log(cfg, f"could not start {argv[0]}: {exc}")
@@ -380,7 +384,7 @@ def handle(connection, cfg, guard, popen=subprocess.Popen):
                 guard.done(127)
             return answer(127, f"{argv[0]} could not be started: {exc}")
         connection.settimeout(None)
-        log(cfg, f"started {argv[0]} {'task' if task else '--help'} in {cwd or '/work'}")
+        log(cfg, f"started {argv[0]} {'task' if task else '--help'} in {run_in}")
         status = pump(connection, child)
     finally:
         with BUSY_LOCK:

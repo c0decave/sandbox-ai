@@ -614,7 +614,8 @@ def main():
     first = next((arg for arg in options if not arg.startswith("-")), None)
     if created and first is None and not any(arg.split("=", 1)[0] in CHOOSING for arg in options):
         args = ["--agent", created, *args]  # the first start goes on with the agent made for it
-    os.execv(letta, [letta, *args])
+    # (a name, as the launcher gives it under Podman - "letta" - is looked up in PATH, as sync's subprocess does)
+    os.execvp(letta, [letta, *args])
 
 
 if __name__ == "__main__":

@@ -760,6 +760,11 @@ def test_openhands_own_command_runs_the_guard_before_the_canvas(tmp_path, monkey
     monkeypatch.setattr(cli, "GUARD_PY", str(kept))
     monkeypatch.setattr(cli, "canvas_main", lambda args: 0)
     monkeypatch.setattr(cli.os, "_exit", lambda status: (_ for _ in ()).throw(SystemExit(status)))
+    # The guard reads this process's own environment: what the host running the tests has that it refuses
+    # (GitHub's runner image: POWERSHELL_TELEMETRY_OPTOUT=1 and the like) is not in a sandbox - the launcher never
+    # passes it (refused_names) - so not here either.
+    for name in guard.refused_names("openhands", os.environ):
+        monkeypatch.delenv(name)
     monkeypatch.setenv("AGENT_CANVAS_DISABLE_TELEMETRY", "0")
     with pytest.raises(SystemExit) as ended:
         cli.main(["openhands"])

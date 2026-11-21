@@ -806,7 +806,11 @@ def test_e2e_plain_uninstall_is_install_sh_uninstall(tmp_path):
 
 
 def test_e2e_system_installation(world, tmp_path):
+    # A prefix that is there and this user's (install.sh --system: root, or whoever may write the prefix), so this
+    # runs as a user too (CI); the user's refusal where they cannot write it: test_install's
+    # test_any_user_may_check_a_system_installation_and_only_root_changes_it.
     prefix = tmp_path / "prefix"
+    prefix.mkdir()
     result = subprocess.run(["bash", str(ROOT / "install.sh"), "--system", "--prefix", str(prefix), "--from",
                              str(ROOT), "--no-app-deps", "--no-app-terminal"], capture_output=True, text=True,
                             env=world.env, timeout=300)

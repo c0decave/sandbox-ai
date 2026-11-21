@@ -296,7 +296,10 @@ def test_packages_that_cannot_replace_themselves_say_why(home, tmp_path, monkeyp
 def test_the_timer_of_a_package_runs_the_file_not_the_copy_of_one_version(home, tmp_path, monkeypatch):
     info, file = package_copy(tmp_path, "pyz", monkeypatch)
     command = U.timer_command(info)
-    assert command[1:] == ["-I", str(file), "update", "--scheduled"] and "cache" not in " ".join(command)
+    # (never the copy unpacked below cache/; the interpreter may lie in a "cache" of its own: GitHub's runner has
+    # setup-python's in /opt/hostedtoolcache)
+    assert command[1:] == ["-I", str(file), "update", "--scheduled"]
+    assert not [part for part in command if str(tmp_path / "cache") in part]
     info, file = package_copy(tmp_path, "appimage", monkeypatch)
     assert U.timer_command(info) == [str(file), "cli", "update", "--scheduled"]
     info, bundle = package_copy(tmp_path, "macos-app", monkeypatch)

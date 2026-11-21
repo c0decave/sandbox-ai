@@ -132,7 +132,7 @@ def test_sealed_relays_are_published_only_when_the_guard_takes_them(tmp_path):
         assert all(os.get_inheritable(fd) for fd in fds)
         for fd, name in zip(fds, ("attach", "shell")):
             with socket.socket(socket.AF_UNIX) as client, socket.socket(fileno=os.dup(fd)) as listener:
-                client.connect(str(directory / f"{name}.sock"))
+                rt.connect_long(client, directory / f"{name}.sock")
                 listener.settimeout(5)
                 accepted, _ = listener.accept()
                 accepted.close()
@@ -241,7 +241,7 @@ def test_sealed_relays_do_not_use_what_is_in_their_place(tmp_path):
     (tmux / "relay").unlink()
     (tmux / "relay").mkdir()
     stale = socket.socket(socket.AF_UNIX)
-    stale.bind(str(tmux / "relay" / "attach.sock"))
+    rt.bind_long(stale, tmux / "relay" / "attach.sock")
     stale.close()
     relays = rt.SealedRelays(tmux / "relay", sandboxed=False)
     try:
@@ -321,7 +321,7 @@ def test_the_sealed_script_runs_the_relays_on_the_handed_sockets(tmp_path, monke
         # `sandbox-ai attach`: the relay on the handed socket starts its tmux client.
         with socket.socket(socket.AF_UNIX) as attach:
             attach.settimeout(20)
-            attach.connect(str(directory / "attach.sock"))
+            rt.connect_long(attach, directory / "attach.sock")
             attach.sendall(rt.attach_frame(b"r", struct.pack("!HH", 24, 80)))
             said = b""
             while b"attached" not in said:
@@ -404,12 +404,12 @@ def test_a_relay_refuses_connections_beyond_its_limit_before_serving_them(tmp_pa
     held = []
     for _ in range(3):
         client = socket.socket(socket.AF_UNIX)
-        client.connect(str(path))
+        rt.connect_long(client, path)
         held.append(client)
     assert wait_for(lambda: len(serving) == 3)
     extra = socket.socket(socket.AF_UNIX)
     extra.settimeout(5)
-    extra.connect(str(path))
+    rt.connect_long(extra, path)
     assert extra.recv(1) == b""  # closed at once: no thread, no pty, no process was made for it
     extra.close()
     assert len(serving) == 3
@@ -424,7 +424,7 @@ def one_more(path, serving, expected):
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(2)
         try:
-            client.connect(str(path))
+            rt.connect_long(client, path)
         except OSError:
             return False
         return wait_for(lambda: len(serving) >= expected, 1)
@@ -498,7 +498,7 @@ def test_an_impostor_in_the_tmux_folder_gets_nothing_of_a_sealed_session(tmp_pat
     (directory / "tmux" / "relay").mkdir()
     for name in ("attach.sock", "shell.sock"):  # the relays the process ended: their sockets stay, nobody listens
         dead = socket.socket(socket.AF_UNIX)
-        dead.bind(str(directory / "tmux" / "relay" / name))
+        rt.bind_long(dead, directory / "tmux" / "relay" / name)  # (a long tmp path: too long a name for bind())
         dead.close()
     fake_shell = Impostor(directory / "tmux" / "shell.sock", b"o" + struct.pack("!I", 5) + b"owned"
                           + b"x" + struct.pack("!I", 4) + struct.pack("!i", 0))

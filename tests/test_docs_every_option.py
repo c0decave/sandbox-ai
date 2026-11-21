@@ -50,7 +50,7 @@ def every_option():
         if command in hidden:
             continue
         parser = completion.parser_of(command)
-        assert parser is not None, f"sandbox-ai {command}: its parser was not found"
+        assert parser is not None, f"sandbox-ai {command}: its parser was not found ({completion.NOT_FOUND.get(command)})"
         walk(parser, (command,))
     return found
 

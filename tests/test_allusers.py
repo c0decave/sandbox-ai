@@ -3,12 +3,15 @@ each user's state read as data only, Podman asked as that user, every action run
 
 Nothing here touches the machine's users, HOMEs or Podman: the users come from a fake passwd file
 (SANDBOX_AI_PASSWD), their HOMEs and runtime directories are temporary (SANDBOX_AI_USER_RUNTIME), and runuser and
-podman are fakes on PATH that record what they were asked. These tests run as root (the sandbox's), so the fake
-users have the uid that owns the temporary files; a foreign owner is faked where it matters (owner_ok)."""
+podman are fakes on PATH that record what they were asked. The fake users have the uid that owns the temporary files
+(the test's own); a foreign owner is faked where it matters (owner_ok). The tests through ./sandbox-ai need a real
+root (the seam SANDBOX_AI_TEST_EUID only ever takes root away) and are skipped without one (as on CI's runner); the
+in-process ones fake root with a stubbed os.geteuid where that is all they need."""
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -20,6 +23,25 @@ au = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(au)
 ME = os.geteuid()
 SECRET = "SECRET-shadow-line-4711"
+
+# ./sandbox-ai run as another process: only a real root may see another user's starts, and nothing can fake it there.
+NEEDS_ROOT = pytest.mark.skipif(ME != 0, reason="runs ./sandbox-ai, which acts on another user's starts only as a "
+                                                "real root (SANDBOX_AI_TEST_EUID only takes root away); this runs as "
+                                                f"uid {ME}")
+
+
+def roots_copy_problem():
+    """Why this checkout cannot be root's own copy handed to a user (allusers.copy_problem, with the python3 that
+    ./sandbox-ai runs), or None: e.g. a checkout under /root (0700) no other user can reach."""
+    python = shutil.which("python3")
+    return au.copy_problem(au.HERE, 0, os.path.realpath(python) if python else None)
+
+
+def as_root(monkeypatch):
+    """Fake root in this process (os.geteuid, which allusers.effective_uid reads) for a test that needs nothing of
+    root but the check: nothing it runs gets root's rights (the fake users are the test's own uid)."""
+    monkeypatch.setattr(au.os, "geteuid", lambda: 0)
+    monkeypatch.delenv(au.EUID_ENV, raising=False)
 
 
 @pytest.fixture(params=["happy", "sad", "edge"])
@@ -288,6 +310,7 @@ def test_target_of_a_command(scenario, box, monkeypatch):
 
 # --- through ./sandbox-ai ------------------------------------------------------------------------------------------
 
+@NEEDS_ROOT
 def test_list_all_users_e2e(box):
     alice, bob = box.user("alice"), box.user("bob")
     marks = [plant_own_copy(alice), plant_own_copy(bob)]
@@ -317,6 +340,7 @@ def test_list_all_users_e2e(box):
                for line in box.log("runuser.log").splitlines())
 
 
+@NEEDS_ROOT
 def test_list_all_users_without_a_runtime_dir_says_unknown_e2e(box):
     alice = box.user("alice", logged_in=False)
     box.session(alice, "a-live")
@@ -336,6 +360,7 @@ def test_non_root_is_refused_e2e(box):
     assert box.log("runuser.log") == "" and box.log("podman.log") == ""
 
 
+@NEEDS_ROOT
 def test_symlink_attack_is_not_read_e2e(box):
     """A user links their state file to a root-only file (as /etc/shadow): root never reads it."""
     alice = box.user("alice")
@@ -353,7 +378,11 @@ def test_symlink_attack_is_not_read_e2e(box):
     assert SECRET not in done.stdout + done.stderr
 
 
+@NEEDS_ROOT
 def test_actions_run_as_the_user_with_roots_own_copy_e2e(box):
+    problem = roots_copy_problem()
+    if problem:
+        pytest.skip(f"this checkout cannot be root's own copy that a user runs (the product refuses it): {problem}")
     alice = box.user("alice")
     mark = plant_own_copy(alice)
     box.session(alice, "a-kept", ended=True)
@@ -372,6 +401,7 @@ def test_actions_run_as_the_user_with_roots_own_copy_e2e(box):
     assert not mark.exists()
 
 
+@NEEDS_ROOT
 def test_unknown_user_is_said_e2e(box):
     box.user("alice")
     done = box.run("stop", "--user", "carol", "x")
@@ -387,6 +417,7 @@ def test_completion_offers_other_users_starts_to_root_only(scenario, box, monkey
     spec.loader.exec_module(completion)
     alice = box.user("alice")
     box.session(alice, "a-live")
+    as_root(monkeypatch)  # (its records are read as data only; Podman is not asked)
     if scenario == "sad":
         monkeypatch.setenv(au.EUID_ENV, "1000")
     if scenario == "edge":
@@ -423,6 +454,10 @@ def test_actions_get_no_terminal_of_roots(scenario, box, monkeypatch):
     alice = box.user("alice")
     seen = {}
     real_popen = subprocess.Popen
+    as_root(monkeypatch)  # (Popen is faked: what it starts runs as the test's own uid)
+    # root's own copy as own_copy returns it when its check holds (that check: test_own_copy_must_be_roots_and_
+    # reachable and the e2e above); this checkout may lie where a user cannot reach it (/root) or be no root's
+    monkeypatch.setattr(au, "own_copy", lambda: (os.path.realpath(sys.executable), str(au.HERE / "main.py")))
 
     def popen(argv, **kwargs):
         seen.update(argv=argv, **kwargs)

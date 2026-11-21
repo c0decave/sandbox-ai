@@ -150,7 +150,9 @@ if [[ -z "$mode" ]]; then
   if [[ $(id -u) == 0 ]]; then mode=system; else mode=user; fi
 fi
 if [[ $mode == system ]]; then
-  [[ $(id -u) == 0 || -w "$prefix" ]] || die "--system needs root: sudo bash install.sh --system"
+  # --check only reads (what is installed, what the source offers, its signature): every user of a system
+  # installation asks it (sandbox-ai update --check, the app's and notify's daily check); what changes one needs root.
+  [[ $action == check || $(id -u) == 0 || -w "$prefix" ]] || die "--system needs root: sudo bash install.sh --system"
   # For every user: what is made here is open to all and writable by its owner only, whatever root's umask (077 on
   # hardened systems or in a root shell made every folder root's alone - the users' sandbox-ai, builds and app failed).
   umask 022

@@ -195,6 +195,31 @@ def test_firejails_folder_in_the_agents_home_is_sealed_before_firejail_starts(tm
     assert "--noprofile" in rt.firejail_command({})
 
 
+def test_firejails_folder_is_blacklisted_only_as_a_folder_and_a_caller_that_cannot_look_gets_a_command(
+        tmp_path, monkeypatch):
+    """CI 0.1.186 (a runner that is not root, /root 0700): Path.is_dir() raised PermissionError for
+    /root/.config/firejail and no Firejail command was made. A link is never blacklisted (Firejail would hide what it
+    leads to); a folder this process may not look at is none it is shown either."""
+    monkeypatch.setattr(rt.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout=""))
+    target = tmp_path / "work"
+    target.mkdir()
+    link = tmp_path / "firejail"
+    link.symlink_to(target)
+    monkeypatch.setattr(rt, "FIREJAIL_CONFIG", link)
+    assert not [option for option in rt.firejail_command({}) if option.startswith("--blacklist=" + str(tmp_path))]
+    hidden = tmp_path / "closed" / "firejail"
+    for name in ("stat", "lstat"):  # (root may look everywhere: the denial is made up, for this path alone)
+        def denied(path, *args, real=getattr(os, name), **kwargs):
+            if str(path) == str(hidden):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real(path, *args, **kwargs)
+        monkeypatch.setattr(rt.os, name, denied)
+    monkeypatch.setattr(rt, "FIREJAIL_CONFIG", hidden)
+    command = rt.firejail_command({})
+    assert "--noprofile" in command and f"--blacklist={hidden}" not in command
+    assert rt.sealed_firejail_folder(tmp_path / "absent") is False and rt.sealed_firejail_folder(target) is True
+
+
 def test_the_supervisor_seals_first_and_a_strict_mode_does_not_start_unsealed(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(rt, "SANDBOX_PROCESS", True)
     monkeypatch.setattr(rt, "write_manifest", lambda manifest: [])

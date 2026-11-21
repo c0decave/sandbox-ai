@@ -49,21 +49,34 @@ def commands():
     return dict(module("main").PYTHON_COMMANDS)
 
 
+# Every way a script asks its parser to parse. All of them are caught: since Python 3.12.7/3.13 the intermixed
+# ones no longer go through parse_known_args (they call argparse's internal _parse_known_args2), so catching
+# parse_args and parse_known_args alone let `completion` (parse_intermixed_args) print its --help and exit.
+PARSE_METHODS = ("parse_args", "parse_known_args", "parse_intermixed_args", "parse_known_intermixed_args")
+
+# Why parser_of found no parser, per command (for the report of a test, or a look by hand): its contract stays
+# None, so a script that cannot be read gets no completion and never fails the shell.
+NOT_FOUND = {}
+
+
 def parser_of(command):
     """The argparse parser COMMAND's script builds, caught when it parses: the script runs as it would, up to
     its parse_args (nothing after that), with its output thrown away."""
     table = commands()
     if command not in table:
+        NOT_FOUND[command] = "not a command of main.py's PYTHON_COMMANDS"
         return None
     script, *prefix = table[command]
     if script == "agent_sandbox.py":
         return module("agent_sandbox").build_parser()
-    original = argparse.ArgumentParser.parse_args, argparse.ArgumentParser.parse_known_args
+    original = {name: getattr(argparse.ArgumentParser, name) for name in PARSE_METHODS
+                if hasattr(argparse.ArgumentParser, name)}
 
     def capture(self, *args, **kwargs):
         raise Captured(self)
     argv = sys.argv
-    argparse.ArgumentParser.parse_args = argparse.ArgumentParser.parse_known_args = capture
+    for name in original:
+        setattr(argparse.ArgumentParser, name, capture)
     sys.argv = [str(HERE / script), *prefix, "--help"]
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -77,11 +90,15 @@ def parser_of(command):
                 break
             parser = sub
         return parser
-    except BaseException:  # noqa: BLE001 - a script that cannot be read gets no completion
+    except BaseException as exc:  # noqa: BLE001 - a script that cannot be read gets no completion
+        NOT_FOUND[command] = (f"{script} ended with {type(exc).__name__}: {exc} before any of "
+                              f"{', '.join(original)} was called")
         return None
     finally:
-        argparse.ArgumentParser.parse_args, argparse.ArgumentParser.parse_known_args = original
+        for name, method in original.items():
+            setattr(argparse.ArgumentParser, name, method)
         sys.argv = argv
+    NOT_FOUND[command] = f"{script} ran to its end without calling any of {', '.join(original)}"
     return None
 
 

@@ -263,6 +263,19 @@ def test_the_relay_answers_a_paused_task_without_running_it(world, monkeypatch):
     assert status == 0 and out, "--help (Cairn's check at its start) is no task"
 
 
+def test_help_answers_where_there_is_no_work_folder(world, monkeypatch, tmp_path):
+    """CI 0.1.186 (GitHub's runner has no /work): `--help` ran in /work alone, which could not be started there
+    (127), so Cairn's check at its start failed. It runs in the agent's /work, or in / without one."""
+    monkeypatch.setattr(relay, "HELP_CWD", str(tmp_path / "no-work"))
+    status, out, err = world["call"]("claude", "--help")
+    assert status == 0 and out == "answer of claude\n", err
+    assert world["calls"]()[-1]["cwd"] == "/" and world["calls"]()[-1]["args"] == ["--help"]
+    here = tmp_path / "work"
+    here.mkdir()
+    monkeypatch.setattr(relay, "HELP_CWD", str(here))
+    assert world["call"]("claude", "--help")[0] == 0 and world["calls"]()[-1]["cwd"] == str(here)
+
+
 def test_the_socket_is_the_owner_s_only(world):
     assert os.stat(world["cfg"]["socket"]).st_mode & 0o777 == 0o600
 

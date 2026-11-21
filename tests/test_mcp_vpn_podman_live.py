@@ -188,12 +188,20 @@ def test_the_guard_runs_the_server_in_the_vpn_containers_namespace_and_nothing_l
 
 @pytest.mark.skipif(os.environ.get("SANDBOX_AI_LIVE_NETWORK") != "1", reason="SANDBOX_AI_LIVE_NETWORK=1: the internet")
 def test_the_same_server_without_a_vpn_reaches_the_internet(work, names):
-    """(the control: the probe sees a way out where there is one)"""
+    """(the control: the probe sees a way out where there is one) Without a VPN the bridge runs a server with network
+    through mcp_egress.py's guard (its egress rules in the container's namespace before it starts: the internet,
+    not your network), the server's own `podman run` line after its "--"; run as the bridge runs it."""
     (work / "targets.json").write_text(json.dumps({"mode": "probe", "tcp": {"internet": ["1.1.1.1", 443]},
                                                    "dns": {"public resolver": ["example.com", "1.1.1.1"]}}))
     command, plan = connection_command("plain", work, vpn=False)
-    assert plan["vpn"] is None and command[:2] == ["podman", "run"]
+    # Without a VPN its way out is the internet, not your network: mcp_egress.py's guard creates the container, loads
+    # its egress rules into its namespace and starts it only then (mcp.connection_command, since the egress rules).
+    run = command.index("--") + 1
+    assert plan["vpn"] is None and plan["egress"] and command[:4] == [
+        sys.executable, "-I", str(SANDBOX / "mcp_egress.py"), "--internal-egress-guard"], command
+    assert command[run:run + 2] == ["podman", "run"] and command[-1] == PROBE_IMAGE, command
     done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+    assert done.returncode == 0 and done.stdout.strip(), done.stderr[-2000:]
     report = json.loads(done.stdout.strip().splitlines()[-1])
     assert report["attempts"]["internet"] == "connected", report
     assert isinstance(report["attempts"]["public resolver"], list) and report["attempts"]["public resolver"], report

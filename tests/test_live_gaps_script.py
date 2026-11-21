@@ -546,6 +546,11 @@ def test_a_whole_run_with_stand_ins_for_podman_and_pytest(tmp_path, monkeypatch,
     monkeypatch.setattr(real, "inside_a_container", lambda: False)
     monkeypatch.setattr(real, "pytest_python", lambda directory: sys.executable)
     monkeypatch.setattr(LG, "load_live_check", lambda: real)
+    # A stand-in for `devices scan` too: one offering nothing (GitHub's runner has a /dev/kvm the real scan offers,
+    # and devices-live ran there).
+    prepare_device = LG.prepare_device
+    monkeypatch.setattr(LG, "prepare_device", lambda args, env: prepare_device(
+        args, env, runner=lambda command, **kwargs: (0, json.dumps({"devices": []}), "")))
     seen = {}
 
     def fake_pytest(command, log, timeout, env, cwd):
@@ -576,6 +581,8 @@ def test_a_whole_run_with_stand_ins_for_podman_and_pytest(tmp_path, monkeypatch,
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["kits-attach"]["missing"] == ["image:claude: missing: sandbox-ai build claude (or --build)"]
     assert checks["local-llm"]["missing"][0].startswith("llm: not run: not confirmed")
+    assert checks["devices-live"]["missing"] == ["device: devices scan offers no serial port, camera, render node or "
+                                                 "/dev/kvm to hand over; give --device PATH"]
     assert checks["git-login-give"]["outcome"] == "passed" and "--agent-backend podman" in checks[
         "git-login-give"]["command"]
     text = next((tmp_path / "out").glob("REPORT-*.md")).read_text()

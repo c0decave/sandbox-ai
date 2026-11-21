@@ -128,6 +128,40 @@ def writable_tmp_path(request):
                     pass
 
 
+# The folders an untrusted command (runtime.py --untrusted) may change; kept in step with UNTRUSTED_WRITABLE there
+# (test_security_review_untrusted.py checks the tuple).
+UNTRUSTED_WRITABLE = ("/work", "/workspaces", "/tmp", "/var/tmp", "/dev", "/proc")
+
+
+@pytest.fixture
+def untrusted_place(tmp_path):
+    """A folder for a made-up HOME of an untrusted command, outside the folders such a command may change: tmp_path
+    where it lies outside them (a local run with TMPDIR under /root), else a fresh folder below the real user's
+    ~/.cache (GitHub's runner: pytest's tmp is under /tmp, and a HOME there is refused - /tmp is the command's to
+    change, so the agents' folders below it would be too; inside a sandbox HOME is /root, on a host /home/USER).
+    Removed afterwards."""
+    import pwd
+    import shutil
+    import tempfile
+
+    def changeable(path):
+        real = os.path.realpath(path)
+        return any(real == item or real.startswith(item + "/") for item in UNTRUSTED_WRITABLE)
+    if not changeable(tmp_path):
+        yield tmp_path
+        return
+    cache = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache"
+    if changeable(cache):
+        pytest.skip(f"no folder outside {', '.join(UNTRUSTED_WRITABLE)} to make a HOME in (tmp_path {tmp_path}, the "
+                    f"user's {cache})")
+    cache.mkdir(parents=True, exist_ok=True)
+    made = Path(tempfile.mkdtemp(prefix="sandbox-ai-untrusted-test-", dir=cache))
+    try:
+        yield made
+    finally:
+        shutil.rmtree(made, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def no_fake_host_process_outlives_the_test():
     """Nothing of a fake host (live_fakes.Host) a test made runs on after it: what is left (an MCP server's relay

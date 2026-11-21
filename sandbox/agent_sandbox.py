@@ -601,7 +601,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.186"
+__version__ = "0.1.187"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -12749,8 +12749,8 @@ def start_monitor(a, safeguard=None, watched=False):
     Bubblewrap run without a scope of its own: its process tree); else, and when the cgroup is not found after
     MONITOR_LOCATE_TRIES looks, `podman stats` every monitor.REMOTE_INTERVAL seconds stands in (macOS: podman machine's
     VM; --podman-url). Its warnings go to SAFEGUARD (the run's safeguard records: the app's popups, a desktop
-    notification) - those the memory watch tells itself not when it runs (WATCHED) - and to the run's activity.
-    Never fails the launch."""
+    notification) - those the memory watch tells itself not while it sees the run's cgroup (WATCHED: the run's
+    ResourceWatch, None, or True/False) - and to the run's activity. Never fails the launch."""
     if a.probe:
         return None
     try:
@@ -12801,7 +12801,9 @@ def start_monitor(a, safeguard=None, watched=False):
         def warn(warning, started):
             if not started:
                 return
-            if safeguard is not None and not (watched and warning["kind"] in MONITOR_WATCHED_KINDS):
+            # (a memory watch that has not found the run's cgroup tells nothing: the monitor's warning is the one)
+            told = watched if isinstance(watched, bool) else getattr(watched, "cgroup", None) is not None
+            if safeguard is not None and not (told and warning["kind"] in MONITOR_WATCHED_KINDS):
                 fix = warning["advice"] + (f" (sandbox-ai {' '.join(warning['argv'])})" if warning.get("argv") else "")
                 safeguard("resources", warning["text"], warning["title"], fix, target=warning["kind"])
             if a.log_dir:
@@ -15015,7 +15017,7 @@ def launch(argv, floor_by=None):
         # Not "memory": that name holds the project memory (save_memory below).
         memory_watch = start_memory_watch(a, session, safeguard_watch.report if safeguard_watch else None)
         # The system monitor: what the run uses over time, its warnings (sandbox-ai top, stats usage; the app).
-        monitor = start_monitor(a, safeguard_watch.report if safeguard_watch else None, memory_watch is not None)
+        monitor = start_monitor(a, safeguard_watch.report if safeguard_watch else None, memory_watch)
         # The budgets (sandbox-ai spend): the proxy's warnings to you, the other runs' spending to the proxy.
         try:
             spend_watch = start_spend_watch(a)

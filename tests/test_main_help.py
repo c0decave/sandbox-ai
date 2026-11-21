@@ -77,7 +77,7 @@ def test_the_help_is_docker_like_and_fits_80_columns():
 def test_management_commands_are_the_ones_with_subcommands():
     for command in sorted(set(listed()) - {"build", "update", "version", "help"}):
         parser = completion.parser_of(command)
-        assert parser is not None, command
+        assert parser is not None, f"{command}: {completion.NOT_FOUND.get(command)}"
         has_commands = any(isinstance(a, argparse._SubParsersAction) for a in parser._actions)
         assert has_commands == (command in names("Management Commands")), command
 
@@ -224,6 +224,7 @@ def every_parser():
         parser = completion.parser_of(command)
         if command not in main.PYTHON_COMMANDS or main.PYTHON_COMMANDS[command][0] == "agent_sandbox.py":
             continue
+        assert parser is not None, f"{command}: {completion.NOT_FOUND.get(command)}"
         walk(helpstyle.style(parser), [command])
     launcher = load("agent_sandbox")
     found.append((["claude"], launcher.build_parser("claude")))

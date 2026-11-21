@@ -125,6 +125,14 @@ def test_nothing_of_python_3_10_or_later_on_the_host():
     assert not found, "\n".join(found)
 
 
+def test_the_tests_collect_on_python_3_9_too():
+    """CI runs the tests on 3.9 and 3.10 as well: a test file using 3.11's tomllib without its tomli fallback was
+    an ERROR collecting there (0.1.186: test_plugins_codex_opencode2.py)."""
+    tests = sorted(Path(__file__).resolve().parent.glob("*.py"))
+    found = [problem for path in tests for problem in problems_of(path.name, path.read_text(encoding="utf-8"))]
+    assert not found, "\n".join(found)
+
+
 @pytest.mark.parametrize("source, problem", [
     ("def f(x: int | None): pass", "evaluated on 3.9"),
     ("x: int | None = 1", "evaluated on 3.9"),

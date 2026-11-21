@@ -903,6 +903,29 @@ def test_seal_firejail_config(scenario, tmp_path):
         assert "No such file" in r.seal_firejail_config(tmp_path / "absent")
 
 
+def test_sealed_firejail_folder(scenario, tmp_path, monkeypatch):
+    r = s.RUNTIME
+    folder = tmp_path / "firejail"
+    if scenario == "happy":  # a folder of its own: blacklisted (the default path, FIREJAIL_CONFIG, the same)
+        folder.mkdir()
+        assert r.sealed_firejail_folder(folder) is True
+        monkeypatch.setattr(r, "FIREJAIL_CONFIG", folder)
+        assert r.sealed_firejail_folder() is True
+    elif scenario == "sad":  # a link to a folder, a file, nothing: never
+        (tmp_path / "elsewhere").mkdir()
+        folder.symlink_to(tmp_path / "elsewhere")
+        assert r.sealed_firejail_folder(folder) is False
+        assert r.sealed_firejail_folder(tmp_path / "file") is False
+        (tmp_path / "file").write_text("x")
+        assert r.sealed_firejail_folder(tmp_path / "file") is False
+    else:  # a path this process may not look at (CI's runner: /root 0700): no error, none it is shown
+        real = os.lstat
+        monkeypatch.setattr(r.os, "lstat", lambda path, *a, **kw: (_ for _ in ()).throw(
+            PermissionError(13, "Permission denied")) if str(path) == str(folder) else real(path, *a, **kw))
+        folder.mkdir()
+        assert r.sealed_firejail_folder(folder) is False
+
+
 def test_firejail_version(scenario):
     r = s.RUNTIME
     if scenario == "happy":
@@ -13226,6 +13249,31 @@ def test_start_monitor(scenario, monkeypatch, tmp_path):
         assert recorder.read() is None  # nothing from Podman: no sample, no error
 
 
+def test_start_monitor_tells_what_a_memory_watch_that_sees_nothing_cannot(monkeypatch, tmp_path):
+    """Regression (GitHub's runner, 0.1.186): a memory watch runs (a user manager, limits) but has not found the run's
+    cgroup - it tells nothing of the memory then, so the monitor's memory warning is a safeguard record after all;
+    once the watch sees the cgroup, the warning is its to tell (no second record)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    said = []
+    M = s.load_monitor_module()
+    monkeypatch.setattr(M.Recorder, "start", lambda self: self)
+    monkeypatch.setattr(M, "podman_stats", lambda prefix, **k: "")
+    a = s.parse_args(["claude", "--log-dir", str(tmp_path / "logs")])
+    a.run_id = "claude-contract"
+    a.podman_url = "unix:///run/podman.sock"
+    (tmp_path / "logs").mkdir()
+    watch = SimpleNamespace(cgroup=None)
+    recorder = s.start_monitor(a, lambda *args, **kwargs: said.append(args), watch)
+    memory = {"kind": "memory", "level": "warning", "title": "t", "text": "x", "advice": "y", "argv": None,
+              "values": {}}
+    recorder.warn(memory, True)
+    assert [args[0] for args in said] == ["resources"]  # the watch sees nothing yet: the monitor tells it
+    watch.cgroup = tmp_path / "cgroup"
+    recorder.warn(memory, True)
+    assert len(said) == 1  # the watch sees the run: its to tell
+    assert len((tmp_path / "logs" / "activity.jsonl").read_text().splitlines()) == 2  # (the activity has both)
+
+
 def test_tmpfs_size(scenario, monkeypatch):
     """/tmp holds at most half the memory limit: a full /tmp is an error the agent sees, not an OOM of the run."""
     if scenario == "happy":
@@ -19667,8 +19715,8 @@ def test_landlock_restrict(scenario, tmp_path):
         assert rules == [reading, rt.LL_FS_EXECUTE | rt.LL_FS_READ_FILE, support["fs"]]
 
 
-def test_untrusted_plan(scenario, tmp_path):
-    home = tmp_path / "home"
+def test_untrusted_plan(scenario, untrusted_place):
+    home = untrusted_place / "home"  # (outside /tmp, as /root is: a HOME below /tmp is refused, conftest.py)
     (home / ".codex").mkdir(parents=True)
     if scenario == "happy":
         read, write, cut = rt.untrusted_plan(str(home))
@@ -19678,8 +19726,8 @@ def test_untrusted_plan(scenario, tmp_path):
             with pytest.raises(ValueError, match="gets no access to"):
                 rt.untrusted_plan(str(home), [path])
     else:
-        (tmp_path / "out").mkdir()
-        assert str(tmp_path / "out") in rt.untrusted_plan(str(home), [str(tmp_path / "out")])[1]
+        (untrusted_place / "out").mkdir()
+        assert str(untrusted_place / "out") in rt.untrusted_plan(str(home), [str(untrusted_place / "out")])[1]
 
 
 def test_untrusted_cut_note(scenario):
@@ -19703,8 +19751,8 @@ def test_untrusted_note(scenario):
         assert "signals" not in rt.untrusted_note({"abi": 7, "unix": False, "scope": 3})
 
 
-def test_untrusted(scenario, tmp_path, monkeypatch, capsys):
-    home = tmp_path / "home"
+def test_untrusted(scenario, tmp_path, untrusted_place, monkeypatch, capsys):
+    home = untrusted_place / "home"
     (home / ".codex").mkdir(parents=True)
     executed = []
     monkeypatch.setattr(rt, "landlock_supported", lambda libc=None: {"abi": 10, "fs": 0, "unix": True, "scope": 3})

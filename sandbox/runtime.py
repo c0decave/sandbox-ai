@@ -3275,6 +3275,16 @@ def seal_firejail_config(home=Path("/root")):
     return None
 
 
+def sealed_firejail_folder(path=None):
+    """True when FIREJAIL_CONFIG is a folder itself (no link: Firejail would hide what a link leads to). A path this
+    process may not look at is none it can show either: Path.is_dir() raises PermissionError there (a caller that is
+    not root, /root 0700) - the supervisor, root, never gets it."""
+    try:
+        return stat.S_ISDIR(os.lstat(path or FIREJAIL_CONFIG).st_mode)
+    except OSError:
+        return False
+
+
 def firejail_version(run=subprocess.run):
     """The installed Firejail's version ("0.9.72"), or None."""
     try:
@@ -5778,7 +5788,7 @@ def firejail_command(before, nested=False, shutdown=False):
                NESTED_SECCOMP if nested else "--seccomp"]
     # Firejail's own filters for new namespaces and socket families, beside sandbox-ai's (own_filter).
     command += firejail_narrowing(help_text, nested, RUN_ISOLATION or isolation_settings({}))
-    if FIREJAIL_CONFIG.is_dir() and not FIREJAIL_CONFIG.is_symlink():
+    if sealed_firejail_folder():
         # Firejail's folder in the agent's HOME (seal_firejail_config): nothing in the sandbox reads or writes it.
         command.append(f"--blacklist={FIREJAIL_CONFIG}")
     if "--deterministic-exit-code" in help_text:

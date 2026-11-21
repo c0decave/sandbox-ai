@@ -217,7 +217,7 @@ def every_parser():
         if command in c.INTERNAL_COMMANDS or command.startswith("_"):
             continue
         parser = c.parser_of(command)
-        assert parser is not None, f"sandbox-ai {command}: its parser cannot be read"
+        assert parser is not None, f"sandbox-ai {command}: its parser cannot be read ({c.NOT_FOUND.get(command)})"
         walk(command, None, parser)
     for (command, word), make in c.OWN_PARSERS.items():
         walk(command, word, make())
@@ -234,6 +234,32 @@ def test_every_parser_position_has_a_completion():
                 name = action.option_strings[-1] if action.option_strings else action.dest
                 missing.append(f"{command} {sub or ''} {name} ({action.metavar})")
     assert not missing, "no completion (add a provider, or say why in FREE_TEXT):\n" + "\n".join(missing)
+
+
+def test_the_completion_command_s_own_parser_is_found_with_python_3_13_s_argparse(monkeypatch):
+    """CI 0.1.186 (Python 3.12/3.13): parser_of("completion") was None, so its options were missing from the help
+    and docs checks. completion.py parses with parse_intermixed_args, which since Python 3.12.7/3.13 no longer goes
+    through parse_known_args (argparse calls its internal _parse_known_args2), so the catch on parse_args and
+    parse_known_args alone let the script print its --help and exit. Here the older Python gets 3.13's way."""
+    import argparse
+
+    def intermixed_like_3_13(self, args=None, namespace=None):
+        self.print_help()  # what --help does inside _parse_known_args2: never calls parse_known_args
+        raise SystemExit(0)
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_known_intermixed_args", intermixed_like_3_13)
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_intermixed_args",
+                        lambda self, args=None, namespace=None: self.parse_known_intermixed_args(args, namespace))
+    parser = c.parser_of("completion")
+    assert parser is not None, c.NOT_FOUND.get("completion")
+    assert parser.prog == "sandbox-ai completion" and "--no-rc" in c.options(parser)
+    # what was patched to catch the parse is put back as it was
+    assert argparse.ArgumentParser.parse_known_intermixed_args is intermixed_like_3_13
+
+
+def test_a_script_that_never_parses_says_why_it_has_no_parser():
+    assert c.parser_of("__complete") is None  # completion.py __complete --help: candidates, no argparse
+    assert "completion.py ended with SystemExit" in c.NOT_FOUND["__complete"]
+    assert c.parser_of("no-such-command") is None and "not a command" in c.NOT_FOUND["no-such-command"]
 
 
 def test_free_text_lists_only_what_exists():
