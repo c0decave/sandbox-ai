@@ -111,7 +111,7 @@ READY_TIMEOUT = 120
 KEYS = {"command", "options", "agent", "workspace", "description", "tool_timeout"}
 IMAGE_KEYS = {"image", "network", "mounts", "env", "memory", "cpus", "pids", "tmp", "description", "source", "vpn",
               "signed_by", "rootfs", "catalog", "env_optional", "env_values", "env_secrets", "tool_timeout", "pid1",
-              "hosts", "allow_private", "allow_tcp", "built"}
+              "hosts", "allow_private", "allow_tcp", "built", "tmp_exec"}
 # "built": an image built on this host from a catalog entry's reviewed source (mcp add --build: mcp_build.py), never
 # signed - {"commit", "repository", "path", "archive_sha256", "at"}; its "signed_by" is null.
 BUILT_KEYS = ("commit", "repository", "path", "archive_sha256", "at")
@@ -131,6 +131,10 @@ HOSTS_LIMIT = 64
 # and holds the MCP connection's stdin and stdout, which every process of the server can open through /proc/1/fd: a
 # server that runs commands (exec) asks for this, so that none of them can write MCP messages to the client.
 PID1_VALUES = ("server",)
+# "tmp_exec": true - the server's /tmp may run programs (Podman: its tmpfs without noexec; Bubblewrap's /tmp always
+# could). Only for a server whose own tools must run a helper they unpack or copy there (smali: apktool runs its aapt2
+# only after chmod, which the read-only image refuses); from its signed catalog entry, part of its identity. Every
+# other server's /tmp stays noexec; nosuid and nodev stay for all.
 # How long an agent waits for one call of the server (seconds; its "tool_timeout", from its catalog entry or `mcp set
 # --tool-timeout`): a server whose tools run long (exec: commands up to 600 s) says so. The agent's setting, not the
 # server's: nothing of what the server can reach (definition_digest leaves it out).
@@ -285,6 +289,8 @@ def validated_image(definition, where):
         checked_built(definition, where)
     if "pid1" in definition:
         checked_pid1(definition["pid1"], where)
+    if "tmp_exec" in definition and definition["tmp_exec"] is not True:
+        raise ValueError(f"{where}: tmp_exec must be true (its /tmp may run programs) or left out")
     if "vpn" in definition:
         if not isinstance(definition["vpn"], str) or not re.fullmatch(launcher().VPN_PROFILE_NAME, definition["vpn"]):
             raise ValueError(f"{where}: vpn must name a VPN profile (sandbox-ai vpn list)")
@@ -1362,6 +1368,8 @@ def image_command(plan, engine="podman"):
              for flag in RUN_FLAGS]
     if server_is_pid1(definition):  # no catatonit holding the MCP pipes at /proc/1/fd: the server is PID 1
         flags.remove("--init")
+    if definition.get("tmp_exec") is True:  # (its signed entry: helpers it runs from /tmp; nosuid, nodev stay)
+        flags = [flag.replace(",noexec,", ",exec,") if flag.startswith("--tmpfs=/tmp:") else flag for flag in flags]
     command = [engine, "run", *flags, f"--pids-limit={limits['pids']}", f"--memory={limits['memory']}"]
     controllers = launcher().delegated_controllers()
     if controllers is None or "cpu" in controllers:  # rootless Podman sets it only where the controller is delegated
@@ -1944,6 +1952,8 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
         definition["tool_timeout"] = entry_tool_timeout(entry)
     if "pid1" in entry:  # checked with the rest (validated_image): a value that is not "server" is refused
         definition["pid1"] = entry["pid1"]
+    if "tmp_exec" in entry:  # checked with the rest: only true is taken
+        definition["tmp_exec"] = entry["tmp_exec"]
     return validated_image(definition, entry["name"])
 
 

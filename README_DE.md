@@ -5791,6 +5791,13 @@ der MCP-Verbindung, die jeder Prozess des Servers über `/proc/1/fd` öffnen kan
 Servers selbst PID 1 (Podman ohne `--init`, `bwrap --as-pid-1`) und räumt seine Kindprozesse selbst ab. Jeder andere
 Server behält den Default. Es gehört zu dem, was eine Instanz eines Servers ausmacht (eine Änderung startet eine neue).
 
+**Ein Server, dessen /tmp Programme ausführen darf** (`"tmp_exec": true` in seinem signierten Katalogeintrag;
+`mcp add` übernimmt es, jeder andere Wert wird abgewiesen): Unter Podman ist `/tmp` jedes MCP-Servers `noexec`
+eingehängt, was ein Hilfsprogramm aufhält, das ein Server dort auspackt oder hinkopiert. smali braucht es (apktool
+startet sein aapt2 erst nach einem `chmod`, den das schreibgeschützte Image abweist), also sagt es sein Eintrag;
+`nosuid` und `nodev` bleiben, jeder andere Server behält `noexec`, und es gehört zur Identität des Servers. Unter
+Bubblewrap durfte `/tmp` das immer.
+
 **Was den Prozess eines Servers beendete.** Der Container jeder Verbindung läuft unter einer Beobachtung auf dem
 Host, die alle zwei Sekunden seine cgroup liest: ein Out-of-Memory-Kill (der Renderer eines Browsers stirbt zuerst:
 "Playwright crashed"), sein erreichtes Prozesslimit, sein fast volles /tmp und ein Ende, das niemand verlangt hat

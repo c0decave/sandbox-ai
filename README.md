@@ -5390,6 +5390,12 @@ not let one of them write MCP messages to the client: with `"pid1": "server"` th
 (Podman without `--init`, `bwrap --as-pid-1`) and reaps its children itself. Every other server keeps the default.
 It is part of what makes a server's instance (a change starts a new one).
 
+**A server whose /tmp may run programs** (`"tmp_exec": true` in its signed catalog entry; `mcp add` carries it, any
+other value is refused): under Podman every MCP server's `/tmp` is mounted `noexec`, which stops a helper a server
+unpacks or copies there. smali needs it (apktool runs its aapt2 only after a `chmod`, which the read-only image
+refuses), so its entry says so; `nosuid` and `nodev` stay, every other server keeps `noexec`, and it is part of
+the server's identity. Under Bubblewrap `/tmp` always allowed it.
+
 **What ended a server's process.** Each connection's container runs under a watch on the host that reads its cgroup
 every two seconds: an out-of-memory kill (a browser's renderer dies first: "Playwright crashed"), its process limit
 reached, its /tmp nearly full, and an exit nobody asked for (137: SIGKILL, mostly out of memory) become a

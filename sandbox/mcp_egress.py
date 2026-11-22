@@ -317,10 +317,11 @@ class CapData(ctypes.Structure):
     _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32), ("inheritable", ctypes.c_uint32)]
 
 
-def enter_namespaces(pid, libc=None):
+def enter_namespaces(pid, libc=None, net_admin=True):
     """In a child about to exec nft: the network namespace of PID and the user namespace that owns it (a bwrap
-    sandbox of this user, whose user namespace gives the child every capability there), and CAP_NET_ADMIN kept across exec (ambient): nft runs as the
-    sandbox's user, with the right to change its network namespace's rules and nothing of the host's."""
+    sandbox of this user, whose user namespace gives the child every capability there), and CAP_NET_ADMIN kept
+    across exec (ambient): nft runs as the sandbox's user, with the right to change its network namespace's rules
+    and nothing of the host's. NET_ADMIN=False: the namespaces only (slirp4netns's anchor, mcp_rootfs)."""
     libc = libc or ctypes.CDLL(None, use_errno=True)
     # The user namespace that OWNS the network namespace: bwrap --unshare-user --uid U puts the sandboxed process
     # into a second, nested user namespace, where a process entering only that one has no right over the network
@@ -339,6 +340,8 @@ def enter_namespaces(pid, libc=None):
             raise OSError(ctypes.get_errno(), "setns(net) failed")
     finally:
         os.close(net)
+    if not net_admin:
+        return
     header = CapHeader(0x20080522, 0)  # _LINUX_CAPABILITY_VERSION_3
     data = (CapData * 2)()
     if libc.capget(ctypes.byref(header), data) != 0:

@@ -576,8 +576,8 @@ class FakeBwrap:
         self.events, self.gate, self.loaded = [], None, None
         self.killed = False
         fake = self
-        # (PID 4242 does not exist: slirp4netns is handed it as before, the namespace lookup is tested on its own)
-        monkeypatch.setattr(rootfs, "slirp_target", lambda pid: ([str(pid)], ()))
+        # (PID 4242 does not exist: slirp4netns is handed it directly, the anchor is tested on its own)
+        monkeypatch.setattr(rootfs, "slirp_anchor", lambda pid, egress: (pid, None))
 
         class Process:
             def __init__(self, argv):
@@ -927,28 +927,41 @@ def test_a_bwrap_server_whose_network_never_comes_up_never_runs(tmp_path, monkey
     assert "slirp4netns" in capsys.readouterr().err
 
 
-def test_slirp4netns_joins_the_user_namespace_that_owns_the_servers_network(tmp_path, monkeypatch):
-    """slirp4netns handed only the server's PID joins that process's user namespace - bwrap's nested one, which has
-    no right over the network namespace (the CI's "setns(CLONE_NEWNET): Operation not permitted"). It is handed the
-    network namespace and its owner instead (NS_GET_USERNS), by descriptor; without NS_GET_USERNS, the PID as before."""
-    import errno
-    import fcntl
-    owner = os.open(tmp_path, os.O_RDONLY)
+def test_slirp4netns_is_pointed_at_an_anchor_in_the_namespaces_that_own_the_servers_network(monkeypatch):
+    """slirp4netns joins /proc/PID/ns/user and .../net of the PID it is given (its child, and with --enable-sandbox
+    its parent too); the server's own PID is in bwrap's nested user namespace, which has no right over its network
+    namespace (CI: "setns(CLONE_NEWNET): Operation not permitted"), and slirp4netns's path mode leaves its parent
+    in this user namespace (CI: "setegid(0)", "parent failed"). It gets an anchor's PID: a process of the launcher
+    that entered the owning user namespace and the network namespace (without CAP_NET_ADMIN) and only waits; it ends
+    once slirp4netns is attached."""
+    entered = []
+    monkeypatch.setattr(eg, "enter_namespaces", lambda pid, libc=None, net_admin=True: entered.append(
+        (pid, net_admin)))
+    target, anchor = rootfs.slirp_anchor(4242, eg)
     try:
-        monkeypatch.setattr(fcntl, "ioctl", lambda fd, request, *rest: os.dup(owner) if request == 0xB701 else 0)
-        args, fds = rootfs.slirp_target(os.getpid())
-        try:
-            net, user = fds
-            assert os.readlink(f"/proc/self/fd/{net}") == os.readlink(f"/proc/{os.getpid()}/ns/net")
-            assert os.readlink(f"/proc/self/fd/{user}") == str(tmp_path)
-            assert args == ["--netns-type=path", f"--userns-path=/proc/self/fd/{user}", f"/proc/self/fd/{net}"]
-        finally:
-            for fd in fds:
-                os.close(fd)
-
-        def old_kernel(fd, request, *rest):
-            raise OSError(errno.ENOTTY, "no NS_GET_USERNS")
-        monkeypatch.setattr(fcntl, "ioctl", old_kernel)
-        assert rootfs.slirp_target(os.getpid()) == ([str(os.getpid())], ())
+        assert target == anchor.pid != os.getpid() and anchor.poll() is None, "it waits while slirp4netns attaches"
     finally:
-        os.close(owner)
+        rootfs.end_anchor(anchor)
+    assert anchor.returncode == 0, "its stdin closed, it ended"
+    # (the preexec_fn ran in the child: what it recorded there is not seen here - but a failing one refuses)
+
+    def fails(pid, libc=None, net_admin=True):
+        raise OSError(1, "setns(user) failed")
+    monkeypatch.setattr(eg, "enter_namespaces", fails)
+    with pytest.raises(ValueError, match="could not be entered for slirp4netns"):
+        rootfs.slirp_anchor(4242, eg)
+
+
+def test_the_anchor_gets_no_capability_beyond_the_namespaces(monkeypatch):
+    """enter_namespaces(net_admin=False): the setns calls only - no CAP_NET_ADMIN raised for the anchor."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        owner = os.open(folder, os.O_RDONLY)
+        try:
+            libc = NamespaceLibc(owner=owner)
+            libc.capset = lambda *args: pytest.fail("capset for the anchor")
+            libc.prctl = lambda *args: pytest.fail("an ambient capability for the anchor")
+            eg.enter_namespaces(os.getpid(), libc, net_admin=False)
+            assert [call[0] for call in libc.calls] == ["ioctl", "setns", "setns"]
+        finally:
+            os.close(owner)
