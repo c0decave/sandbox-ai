@@ -160,6 +160,14 @@ def make_logs(directory, run=RUN, session=None, safeguards=True, ended=True):
     jsonl(directory / "workspaces.jsonl", [
         {"time": "2026-11-11T10:18:00Z", "run": run, "event": "add", "host": "/projects/docs", "sandbox": "/docs",
          "mode": "ro"}])
+    jsonl(directory / "toolchains.jsonl", [
+        {"time": "2026-11-11T10:00:02Z", "run": run, "event": "start", "name": "go", "version": "1.27.3",
+         "sha256": "a" * 64, "source": "start", "signed_by": "SHA256:key"},
+        {"time": "2026-11-11T10:18:30Z", "run": run, "event": "attach", "name": "jdk", "version": "21.0.13+9",
+         "sha256": "b" * 64, "source": "added", "signed_by": None},
+        {"time": "2026-11-11T10:18:31Z", "run": run, "event": "open", "names": ["jdk"],
+         "hosts": ["repo.maven.apache.org"]},
+        {"time": "2026-11-11T10:18:40Z", "run": run, "event": "detach", "name": "jdk", "version": "21.0.13+9"}])
     jsonl(directory / "files.jsonl", [{"time": "2026-11-11T10:19:00Z", "action": "write", "path": "/work/a.py"}])
     jsonl(directory / "processes.jsonl", [{"time": "2026-11-11T10:19:30Z", "pid": 3, "ppid": 1,
                                            "command": "/usr/bin/python3 -m pytest"}])
@@ -218,6 +226,12 @@ def test_every_kind_of_event_is_gathered_for_its_run_only(tmp_path):
     assert data["pushes"]["checked"] == 1 and data["pushes"]["refused"] == 1
     assert data["models"] == {"claude-x": 1} and data["tokens"]["output_tokens"] == 20
     assert data["processes"] == 1 and data["files"] == {"write": 1}
+    toolchains = data["toolchains"]
+    assert (toolchains["start"], toolchains["attached"], toolchains["detached"], toolchains["refused"]) == (1, 1, 1, 0)
+    assert [(item["name"], item["event"], item["signed"]) for item in toolchains["items"]] == [
+        ("go", "start", True), ("jdk", "attach", False), ("jdk", "detach", False)]
+    assert "toolchains mounted read-only: go 1.27.3, jdk 21.0.13+9 (unsigned) (1 at a start, 1 during a run, 1 " \
+        "taken out again, 0 refused)" in R.render(data, "md")
     kinds = {f["kind"] for f in data["findings"]}
     # Without safeguards.jsonl the findings come from the logs themselves (safeguards.py's own converters).
     assert {"canary", "vpn", "push", "rule", "taint", "untaint", "killswitch", "tls", "network", "firewall", "dns",

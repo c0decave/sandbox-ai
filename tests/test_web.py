@@ -2476,6 +2476,11 @@ CONFIRM_CASES = {
                      ["mcp", "add", "--unsigned", "hub:binwalk"]),
     # built from its source (no signed image in its catalog yet): that commit and source archive only, unsigned - its
     # own question (confirm_build) beside the add's ({"confirm": true}: a server of that name replaced, asked first)
+    # a build toolchain mounted into a running start (its registries opened), and a detach forced while it is used
+    "toolchain-add": ("POST", "/api/hosts/ct1/toolchains/web", {"toolchain": "go"},
+                      ["toolchain", "attach", "web", "go"]),
+    "toolchain-force": ("POST", "/api/hosts/ct1/toolchains/web/remove", {"toolchain": "go", "force": True},
+                        ["toolchain", "detach", "web", "go", "--force"]),
     "mcp-build": ("POST", "/api/hosts/ct1/mcp", {"entry": "jadx", "build": True, "commit": "1" * 40,
                                                  "source_sha256": "a" * 64, "confirm": True},
                   ["mcp", "add", "--build", "--commit=" + "1" * 40, "--source-sha256=" + "a" * 64, "--yes", "jadx"]),

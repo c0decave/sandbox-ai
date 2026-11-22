@@ -75,6 +75,7 @@ LIST_GROUPS = {
     "proxy": ("", ("--no-inspect",)),  # (one kind: its own label names the row)
     "vpn": ("", ("--vpn-bypass-tcp",)),
     "devices": ("", ("--device",)),
+    "toolchains": ("", ("--toolchain",)),
 }
 # What a suggestion of a secret's name becomes in each of these (name_fields.add_line): HOST to be typed over.
 SECRET_SUGGESTIONS = {"--secret-env": "{name}", "--api-key": "HOST={name}", "--git-token-secret": "https://HOST={name}"}
@@ -5711,7 +5712,33 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             return functools.partial(self.secret_suggestions, option)
         if option == "--device":
             return self.device_suggestions
+        if option == "--toolchain":
+            return self.toolchain_suggestions
         return None
+
+    def toolchain_suggestions(self, fill):
+        """FILL with the toolchains of the board's host: those in its store (sandbox-ai toolchain list there), then
+        the signed catalog's others (a start needs them added first: said with each)."""
+        host = self.host()
+
+        def read():
+            return self.sai.host_toolchains(host)
+
+        def found(result, error):
+            if host != self.host():
+                return
+            if error is not None:
+                fill([], tr("Could not be read: {error}", error=printable_text(str(error))[-200:]))
+                return
+            items = [(tr("{name} {version} (in the store)", name=row["name"], version=row["version"]), row["name"])
+                     for row in result["installed"]]
+            have = {row["name"] for row in result["installed"]}
+            items += [(tr("{name} {version} (add it first: sandbox-ai toolchain add {name})", name=row["name"],
+                          version=row["version"]), row["name"])
+                      for row in result["catalog"] if row["name"] not in have]
+            fill(items, None if items else tr("No toolchain in the store or the catalog ({problem})",
+                                              problem=result.get("problem") or tr("the catalog is empty")))
+        background(read, owner=self, timeout=90, done=found)
 
     def list_changed(self, node_id, key, values):
         """A list field's KEY now holds VALUES. A GPU kind chosen in the device field (device_picker.gpu_value) is the

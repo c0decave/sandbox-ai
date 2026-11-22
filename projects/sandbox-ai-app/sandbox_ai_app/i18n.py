@@ -5843,6 +5843,9 @@ TEXTS = {
     'Update check not run yet.': {
         'en': 'Update check not run yet.',
         'de': 'Noch nicht auf Updates geprüft.'},
+    'A check for updates is still running; its result follows here.': {
+        'en': 'A check for updates is still running; its result follows here.',
+        'de': 'Eine Suche nach Updates läuft noch; ihr Ergebnis folgt hier.'},
     'Check for updates': {
         'en': 'Check for updates',
         'de': 'Auf Updates prüfen'},
@@ -15216,6 +15219,30 @@ TEXTS = {
     "The videos' archive holds {name}, which is not a video of the series: nothing is installed.": {
         'en': "The videos' archive holds {name}, which is not a video of the series: nothing is installed.",
         'de': 'Das Archiv der Videos enthält {name}, und das ist kein Video der Reihe: Nichts wird installiert.'},
+    'The release {version} is not on {source}: it is not published there (yet).': {
+        'en': 'The release {version} is not on {source}: it is not published there (yet).',
+        'de': 'Das Release {version} gibt es auf {source} nicht: Es ist dort (noch) nicht veröffentlicht.'},
+    'No program to play videos with could be started. The video is the file {path}': {
+        'en': 'No program to play videos with could be started. The video is the file {path}',
+        'de': 'Kein Programm zum Abspielen von Videos ließ sich starten. Das Video ist die Datei {path}'},
+    'The video cannot be shown: {why}': {
+        'en': 'The video cannot be shown: {why}',
+        'de': 'Das Video lässt sich nicht zeigen: {why}'},
+    'The version of this sandbox-ai is not known, so there is no release to download the videos from.': {
+        'en': 'The version of this sandbox-ai is not known, so there is no release to download the videos from.',
+        'de': 'Die Version dieses sandbox-ai ist nicht bekannt, daher gibt es kein Release, aus dem sich die Videos herunterladen ließen.'},
+    'Downloading and checking the videos of {version}…': {
+        'en': 'Downloading and checking the videos of {version}…',
+        'de': 'Die Videos von {version} werden heruntergeladen und geprüft…'},
+    'Download the videos of {version}': {
+        'en': 'Download the videos of {version}',
+        'de': 'Die Videos von {version} herunterladen'},
+    'The newest release published on {source}: its videos are checked as these would have been': {
+        'en': 'The newest release published on {source}: its videos are checked as these would have been',
+        'de': 'Das neueste auf {source} veröffentlichte Release: Seine Videos werden genauso geprüft'},
+    'The list of the videos': {
+        'en': 'The list of the videos',
+        'de': 'Die Liste der Videos'},
     'Claude Code': {
         'en': 'Claude Code',
         'de': 'Claude Code'},
@@ -22118,4 +22145,85 @@ TEXTS = {
     ' (built from its source: minutes)': {
         'en': ' (built from its source: minutes)',
         'de': ' (aus seinem Quelltext gebaut: Minuten)'},
+    'Toolchains': {
+        'en': 'Toolchains',
+        'de': 'Toolchains'},
+    'Toolchain {name}: mounted read-only, its registries stay closed': {
+        'en': 'Toolchain {name}: mounted read-only, its registries stay closed',
+        'de': 'Toolchain {name}: nur lesbar eingehängt, ihre Registrys bleiben zu'},
+    'Toolchain {name}: mounted read-only, its package registries are opened': {
+        'en': 'Toolchain {name}: mounted read-only, its package registries are opened',
+        'de': 'Toolchain {name}: nur lesbar eingehängt, ihre Paket-Registrys werden geöffnet'},
+    "Build tools from the signed catalog (Go, Rust, a JDK, Node, Python ...), mounted read-only at /opt/toolchains/NAME with their commands on the agent's PATH; their registries are opened": {
+        'en': "Build tools from the signed catalog (Go, Rust, a JDK, Node, Python ...), mounted read-only at /opt/toolchains/NAME with their commands on the agent's PATH; their registries are opened",
+        'de': 'Bauwerkzeuge aus dem signierten Katalog (Go, Rust, ein JDK, Node, Python ...), nur lesbar unter /opt/toolchains/NAME eingehängt, ihre Befehle im PATH des Agenten; ihre Registrys werden geöffnet'},
+    '{name} {version} (in the store)': {
+        'en': '{name} {version} (in the store)',
+        'de': '{name} {version} (im Lager)'},
+    '{name} {version} (add it first: sandbox-ai toolchain add {name})': {
+        'en': '{name} {version} (add it first: sandbox-ai toolchain add {name})',
+        'de': '{name} {version} (erst hinzufügen: sandbox-ai toolchain add {name})'},
+    'No toolchain in the store or the catalog ({problem})': {
+        'en': 'No toolchain in the store or the catalog ({problem})',
+        'de': 'Keine Toolchain im Lager oder im Katalog ({problem})'},
+    'the catalog is empty': {
+        'en': 'the catalog is empty',
+        'de': 'der Katalog ist leer'},
+    "Mount {name} read-only into {run} at /opt/toolchains/{name}? Its commands are on the agent's PATH from then on.": {
+        'en': "Mount {name} read-only into {run} at /opt/toolchains/{name}? Its commands are on the agent's PATH from then on.",
+        'de': '{name} nur lesbar unter /opt/toolchains/{name} in {run} einhängen? Ihre Befehle stehen von da an im PATH des Agenten.'},
+    'Remove toolchain from {run}': {
+        'en': 'Remove toolchain from {run}',
+        'de': 'Toolchain aus {run} entfernen'},
+    'Add toolchain to {run} on {host}': {
+        'en': 'Add toolchain to {run} on {host}',
+        'de': 'Toolchain zu {run} auf {host} hinzufügen'},
+    'Add toolchain to {run}': {
+        'en': 'Add toolchain to {run}',
+        'de': 'Toolchain zu {run} hinzufügen'},
+    'Toolchain': {
+        'en': 'Toolchain',
+        'de': 'Toolchain'},
+    'Add toolchain…': {
+        'en': 'Add toolchain…',
+        'de': 'Toolchain hinzufügen…'},
+    "Mount a build toolchain of its host's store (Go, Rust, a JDK, Node, Python ...) read-only into the selected sandbox, its commands on the agent's PATH (sandbox-ai toolchain attach)": {
+        'en': "Mount a build toolchain of its host's store (Go, Rust, a JDK, Node, Python ...) read-only into the selected sandbox, its commands on the agent's PATH (sandbox-ai toolchain attach)",
+        'de': 'Eine Toolchain aus dem Lager ihres Hosts (Go, Rust, ein JDK, Node, Python ...) nur lesbar in die gewählte Sandbox einhängen, ihre Befehle im PATH des Agenten (sandbox-ai toolchain attach)'},
+    'Remove toolchain…': {
+        'en': 'Remove toolchain…',
+        'de': 'Toolchain entfernen…'},
+    'Take a toolchain added during the run out again (sandbox-ai toolchain detach)': {
+        'en': 'Take a toolchain added during the run out again (sandbox-ai toolchain detach)',
+        'de': 'Eine während des Laufs hinzugefügte Toolchain wieder herausnehmen (sandbox-ai toolchain detach)'},
+    '{name} {version}: {commands}': {
+        'en': '{name} {version}: {commands}',
+        'de': '{name} {version}: {commands}'},
+    '{name} {version} (downloaded from the signed catalog first)': {
+        'en': '{name} {version} (downloaded from the signed catalog first)',
+        'de': '{name} {version} (wird erst aus dem signierten Katalog geladen)'},
+    'Its registries are opened for the run: {hosts} (not in the security modes high and paranoid).': {
+        'en': 'Its registries are opened for the run: {hosts} (not in the security modes high and paranoid).',
+        'de': 'Ihre Registrys werden für den Lauf geöffnet: {hosts} (nicht in den Sicherheitsmodi high und paranoid).'},
+    'It is downloaded from the signed catalog into the store first ({size} MiB).': {
+        'en': 'It is downloaded from the signed catalog into the store first ({size} MiB).',
+        'de': 'Sie wird erst aus dem signierten Katalog ins Lager geladen ({size} MiB).'},
+    'No toolchain was attached to {run} during its run (toolchains given at the start stay).': {
+        'en': 'No toolchain was attached to {run} during its run (toolchains given at the start stay).',
+        'de': 'In {run} wurde während des Laufs keine Toolchain eingehängt (beim Start gegebene bleiben).'},
+    'Every toolchain of the store is attached to it already.': {
+        'en': 'Every toolchain of the store is attached to it already.',
+        'de': 'Jede Toolchain des Lagers ist bereits eingehängt.'},
+    'No toolchain is in the store, and the signed catalog offers none ({problem}). In a terminal: sandbox-ai toolchain catalog': {
+        'en': 'No toolchain is in the store, and the signed catalog offers none ({problem}). In a terminal: sandbox-ai toolchain catalog',
+        'de': 'Im Lager liegt keine Toolchain, und der signierte Katalog bietet keine an ({problem}). Im Terminal: sandbox-ai toolchain catalog'},
+    '{name} is still in use in {run}: a program of it runs or has one of its files open. Detach it anyway? What is open stays usable until it is closed.': {
+        'en': '{name} is still in use in {run}: a program of it runs or has one of its files open. Detach it anyway? What is open stays usable until it is closed.',
+        'de': '{name} wird in {run} noch benutzt: Ein Programm daraus läuft oder hat eine ihrer Dateien offen. Trotzdem lösen? Was offen ist, bleibt nutzbar, bis es geschlossen wird.'},
+    'Detach anyway': {
+        'en': 'Detach anyway',
+        'de': 'Trotzdem lösen'},
+    'it is empty': {
+        'en': 'it is empty',
+        'de': 'er ist leer'},
 }

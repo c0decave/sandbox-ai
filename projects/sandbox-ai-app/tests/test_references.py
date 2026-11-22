@@ -84,7 +84,8 @@ def test_the_check_catches_a_missing_name(tmp_path):
 # SandboxAI methods that run a command, ask the keyring or read big logs (the window must keep polling the
 # approvals meanwhile, or questions are refused after a minute). Declared here; test_every_slow_backend_method_is_declared
 # finds every method of backend.py that runs a process, sleeps or calls one of these, and wants it here too.
-BLOCKING_SAI = {"call", "_call", "bridges", "bridge_json", "bridge_plan", "bridge_add", "bridge_show", "bridge_revoke",
+BLOCKING_SAI = {"host_toolchains", "toolchains_of_run", "toolchain_add", "toolchain_attach", "toolchain_detach",
+                "call", "_call", "bridges", "bridge_json", "bridge_plan", "bridge_add", "bridge_show", "bridge_revoke",
                 "host_bridges", "bridge_resume", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret",
                 "mcp_tool_budget",  # mcp_budget.start_report: the profiles, the definitions, the pins read
                 "shared_wildcards",  # the Public Suffix List read (sandbox-ai's runtime) at the first call

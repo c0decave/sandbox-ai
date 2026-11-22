@@ -3608,13 +3608,16 @@ class SortItem(QTableWidgetItem):
     """A cell that sorts by its SORT_ROLE value (numbers as numbers, times as times)."""
 
     def __lt__(self, other):
+        # Never super().__lt__(): PySide6 6.12 dispatches that back into this override - endless recursion while a
+        # sorted table re-sorts (the user's log 2026-11-22, the Approvals page every second). Without comparable
+        # sort values the texts are compared, as QTableWidgetItem's own operator< does.
         mine, theirs = self.data(SORT_ROLE), other.data(SORT_ROLE)
         if mine is not None and theirs is not None:
             try:
-                return mine < theirs
+                return bool(mine < theirs)
             except TypeError:
                 pass
-        return super().__lt__(other)
+        return self.text() < other.text()
 
 
 def table(headers, multi=False, stretch=None, numeric=(), sortable=True, compact=(), many=False, view=None):

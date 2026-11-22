@@ -15,8 +15,8 @@ import weakref
 from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QBoxLayout, QComboBox, QDialog, QFormLayout, QFrame, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QStyle,
+    QAbstractItemView, QAbstractScrollArea, QApplication, QBoxLayout, QComboBox, QDialog, QFormLayout, QFrame,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter, QStyle,
     QStyleOptionGroupBox, QTabWidget, QTableView, QTextBrowser, QToolButton, QToolTip, QTreeView, QVBoxLayout,
     QWidget, QWidgetItem,
 )
@@ -34,6 +34,8 @@ SIZE = 18
 _SHOWN = [True]  # the setting help_buttons: the (?)s are shown (the Help page, tours and F1 stay either way)
 _BUTTONS = weakref.WeakSet()  # every HelpButton made, to hide or show them when the setting changes
 _LISTENERS = []  # weakref.WeakMethod of callbacks (what paints a (?) itself: the board's nodes and parts list)
+_PAGES = weakref.WeakSet()  # every HelpPage made: the one showing the videos' list reads it again after a download
+VIDEO_SECTION = "app-videos"  # the Help section about the videos: it leads to their list (VIDEOS)
 
 
 def buttons_shown():
@@ -262,7 +264,17 @@ def watch_video(page):
         except RuntimeError:  # the window that set it is gone
             pass
     from . import video_player
-    return video_player.open_video(page)
+    return video_player.watch(page, parent=QApplication.activeWindow())
+
+
+def videos_changed():
+    """The videos came (a download): a Help page showing their list reads it again."""
+    for page in list(_PAGES):
+        try:
+            if page.shown == VIDEOS:
+                page.show_videos()
+        except RuntimeError:  # deleted meanwhile
+            pass
 
 
 # -- where the (?)s go --
@@ -616,6 +628,9 @@ def render(section, language):
     from . import help_content
     links = [f'<a href="section:{s}">{html.escape(H.say(help_content.BY_ID[s].title, language))}</a>'
              for s in section.see if s in help_content.BY_ID]
+    if section.id == VIDEO_SECTION:  # the list itself: with a click on a video, or the download when none is here
+        parts.append(f'<p><a href="section:{VIDEOS}">{html.escape(tr_in(language, N_("The list of the videos")))}</a>'
+                     "</p>")
     if links:
         parts.append(f"<p><b>{html.escape(tr_in(language, N_('See also')))}:</b> " + " · ".join(links) + "</p>")
     return "\n".join(parts)
@@ -683,6 +698,7 @@ class HelpPage(QWidget):
         super().__init__(parent)
         from . import help_content
         self.content, self.with_tours, self.shown = help_content, with_tours, None
+        _PAGES.add(self)
         layout = QVBoxLayout(self)
         top = QHBoxLayout()
         self.search = QLineEdit()

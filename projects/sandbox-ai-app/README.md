@@ -47,7 +47,8 @@ that cuts every sandbox's network here and on your hosts, quit with Ctrl+Q), *Vi
 screen with F11, hide to the system tray - greyed out with the reason where there is none -, the theme, the board's
 zoom, the panels), *Go* (the pages with Ctrl+1 … Ctrl+9, *Back* and *Forward*, next and previous tab), *Settings* (*Settings…*, Ctrl+,:
 every setting of the app in one dialog, the same as *All settings…* on the System page), *Help* (the videos about the
-pages, the versions of the app, sandbox-ai, PySide6, Qt and Python; this README) - and painted, theme-aware buttons in the header bar: minimize,
+pages - downloaded once from the release of this version, or from the newest published one when this version's is not
+published yet -, the versions of the app, sandbox-ai, PySide6, Qt and Python; this README) - and painted, theme-aware buttons in the header bar: minimize,
 maximize/restore (its icon and tooltip follow the window), full screen, to the tray, quit. Quitting asks the usual
 questions (running sandboxes, terminals, work in progress) and shuts down as closing does. On the Terminals page
 Ctrl+W, Ctrl+Tab, Alt+Left and Alt+Right go to the terminal. Every dialog, message box and extra window (the log
@@ -565,7 +566,8 @@ die ersten zehn (unter macOS Control), Strg+Umschalt+C/V kopieren und fügen ein
 kommen die Tabs laufender Starts wieder; ein Link im Terminal eines Laufs hinter Tor wird nur zum Kopieren angeboten.
 *Datei → Browser* (Strg+Umschalt+O) öffnet einen Chromium-Browser zum Anmelden bei Cloud-Abos, *Datei →
 Notaus* (Strg+Umschalt+X) kappt das Netz jeder Sandbox hier und auf Ihren Hosts. *Hilfe → Videos zu den Seiten*
-spielt neunzehn kurze, deutsch gesprochene Videos mit Untertiteln (Umschalt+F2: das zur gezeigten Seite). Jeder
+spielt neunzehn kurze, deutsch gesprochene Videos mit Untertiteln (Umschalt+F2: das zur gezeigten Seite; einmal aus
+dem Release dieser Version geladen, oder aus dem neuesten veröffentlichten, solange es das eigene noch nicht gibt). Jeder
 Dialog und jedes zusätzliche Fenster hat oben rechts ein [x] und schließt mit Esc. Das Protokollfenster unten auf
 jeder Seite zeigt, was die App tat und warum (was ein Start gefragt wurde, worauf er wartet, warum er abgelehnt
 wurde, jeder `sandbox-ai`-Befehl mit Exit-Status), ab einer Stufe und aus einem Bereich; *Für einen Fehlerbericht

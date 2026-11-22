@@ -61,8 +61,8 @@ LAYOUT = {
     # Hermes writes its own skills into ~/.hermes/skills; the kits' are its external skills (hermes.py,
     # skills.external_dirs), where the agent cannot change them.
     "hermes": {"skills": ".agents/skills"},
-    # DSH scans ~/.dsh/skills (its own, the sandbox-ai skill's) and the shared agents root ~/.agents/skills (the
-    # kits', read-only).
+    # DSH scans ~/.dsh/skills (its own) and the shared agents root ~/.agents/skills (the kits' and the sandbox-ai
+    # skill's, read-only).
     "dsh": {"skills": ".agents/skills"},
     # Qwen Code writes its own agents and commands; only the kits' skills are mounted (~/.qwen/skills, read-only).
     "qwen": {"skills": ".qwen/skills"},

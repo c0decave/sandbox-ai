@@ -8,7 +8,9 @@ Beside it, a **series of nineteen short videos, one per page of the desktop app*
 with a spoken German narration (see [The app series, spoken](#the-app-series-spoken)). The rendered files are not
 kept in Git; render them as below, or take them from a release. The desktop app plays the series itself (Help >
 Videos about the pages) and downloads it once from its release, `sandbox-ai-videos.tar`, checked against the signed
-`SHA256SUMS` (`scripts/make_dist.py --videos DIR` makes that file; see RELEASING.md).
+`SHA256SUMS` (`scripts/make_dist.py --videos DIR` makes that file; see RELEASING.md). When the release of the installed
+version is not published (yet) or has no videos, the app says so and offers the newest published release's videos,
+checked the same way.
 
 | File | What it is |
 |---|---|
@@ -181,6 +183,8 @@ WebVTT-Untertiteln und einer Kapitelspur. Dazu eine Serie von neunzehn kurzen Vi
 Desktop-App, mit gesprochener deutscher Erzählung. Die fertigen Dateien liegen nicht in Git. Die Desktop-App spielt
 die Reihe selbst ab (Hilfe > Videos zu den Seiten) und lädt sie einmal aus ihrem Release, `sandbox-ai-videos.tar`,
 geprüft gegen die signierte `SHA256SUMS` (`scripts/make_dist.py --videos DIR` erzeugt die Datei; siehe RELEASING.md).
+Ist das Release der installierten Version (noch) nicht veröffentlicht oder hat es keine Videos, sagt die App das und
+bietet die Videos des neuesten veröffentlichten Release an, genauso geprüft.
 
 **Erzeugen.** Die Werkzeuge sind keine Abhängigkeiten von sandbox-ai; legen Sie sie in eine Wegwerf-Umgebung
 außerhalb des Checkouts:

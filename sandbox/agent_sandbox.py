@@ -601,7 +601,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.202"
+__version__ = "0.1.207"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -733,6 +733,7 @@ SHORT_OPTIONS = {
     "--egress-all-allow": "-E", "--dns": "-R", "--nameserver": "-ns", "--subnet": "-sn", "--subnet6": "-s6",
     "--network": "-nw", "--ip": "-ip",
     "--ip6": "-i6", "--image": "-i", "--podman-url": "-pu", "--binary": "-B", "--runtime": "-rt",
+    "--toolchain": "-tc", "--toolchain-offline": "-to",
     "--copy-auth": "-ca", "--no-auth": "-na", "--auth-file": "-af", "--import-codex-auth": "-ic",
     "--auth-from-session": "-as",
     "--image-variant": "-iv", "--nested-containers": "-ct", "--service": "-sv",
@@ -832,6 +833,7 @@ HELP_GROUPS = [  # --help: options by topic, in this order
     ("Hardware and limits", ["--device", "--gpu", "--memory", "--cpus", "--pids", "--tmp-size"]),
     ("Engine", ["--backend", "--image", "--image-variant", "--service", "--nested-containers", "--podman-url", "--binary",
                 "--runtime"]),
+    ("Toolchains", ["--toolchain", "--toolchain-offline"]),
     ("Logs and checks", ["--log-dir", "--log-debug", "--dry-run", "--probe", "--version", "--help"]),
 ]
 
@@ -1288,6 +1290,14 @@ def build_parser(agent=None):
     p.add_argument("--podman-url", metavar="URL", help="Podman service URL, e.g. unix:///example/podman.sock")
     p.add_argument("--binary", metavar="PATH", help="Agent executable (host path with bwrap; image path with podman)")
     p.add_argument("--runtime", action="append", default=[], metavar="DIR", help="bwrap: expose runtime directory read-only at same path")
+    p.add_argument("--toolchain", action="append", default=[], metavar="NAME[@VERSION]",
+                   help="Mount a build toolchain of your store (sandbox-ai toolchain add NAME: Go, Rust, a JDK, Node, "
+                        "Python ... from the signed catalog) read-only at /opt/toolchains/NAME, its commands on the "
+                        "agent's PATH, and open the registries it names (as --allow-host; not in the modes high and "
+                        "paranoid, which mount it and keep them closed). Repeatable. Into a running sandbox: "
+                        "sandbox-ai toolchain attach RUN NAME")
+    p.add_argument("--toolchain-offline", action="store_true",
+                   help="Mount the toolchains without opening their registries")
     p.add_argument("--copy-auth", action="store_true",
                    help="Copy this agent's JSON credential files; they must exist on the host. A login already "
                         "in a reused sandbox HOME (session, --state-dir) is kept. Without any auth option, the "
@@ -1892,6 +1902,58 @@ def load_browser_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_toolchains_module = None
+
+
+def load_toolchains_module():
+    """toolchains.py: build toolchains mounted read-only at /opt/toolchains/NAME (--toolchain, sandbox-ai toolchain)."""
+    global _toolchains_module
+    if _toolchains_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_toolchains", HERE / "toolchains.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _toolchains_module = module
+    return _toolchains_module
+
+
+def own_image(a):
+    """The run's image is one of sandbox-ai's own (Debian bookworm, what a toolchain's needs are checked against): not
+    an image you named (--image) and not a variant built on a base image of yours."""
+    image = str(getattr(a, "image", "") or "")
+    return bool(re.fullmatch(r"localhost/[a-z0-9-]+-sandbox(?:-[a-z0-9_.-]+)?:latest", image)) and \
+        not variant_base(a)
+
+
+def plan_toolchains(a):
+    """--toolchain: a.toolchain_plan (toolchains.start_plan: the installed entries, checked against what this backend
+    runs them on), and the registries they name join --allow-host and the --allow-PRESET options - not in the modes
+    high and paranoid, which refuse every option that opens a host (the toolchains are mounted, their registries stay
+    closed, said in a note), and not with --toolchain-offline or --offline. The notes to say."""
+    a.toolchain_plan = None
+    if not getattr(a, "toolchain", None):
+        return []
+    if a.podman_url:
+        raise ValueError("--toolchain mounts a folder of this host's store, which another Podman service "
+                         "(--podman-url) does not have")
+    plan = load_toolchains_module().start_plan(
+        a.toolchain, a.backend, own_image=own_image(a), strict=strict_mode(a),
+        offline=bool(getattr(a, "toolchain_offline", False) or a.offline), mode=getattr(a, "mode", None),
+        presets=tuple(PRESETS))
+    a.allow_host = list(dict.fromkeys([*a.allow_host, *plan["hosts"]]))
+    a.presets = list(dict.fromkeys([*a.presets, *plan["presets"]]))
+    a.toolchain_plan = plan
+    mounted = ", ".join(f"{entry['name']} {entry['version']} ({entry['sha256'][:12]})" for entry in plan["entries"])
+    opened = ", ".join([*plan["hosts"], *(f"--allow-{preset}" for preset in plan["presets"])])
+    LOG.info("toolchains", f"mounted read-only: {mounted}; registries opened: {opened or 'none'}"
+                           + (f"; left closed: {', '.join(plan['closed'])}" if plan["closed"] else ""))
+    return plan["notes"]
+
+
+def toolchain_entries(a):
+    plan = getattr(a, "toolchain_plan", None)
+    return plan["entries"] if plan else []
 
 
 def load_cairn_module():
@@ -10492,6 +10554,11 @@ def register_run(a, run, session):
         "log_dir": str(Path(a.log_dir).expanduser().resolve()) if a.log_dir else None,
         # devices.jsonl keeps serial numbers in full only then.
         "log_debug": bool(getattr(a, "log_debug", False)),
+        # --toolchain: what the start mounted (sandbox-ai list, report); `toolchain attach` checks what a toolchain
+        # needs against sandbox-ai's own images, and only notes it for an image of yours.
+        "toolchains": load_toolchains_module().plan_shown(getattr(a, "toolchain_plan", None))
+        if toolchain_entries(a) else [],
+        "custom_image": a.backend == "podman" and not own_image(a),
         # `sandbox-ai net allow` refuses destinations inside a chosen network of the sandbox's own.
         "subnets": [v for v in (getattr(a, "subnet", None), getattr(a, "subnet6", None)) if v],
         # `sandbox-ai net allow --git-token-*` writes logins its Git helper reads (not with --token-proxy).
@@ -11100,6 +11167,10 @@ def agent_environment(a):
         env.update({"OPENCODE_CONFIG": "/root/.config/opencode/opencode.jsonc",
                     "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
                     "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_SHARE": "1"})
+    # --toolchain: its variables (JAVA_HOME ...), where you set none yourself (--env); its caches in the sandbox HOME.
+    for key, value in load_toolchains_module().environment(toolchain_entries(a)).items() \
+            if toolchain_entries(a) else ():
+        env.setdefault(key, value)
     env.update(own_environment(a))
     for agent in managed_companions(a):  # the agents --with: their variables, as their own starts set them
         env.update(own_environment(companion_view(a, agent)))
@@ -11449,6 +11520,30 @@ def agent_restart_script(a, binary):
             "continues\n" + shlex.join(command) + f'\nprintf "%s %s" "$?" "$(date +%s)" > {RUNTIME.AGENT_EXIT}\n')
 
 
+def toolchain_mounts(a, session):
+    """[(host, sandbox, "ro")]: the session's folder toolchains/ at /opt/toolchains (every start has it: the wrappers
+    of the toolchains' commands, their variables, and the mount point `sandbox-ai toolchain attach` mounts one on
+    while the sandbox runs), the store's tree of each --toolchain on it, and - with Podman - the file that puts the
+    wrappers' folder back on a login shell's PATH (the image's /etc/profile resets it). [] for a session directory
+    without the folder (prepare_toolchains made none)."""
+    module = load_toolchains_module()
+    folder = module.session_folder(session)
+    if not folder.is_dir():
+        return []
+    found = [(folder, module.MOUNT, "ro")]
+    found += [(source, target, "ro") for source, target in module.start_mounts(toolchain_entries(a))]
+    if a.backend == "podman":
+        found.append((folder / "profile.sh", module.PROFILE_TARGET, "ro"))
+    return found
+
+
+def prepare_toolchains(a, session):
+    """The session's folder toolchains/ (toolchains.write_session): the wrappers and variables of the start's
+    toolchains, each mount point. The notes on commands two toolchains name."""
+    return load_toolchains_module().write_session(load_toolchains_module().session_folder(session),
+                                                  toolchain_entries(a))
+
+
 def mount_option(src, dest, mode, nosuid=True):
     if any(c in str(src) + dest for c in (",", "\n", "\r")):
         raise ValueError("Podman bind paths cannot contain commas or newlines")
@@ -11652,6 +11747,7 @@ def pod_commands(a, name, session, home):
                 (session / "hosts", "/etc/hosts", "ro"),
                 (session / "resolv.conf", "/etc/resolv.conf", "ro"),
                 (session / "nsswitch.conf", "/etc/nsswitch.conf", "ro")]
+    bindings += toolchain_mounts(a, session)
     bindings += [parse_mount(value) for value in a.mount]
     # Kits after /root, so that they lie on top of the sandbox HOME.
     bindings += [(src, dest, mode) for src, dest, mode in getattr(a, "kit_mounts", [])]
@@ -13255,6 +13351,8 @@ def bwrap_command(a, session, home):
                 dest]
     for src, dest, _ in hidden_mounts(a, session):  # --hide: over what it matches in the workspaces, after them
         cmd += ["--ro-bind", str(src), dest]
+    for src, dest, _ in toolchain_mounts(a, session):  # /opt/toolchains and each --toolchain on it (nosuid, nodev)
+        cmd += ["--ro-bind", str(src), dest]
     for value in a.mount:
         src, dest, mode = parse_mount(value)
         cmd += ["--ro-bind" if mode == "ro" else "--bind", src, dest]
@@ -14606,6 +14704,9 @@ def launch(argv, floor_by=None, preset_bridge=None):
     check_policy(a, policy)
     # Options may narrow the mode, never widen it; then what it enforces beyond options (approval scope ...).
     MODES.check(launcher_namespace(), a, policy)
+    # --toolchain: what it mounts, and its registries (after the mode's check: in high and paranoid they stay closed
+    # instead of being refused as --allow-host would be; before validate(), which checks the hosts as any others).
+    toolchain_notes = plan_toolchains(a)
     # A wildcard below a shared service given with --allow-host: confirmed by --yes or on a terminal (else validate()
     # refuses it, naming --allow-shared-wildcard); after the policy and the mode, which refuse it without a question.
     confirm_shared_wildcards(a)
@@ -14637,7 +14738,8 @@ def launch(argv, floor_by=None, preset_bridge=None):
         print(f"agent-sandbox: note: {load_dsh_module().note(a, dsh_session_browser(a))}", file=sys.stderr)
     if not a.dry_run:
         remember_exposed(a)
-    for note in remembered + notes + ask_allow_notes(a) + preset_bridge_notes(a):
+    for note in remembered + notes + ask_allow_notes(a) + preset_bridge_notes(a) + \
+            ([] if detachable(a) and not a.dry_run else toolchain_notes):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     a.run_id = getattr(a, "run_id", None) or (a.pod_name[len("agent-"):] if a.pod_name
                                               else f"{a.agent}-{uuid.uuid4().hex[:8]}")
@@ -14699,6 +14801,12 @@ def launch(argv, floor_by=None, preset_bridge=None):
                           # the workspace checkpoints, kept on the host in sandbox-ai's state (never mounted)
                           "checkpoint": checkpoint_plan(a),
                           "devices": [{"path": path, "kind": kind} for path, kind in devices(a)], "gpu": a.gpu,
+                          # --toolchain: mounted read-only at /opt/toolchains/NAME; the registries opened with them
+                          "toolchains": load_toolchains_module().plan_shown(a.toolchain_plan)
+                          if a.toolchain_plan else [],
+                          "toolchain_hosts": {"opened": [*a.toolchain_plan["hosts"],
+                                                         *(f"--allow-{p}" for p in a.toolchain_plan["presets"])],
+                                              "closed": a.toolchain_plan["closed"]} if a.toolchain_plan else None,
                           "device_grants": [{**{key: grant[key] for key in ("value", "by", "state", "decision",
                                                                             "rule", "ruleset", "track")},
                                              "nodes": list(grant["nodes"] or grant.get("pending") or [])}
@@ -14930,6 +15038,10 @@ def launch(argv, floor_by=None, preset_bridge=None):
         # The files of the workspaces the host runs or trusts, as they are before the agent: compared after the run.
         workspace_manifest = record_workspace_review(a)
         plan_hidden(a, session)  # --hide: before the canaries, so that a canary's .env is never one of them
+        # /opt/toolchains of this run: the wrappers and variables of its --toolchain, the mount points (and the place
+        # `sandbox-ai toolchain attach` puts one while it runs).
+        for note in prepare_toolchains(a, session):
+            print(f"agent-sandbox: note: toolchains: {printable(note)}", file=sys.stderr)
         a.canary_plan = plant_canaries(a, home, cleanup)  # after the auth copies and kits: never over them
         pair = claude_credential_pair(a, home)
         writeback = claude_writeback_state(pair) if pair and not a.probe else None
@@ -14968,6 +15080,8 @@ def launch(argv, floor_by=None, preset_bridge=None):
         # The kill switch (sandbox-ai net cut): what it needs to know of this run; None: it has none (said why).
         a.killswitch = killswitch_config(a, hosts)
         a.control_dir = register_run(a, a.run_id, session)
+        if toolchain_entries(a):  # the run's registry (toolchain list --run, detach) and its toolchains.jsonl
+            load_toolchains_module().record_start(a.control_dir, a.toolchain_plan, a.log_dir, a.run_id)
         if a.killswitch is not None:
             # The cuts of the runs this one acts for, when they are cut now: they hold before its agent runs.
             a.killswitch["cuts"] = load_starts_module().module("net").joined_cuts(a.run_id, a.control_dir)

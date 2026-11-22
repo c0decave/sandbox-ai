@@ -118,7 +118,8 @@ GROUPS = {
     "Cairn": ["--cairn", "--cairn-workers", "--cairn-origin", "--cairn-goal", "--cairn-hint", "--cairn-board"],
     "Hardware": ["--device", "--gpu"],
     "Limits": ["--memory", "--cpus", "--pids", "--tmp-size"],
-    "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe"],
+    "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe",
+               "--toolchain", "--toolchain-offline"],
 }
 PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--log-dir", "--git-credentials", "--local-config",
                 "--auth-file", "--import-codex-auth", "--gui-vnc", "--kit-dir", "--config", "--runtime", "--device"}
@@ -1461,6 +1462,58 @@ class SandboxAI:
         if not valid_run(run) or not (valid_device(path) or re.fullmatch(r"[0-9]{1,9}", str(path))):
             return 2, "", "invalid run or device"
         return self.host_run(host, "devices", "remove", run, path, timeout=120)
+
+    # -- build toolchains (sandbox-ai toolchain): the store, the signed catalog, a running sandbox's --
+
+    def host_toolchains(self, host="local"):
+        """{"installed": [row], "catalog": [row], "signed": bool, "problem": text or None} of HOST: its store
+        (`toolchain list --json`) and what the signed catalog offers its machine (`toolchain catalog --json`; not
+        read: "problem" says why, the store is listed all the same). ValueError: the store was not read (a
+        sandbox-ai without toolchains there)."""
+        installed = self.host_json(host, "toolchain", "list", "--json", timeout=60)
+        if not isinstance(installed, list):
+            raise ValueError("not a list of toolchains")
+        rows = [row for row in installed if isinstance(row, dict) and valid_toolchain(row.get("name"))
+                and isinstance(row.get("version"), str)]
+        catalog, signed, problem = [], False, None
+        try:
+            found = self.host_json(host, "toolchain", "catalog", "--json", timeout=90)
+            catalog = [row for row in found.get("toolchains", []) if isinstance(row, dict)
+                       and valid_toolchain(row.get("name")) and isinstance(row.get("version"), str)]
+            signed = (found.get("signature") or {}).get("state") == "good"
+            if not signed:
+                problem = printable(str((found.get("signature") or {}).get("reason") or "not signed"))[:300]
+        except (ValueError, OSError, AttributeError) as exc:
+            problem = printable(str(exc))[-300:]
+        return {"installed": rows, "catalog": catalog if signed else [], "signed": signed, "problem": problem}
+
+    def toolchains_of_run(self, run, host="local"):
+        """[row] of the toolchains of the running sandbox RUN on HOST (`toolchain list --run RUN --json`): "name",
+        "version", "source" (start, added), "commands". ValueError: not answered."""
+        if not valid_run(run):
+            raise ValueError("invalid run")
+        data = self.host_json(host, "toolchain", "list", "--run", run, "--json", timeout=60)
+        if not isinstance(data, list):
+            raise ValueError("not a list of toolchains")
+        return [row for row in data if isinstance(row, dict) and valid_toolchain(row.get("name"))]
+
+    def toolchain_add(self, name, host="local"):
+        """`sandbox-ai toolchain add NAME` on HOST: from the signed catalog into its store (a download)."""
+        if not valid_toolchain(name):
+            return 2, "", "invalid toolchain"
+        return self.host_run(host, "toolchain", "add", name, timeout=3600)
+
+    def toolchain_attach(self, run, name, host="local", offline=False):
+        """`sandbox-ai toolchain attach RUN NAME` on HOST: mounted read-only into the running sandbox."""
+        if not valid_run(run) or not valid_toolchain(name):
+            return 2, "", "invalid run or toolchain"
+        return self.host_run(host, "toolchain", "attach", run, name, *(["--offline"] if offline else []), timeout=300)
+
+    def toolchain_detach(self, run, name, host="local", force=False):
+        """`sandbox-ai toolchain detach RUN NAME [--force]` on HOST."""
+        if not valid_run(run) or not valid_toolchain(name):
+            return 2, "", "invalid run or toolchain"
+        return self.host_run(host, "toolchain", "detach", run, name, *(["--force"] if force else []), timeout=150)
 
     def host_devices_added(self, host, run):
         """[(id, what)] of the devices added to the running sandbox RUN on HOST during its run and not removed
@@ -5629,6 +5682,12 @@ class DeviceScanMissing(ValueError):
 USB_DEVICE = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # devices.SELECTOR
 
 
+def valid_toolchain(value):
+    """A toolchain's name as sandbox-ai takes it: NAME or NAME@VERSION (toolchains.spec)."""
+    return isinstance(value, str) and bool(re.fullmatch(r"[a-z][a-z0-9-]{0,31}(?:@[0-9A-Za-z][0-9A-Za-z.+_-]{0,63})?",
+                                                        value)) and value.partition("@")[0] != "bin"
+
+
 def valid_device(path):
     """A device path of one line under /dev, or a USB device by identity, usb:VENDOR:PRODUCT[:SERIAL] (as
     `sandbox-ai devices add` takes it); never read as an option."""
@@ -5683,6 +5742,10 @@ NEEDS_CONFIRM = {
     "workspace-force": "a forced removal leaves what a process there still holds usable, also for writing, until it "
                        "is closed; a copy the agent took stays usable until the sandbox restarts",
     "device-add": "a device gives the agent that hardware of the host",
+    "toolchain-add": "a toolchain gives the agent that compiler or interpreter, read-only, and opens the package "
+                     "registries it names for the run",
+    "toolchain-force": "a forced detach leaves what a process there still runs or holds of the toolchain usable "
+                       "until it is closed",
     "limits-raise": "a limit above the current one (or none) lets the agent use more of that host",
     "host-remove": "removing a host ends this service's management of it",
     "vpn-remove": "removing a VPN profile stops the starts that use it from starting",

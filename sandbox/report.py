@@ -22,7 +22,7 @@ allowed - as Markdown, HTML or PDF, with a table of contents and links.
 The report is made only from what sandbox-ai records: the run registry (run.json of a running sandbox, and through
 its supervisor what was allowed during the run), the start directories and their histories, and the log directory
 of each run: activity.jsonl, safeguards.jsonl, the proxy's connections-*.jsonl, egress-denied.jsonl, dns.jsonl,
-canaries.jsonl, vpn.jsonl, tools.jsonl, mcp-calls.jsonl, devices.jsonl, workspaces.jsonl, files.jsonl and
+canaries.jsonl, vpn.jsonl, tools.jsonl, mcp-calls.jsonl, devices.jsonl, toolchains.jsonl, workspaces.jsonl, files.jsonl and
 processes.jsonl, and the MCP servers' own mcp-calls.jsonl. Each log is read from its end and only so far (the logs
 are not rotated): the appendix names every file read, how much of it, and what could not be read. Secrets never
 appear: every text goes through the activity log's redaction (the token formats, credential patterns and the run's
@@ -722,6 +722,7 @@ class Gatherer:
         self.processes = 0
         self.agent = collections.Counter()
         self.devices = {"added": 0, "refused": 0, "items": []}
+        self.toolchains = {"start": 0, "attached": 0, "detached": 0, "refused": 0, "items": []}
         self.vpn_checks = []
         self.recorded, self.derived = collections.defaultdict(list), collections.defaultdict(dict)
         self.derived_left, self.reasons = 0, {}
@@ -866,6 +867,7 @@ class Gatherer:
                    ("tools.jsonl", "the agent's tool calls (hooks)", self.tool),
                    ("mcp-calls.jsonl", "MCP tool calls", self.mcp_call),
                    ("devices.jsonl", "devices", self.device),
+                   ("toolchains.jsonl", "toolchains mounted", self.toolchain),
                    ("workspaces.jsonl", "workspaces added and removed", self.workspace))
         for name, kind, handle in readers:
             for record in self.sources.records(directory / name, kind):
@@ -1140,6 +1142,20 @@ class Gatherer:
         if event in ("add", "refuse", "remove") and len(self.devices["items"]) < 100:
             self.devices["items"].append({"time": record.get("time"), "run": run, "event": event,
                                           "device": record.get("value"), "reason": record.get("reason")})
+
+    def toolchain(self, record, run):
+        """toolchains.jsonl: a toolchain mounted at the start or during the run, taken out again, or refused (a
+        host below what it needs); the registries opened with them are in the network part as any allowed host."""
+        event = record.get("event")
+        key = {"start": "start", "attach": "attached", "detach": "detached", "refuse": "refused"}.get(event)
+        if key is None:
+            return
+        self.toolchains[key] += 1
+        if len(self.toolchains["items"]) < 100:
+            self.toolchains["items"].append({"time": record.get("time"), "run": run or record.get("run"),
+                                             "event": event, "name": record.get("name"),
+                                             "version": record.get("version"), "sha256": record.get("sha256"),
+                                             "signed": bool(record.get("signed_by")), "reason": record.get("reason")})
 
     def workspace(self, record, run):
         if run:
@@ -1515,7 +1531,7 @@ class Gatherer:
             "pushes": self.pushes, "models": dict(self.models.most_common(10)), "tokens": dict(self.tokens),
             "credentials": dict(self.credentials.most_common(20)), "added": dict(self.added.most_common(20)),
             "agent": dict(self.agent), "files": dict(self.files), "processes": self.processes,
-            "programs": dict(self.programs.most_common(15)), "devices": self.devices, "vpn_checks": self.vpn_checks[:200],
+            "programs": dict(self.programs.most_common(15)), "devices": self.devices, "toolchains": self.toolchains, "vpn_checks": self.vpn_checks[:200],
             "findings": findings[:FINDINGS_LIMIT], "findings_left_out": max(0, len(findings) - FINDINGS_LIMIT),
             "sources": self.sources.used, "unreadable": self.sources.unreadable, "notes": self.notes,
             "not_recorded": NOT_RECORDED,
@@ -1863,6 +1879,13 @@ def build(data):
     devices = data["devices"]
     if devices["added"] or devices["refused"]:
         lines.append([t(f"devices: {devices['added']} added, {devices['refused']} refused during the run")])
+    toolchains = data.get("toolchains") or {"items": []}
+    if toolchains["items"]:
+        mounted = sorted({f"{item['name']} {item['version']}" + ("" if item["signed"] else " (unsigned)")
+                          for item in toolchains["items"] if item["event"] in ("start", "attach")})
+        lines.append([t(f"toolchains mounted read-only: {joined(mounted, 12) or 'none'} ({toolchains['start']} at a "
+                        f"start, {toolchains['attached']} during a run, {toolchains['detached']} taken out again, "
+                        f"{toolchains['refused']} refused)")])
     if data["vpn_checks"]:
         failed = sum(1 for check in data["vpn_checks"] if not check["ok"])
         lines.append([t(f"VPN and Tor checks: {len(data['vpn_checks'])} ({failed} failed)")])

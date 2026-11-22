@@ -4039,6 +4039,74 @@ function resourcesCard(main, s) {
     devHeld = list;
     showDetected();
   };
+  // build toolchains: given at the start (they stay) or attached (Remove); attaching asks first. Only what that
+  // host's store has is offered (sandbox-ai toolchain add NAME there adds one from the signed catalog).
+  const tcBody = el("tbody"), tcStatus = el("div"), tcNote = el("p", { class: "hint" }), tcActions = el("div", { class: "row" });
+  const tcTable = el("table", {}, el("caption", { class: "sr-only" }, t("Toolchains of {where}", { where })), head([t("Toolchain"), t("Version"), t("Given"), t("Commands"), ""]), tcBody);
+  const tcChoice = el("select", { id: "tc-choice" });
+  let tcHeld = [], tcStore = null;
+  const detachToolchain = (tc, force) => async (event) => busy(event.target, async () => {
+    try {
+      const r = await api("POST", hostPath(`/toolchains/${encodeURIComponent(name)}/remove`, host), force ? { toolchain: tc, force: true, confirm: true } : { toolchain: tc });
+      toast("success", t("Removed {what} from {where}", { what: tc, where }), (r && r.output) || "");
+    } catch (e) {
+      if (!force && /--force/.test(errorText(e))) {
+        clear(tcActions).append(...ask(t("{toolchain} is still in use in {name}: a program of it runs or has one of its files open. Detach it anyway? What is open stays usable until it is closed.", { toolchain: tc, name }),
+          t("Yes, detach it"), detachToolchain(tc, true), () => { tcButtons(); focusFirst(tcActions); }));
+        focusCancel(tcActions);
+        return;
+      }
+      failed(t("Could not remove {what} from {where}", { what: tc, where }))(e);
+    }
+    tcButtons(); loadToolchains();
+  });
+  const toolchainRow = (d) => el("tr", {}, el("td", { class: "mono" }, d.name), el("td", { class: "mono" }, d.version || ""),
+    el("td", {}, d.source === "start" ? t("at the start") : t("during the run")), el("td", { class: "mono" }, (d.commands || []).slice(0, 8).join(", ")),
+    el("td", { class: "actions" }, d.source === "added" ? el("button", { onclick: (event) => detachToolchain(d.name, false)(event) }, t("Remove")) : null));
+  const showStore = () => {
+    clear(tcChoice);
+    const held = new Set(tcHeld.map(d => d.name)), offered = (tcStore || []).filter(d => !held.has(d.name));
+    tcChoice.append(el("option", { value: "" }, t("Choose a toolchain…")), ...offered.map(d => el("option", { value: d.name, title: (d.hosts || []).join(", ") }, `${d.name} ${d.version} (${(d.commands || []).slice(0, 6).join(", ")})`)));
+    tcChoice.hidden = !offered.length;
+    tcNote.textContent = tcStore === null ? "" : offered.length ? "" : (tcStore.length ? t("Every toolchain of the store is attached to it already.")
+      : t("No toolchain is in the store of {host}. In a terminal there: sandbox-ai toolchain catalog, then sandbox-ai toolchain add NAME.", { host }));
+  };
+  const loadToolchains = async () => {
+    let list;
+    try { list = await api("GET", hostPath(`/toolchains/${encodeURIComponent(name)}`, host)); }
+    catch (e) { clear(tcStatus).append(errorNotice(e)); tcTable.hidden = true; return; }
+    tcHeld = (Array.isArray(list) ? list : []).filter(d => d && typeof d === "object" && typeof d.name === "string");
+    clear(tcStatus).append(tcHeld.length ? "" : el("p", { class: "hint" }, t("No toolchain is mounted in it.")));
+    clear(tcBody).append(...tcHeld.map(toolchainRow));
+    tcTable.hidden = !tcHeld.length;
+    showStore();
+  };
+  const loadStore = async () => {
+    try {
+      const r = await api("GET", hostPath("/toolchains", host));
+      tcStore = (Array.isArray(r) ? r : []).filter(d => d && typeof d === "object" && typeof d.name === "string");
+    } catch (e) { tcStore = null; tcNote.textContent = t("The toolchains of {host} could not be read: {error}", { host, error: errorText(e) }); return; }
+    showStore();
+  };
+  const attachToolchain = (tc) => async (event) => busy(event.target, async () => {
+    try {
+      const r = await api("POST", hostPath(`/toolchains/${encodeURIComponent(name)}`, host), { toolchain: tc, confirm: true });
+      toast("success", t("Gave {what} to {where}", { what: tc, where }), (r && r.output) || "");
+      loadToolchains();
+    } catch (e) { failed(t("Could not give {what} to {where}", { what: tc, where }))(e); }
+    tcButtons();
+  });
+  const tcButtons = () => clear(tcActions).append(el("button", { class: "primary", onclick: () => {
+    const tc = tcChoice.value, entry = (tcStore || []).find(d => d.name === tc);
+    if (!tc || !entry) { toast("warning", t("Which toolchain?"), t("Choose one of the store of {host}.", { host })); return; }
+    const opens = [...(entry.hosts || []), ...(entry.allow || []).map(p => `--allow-${p}`)].join(", ");
+    clear(tcActions).append(...ask(t("Mount {toolchain} read-only into {name} at /opt/toolchains/{toolchain}? Its commands are on the agent's PATH from then on.", { toolchain: tc, name })
+      + (opens ? " " + t("Its registries are opened for the run: {hosts} (not in the security modes high and paranoid).", { hosts: opens }) : ""),
+      t("Yes, mount it"), attachToolchain(tc), () => { tcButtons(); focusFirst(tcActions); }));
+    focusCancel(tcActions);
+  } }, t("Add toolchain")));
+  tcButtons();
+
   const device = el("input", { id: "dev-value", class: "mono", placeholder: t("{path} or {usb}", { path: "/dev/ttyUSB0", usb: "usb:2e8a:000a" }) });
   // the devices that host has (sandbox-ai devices scan there, never this machine's for another host), grouped by
   // kind, minus those the run has and those sandbox-ai refuses; one chosen goes into the field. A GPU kind is shown,
@@ -4149,7 +4217,7 @@ function resourcesCard(main, s) {
       : t("Raise the {limits} limit of {where}? The agent can then use more of that host (a strict security mode keeps its cap).", { limits: names(raised), where });
     confirmIn(limActions, text, removed.length ? t("Yes, no limit") : t("Yes, raise it"), () => sendLimits(Object.assign(body, { confirm: true })), { trigger: apply });
   } }, t("Apply limits"));
-  limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadMcp(); loadDevices(); scanDevices(); loadLimits(); } }, t("Refresh")));
+  limActions.append(apply, el("button", { onclick: () => { loadWorkspaces(); loadMcp(); loadDevices(); scanDevices(); loadToolchains(); loadStore(); loadLimits(); } }, t("Refresh")));
 
   const title = () => t("Workspaces, devices and limits of {where}", { where });
   const heading = el("h2", {}, title());
@@ -4181,6 +4249,8 @@ function resourcesCard(main, s) {
     el("h3", {}, t("Devices")), devStatus, devTable,
     el("div", { class: "form" }, el("label", { for: "dev-detected" }, t("Detected on {host}", { host })), detected, el("span"), detectedNote,
       el("label", { for: "dev-value" }, t("Device")), device, el("span"), devActions),
+    el("h3", {}, t("Toolchains")), tcStatus, tcTable,
+    el("div", { class: "form" }, el("label", { for: "tc-choice" }, t("In the store of {host}", { host })), tcChoice, el("span"), tcNote, el("span"), tcActions),
     el("h3", {}, t("Resource limits")), limitsNow,
     el("p", { class: "hint" }, t("Only a changed field is sent; a limit raised or taken away (none) is asked first. A strict security mode keeps its caps.")),
     el("div", { class: "form" },
@@ -4196,6 +4266,8 @@ function resourcesCard(main, s) {
   loadCopySources();
   loadDevices();
   scanDevices();
+  loadToolchains();
+  loadStore();
   loadLimits();
 }
 

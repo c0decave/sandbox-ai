@@ -19,5 +19,7 @@ recursive-include docs *.py *.md
 exclude docs/AGENT_HOSTS.md docs/MCP_SIGNING_AXROSS.md
 recursive-include tests/golden *
 recursive-include scripts *.py *.sh
+# The source of the agents' sandbox-ai skill (scripts/gen_skills.py; tests/test_skill_sync.py reads it).
+graft scripts/skill_source
 recursive-include packaging *
 global-exclude __pycache__ *.py[cod]

@@ -902,6 +902,48 @@ def test_firejail_helpers_unusable(scenario, tmp_path, monkeypatch):
         assert r.firejail_helpers_unusable((str(tmp_path / "missing"),)) is None  # none found: Firejail says so
 
 
+def test_preset_bridge_notes(scenario, monkeypatch):
+    """The notes a start says of the bridge its preset proposes: none without one (or in a dry run or a probe); the
+    agent's note when it would not see the bridge; and for a foreground start the command to make it later."""
+    presets = SimpleNamespace(bridge_agent_note=lambda proposal, agent: None if agent == "claude" else
+                              f"{agent} reads its MCP servers only at its start",
+                              bridge_command=lambda proposal, name: f"sandbox-ai bridge add {name} web --allow ask")
+    monkeypatch.setattr(s, "load_presets_module", lambda: presets)
+    proposal = {"preset": "pair-reviewer"}
+    a = SimpleNamespace(preset_bridge=proposal, dry_run=False, probe=False, agent="claude", start_name="rev")
+    if scenario == "happy":
+        monkeypatch.setattr(s, "detachable", lambda a: True)
+        assert s.preset_bridge_notes(a) == [], "a session asks once it is up: nothing to say here"
+    elif scenario == "sad":
+        monkeypatch.setattr(s, "detachable", lambda a: False)
+        a.agent = "codex"
+        notes = s.preset_bridge_notes(a)
+        assert notes[0] == "note: codex reads its MCP servers only at its start"
+        assert "sandbox-ai bridge add rev web --allow ask" in notes[1] and "foreground" in notes[1]
+    else:
+        for changes in ({"preset_bridge": None}, {"dry_run": True}, {"probe": True}):
+            assert s.preset_bridge_notes(SimpleNamespace(**{**vars(a), **changes})) == [], changes
+
+
+def test_propose_preset_bridge(scenario, monkeypatch, capsys):
+    """Once the preset's session is up its bridge is proposed (asked on a terminal, said otherwise); a failure of
+    the proposal never fails the start that runs - it says how to make the bridge by hand."""
+    proposed = []
+
+    def propose(proposal, name):
+        if scenario == "sad":
+            raise ValueError("the broker is not there")
+        proposed.append((proposal, name))
+    monkeypatch.setattr(s, "load_presets_module", lambda: SimpleNamespace(propose_bridge=propose))
+    a = SimpleNamespace(preset_bridge={"preset": "observer"})
+    s.propose_preset_bridge(a, "watch" if scenario != "edge" else "lab1-x")
+    if scenario == "sad":
+        assert proposed == [] and "the preset's bridge was not proposed: the broker is not there" in \
+            capsys.readouterr().err
+    else:
+        assert proposed == [({"preset": "observer"}, "watch" if scenario == "happy" else "lab1-x")]
+
+
 def test_mcp_mode_refusal(scenario, monkeypatch):
     """A server not added yet (to be built from its catalog's source) is weighed by the security mode as if it were
     defined: the mode's own rules see it among the definitions; the launcher itself is left as it was."""
@@ -21017,3 +21059,143 @@ def test_full_text(scenario, tmp_path):
         # Without a file name (nothing to name) as before; a quota (EDQUOT) is a full file system too.
         assert s.full_text(OSError(errno.ENOSPC, "No space left on device")) == ""
         assert "is full" in s.full_text(OSError(errno.EDQUOT, "Disk quota exceeded", str(tmp_path)))
+
+
+# --- --toolchain: build toolchains mounted read-only (toolchains.py; tests/test_toolchains_start.py has the rest) ---
+
+
+def _toolchain_store(tmp_path, monkeypatch):
+    """A store with the toolchain go (added from an unsigned catalog of this test)."""
+    import test_toolchains as tt
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    source = tt.catalog(tmp_path, [tt.entry(tmp_path, env={"GOFLAGS": "-mod=mod"})])
+    tt.t.add("go", source, unsigned=True, out=lambda line: None)
+    return tt.t.installed()["go"]["1.25.4"]
+
+
+def _toolchain_cleanup(tmp_path):
+    for directory, dirs, _ in os.walk(tmp_path):  # the store's trees are read-only: pytest removes tmp_path
+        for name in dirs:
+            if not os.path.islink(os.path.join(directory, name)):
+                os.chmod(os.path.join(directory, name), 0o700)
+
+
+def test_load_toolchains_module(scenario):
+    toolchains = s.load_toolchains_module()
+    if scenario == "happy":
+        assert toolchains.MOUNT == "/opt/toolchains" and toolchains.BIN == s.RUNTIME.TOOLCHAINS_BIN
+    elif scenario == "sad":
+        with pytest.raises(ValueError, match="a toolchain's name"):
+            toolchains.spec("../go")
+    else:  # one module for the launcher: the plan and the mounts read the same store
+        assert s.load_toolchains_module() is toolchains
+
+
+def test_own_image(scenario, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    if scenario == "happy":
+        assert s.own_image(s.parse_args(["claude"])) and s.own_image(s.parse_args(["codex", "--with", "claude"]))
+    elif scenario == "sad":
+        assert not s.own_image(s.parse_args(["claude", "--image", "docker.io/library/debian:trixie"]))
+    else:  # a variant on sandbox-ai's own base is still sandbox-ai's own Debian; nothing set is no image of ours
+        a = s.parse_args(["claude"])
+        a.image = "localhost/claude-sandbox-go:latest"
+        assert s.own_image(a) and not s.own_image(types.SimpleNamespace(image=None))
+
+
+def test_plan_toolchains(scenario, tmp_path, monkeypatch):
+    _toolchain_store(tmp_path, monkeypatch)
+    try:
+        if scenario == "happy":
+            a = s.parse_args(["claude", "--toolchain", "go"])
+            a.mode = "medium"
+            notes = s.plan_toolchains(a)
+            assert a.allow_host == ["proxy.golang.org", "sum.golang.org"] and any("are opened" in n for n in notes)
+        elif scenario == "sad":
+            a = s.parse_args(["claude", "--toolchain", "rust"])
+            a.mode = "medium"
+            with pytest.raises(ValueError, match="rust is not in the store: sandbox-ai toolchain add rust"):
+                s.plan_toolchains(a)
+        else:  # a strict mode mounts it and keeps its registries closed; no --toolchain plans nothing
+            a = s.parse_args(["claude", "--toolchain", "go"])
+            a.mode = "paranoid"
+            assert any("stay closed" in note for note in s.plan_toolchains(a)) and a.allow_host == []
+            plain = s.parse_args(["claude"])
+            assert s.plan_toolchains(plain) == [] and plain.toolchain_plan is None
+    finally:
+        _toolchain_cleanup(tmp_path)
+
+
+def test_toolchain_entries(scenario, tmp_path, monkeypatch):
+    if scenario == "happy":
+        _toolchain_store(tmp_path, monkeypatch)
+        a = s.parse_args(["claude", "--toolchain", "go"])
+        a.mode = "medium"
+        s.plan_toolchains(a)
+        assert [entry["name"] for entry in s.toolchain_entries(a)] == ["go"]
+        _toolchain_cleanup(tmp_path)
+    elif scenario == "sad":
+        assert s.toolchain_entries(types.SimpleNamespace(toolchain_plan=None)) == []
+    else:  # a namespace that was never planned (a helper's view)
+        assert s.toolchain_entries(types.SimpleNamespace()) == []
+
+
+def test_toolchain_mounts(scenario, tmp_path, monkeypatch):
+    entry = _toolchain_store(tmp_path, monkeypatch)
+    try:
+        a = s.parse_args(["claude", "--toolchain", "go"])
+        a.mode = "medium"
+        s.plan_toolchains(a)
+        session = tmp_path / "session"
+        session.mkdir()
+        if scenario == "happy":
+            s.prepare_toolchains(a, session)
+            assert s.toolchain_mounts(a, session) == [
+                (session / "toolchains", "/opt/toolchains", "ro"),
+                (Path(entry["path"]), "/opt/toolchains/go", "ro"),
+                (session / "toolchains" / "profile.sh", "/etc/profile.d/sandbox-ai-toolchains.sh", "ro")]
+        elif scenario == "sad":  # no folder was prepared: nothing is mounted
+            assert s.toolchain_mounts(a, session) == []
+        else:  # Bubblewrap: the host's /etc is not the sandbox's, no profile file
+            s.prepare_toolchains(a, session)
+            a.backend = "bwrap"
+            assert [target for _, target, _ in s.toolchain_mounts(a, session)] == ["/opt/toolchains",
+                                                                                 "/opt/toolchains/go"]
+    finally:
+        _toolchain_cleanup(tmp_path)
+
+
+def test_prepare_toolchains(scenario, tmp_path, monkeypatch):
+    _toolchain_store(tmp_path, monkeypatch)
+    try:
+        session = tmp_path / "session"
+        session.mkdir()
+        if scenario == "happy":
+            a = s.parse_args(["claude", "--toolchain", "go"])
+            a.mode = "medium"
+            s.plan_toolchains(a)
+            assert s.prepare_toolchains(a, session) == []
+            assert (session / "toolchains/bin/go").read_text().endswith('exec /opt/toolchains/go/bin/go "$@"\n')
+            assert "GOFLAGS=-mod=mod" in (session / "toolchains/env.sh").read_text()
+        elif scenario == "sad":  # a session directory that is not there
+            with pytest.raises(OSError):
+                s.prepare_toolchains(s.parse_args(["claude"]), tmp_path / "none" / "session")
+        else:  # a start without toolchains still gets the folder: one can be attached while it runs
+            s.prepare_toolchains(s.parse_args(["claude"]), session)
+            assert (session / "toolchains/bin").is_dir() and not list((session / "toolchains/bin").iterdir())
+    finally:
+        _toolchain_cleanup(tmp_path)
+
+
+def test_toolchain_env(scenario):
+    runtime = s.RUNTIME
+    base = runtime.base_env()
+    if scenario == "happy":
+        env = runtime.toolchain_env(dict(base), there=lambda path: True)
+        assert env["PATH"].startswith("/opt/toolchains/bin:") and env["BASH_ENV"] == "/opt/toolchains/env.sh"
+    elif scenario == "sad":  # a sandbox without the folder: unchanged
+        assert runtime.toolchain_env(dict(base), there=lambda path: False) == base
+    else:  # your own BASH_ENV stays; the folder is never on PATH twice
+        env = runtime.toolchain_env({**base, "BASH_ENV": "/root/x", "PATH": "/opt/toolchains/bin:/usr/bin"},
+                                    there=lambda path: True)
+        assert env["BASH_ENV"] == "/root/x" and env["PATH"] == "/opt/toolchains/bin:/usr/bin"

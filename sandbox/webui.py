@@ -683,6 +683,7 @@ NET_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 DEVICE_PATH = re.compile(r"/dev/[A-Za-z0-9_+:.@-][A-Za-z0-9_+:.@/-]{0,250}")
 USB_SELECTOR = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # usb:VENDOR:PRODUCT[:SERIAL]
 DEVICE_ID = re.compile(r"[0-9]{1,9}")  # a grant's id, as devices list shows it
+TOOLCHAIN = re.compile(r"(?!bin(?:@|$))[a-z][a-z0-9-]{0,31}(?:@[0-9A-Za-z][0-9A-Za-z.+_-]{0,63})?")  # toolchains.spec
 WORKSPACE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+@ -]{0,254}")  # the NAME of /workspaces/NAME
 WORKSPACE_AS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # workspace add --name NAME (workspaces.NAME)
 # devices add waits up to devices.APPROVAL_SECONDS (60) for the answer to an "ask" rule; over SSH, with room to spare
@@ -957,6 +958,13 @@ def no_dots(value, what):
     return value
 
 
+def toolchain_value(value):
+    """A toolchain as `sandbox-ai toolchain attach` takes it: NAME or NAME@VERSION."""
+    if not (isinstance(value, str) and TOOLCHAIN.fullmatch(value)):
+        raise Refused(400, "a toolchain is NAME or NAME@VERSION (lower-case letters, digits and '-')")
+    return value
+
+
 def device_value(value):
     """A device as `sandbox-ai devices add` takes it: a path under /dev or usb:VENDOR:PRODUCT[:SERIAL]."""
     if isinstance(value, str) and USB_SELECTOR.fullmatch(value):
@@ -1163,6 +1171,10 @@ NEEDS_CONFIRM = {
     "workspace-force": "a forced removal leaves what a process there still holds usable, also for writing, until it "
                        "is closed; a copy the agent took stays usable until the sandbox restarts",
     "device-add": "a device gives the agent that hardware of the host",
+    "toolchain-add": "a toolchain gives the agent that compiler or interpreter, read-only, and opens the package "
+                     "registries it names for the run",
+    "toolchain-force": "a forced detach leaves what a process there still runs or holds of the toolchain usable "
+                       "until it is closed",
     "limits-raise": "a limit above the current one (or none) lets the agent use more of that host",
     "host-remove": "removing a host ends this service's management of it",
     "vpn-remove": "removing a VPN profile stops the starts that use it from starting",
@@ -1609,6 +1621,11 @@ class Api:
             ("GET", H + r"/devices/(?P<name>[^/]+)", self.devices, ()),
             ("POST", H + r"/devices/(?P<name>[^/]+)", self.device_add, ("device-add",)),
             ("POST", H + r"/devices/(?P<name>[^/]+)/remove", self.device_remove, ()),
+            # build toolchains: that host's store, a running start's, attach (asked first) and detach
+            ("GET", H + r"/toolchains", self.toolchains, ()),
+            ("GET", H + r"/toolchains/(?P<name>[^/]+)", self.run_toolchains, ()),
+            ("POST", H + r"/toolchains/(?P<name>[^/]+)", self.toolchain_attach, ("toolchain-add",)),
+            ("POST", H + r"/toolchains/(?P<name>[^/]+)/remove", self.toolchain_detach, ("toolchain-force",)),
             ("GET", H + r"/limits/(?P<name>[^/]+)", self.limits, ()),
             ("POST", H + r"/limits/(?P<name>[^/]+)", self.set_limits, ("limits-raise",)),
             ("GET", H + r"/presets", self.presets, ()),
@@ -2813,6 +2830,35 @@ class Api:
         if not (isinstance(device, str) and DEVICE_ID.fullmatch(device)):
             device = device_value(device)
         return self.done(params["host"], ["devices", "remove", name, device], 60)
+
+    def toolchains(self, params, body):
+        """sandbox-ai toolchain list --json on that host: its store ([{"name", "version", "commands", "hosts",
+        "allow", "signed_by", "used_by", ...}]) - what a running start there can be given."""
+        return self.json_of(params["host"], ["toolchain", "list", "--json"], 30)
+
+    def run_toolchains(self, params, body):
+        """sandbox-ai toolchain list --run NAME --json: the running start's toolchains ("source": start or added)."""
+        return self.json_of(params["host"], ["toolchain", "list", "--run", start_name(params["name"]), "--json"], 30)
+
+    def toolchain_attach(self, params, body):
+        """sandbox-ai toolchain attach NAME TOOLCHAIN [--offline]: one of that host's store, mounted read-only into
+        the running start; its registries are opened as `net allow` opens hosts (the run's mode decides)."""
+        name, toolchain = start_name(params["name"]), toolchain_value(body.get("toolchain"))
+        offline = body.get("offline", False)
+        if not isinstance(offline, bool):
+            raise Refused(400, "offline is true or false")
+        confirmed(body, "toolchain-add", toolchain)
+        return self.done(params["host"], ["toolchain", "attach", name, toolchain, *(["--offline"] if offline else [])],
+                         300)
+
+    def toolchain_detach(self, params, body):
+        name, toolchain = start_name(params["name"]), toolchain_value(body.get("toolchain"))
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            raise Refused(400, "force is true or false")
+        if force:
+            confirmed(body, "toolchain-force", toolchain)
+        return self.done(params["host"], ["toolchain", "detach", name, toolchain, *(["--force"] if force else [])], 150)
 
     def limits(self, params, body):
         """sandbox-ai limits NAME --show --json: {"memory": bytes, "memory_high": bytes, "cpus": N, "pids": N},

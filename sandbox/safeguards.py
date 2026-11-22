@@ -322,6 +322,13 @@ def rule_fix(kind, run, rule, ruleset, reason, approval=None):
                 "off it stays refused", False)
     if kind == "policy" or ruleset == "policy":
         return "the administrator's policy refuses it: it stays refused (ask your administrator)", True
+    if rule in (None, "") and not ruleset:  # refused by the approvals themselves, not by a rule
+        if "too many" in str(reason or ""):
+            return (f"it was not asked: too many questions at once (20 open) or in this run (500) - allow it during the "
+                    f"run on the app's Approvals page (Blocked) or with sandbox-ai net allow {run_word(run)} "
+                    "--allow-host HOST; answering or ending the open questions lets the next ones be asked", False)
+        return (f"no rule refused it ({reason or 'refused without a question'}): allow it during the run on the app's "
+                f"Approvals page (Blocked) or with sandbox-ai net allow {run_word(run)}", False)
     if ruleset in ("project", ".sandbox-ai.json"):
         return f"rule {rule} of the project file refuses it: change that rule (sandbox-ai wizard edit) or keep it", False
     where = {"rules": "~/.config/sandbox-ai/rules.json", "--rules": "the --rules file",

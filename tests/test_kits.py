@@ -1240,17 +1240,14 @@ def test_superpowers_is_offered_pinned_with_a_built_in_kit_but_not_by_default():
 
 
 def test_the_sandbox_ai_skill_says_the_same_to_every_agent():
-    """The copies of the built-in sandbox-ai skill differ only in the agent's memory line and a section of the agent's
-    own (Hermes in this sandbox): Hermes' copy was made before --allow-domain and --browser and lacked both."""
-    def body(agent):
-        lines = (k.BUILTIN / agent / "skills/sandbox-ai/SKILL.md").read_text().splitlines()
-        kept, own = [], False
-        for line in lines:
-            if line.startswith("## "):
-                own = line.endswith(" in this sandbox")
-            if not own and k.MEMORY_FILE[agent][1] not in line:
-                kept.append(line.rstrip())
-        return kept
-    reference = body("claude")
+    """The copies of the built-in sandbox-ai skill are written from one source (scripts/gen_skills.py): Hermes' copy
+    was made before --allow-domain and --browser and lacked both. They differ only in the agent's facts (its name,
+    memory, folders, commands) and a section of its own (Hermes in this sandbox); tests/test_skill_sync.py checks
+    the facts against the code."""
+    gen = load("gen_skills_for_kits_tests", "scripts/gen_skills.py")
+    assert gen.differing(gen.render()) == []
+    reference = gen.render(agents=["claude"])["sandbox/builtin/claude/skills/sandbox-ai/SKILL.md"]
     for agent in k.AGENTS:
-        assert body(agent) == reference, agent
+        text = (k.BUILTIN / agent / "skills/sandbox-ai/SKILL.md").read_text()
+        for needed in ("--allow-domain DOMAIN", "--browser", "## What to ask the human for"):
+            assert needed in text and needed in reference, (agent, needed)

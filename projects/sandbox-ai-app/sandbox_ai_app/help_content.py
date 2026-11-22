@@ -3080,9 +3080,15 @@ SECTIONS = (
          "release page, from `$SANDBOX_AI_SOURCE` or GitHub). Nothing is used before it checked out: the release's "
          "`SHA256SUMS` must carry a good signature by a release key the installed sandbox-ai trusts (as `sandbox-ai "
          "update` checks), the archive must have the SHA-256 listed there, and it may hold only the series' videos "
-         "and subtitles; otherwise nothing is installed. Only https, nothing is streamed.\n\n"
+         "and subtitles; otherwise nothing is installed. Only https, nothing is streamed. While it downloads, the "
+         "window shows how far it is; a failure (offline, a bad signature, no videos) is said there in red. A release "
+         "of this version that is not published there (yet), or has no videos, is said so, and the newest release "
+         "published there is offered instead (Download the videos of VERSION; checked the same way).\n\n"
+         "The windows of the videos (the player, the offer to download them) open over the window they were asked "
+         "from, also over a full-screen or maximized one, and over a dialog when asked from inside it.\n\n"
          "Where Qt Multimedia or its FFmpeg plugin is missing, or a video cannot be played, the app says so and "
-         "offers the system's player.",
+         "offers the system's player; where no program to play videos with can be started, it says so and names the "
+         "file.",
          "Ein kurzes Video zu jeder Seite der App, mit Ton (deutsch gesprochen) und Untertiteln, in der Reihenfolge "
          "der Navigation: wofür die Seite da ist und wie man sie benutzt.\n\n"
          "- Hilfe > Videos zu den Seiten (der Eintrag Videos in dieser Liste) listet sie mit Teil, Länge, der Seite, "
@@ -3101,9 +3107,17 @@ SECTIONS = (
          "nichts, bevor es geprüft ist: Die `SHA256SUMS` des Release muss eine gültige Signatur durch einen "
          "Release-Schlüssel tragen, dem das installierte sandbox-ai vertraut (wie `sandbox-ai update` prüft), das "
          "Archiv muss die dort genannte SHA-256 haben und darf nur die Videos und Untertitel der Reihe enthalten; "
-         "sonst wird nichts installiert. Nur https, nichts wird gestreamt.\n\n"
+         "sonst wird nichts installiert. Nur https, nichts wird gestreamt. Während des Herunterladens zeigt das "
+         "Fenster, wie weit es ist; ein Fehler (offline, eine schlechte Signatur, keine Videos) steht dort in Rot. "
+         "Gibt es das Release dieser Version dort (noch) nicht oder hat es keine Videos, sagt die App das und bietet "
+         "stattdessen das neueste dort veröffentlichte Release an (Die Videos von VERSION herunterladen; genauso "
+         "geprüft).\n\n"
+         "Die Fenster der Videos (der Player, das Angebot zum Herunterladen) öffnen sich über dem Fenster, aus dem "
+         "sie aufgerufen wurden, auch über einem im Vollbild oder maximiert, und über einem Dialog, wenn sie aus ihm "
+         "heraus aufgerufen wurden.\n\n"
          "Fehlt Qt Multimedia oder sein FFmpeg-Plugin oder lässt sich ein Video nicht abspielen, sagt die App das "
-         "und bietet den Player des Systems an."),
+         "und bietet den Player des Systems an; lässt sich kein Programm zum Abspielen von Videos starten, sagt sie "
+         "das und nennt die Datei."),
         see=("page-help", "app-tours")),
     section(
         "app-browser", "app", ("The app's browser", "Der Browser der App"),
@@ -4659,6 +4673,48 @@ SECTIONS = (
              "sandbox-ai mcp set axross --network full --allow-tcp 192.168.1.20:22 --env AXROSS_PASSWORDS",
              "sandbox-ai secrets set AXROSS_PASSWORDS"),
         see=("mcp", "presets", "rulesets"),
+        tours=()),
+    section(
+        "toolchains", "concepts", ("Toolchains: build tools mounted in", "Toolchains: Bauwerkzeuge zum Einhängen"),
+        ("The agent images are small: no Go, no Rust, no JDK. A toolchain is a compiler or interpreter with its "
+         "package manager, kept in a store on the host and mounted read-only into a sandbox at "
+         "`/opt/toolchains/NAME`, its commands on the agent's PATH. The agent builds in its own shell, under the "
+         "sandbox's rules; nothing of a toolchain runs on your host.\n\n"
+         "- `sandbox-ai toolchain catalog` shows what the signed catalog offers, `sandbox-ai toolchain add NAME` "
+         "downloads one, checks it against the catalog's SHA-256 and unpacks it into the store. Only a catalog "
+         "signed by a trusted key is taken.\n"
+         "- At a start: `--toolchain NAME`, on the Board the part Toolchains (its field offers the store's and the "
+         "catalog's).\n"
+         "- Into a running sandbox: `sandbox-ai toolchain attach RUN NAME`; in the app Add toolchain… on the "
+         "Sandboxes & sessions page, in a row's menu, and in a terminal tab's menu under While it runs. Remove "
+         "toolchain… takes one added during the run out again (refused while a program of it still runs; the "
+         "question then offers to detach it anyway).\n\n"
+         "The registries a toolchain names (the Go module proxy, Maven Central, npm ...) are opened with it, as "
+         "the network options open hosts; in the security modes high and paranoid they stay closed and the "
+         "toolchain is mounted all the same. A command the agent starts after an attach finds the toolchain at "
+         "once; a shell that is already open reads its variables with `. /opt/toolchains/env.sh`. On macOS a "
+         "toolchain is given at the start only.",
+         "Die Agenten-Images sind klein: kein Go, kein Rust, kein JDK. Eine Toolchain ist ein Compiler oder "
+         "Interpreter mit seinem Paketmanager, liegt in einem Lager auf dem Host und wird nur lesbar unter "
+         "`/opt/toolchains/NAME` in eine Sandbox eingehängt, ihre Befehle im PATH des Agenten. Der Agent baut in "
+         "seiner eigenen Shell, unter den Regeln der Sandbox; nichts von einer Toolchain läuft auf dem Host.\n\n"
+         "- `sandbox-ai toolchain catalog` zeigt, was der signierte Katalog anbietet, `sandbox-ai toolchain add "
+         "NAME` lädt eine herunter, prüft sie gegen die SHA-256 des Katalogs und entpackt sie ins Lager. Nur ein "
+         "von einem vertrauten Schlüssel signierter Katalog wird genommen.\n"
+         "- Beim Start: `--toolchain NAME`, auf dem Board der Teil Toolchains (sein Feld bietet die des Lagers und "
+         "des Katalogs an).\n"
+         "- In eine laufende Sandbox: `sandbox-ai toolchain attach LAUF NAME`; in der App Toolchain hinzufügen… "
+         "auf der Seite Sandboxen & Sitzungen, im Menü einer Zeile und im Menü eines Terminal-Tabs unter Während "
+         "es läuft. Toolchain entfernen… nimmt eine während des Laufs hinzugefügte wieder heraus (abgelehnt, "
+         "solange ein Programm daraus noch läuft; die Frage bietet dann an, sie trotzdem zu lösen).\n\n"
+         "Die Registrys, die eine Toolchain nennt (der Go-Modul-Proxy, Maven Central, npm ...), werden mit ihr "
+         "geöffnet, so wie die Netzwerkoptionen Hosts öffnen; in den Sicherheitsmodi high und paranoid bleiben "
+         "sie zu, und die Toolchain wird trotzdem eingehängt. Ein Befehl, den der Agent nach dem Einhängen "
+         "startet, findet die Toolchain sofort; eine schon offene Shell liest ihre Variablen mit "
+         "`. /opt/toolchains/env.sh`. Unter macOS gibt es eine Toolchain nur beim Start."),
+        cli=("--toolchain", "--toolchain-offline", "sandbox-ai toolchain catalog", "sandbox-ai toolchain add",
+             "sandbox-ai toolchain list", "sandbox-ai toolchain attach", "sandbox-ai toolchain detach"),
+        see=("page-sandboxes", "network", "security-modes", "devices"),
         tours=()),
     section(
         "devices", "concepts", ("Devices and GPUs", "Geräte und GPUs"),

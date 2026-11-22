@@ -115,6 +115,11 @@ KINDS = {kind.key: kind for kind in (
                  "blocks the rest, addresses and DNS are checked before the start")),
     Kind("devices", N_("Devices and GPU"), ("--device", "--gpu"), column=0,
          help=N_("Host devices handed to the agent (weakens the isolation)")),
+    # Build toolchains (--toolchain): from the signed catalog into the host's store (sandbox-ai toolchain add), and
+    # from there read-only into the sandbox at /opt/toolchains/NAME. One part with the list of them, as Devices.
+    Kind("toolchains", N_("Toolchains"), ("--toolchain", "--toolchain-offline"), column=0,
+         help=N_("Build tools from the signed catalog (Go, Rust, a JDK, Node, Python ...), mounted read-only at "
+                 "/opt/toolchains/NAME with their commands on the agent's PATH; their registries are opened")),
     Kind("limits", N_("Limits"), ("--memory", "--cpus", "--pids", "--tmp-size"), column=0,
          help=N_("Memory, CPUs, processes and the size of /tmp")),
     Kind("display", N_("Display"), ("--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"), column=0,
@@ -159,6 +164,7 @@ KINDS = {kind.key: kind for kind in (
 # Which edges may exist: (from kind, to kind). Workspaces, mounts and MCP servers count only when connected.
 EDGES = {("workspace", "agent"), ("mount", "agent"), ("home", "agent"), ("kits", "agent"), ("agent", "proxy"),
          ("proxy", "network"), ("agent", "mcp"), ("approvals", "proxy"), ("git", "proxy"), ("devices", "agent"),
+         ("toolchains", "agent"),
          ("limits", "agent"), ("display", "agent"), ("session", "agent"), ("logs", "proxy"), ("engine", "agent"),
          ("vpn", "network"), ("agent", "llm"), ("agent", "service"), ("service", "proxy"), ("browser", "proxy"),
          ("agent", "bridge"), ("agent", "cairn"), ("cairn", "proxy"), ("agent", "team")}
@@ -386,7 +392,7 @@ class Board:
 
     # The columns of layout(), by role: what configures the agent, the agent and what configures the proxy,
     # the proxy and what the agent talks to, the network. In each column, top to bottom, in this order.
-    FLOW = (("workspace", "mount", "home", "kits", "engine", "devices", "limits", "display", "session"),
+    FLOW = (("workspace", "mount", "home", "kits", "engine", "devices", "toolchains", "limits", "display", "session"),
             ("agent", "approvals", "git", "logs"),
             ("mcp", "llm", "service", "cairn", "browser", "bridge", "team", "proxy", "vpn"),
             ("network",))
@@ -2384,6 +2390,13 @@ def capabilities(board, launcher=None, definitions=None, bases=None):
         add("read", "bad", tr("Host device {path}", path=printable(value)), devices, 15)
     if values_.get("--gpu"):
         add("read", "warn", tr("GPU devices ({kind})", kind=printable(values_["--gpu"])), devices, 10)
+    toolchains = board.first("toolchains")
+    for value in values_.get("--toolchain", []):
+        # Signed code the agent runs in the sandbox, read-only; its registries are opened unless the part says not to.
+        add("code", "info", tr("Toolchain {name}: mounted read-only, its registries stay closed", name=printable(value))
+            if values_.get("--toolchain-offline") else
+            tr("Toolchain {name}: mounted read-only, its package registries are opened", name=printable(value)),
+            toolchains, 2)
     if values_.get("--dangerously-skip-permissions"):
         add("code", "info", tr("The agent runs without its own approval prompts (the sandbox stays in force)"),
             agent_node, 3)

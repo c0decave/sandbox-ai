@@ -5,23 +5,22 @@ description: Explains the sandbox-ai environment this agent runs in - the projec
 
 # The sandbox-ai environment
 
-- **Project**: the first workspace is at `/work`; further workspaces are under `/workspaces/NAME`.
-  Only these directories are shared with the host.
-- **Network**: outbound connections are limited to an allow-list. When a download, `git push` or
-  API call fails with a connection or DNS error, the host is most likely not allowed. Name the host
-  to the user; they can allow it with `--allow-host HOST` and see what was blocked with
-  `sandbox-ai logs`.
-- **Privacy check**: `git commit` and `git push` run sandbox-ai's privacy hooks. When a push to a
-  public remote is refused because it would publish a private path, address, account name or token,
-  remove that from the commits or ask the user; do not bypass the hooks.
-- **HOME** (`/root`) is discarded after the run, unless the sandbox was started with `--state-dir`
-  or as a session.
-- **Memory**: `~/.config/goose/AGENTS.md` (your global hints) belongs to this project only. sandbox-ai keeps
-  them between runs; they never reach other projects or the host. Put lasting notes about this
-  project there.
-- **Kits**: skills from sandbox-ai kits (in `~/.agents/skills`) are read-only in the sandbox. The user changes them
-  on the host, in `~/.local/share/sandbox-ai/home/goose/` or a kit under
-  `~/.local/share/sandbox-ai/kits/`.
+- **Project**: the first workspace is at `/work`; further workspaces are under `/workspaces/NAME`. Only these
+  directories are shared with the host.
+- **Network**: outbound connections are limited to an allow-list. When a download, `git push` or API call fails with
+  a connection or DNS error, the host is most likely not allowed. Name the host to the user; they can allow it with
+  `--allow-host HOST` and see what was blocked with `sandbox-ai logs`.
+- **Privacy check**: `git commit` and `git push` run sandbox-ai's privacy hooks. When a push to a public remote is
+  refused because it would publish a private path, address, account name or token, remove that from the commits or
+  ask the user; do not bypass the hooks.
+- **HOME** (`/root`) is kept when the start ends and comes back with `sandbox-ai resume NAME`, unless the start ran
+  with `--no-keep` or in the security mode `paranoid`; a new start begins with a fresh one.
+- **Memory**: `~/.config/goose/AGENTS.md` (your global hints, read at every start). It belongs to this project only:
+  sandbox-ai keeps it between runs, and it never reaches other projects or the agent's own setup on the host. Put
+  lasting notes about this project there.
+- **Kits**: skills (in `~/.agents/skills`) from sandbox-ai kits are read-only in the sandbox. The user changes them
+  on the host, in `~/.local/share/sandbox-ai/home/goose/` or a kit under `~/.local/share/sandbox-ai/kits/`.
 
-This is sandbox-ai's example skill. Edit or delete it on the host in
-`~/.local/share/sandbox-ai/home/goose/skills/sandbox-example/`; a deleted example is not created again.
+More in the skill `sandbox-ai`, which sandbox-ai ships beside this one. This is sandbox-ai's example skill. Edit or
+delete it on the host in `~/.local/share/sandbox-ai/home/goose/skills/sandbox-example/`; a deleted example is not
+created again.

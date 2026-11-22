@@ -8,9 +8,13 @@ F or F11 (full screen), Esc (full screen off, else the window closes).
 Where QtMultimedia cannot be loaded or has no media backend (its FFmpeg plugin; the wheels bring it, a trimmed Qt
 may not), or a video cannot be played, it is said so and the file can be opened with the system's player instead.
 
-open_video(page) is what the pages and the Help page call: the video about PAGE when it is on this computer; when
-the videos are not, the offer to download them once from the release of this version (VideoDownload: checked
-against the release's signed SHA256SUMS before anything is used - videos.install_release).
+open_video(page) is what the pages and the Help page call (through watch: an error on the way is said, not only
+logged): the video about PAGE when it is on this computer; when the videos are not, the offer to download them once
+from the release of this version (VideoDownload: checked against the release's signed SHA256SUMS before anything is
+used - videos.install_release); a release not published there (yet), or without videos, is said so, and the newest
+release published there is offered instead. Every window it opens floats over the window it was asked from
+(float_over): without that it could open behind a full-screen or maximized main window on a tiling window manager,
+and a click seemed to do nothing.
 """
 from __future__ import annotations
 
@@ -20,8 +24,8 @@ import weakref
 from PySide6.QtCore import QEvent, QObject, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSlider, QStyle, QToolButton, QVBoxLayout,
-    QWidget,
+    QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSlider, QStyle, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from . import videos as V
@@ -63,8 +67,12 @@ def backend_problem():
 
 
 def system_player(path):
-    """Open the file PATH with the system's player."""
-    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+    """Open the file PATH with the system's player; False when none could be started."""
+    return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+
+
+def no_system_player(path):
+    return tr("No program to play videos with could be started. The video is the file {path}", path=path)
 
 
 def remembered(key, default, kind):
@@ -317,7 +325,8 @@ class VideoPlayer(QWidget):
 
     def open_externally(self):
         self.player.pause()
-        system_player(self.video.path)
+        if not system_player(self.video.path):
+            self.bar.ask(no_system_player(self.video.path), [], level="error")
 
     def closeEvent(self, event):  # noqa: N802 - Qt's name
         self.player.stop()
@@ -374,10 +383,21 @@ def catalog(sai=None, language=None):
     return V.catalog(V.folders(getattr(sai, "directory", None)), language or i18n.language())
 
 
+def watch(page=None, sai=None, parent=None):
+    """open_video for a click: an error on the way is said in a message (with the log), never only logged."""
+    try:
+        return open_video(page, sai=sai, parent=parent)
+    except Exception as exc:  # noqa: BLE001 - whatever it is, the human clicked and is told
+        from . import applog, widgets
+        applog.swallowed("videos", f"the video about {page or 'the pages'} could not be shown", exc)
+        widgets.warn(parent, tr("Videos"), tr("The video cannot be shown: {why}", why=exc), modal=False)
+        return None
+
+
 def open_video(page=None, video=None, sai=None, parent=None, found=None):
     """Play the video about PAGE (or VIDEO) in the player; FOUND: the catalog (else looked up). Without the videos
     on this computer: the offer to download them (VideoDownload); without a player: the system's (NoPlayer).
-    Returns the window shown."""
+    PARENT: the window it is asked from (it floats over it). Returns the window shown."""
     from . import help_view
     sai = sai if sai is not None else (help_view.VIDEO_SAI[0] if help_view.VIDEO_SAI else None)
     found = catalog(sai) if found is None else found
@@ -386,7 +406,7 @@ def open_video(page=None, video=None, sai=None, parent=None, found=None):
         return offer_download(page, sai, parent)
     why = backend_problem()
     if why:
-        return show(NoPlayer(video, why))
+        return show(NoPlayer(video, why), parent)
     window = next((p for p in players() if p.isVisible()), None)
     if window is not None:
         if found:
@@ -394,10 +414,34 @@ def open_video(page=None, video=None, sai=None, parent=None, found=None):
         window.load(video)
     else:
         window = VideoPlayer(video, found)
-    return show(window)
+    return show(window, parent)
 
 
-def show(window):
+def float_over(window, parent=None):
+    """WINDOW stays above the window it was asked from: a dialog that blocks the app when one is open, else PARENT's
+    window, else the active one - its transient parent (the window manager keeps it above that one, also above a
+    full-screen or maximized one on a tiling window manager such as spectrwm, where a window without it opened behind
+    and a click seemed to do nothing). Only the QWindow's: WINDOW keeps no Qt parent, so a dialog that blocks its
+    window (window modal) does not block it, and it is not closed with the dialog."""
+    from shiboken6 import isValid
+    owner = QApplication.activeModalWidget()
+    if owner is None and parent is not None and isValid(parent):
+        owner = parent.window()
+    if owner is None:
+        owner = QApplication.activeWindow()
+    if owner is None or owner is window or not isValid(owner) or not owner.isVisible():
+        return
+    window.winId()  # its QWindow, made now
+    handle, over = window.windowHandle(), owner.windowHandle()
+    if handle is not None and over is not None and handle is not over:
+        handle.setTransientParent(over)
+
+
+def show(window, parent=None):
+    """WINDOW shown over the window it was asked from (float_over), brought up also when it was minimized."""
+    float_over(window, parent)
+    if window.isMinimized():
+        window.showNormal()
     window.show()
     window.raise_()
     window.activateWindow()
@@ -431,29 +475,46 @@ class NoPlayer(QWidget):
         self.resize(520, 160)
 
     def open_externally(self):
-        system_player(self.video.path)
-        self.close()
+        if system_player(self.video.path):
+            self.close()
+            return
+        self.text.setText(no_system_player(self.video.path))
+        self.text.setProperty("role", "notice-error")
+        restyle(self.text)
+
+
+def restyle(widget):
+    """WIDGET drawn again after its "role" changed (the style sheet's colour of an error)."""
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 def offer_download(page, sai, parent=None):
     if _downloads and _downloads[0].alive():
-        return show(_downloads[0])
-    window = VideoDownload(sai, page)
+        return show(_downloads[0], parent)
+    window = VideoDownload(sai, page, owner=parent)
     _downloads[:] = [window]
-    return show(window)
+    return show(window, parent)
 
 
 class VideoDownload(QWidget):
     """The videos are not on this computer: where the app looks for them, and their one download from the release of
     this version - checked before anything is used; then the video about PAGE plays."""
 
-    def __init__(self, sai, page=None, installer=None):
+    def __init__(self, sai, page=None, installer=None, owner=None):
         super().__init__(None, Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(tr("Videos"))
         self.sai, self.page = sai, page
+        self.owner = owner  # the window it was asked from: the video floats over it
         self.installer = installer or V.install_release  # (tests: a fake release)
-        self.version = sai.version() if sai is not None and hasattr(sai, "version") else ""
+        try:
+            self.version = str(sai.version() or "") if sai is not None and hasattr(sai, "version") else ""
+        except Exception as exc:  # noqa: BLE001 - a launcher that does not load: said below, the rest still works
+            from . import applog
+            applog.swallowed("videos", "the version of sandbox-ai could not be read", exc)
+            self.version = ""
+        self.other = None  # the newest release published, offered when this version's has no videos
         self.target = V.data_folder()
         self.progress_state = {"done": 0, "total": None}
         self.stop = threading.Event()
@@ -473,12 +534,19 @@ class VideoDownload(QWidget):
         layout.addWidget(self.message)
         row = QHBoxLayout()
         row.addStretch(1)
+        self.other_button = QPushButton()
+        self.other_button.clicked.connect(lambda _=False: self.download(self.other))
+        self.other_button.hide()
+        row.addWidget(self.other_button)
         self.download_button = QPushButton(tr("Download and check"))
         self.download_button.setProperty("role", "primary")
         self.download_button.setToolTip(safe_tooltip(tr("From {source}, into {folder}", source=V.source(),
                                                         folder=self.target)))
         self.download_button.clicked.connect(lambda _=False: self.download())
         self.download_button.setEnabled(bool(self.version))
+        if not self.version:
+            self.say(tr("The version of this sandbox-ai is not known, so there is no release to download the videos "
+                        "from."), "notice-error")
         self.close_button = QPushButton(tr("Close"))
         self.close_button.clicked.connect(lambda _=False: self.close())
         row.addWidget(self.download_button)
@@ -496,26 +564,53 @@ class VideoDownload(QWidget):
         from shiboken6 import isValid
         return isValid(self) and self.isVisible()
 
-    def download(self):
+    def say(self, text, role="secondary"):
+        """TEXT below the question, in the colour of ROLE ("notice-error": a failure)."""
+        self.message.setText(text)
+        if self.message.property("role") != role:
+            self.message.setProperty("role", role)
+            restyle(self.message)
+
+    def download(self, version=None):
+        """The videos of VERSION (default: this sandbox-ai's) downloaded and checked, in the background."""
         if self.running:
             return
+        version = version or self.version
         self.running = True
         self.stop.clear()
-        self.message.setText(tr("Downloading and checking…"))
+        self.say(tr("Downloading and checking…") if version == self.version else
+                 tr("Downloading and checking the videos of {version}…", version=version))
+        self.state_reset()
         self.bar.setRange(0, 0)
+        self.bar.setFormat("")
         self.bar.show()
         self.download_button.setEnabled(False)
+        self.other_button.hide()
         self.close_button.setText(tr("Cancel"))
         self.timer.start()
-        sai, version, target, state = self.sai, self.version, self.target, self.progress_state
+        sai, target, state, stop = self.sai, self.target, self.progress_state, self.stop
+        installer, repository = self.installer, V.source()
 
         def progress(done, total):
             state["done"], state["total"] = done, total
 
         def work():
             keys = V.release_keys(getattr(sai, "directory", None))
-            return self.installer(target, version, keys, V.source(), progress=progress, cancelled=self.stop.is_set)
-        background(work, done=self.finished, owner=self, work=True)
+            try:
+                return installer(target, version, keys, repository, progress=progress, cancelled=stop.is_set)
+            except V.VideoError as exc:
+                exc.tried, exc.latest = version, None
+                if exc.missing and not stop.is_set():
+                    try:  # the newest release published there may have them
+                        exc.latest = V.latest_release(repository)
+                    except V.VideoError:
+                        pass
+                raise
+        background(work, done=self.finished, owner=self, work=True,
+                   what=f"download the videos of sandbox-ai {version} from {repository}")
+
+    def state_reset(self):
+        self.progress_state["done"], self.progress_state["total"] = 0, None
 
     def show_progress(self):
         done, total = self.progress_state["done"], self.progress_state["total"]
@@ -533,16 +628,26 @@ class VideoDownload(QWidget):
         if error is not None:
             self.bar.hide()
             self.download_button.setEnabled(bool(self.version))
-            self.message.setText(tr("Not downloaded: {why}", why=error))
-            self.message.setProperty("role", "error")
+            self.say(tr("Not downloaded: {why}", why=error), "notice-error")
+            latest = getattr(error, "latest", None)
+            if latest and latest != getattr(error, "tried", self.version):
+                self.other = latest
+                self.other_button.setText(tr("Download the videos of {version}", version=latest))
+                self.other_button.setToolTip(safe_tooltip(tr(
+                    "The newest release published on {source}: its videos are checked as these would have been",
+                    source=V.source())))
+                self.other_button.show()
             return
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
-        self.message.setText(tr("{count} files checked and installed in {folder}.", count=len(names),
-                                folder=self.target))
+        self.say(tr("{count} files checked and installed in {folder}.", count=len(names), folder=self.target))
+        from . import help_view
+        help_view.videos_changed()  # the Help page's list shows them
         found = catalog(self.sai)
         if self.page and V.for_page(found, self.page) is not None:
-            open_video(self.page, sai=self.sai, found=found)
+            from shiboken6 import isValid
+            owner = self.owner if self.owner is not None and isValid(self.owner) else None
+            watch(self.page, sai=self.sai, parent=owner)
             self.close()
 
     def closeEvent(self, event):  # noqa: N802 - Qt's name: a download running is cancelled

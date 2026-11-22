@@ -15,7 +15,10 @@ repository of $SANDBOX_AI_SOURCE, else GitHub's) with the release's SHA256SUMS a
 used before the signature is good - by a key of the release-signers of the sandbox-ai installed here, as
 `sandbox-ai update` checks a release - and the archive is the one SHA256SUMS lists; its members must be the videos
 and subtitles of the series (plain files with those names), or nothing is installed. Only https (no redirect to
-anything else), sizes bounded; nothing is ever played from the network.
+anything else), sizes bounded; nothing is ever played from the network. A release that is not there (not published
+(yet), or without videos) raises VideoError with missing set; latest_release then names the newest release published
+on that repository (where its .../releases/latest page sends the browser), whose videos are fetched and checked the
+same way when the human chooses them.
 """
 from __future__ import annotations
 
@@ -58,7 +61,12 @@ LOOPBACK_OK = False  # http to 127.0.0.1 allowed (the tests' fake release server
 
 
 class VideoError(Exception):
-    """Why the videos could not be fetched or installed (said to the human as it is)."""
+    """Why the videos could not be fetched or installed (said to the human as it is). MISSING: the release, or its
+    videos, are not there (an answer 404, a SHA256SUMS that lists no videos) - the newest release may have them."""
+
+    def __init__(self, text, missing=False):
+        super().__init__(text)
+        self.missing = missing
 
 
 @dataclass
@@ -314,16 +322,52 @@ def source(environ=None):
     return (environ.get("SANDBOX_AI_SOURCE") or DEFAULT_SOURCE).strip()
 
 
-def release_url(repository, version, name):
-    """The address of the file NAME of the release VERSION of REPOSITORY (GitHub, Gitea and Forgejo serve it so)."""
+VERSION = re.compile(r"\d+\.\d+\.\d+(?:[.+-][0-9A-Za-z.+-]+)?")
+
+
+def repository_base(repository):
+    """REPOSITORY's address as its release pages are found below it (no .git, no / at the end)."""
     parts = urllib.parse.urlsplit(re.sub(r"\.git$", "", repository.strip().rstrip("/")))
     path = [p for p in parts.path.split("/") if p]
     if parts.scheme not in ("https", "http") or len(path) < 2 or not parts.hostname:
         raise VideoError(tr("Not a repository address: {source}", source=repository))
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[.+-][0-9A-Za-z.+-]+)?", str(version)):
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/".join([""] + path), "", ""))
+
+
+def release_url(repository, version, name):
+    """The address of the file NAME of the release VERSION of REPOSITORY (GitHub, Gitea and Forgejo serve it so)."""
+    base = repository_base(repository)
+    if not VERSION.fullmatch(str(version)):
         raise VideoError(tr("Not a version: {version}", version=version))
-    base = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/".join([""] + path), "", ""))
     return f"{base}/releases/download/v{version}/{urllib.parse.quote(name)}"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # (the answer itself is wanted: urllib raises it as an HTTPError)
+
+
+def latest_release(repository=None, timeout=30):
+    """The version of the newest release published on REPOSITORY (GitHub, Gitea and Forgejo send
+    .../releases/latest on to its tag, .../releases/tag/vVERSION), or None when it has none. Nothing is downloaded
+    from there: what is then fetched of that release is checked as install_release checks it."""
+    url = f"{repository_base(repository or source())}/releases/latest"
+    if not allowed_url(url):
+        raise VideoError(tr("Refused: {address} is not https.", address=url[:200]))
+    request = urllib.request.Request(url, headers={"User-Agent": "sandbox-ai-app"})
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout) as response:
+            location = response.geturl()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (301, 302, 303, 307, 308):
+            return None
+        location = urllib.parse.urljoin(url, exc.headers.get("Location") or "")
+    except (urllib.error.URLError, OSError) as exc:
+        raise VideoError(tr("Cannot download {address}: {why}", address=url, why=getattr(exc, "reason", exc))) \
+            from None
+    match = re.search(r"/releases/tag/v([^/?#]+)$", urllib.parse.urlsplit(location).path)
+    version = urllib.parse.unquote(match[1]) if match else ""
+    return version if VERSION.fullmatch(version) else None
 
 
 def allowed_url(url):
@@ -372,7 +416,8 @@ def fetch(url, limit, sink=None, progress=None, cancelled=None, timeout=60):
                     progress(done, total)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            raise VideoError(tr("The release has no {name} ({address}).", name=_name(url), address=url)) from None
+            raise VideoError(tr("The release has no {name} ({address}).", name=_name(url), address=url),
+                             missing=True) from None
         raise VideoError(tr("{address}: HTTP {code}", address=url, code=exc.code)) from None
     except (urllib.error.URLError, OSError) as exc:
         raise VideoError(tr("Cannot download {address}: {why}", address=url,
@@ -413,7 +458,13 @@ def install_release(target, version, keys, repository=None, fetcher=fetch, progr
     Returns the names installed; VideoError says why nothing was."""
     module, trusted = keys
     repository = repository or source()
-    sums = fetcher(release_url(repository, version, "SHA256SUMS"), SUMS_LIMIT)
+    try:
+        sums = fetcher(release_url(repository, version, "SHA256SUMS"), SUMS_LIMIT)
+    except VideoError as exc:
+        if not exc.missing:
+            raise
+        raise VideoError(tr("The release {version} is not on {source}: it is not published there (yet).",
+                            version=version, source=repository), missing=True) from None
     try:
         signature = fetcher(release_url(repository, version, "SHA256SUMS.sig"), SIGNATURE_LIMIT)
     except VideoError as exc:
@@ -428,7 +479,7 @@ def install_release(target, version, keys, repository=None, fetcher=fetch, progr
     wanted = checksums(sums.decode("utf-8", errors="replace")).get(ARCHIVE)
     if wanted is None:
         raise VideoError(tr("The release {version} has no videos (its SHA256SUMS lists no {name}).", version=version,
-                            name=ARCHIVE))
+                            name=ARCHIVE), missing=True)
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     handle, partial = tempfile.mkstemp(prefix=".videos-download-", dir=target)

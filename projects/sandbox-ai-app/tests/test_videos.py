@@ -365,7 +365,7 @@ def test_the_installed_release_keys_are_the_ones_checked(tmp_path):
 class Server:
     """The fake release over http on 127.0.0.1 (LOOPBACK_OK), as GitHub serves it: a redirect to the file."""
 
-    def __init__(self, folder, redirect_to=None):
+    def __init__(self, folder, redirect_to=None, latest=None):
         outer = self
         self.hits = []
 
@@ -373,6 +373,11 @@ class Server:
             def do_GET(self):  # noqa: N802
                 outer.hits.append(self.path)
                 name = self.path.rsplit("/", 1)[-1]
+                if self.path.endswith("/releases/latest") and latest is not None:
+                    self.send_response(302)  # as GitHub and Gitea: on to the newest release's tag
+                    self.send_header("Location", latest)
+                    self.end_headers()
+                    return
                 if "/releases/download/v0.1.94/" in self.path or "/releases/download/v1.2.3/" in self.path:
                     self.send_response(302)
                     self.send_header("Location", (redirect_to or f"http://127.0.0.1:{outer.port}") + f"/files/{name}")
@@ -410,8 +415,10 @@ def test_the_download_end_to_end_over_http_with_a_redirect(tmp_path, signing, mo
         names = V.install_release(tmp_path / "videos", "0.1.94", (module, trusted), repository)
         assert len(names) == 3 and (tmp_path / "videos" / GOOD[0][0]).read_bytes() == GOOD[0][1]
         assert "/c0decave/sandbox-ai/releases/download/v0.1.94/sandbox-ai-videos.tar" in server.hits
-        with pytest.raises(V.VideoError, match="has no"):
+        with pytest.raises(V.VideoError, match=r"The release 0\.1\.95 is not on .*: it is not published there "
+                                               r"\(yet\)\.") as raised:
             V.install_release(tmp_path / "other", "0.1.95", (module, trusted), repository)
+        assert raised.value.missing
         with pytest.raises(V.VideoError, match="Cancelled"):
             V.fetch(f"{repository}/releases/download/v0.1.94/{V.ARCHIVE}", 1 << 30, sink=io.BytesIO(),
                     cancelled=lambda: True)
@@ -419,6 +426,34 @@ def test_the_download_end_to_end_over_http_with_a_redirect(tmp_path, signing, mo
             V.fetch(f"{repository}/releases/download/v0.1.94/{V.ARCHIVE}", 100)
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("location, expected", [
+    ("/c0decave/sandbox-ai/releases/tag/v0.1.188", "0.1.188"),
+    ("https://github.com/c0decave/sandbox-ai/releases/tag/v1.2.3-rc.1", "1.2.3-rc.1"),
+    ("/c0decave/sandbox-ai/releases", None),
+    ("/c0decave/sandbox-ai/releases/tag/v1.2.3;rm%20-rf", None),
+    ("/c0decave/sandbox-ai/releases/tag/latest", None),
+    (None, None),  # no release published: 404
+])
+def test_the_newest_published_release(tmp_path, monkeypatch, location, expected):
+    """A release of this version that is not published (yet): the newest one is offered. Its version comes from
+    where .../releases/latest sends the browser (only a version is taken; nothing else is fetched from there)."""
+    server = Server(tmp_path, latest=location)
+    monkeypatch.setattr(V, "LOOPBACK_OK", True)
+    try:
+        repository = f"http://127.0.0.1:{server.port}/c0decave/sandbox-ai.git"
+        assert V.latest_release(repository) == expected
+        assert server.hits == ["/c0decave/sandbox-ai/releases/latest"], "the redirect is read, not followed"
+    finally:
+        server.close()
+
+
+def test_the_newest_release_is_asked_over_https_only(monkeypatch):
+    with pytest.raises(V.VideoError, match="not https"):
+        V.latest_release("http://example.org/o/r")
+    with pytest.raises(V.VideoError, match="Not a repository"):
+        V.latest_release("https://example.org/")
 
 
 def test_a_redirect_to_anything_but_https_is_refused(tmp_path, monkeypatch):

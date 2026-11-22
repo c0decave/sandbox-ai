@@ -689,6 +689,31 @@
    ]
   },
   {
+   "id": "toolchains",
+   "title": {
+    "en": "Toolchains: build tools mounted in",
+    "de": "Toolchains: Bauwerkzeuge zum Einhängen"
+   },
+   "body": {
+    "en": "The agent images are small: no Go, no Rust, no JDK. A toolchain is a compiler or interpreter with its package manager, kept in a store on the host and mounted read-only into a sandbox at `/opt/toolchains/NAME`, its commands on the agent's PATH. The agent builds in its own shell, under the sandbox's rules; nothing of a toolchain runs on your host.\n\n- `sandbox-ai toolchain catalog` shows what the signed catalog offers, `sandbox-ai toolchain add NAME` downloads one, checks it against the catalog's SHA-256 and unpacks it into the store. Only a catalog signed by a trusted key is taken.\n- At a start: `--toolchain NAME`, on the Board the part Toolchains (its field offers the store's and the catalog's).\n- Into a running sandbox: `sandbox-ai toolchain attach RUN NAME`; in the app Add toolchain… on the Sandboxes & sessions page, in a row's menu, and in a terminal tab's menu under While it runs. Remove toolchain… takes one added during the run out again (refused while a program of it still runs; the question then offers to detach it anyway).\n\nThe registries a toolchain names (the Go module proxy, Maven Central, npm ...) are opened with it, as the network options open hosts; in the security modes high and paranoid they stay closed and the toolchain is mounted all the same. A command the agent starts after an attach finds the toolchain at once; a shell that is already open reads its variables with `. /opt/toolchains/env.sh`. On macOS a toolchain is given at the start only.",
+    "de": "Die Agenten-Images sind klein: kein Go, kein Rust, kein JDK. Eine Toolchain ist ein Compiler oder Interpreter mit seinem Paketmanager, liegt in einem Lager auf dem Host und wird nur lesbar unter `/opt/toolchains/NAME` in eine Sandbox eingehängt, ihre Befehle im PATH des Agenten. Der Agent baut in seiner eigenen Shell, unter den Regeln der Sandbox; nichts von einer Toolchain läuft auf dem Host.\n\n- `sandbox-ai toolchain catalog` zeigt, was der signierte Katalog anbietet, `sandbox-ai toolchain add NAME` lädt eine herunter, prüft sie gegen die SHA-256 des Katalogs und entpackt sie ins Lager. Nur ein von einem vertrauten Schlüssel signierter Katalog wird genommen.\n- Beim Start: `--toolchain NAME`, auf dem Board der Teil Toolchains (sein Feld bietet die des Lagers und des Katalogs an).\n- In eine laufende Sandbox: `sandbox-ai toolchain attach LAUF NAME`; in der App Toolchain hinzufügen… auf der Seite Sandboxen & Sitzungen, im Menü einer Zeile und im Menü eines Terminal-Tabs unter Während es läuft. Toolchain entfernen… nimmt eine während des Laufs hinzugefügte wieder heraus (abgelehnt, solange ein Programm daraus noch läuft; die Frage bietet dann an, sie trotzdem zu lösen).\n\nDie Registrys, die eine Toolchain nennt (der Go-Modul-Proxy, Maven Central, npm ...), werden mit ihr geöffnet, so wie die Netzwerkoptionen Hosts öffnen; in den Sicherheitsmodi high und paranoid bleiben sie zu, und die Toolchain wird trotzdem eingehängt. Ein Befehl, den der Agent nach dem Einhängen startet, findet die Toolchain sofort; eine schon offene Shell liest ihre Variablen mit `. /opt/toolchains/env.sh`. Unter macOS gibt es eine Toolchain nur beim Start."
+   },
+   "cli": [
+    "--toolchain",
+    "--toolchain-offline",
+    "sandbox-ai toolchain catalog",
+    "sandbox-ai toolchain add",
+    "sandbox-ai toolchain list",
+    "sandbox-ai toolchain attach",
+    "sandbox-ai toolchain detach"
+   ],
+   "see": [
+    "network",
+    "security-modes",
+    "devices"
+   ]
+  },
+  {
    "id": "devices",
    "title": {
     "en": "Devices and GPUs",

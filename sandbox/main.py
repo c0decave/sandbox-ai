@@ -28,7 +28,8 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "privacy-check": ("privacy.py", "check"), "net": ("net.py",), "notify": ("notify.py",),
                    "approvals": ("approvals.py",), "packages": ("packages.py",), "secret-guard": ("secret_guard.py",), "canaries": ("canary.py",), "safeguards": ("safeguards.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
-                   "workspace": ("workspaces.py",), "usage": ("usage.py",), "rules": ("rules_cmd.py",),
+                   "workspace": ("workspaces.py",), "toolchain": ("toolchains.py",), "usage": ("usage.py",),
+                   "rules": ("rules_cmd.py",),
                    "top": ("monitor.py", "top"), "stats": ("monitor.py", "stats"),
                    "report": ("report.py",), "scan": ("lint.py",), "schedule": ("schedule.py",), "spend": ("spend.py",), "models": ("cloud_models.py",),
                    "uninstall": ("uninstall.py",)}
@@ -94,6 +95,7 @@ HELP = (
         ("spend", "What the model requests cost; budgets that stop a run"),
         ("stats", "What the runs used over time, by project, run or agent"),
         ("team", "A team of agents, one sandbox each, with a task board"),
+        ("toolchain", "Build tools (Go, Rust, a JDK ...) mounted into a sandbox"),
         ("vpn", "VPN profiles for --vpn (WireGuard, OpenVPN, Tor ...)"),
         ("web", "The web interface (HTTPS, password and TOTP)"),
         ("wizard", "Project setup: create, edit and trust its configuration"),

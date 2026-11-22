@@ -134,6 +134,7 @@ Ohne Klonen: [sandbox-ai.pyz, das AppImage oder die macOS-App](#vier-wege-zur-in
 17. [tmux-Modus](#tmux-modus)
 18. [GUI-Programme und Browser](#gui-programme-und-browser)
 19. [Hardware: Geräte und GPUs](#hardware-geräte-und-gpus)
+    - [Toolchains: Bauwerkzeuge zum Einhängen](#toolchains-bauwerkzeuge-zum-einhängen)
 20. [Agenten ohne Rückfragen](#agenten-ohne-rückfragen)
 21. [Egress- und Dateizugriffs-Logs](#egress--und-dateizugriffs-logs)
 22. [Aktivität der Agenten](#aktivität-der-agenten)
@@ -617,6 +618,7 @@ Schlüsselbund nicht entsperren).
 | `sandbox-ai logs [VERZ\|--project P] [--json]` | | blockierte Verbindungen und Dateizugriffe eines Log-Verzeichnisses (jeder Start hat eines) zusammenfassen und je blockiertem Ziel die passende Option vorschlagen (`--allow-pypi`, `--allow-host`, `--allow-tcp`, `--allow-host-port` …) |
 | `sandbox-ai activity [LAUF\|--session NAME\|--project P\|--log-dir VERZ] [-f] [--since Z] [-k ART] [--json]` | | was die Agenten getan haben: Eingaben, Antworten, Tool-Aufrufe, Befehle, Dateiänderungen, Netzwerk, Rückfragen, Tokens ([Aktivität der Agenten](#aktivität-der-agenten)) |
 | `sandbox-ai net list\|show\|allow\|revoke\|untaint\|cut …` | | ändern, was eine laufende Sandbox erreichen darf ([Netzwerkänderungen](#netzwerk-einer-laufenden-sandbox-ändern)), es sofort kappen ([der Kill-Switch](#der-kill-switch-das-netz-einer-laufenden-sandbox-kappen)); beendet wird sie mit `sandbox-ai stop NAME` |
+| `sandbox-ai toolchain catalog\|add\|list\|show\|remove NAME`, `toolchain attach\|detach [LAUF] NAME` | | Toolchains (Go, Rust, ein JDK ...) aus dem signierten Katalog, nur lesbar in eine Sandbox eingehängt ([Toolchains](#toolchains-bauwerkzeuge-zum-einhängen)) |
 | `sandbox-ai devices list\|add\|remove [LAUF] PFAD\|usb:VID:PID`, `sandbox-ai limits [LAUF] …` | | Geräte und Limits einer laufenden Sandbox ([Hardware](#hardware-geräte-und-gpus), [Limits](#ressourcenlimits)) |
 | `sandbox-ai usage [LAUF\|--all] [--json] [--follow]` | | was eine laufende Sandbox gerade verbraucht: CPU, Speicher, Prozesse, ihre größten Prozesse ([Limits](#ressourcenlimits)) |
 | `sandbox-ai top [--sort cpu\|mem\|io\|net\|pids] [--watch]` | | der Systemmonitor: was jede laufende Sandbox gerade verbraucht, nach Projekt, mit Warnungen und was hilft ([Systemmonitor](#systemmonitor)) |
@@ -2781,9 +2783,16 @@ Beispiel bleibt gelöscht.
 Jede Sandbox bekommt außerdem den **eingebauten Skill** `sandbox-ai`
 (in `sandbox/builtin/AGENT`, wird mit sandbox-ai aktualisiert): wie der Agent
 in der Sandbox arbeitet, was geteilt ist, wie Netz, Proxy,
-Datenschutzprüfung, Hardware, Displays und Sessions sich verhalten und welche
-Startoption oder welchen `sandbox-ai net`-Befehl der Mensch wofür braucht.
-Ein Skill namens `sandbox-ai` in einem Ihrer Kits ersetzt ihn.
+Datenschutzprüfung, Köderdateien, Hardware, Displays, MCP-Server, Brücken
+und Sessions sich verhalten und welche Startoption oder welchen
+`sandbox-ai`-Befehl der Mensch wofür braucht (die Tabelle an seinem Ende; jede
+Befehlszeile darin wird von sandbox-ais eigenen Parsern gelesen). Ein Skill
+namens `sandbox-ai` in einem Ihrer Kits ersetzt ihn. Die Kopien der zwölf
+Agenten und ihre Beispiel-Skills entstehen aus einer Quelle,
+`scripts/skill_source/` (der gemeinsame Text einmal, die Fakten jedes Agenten
+in `agents.json`, sein eigener Abschnitt in `agents/AGENT.md`), durch
+`scripts/gen_skills.py` (`--check` nennt eine abweichende Kopie); die
+erzeugten Dateien sind eingecheckt, höchstens 650 Zeilen je Datei.
 
 ```bash
 sandbox-ai claude                             # nur das Standard-Kit
@@ -7580,6 +7589,78 @@ Maschine, mit der sich macOS über einen geteilten Ordner nicht verbinden kann:
 Die Live-Ansicht gibt es vorerst nur unter Linux, dort wird nur
 `--browser-control agent` angenommen.
 
+## Toolchains: Bauwerkzeuge zum Einhängen
+
+Die Agenten-Images sind klein: kein Go, kein Rust, kein JDK. Eine **Toolchain** ist ein Compiler oder Interpreter
+mit seinem Paketmanager, liegt in einem Lager auf dem Host und wird **nur lesbar** unter `/opt/toolchains/NAME` in
+eine Sandbox eingehängt, ihre Befehle im PATH des Agenten. Der Agent baut in seiner eigenen Shell, unter den Regeln
+der Sandbox; nichts von einer Toolchain läuft auf dem Host. Jeder Agent, Podman und Bubblewrap.
+
+```bash
+sandbox-ai toolchain catalog                 # was der signierte Katalog für diese Maschine anbietet
+sandbox-ai toolchain add go                  # herunterladen, prüfen, ins Lager entpacken
+sandbox-ai claude --toolchain go             # beim Start (mehrfach: --toolchain jdk --toolchain node)
+sandbox-ai toolchain attach go               # in die laufende Sandbox (LAUF kann genannt werden: attach LAUF go)
+sandbox-ai toolchain detach go               # und wieder heraus
+sandbox-ai toolchain list                    # das Lager; list --run [LAUF]: die Toolchains einer laufenden Sandbox
+sandbox-ai toolchain show go                 # Befehle, Variablen, Registrys, was sie braucht, ihre Quellen
+sandbox-ai toolchain remove go               # aus dem Lager
+```
+
+In einer Projektdatei ist es eine der `"options"`: `["--toolchain", "go"]`. `NAME@VERSION` nennt eine von mehreren
+Versionen im Lager (`--toolchain jdk@21.0.13+9`); je Sandbox eine Version einer Toolchain.
+
+**Woher sie kommen.** `toolchains.json` von
+[sandbox-ai-mcp](https://github.com/c0decave/sandbox-ai-mcp), signiert mit demselben Schlüssel wie dessen
+MCP-Katalog (`sandbox/mcp-signers`; siehe [Server aus einem MCP-Katalog](#server-aus-einem-mcp-katalog)). Jeden
+Eintrag baut die CI dieses Repositorys aus dem Release des Herstellers, festgelegt mit URL und SHA-256 (und dessen
+Signatur, wo eine veröffentlicht ist; jedes Release mindestens 14 Tage alt); bevor der Katalog signiert wurde, ist
+damit über sandbox-ais eigenen Mount unter Podman und unter Bubblewrap ein Hello World übersetzt und ausgeführt
+worden. `toolchain add` nimmt einen Eintrag nur aus einem Katalog, dessen Signatur stimmt, prüft das Archiv gegen
+die SHA-256 des Eintrags, bevor etwas entpackt wird, und entpackt es, ohne ihm zu trauen (kein Pfad aus dem Baum
+hinaus, kein Gerät, kein Set-User-ID-Bit), nach `~/.local/share/sandbox-ai/toolchains/`, nur lesbar.
+`--catalog DATEI_ODER_URL` liest einen anderen Katalog; `--unsigned` nimmt einen Eintrag aus einem Katalog, den
+niemand signiert hat (dem eigenen) - nie aus einem mit falscher Signatur -, und jeder Start mit einer solchen
+Toolchain sagt das.
+
+**Was eine Toolchain braucht.** Unter Podman ist `/usr` der Sandbox das des Agenten-Images, unter Bubblewrap das
+des Hosts. Eine Toolchain bringt alles mit außer dem Kernel, der C-Bibliothek und den wenigen Bibliotheken, die
+ihr Eintrag nennt (`sandbox-ai toolchain show NAME`: `needs: glibc 2.28+, libstdc++.so.6`). Ein Host darunter wird
+mit dem Grund abgelehnt, bevor etwas eingehängt wird; ein eigenes Image (`--image`) ist nicht bekannt und bekommt
+einen Hinweis.
+
+**In der Sandbox.** `/opt/toolchains` ist ein Ordner des Laufs auf dem Host, in der Sandbox nur lesbar: sandbox-ai
+schreibt je Befehl einen kleinen Wrapper nach `/opt/toolchains/bin` (vorn im PATH des Agenten; die eigenen Prozesse
+des Supervisors nutzen ihn nicht) und die Variablen der Toolchains (`JAVA_HOME` ...) nach
+`/opt/toolchains/env.sh`. Der Befehl einer Toolchain steht vor dem gleichnamigen des Images (`node`, `python3`);
+der des Images bleibt über seinen Pfad erreichbar. Paketmanager halten ihre Caches wie immer im HOME der Sandbox
+(`~/go`, `~/.cargo`, `~/.m2`, `~/.npm` ...): in eine Toolchain wird nie geschrieben.
+
+**In eine laufende Sandbox.** `toolchain attach` führt nichts in der Sandbox aus: ein Helfer des eigenen
+Benutzers - derselbe wie bei `devices add` und `workspace add` - betritt den User-Namespace der Sandbox, klont den
+Baum aus dem Lager, macht den Klon nur lesbar, `nosuid`, `nodev` und hängt ihn in jeden eigenen Mount-Namespace der
+Sandbox ein (Linux 5.12 oder neuer). Ein Befehl, den der Agent danach startet, findet die Toolchain sofort (der
+Ordner stand von Anfang an in seinem PATH); jedes neue `bash -c` hat auch ihre Variablen (`BASH_ENV`), eine schon
+offene Shell liest sie mit `. /opt/toolchains/env.sh`. `detach` nimmt zuerst die Befehle weg, dann den Mount -
+abgelehnt, solange ein Prozess der Sandbox noch aus der Toolchain läuft oder eine ihrer Dateien offen hat
+(`--force` löst sie trotzdem). Eine beim Start gegebene Toolchain bleibt für den Lauf; eine an eine Session
+eingehängte steht in deren Optionen, ein Neustart beginnt also mit ihr. Unter macOS gibt es eine Toolchain nur beim
+Start (die Namespaces der Sandbox liegen in der VM von `podman machine`):
+`sandbox-ai resume NAME --restart --toolchain NAME`.
+
+**Das Netz.** Die Registrys, die eine Toolchain nennt (`proxy.golang.org`, Maven Central, `registry.npmjs.org`
+...), werden mit ihr geöffnet, so wie `--allow-host` und die Optionen `--allow-PRESET` Hosts öffnen; der Start
+sagt welche, der Plan (`--dry-run`) führt sie unter `toolchain_hosts`, und bei einer laufenden Sandbox geht
+`attach` über `sandbox-ai net allow`. In den Modi `high` und `paranoid`, die jede Option ablehnen, die einen Host
+öffnet, wird die Toolchain eingehängt und ihre Registrys bleiben zu - eine Verbindung dorthin wird gefragt oder
+abgelehnt wie jede andere in diesem Modus. `--toolchain-offline` (und `toolchain attach --offline`) hängt ein, ohne
+etwas zu öffnen; `--offline` ebenso. Paketwächter und Secret-Wächter gelten für diese Hosts wie für alle anderen.
+
+**Was protokolliert wird.** `toolchains.jsonl` im Log-Verzeichnis des Laufs (eingehängt, gelöst, abgelehnt, was
+geöffnet wurde), `sandbox-ai report`, `"toolchains"` im Plan. Die Richtlinie des Administrators kann sie
+verbieten: `"forbid": ["--toolchain"]`. Format, Prüfungen und Bedrohungsmodell:
+[docs/TOOLCHAINS_DESIGN.md](docs/TOOLCHAINS_DESIGN.md).
+
 ## Hardware: Geräte und GPUs
 
 Ohne weitere Optionen sieht eine Sandbox keine Hardware des Hosts: Podman und
@@ -10809,6 +10890,8 @@ Version, `-j` JSON, `-y` Ja, `-b` Backend; siehe deren `--help`).
 | `-pu`, `--podman-url URL` | URL des Podman-Dienstes, z. B. `unix:///example/podman.sock` |
 | `-B`, `--binary PFAD` | Agent-Programm (Host-Pfad bei bwrap, Image-Pfad bei Podman) |
 | `-rt`, `--runtime DIR` | bwrap: Laufzeitverzeichnis schreibgeschützt am selben Pfad einblenden; mehrfach |
+| `-tc`, `--toolchain NAME[@VERSION]` | Eine Toolchain aus dem Lager (`sandbox-ai toolchain add NAME`) nur lesbar unter `/opt/toolchains/NAME` einhängen, ihre Befehle im PATH des Agenten, ihre Registrys geöffnet (nicht in den Modi `high` und `paranoid`); mehrfach. Siehe [Toolchains](#toolchains-bauwerkzeuge-zum-einhängen) |
+| `-to`, `--toolchain-offline` | Die Toolchains einhängen, ohne ihre Registrys zu öffnen |
 
 Siehe [Agent starten](#agent-starten) und [Voraussetzungen](#voraussetzungen).
 
@@ -11006,6 +11089,7 @@ Siehe [Projektkonfiguration](#projektkonfiguration-und-wizard) und
 | `sandbox-ai usage [LAUF\|--all] [--json] [--follow] [--interval S] [--top N]` | Was eine laufende Sandbox gerade verbraucht: die CPUs (und wie oft `--cpus` sie gebremst hat), Speicher (und ihre Dateien in `/tmp` und HOME), Prozesse und Threads gegen `--pids`, ihre größten Prozesse |
 | `sandbox-ai top [--host HOST] [--project DIR] [--sort cpu\|mem\|io\|net\|pids] [--json] [--watch [S]] [--no-measure]` | Was die laufenden Sandboxen gerade verbrauchen (der letzte Blick der Aufzeichner): CPUs, Speicher der Grenze, Platten-IO, Netzwerk, Prozesse, Warnungen und Vorschläge, die Summen des Hosts |
 | `sandbox-ai stats usage [--since 7d] [--by project\|run\|agent] [--project DIR] [--host HOST] [--json] [--series]` | Was die Läufe über einen Zeitraum verbrauchten: Durchschnitte, Spitzen und Summen pro Projekt, Lauf oder Agent, die größten Verbraucher, untätige Läufe mit Speicher, die Warnungen, die Summen des Hosts, die Kosten des Aufzeichnens |
+| `sandbox-ai toolchain catalog [--json] [--catalog DATEI_ODER_URL]`, `add NAME[@VERSION] [--unsigned] [--catalog DATEI_ODER_URL]`, `list [--run [LAUF]] [--json]`, `show NAME[@VERSION] [--json]`, `remove NAME[@VERSION]`, `attach [LAUF] NAME[@VERSION] [--offline]`, `detach [LAUF] NAME [--force]` | Toolchains aus dem signierten Katalog: ins Lager und von dort nur lesbar in eine Sandbox, beim Start (`--toolchain`) oder im Lauf (siehe [Toolchains](#toolchains-bauwerkzeuge-zum-einhängen)) |
 | `sandbox-ai workspace list [LAUF] [--json]`, `add [LAUF] VERZ\|DATEI [--ro] [--name NAME]`, `remove [LAUF] VERZ\|DATEI\|NAME [--force]` | Ein Host-Verzeichnis (oder eine einzelne Datei) in eine laufende Sandbox unter `/workspaces/<name>` (oder `/workspaces/NAME`) einhängen (die Prüfungen von `--workspace`; ein Verzeichnis bleibt für den nächsten Start einer Session, unter seinem Namen) und wieder wegnehmen |
 | `sandbox-ai approvals list [--state open\|timeout\|allowed\|refused\|all]\|history [LAUF]`, `allow ID [--scope once\|run\|always] [--no-open]`, `deny ID [--scope run\|once\|always]`, `remembered`, `forget PROJEKT EINTRAG` | Die Fragen laufender Sandboxen beantworten - offene, solche mit abgelaufener Zeit (noch beantwortbar) oder schon beantwortete (für den Lauf geändert); was je Projekt immer erlaubt wurde, und einen Eintrag davon vergessen |
 | `sandbox-ai approvals blocked [LAUF] [-n\|--limit N] [--json]`, `decided [LAUF] [--json]`, `ask-again ID` | Was eine laufende Sandbox abgelehnt hat (warum, durch welchen Prozess, was zu tun ist); was sie für den Lauf entschieden hat; eine Entscheidung vergessen, damit der nächste Versuch wieder gefragt wird ([Rückfragen](#rückfragen-und-browser-anfragen)) |

@@ -5935,6 +5935,27 @@ wait "$shells" 2>/dev/null
 exit 0"""]
 
 
+# sandbox-ai toolchain: /opt/toolchains is a folder of the run's session directory on the host, read-only here. Its
+# bin/ holds one wrapper per command of the toolchains mounted below it (at the start, or by `sandbox-ai toolchain
+# attach` while the sandbox runs), its env.sh their variables (toolchains.py: BIN, ENV_FILE).
+TOOLCHAINS_BIN = "/opt/toolchains/bin"
+TOOLCHAINS_ENV = "/opt/toolchains/env.sh"
+
+
+def toolchain_env(env, there=os.path.isdir):
+    """ENV for the agent's processes with the toolchains' wrappers first on PATH - the folder is on PATH from the
+    start, so a toolchain attached later is found by every command started after it - and BASH_ENV naming their
+    variables for each new `bash -c` (not where you set BASH_ENV yourself). The supervisor's own processes keep
+    base_env(): they never run a toolchain's program. Unchanged for a sandbox without the folder."""
+    if not there(TOOLCHAINS_BIN):
+        return env
+    path = env.get("PATH") or base_env()["PATH"]
+    if TOOLCHAINS_BIN not in path.split(":"):
+        env["PATH"] = f"{TOOLCHAINS_BIN}:{path}"
+    env.setdefault("BASH_ENV", TOOLCHAINS_ENV)
+    return env
+
+
 def inner_guard(before):
     current = namespace_state()
     verify_inner(before, current)
@@ -5942,8 +5963,7 @@ def inner_guard(before):
     if cfg["probe"]:
         print(json.dumps({"verified": True, "firejail": current, "outer": before}), flush=True)
         return 0
-    env = base_env()
-    env.update(cfg["env"])
+    env = toolchain_env({**base_env(), **cfg["env"]})
     sealed = None
     if cfg.get("tmux") == "detached" and os.path.isdir(RELAY_DIR):
         # A session: the relays' listening sockets from the supervisor, first of all - nothing of the agent runs yet,

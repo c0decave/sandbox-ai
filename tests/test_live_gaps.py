@@ -553,6 +553,83 @@ def test_live_a_device_added_and_removed_while_it_runs(request, backend, tmp_pat
     print(f"device {device}: added, seen, removed")
 
 
+# --- build toolchains mounted into a running sandbox (toolchain-live) ------------------------------------------------
+
+HELLO_GO = 'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("hello from go") }\n'
+
+
+def toolchains_added(env, *names):
+    """NAMES in the check's own store: from the signed catalog, or from SAI_LIVE_TOOLCHAINS (a toolchains.json of
+    your own builds, taken unsigned). Skips when the catalog has none of them yet."""
+    own = os.environ.get("SAI_LIVE_TOOLCHAINS")
+    more = ["--catalog", own, "--unsigned"] if own else []
+    for name in names:
+        done = sai(env, "toolchain", "add", name, *more, timeout=1800)
+        if done.returncode != 0 and not own and ("not published" in done.stderr or "no toolchain" in done.stderr
+                                                 or "not signed" in done.stderr):
+            pytest.skip(f"the signed catalog offers no {name} yet ({done.stderr.strip()[-300:]}): build it "
+                        "(sandbox-ai-mcp: scripts/toolchain.py build) and give SAI_LIVE_TOOLCHAINS=.../toolchains.json")
+        assert done.returncode == 0, said(done)
+
+
+def test_live_toolchains_attached_to_a_running_session(request, backend, tmp_path, sessions):
+    """sandbox-ai toolchain attach RUN go, then python: each mounted read-only (nosuid, nodev) at /opt/toolchains/NAME
+    in the running sandbox, its commands found by shells started after it without anything started anew; a hello
+    world built and run with go; python3 is the toolchain's, before the image's; toolchain list --run names both;
+    detach takes the commands and the mount away again."""
+    env = environment(tmp_path)
+    toolchains_added(env, "go", "python")
+    started = session(sessions, request, backend, tmp_path, env=env, options=["--offline", *SLEEP])
+    started.start()
+    before = started.shell("test -d /opt/toolchains/bin && echo FOLDER; command -v go || echo NO-GO; echo $PATH")
+    assert "FOLDER" in before.stdout and "NO-GO" in before.stdout, said(before)
+    assert "/opt/toolchains/bin" in before.stdout.splitlines()[-1].split(":")[0], said(before)
+    attached = started.sai("toolchain", "attach", started.name, "go", "--offline", timeout=300)
+    assert attached.returncode == 0 and "attached go" in attached.stdout, said(attached)
+    (started.work / "hello.go").write_text(HELLO_GO)
+    built = started.shell("cd /work && command -v go && go version && go run hello.go && go build -o hello hello.go "
+                          "&& ./hello", timeout=600)
+    assert built.returncode == 0 and built.stdout.count("hello from go") == 2, said(built)
+    assert "/opt/toolchains/bin/go" in built.stdout
+    facts = started.shell("grep ' /opt/toolchains/go ' /proc/self/mountinfo; touch /opt/toolchains/go/x 2>&1 || "
+                          "echo READ-ONLY; touch /opt/toolchains/bin/x 2>&1 || echo WRAPPERS-READ-ONLY")
+    options = facts.stdout.splitlines()[0].split()[5].split(",") if facts.stdout.strip() else []
+    assert {"ro", "nosuid", "nodev"} <= set(options), said(facts)
+    assert "READ-ONLY" in facts.stdout and "WRAPPERS-READ-ONLY" in facts.stdout, said(facts)
+    second = started.sai("toolchain", "attach", started.name, "python", "--offline", timeout=300)
+    assert second.returncode == 0, said(second)
+    python = started.shell("command -v python3; python3 -c 'import ssl, sys; print(sys.version_info[:2], sys.prefix)'; "
+                           "bash -c 'echo BASH_ENV=$BASH_ENV'")
+    assert python.stdout.splitlines()[0] == "/opt/toolchains/bin/python3", said(python)
+    assert "/opt/toolchains/python" in python.stdout and "BASH_ENV=/opt/toolchains/env.sh" in python.stdout
+    listed = started.sai("toolchain", "list", "--run", started.name, "--json")
+    assert listed.returncode == 0, said(listed)
+    assert sorted((row["name"], row["source"]) for row in json.loads(listed.stdout)) == [("go", "added"),
+                                                                                         ("python", "added")]
+    for name in ("go", "python"):
+        gone = started.sai("toolchain", "detach", started.name, name, timeout=300)
+        assert gone.returncode == 0, said(gone)
+    after = started.shell("command -v go || echo NO-GO; ls /opt/toolchains/go 2>/dev/null | wc -l; "
+                          "command -v python3")
+    assert "NO-GO" in after.stdout and "/opt/toolchains" not in after.stdout.splitlines()[-1], said(after)
+    assert json.loads(started.sai("toolchain", "list", "--run", started.name, "--json").stdout) == []
+    print(f"toolchains under {backend}: go and python attached, used, detached")
+
+
+def test_live_a_start_with_a_toolchain(request, backend, tmp_path):
+    """sandbox-ai AGENT --toolchain go: the toolchain is there from the first command, read-only."""
+    env = environment(tmp_path)
+    toolchains_added(env, "go")
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    (work / "hello.go").write_text(HELLO_GO)
+    out, err = once(request, backend, "codex", work, ["--toolchain", "go", "--toolchain-offline", "--binary", "/bin/sh",
+                                                      "--no-tmux"],
+                    ["-c", "cd /work && go run hello.go && touch /opt/toolchains/go/x 2>/dev/null || echo READ-ONLY"],
+                    env, timeout=900)
+    assert "hello from go" in out and "READ-ONLY" in out, (out[-2000:], err[-2000:])
+
+
 # --- signed updates from the real GitHub (update-live) --------------------------------------------------------------
 
 GITHUB_RELEASES = "https://api.github.com/repos/c0decave/sandbox-ai/releases/latest"

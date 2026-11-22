@@ -97,14 +97,18 @@ def directory_of(root, relative):
     return current
 
 
-def unpack(data, target):
-    """DATA (a tar archive, gzip or not) into TARGET (made new), without trusting it; the tree read-only."""
+def unpack(data, target, case_sensitive=True):
+    """DATA (a tar archive, compressed or not: its bytes, or a file open for reading - a toolchain's archive is
+    never held in memory) into TARGET (made new), without trusting it; the tree read-only. CASE_SENSITIVE False (the
+    store's file system takes Name and name for one file, as macOS's does): an archive with two such names is
+    refused, never unpacked with one of them lost."""
     if target.exists():
         raise ValueError(f"{target} exists")
     work = Path(tempfile.mkdtemp(prefix=".unpack-", dir=target.parent))
-    total = 0
+    total, folded = 0, {}
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        with tarfile.open(fileobj=io.BytesIO(data) if isinstance(data, (bytes, bytearray)) else data,
+                          mode="r:*") as archive:
             members = archive.getmembers()
             if len(members) > MEMBERS_LIMIT:
                 raise ValueError(f"the archive has more than {MEMBERS_LIMIT} entries")
@@ -112,6 +116,11 @@ def unpack(data, target):
                 relative = safe_name(member.name)
                 if relative is None:
                     continue
+                if not case_sensitive:
+                    other = folded.setdefault(str(relative).casefold(), str(relative))
+                    if other != str(relative):
+                        raise ValueError(f"the archive has {other} and {relative}, which this file system takes "
+                                         "for one name: not unpacked here")
                 parent = directory_of(work, relative)
                 path = parent / relative.name
                 mode = member.mode & 0o755  # no setuid, setgid, sticky or world-write bits

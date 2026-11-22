@@ -199,7 +199,11 @@ def test_a_whole_run_on_a_mac_with_stand_ins(tmp_path, monkeypatch):
     assert "ok    macos: macOS 15.6.1 (arm64), hdiutil, ditto, codesign, bash 5" in said
     assert "ok    podman-machine:" in said
     assert "ok    dmgs: --dmg-old sandbox-ai-arm64.dmg (a signed release)" in said
-    assert "What these checks send from this machine:" not in said, "nothing leaves the Mac"
+    # Only update-live leaves the Mac (GitHub's releases, read-only: the macOS app updates from there too), and it is
+    # said before anything runs (2026-11-22, when update-live came; before it nothing left a Mac).
+    sends = said.split("What these checks send from this machine:", 1)[1].split("\n\n", 1)[0]
+    assert [line.strip().split(":")[0] for line in sends.splitlines() if line.strip().startswith("- ")] == \
+        ["- update-live"], sends
     assert "MISS  userns" not in said, "a Mac is not asked for Linux's namespaces"
     text = next((tmp_path / "out").glob("REPORT-*.md")).read_text()
     assert "| passed | macos-update |" in text and str(home) not in text

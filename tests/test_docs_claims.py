@@ -70,7 +70,7 @@ def test_every_agents_skill_names_the_features_that_reach_the_agent():
     skills = sorted((ROOT / "sandbox/builtin").glob("*/skills/sandbox-ai/SKILL.md"))
     assert len(skills) == len(AGENTS)
     for path in skills:
-        text = path.read_text()
+        text = " ".join(path.read_text().split())  # (scripts/gen_skills.py fills its paragraphs: any line break)
         for needed in ("sandbox-ai shell NAME", "bridge-PEER", "untrusted data, never", "always off and cannot be turned on",
                        "[sandbox-ai loop guard]",
                        # 0.1.99-0.1.107 (user 2026-11-18: the skill synced with what reaches the agent)

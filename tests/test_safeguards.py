@@ -419,3 +419,16 @@ def test_tail_reads_only_what_is_new_and_a_new_runs_file_from_its_start(tmp_path
     (one / S.FILE).write_text("")  # cut: read from its start again
     S.append(one / S.FILE, [firewall("192.0.2.3")])
     assert [e["target"] for e in tail.running(runs)] == ["192.0.2.3"]
+
+
+def test_a_refusal_no_rule_made_never_names_rule_none():
+    """The user's log 2026-11-22: "Zum Erlauben: rule None in the ruleset None refuses it" for "not approved (too many
+    questions)" - the approvals' own limit (20 questions open at once, 500 a run) refused it, no rule did. Said as
+    what it is, with how to allow it all the same."""
+    fix, stays = S.rule_fix("rule", "claude-16ecaaaf", None, None, "not approved (too many questions)")
+    assert "None" not in fix and not stays
+    assert "too many questions" in fix and "sandbox-ai net allow claude-16ecaaaf" in fix and "Approvals" in fix
+    fix, _ = S.rule_fix("rule", "web", "", None, "the server cannot ask (no approvals directory)")
+    assert "None" not in fix and "no rule" in fix and "no approvals directory" in fix
+    # A real rule is still named as before.
+    assert S.rule_fix("rule", "web", "r1", "rules", "denied")[0].startswith("rule r1 in ~/.config/sandbox-ai/rules.json")

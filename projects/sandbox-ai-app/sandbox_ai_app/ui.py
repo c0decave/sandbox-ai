@@ -3548,6 +3548,13 @@ class SandboxesPage(QWidget):
                  self.add_workspace),
                 ("remove-workspace", tr("Remove workspace…"), tr("Take back a workspace added during the run "
                                                                 "(sandbox-ai workspace remove)"), self.remove_workspace),
+                ("add-toolchain", tr("Add toolchain…"), tr("Mount a build toolchain of its host's store (Go, Rust, "
+                                                           "a JDK, Node, Python ...) read-only into the selected "
+                                                           "sandbox, its commands on the agent's PATH (sandbox-ai "
+                                                           "toolchain attach)"), self.add_toolchain),
+                ("remove-toolchain", tr("Remove toolchain…"), tr("Take a toolchain added during the run out again "
+                                                                 "(sandbox-ai toolchain detach)"),
+                 self.remove_toolchain),
                 ("add-mcp", tr("Add MCP server…"), tr("Give the selected kept start an MCP server or a helper agent "
                                                       "now, without a restart, and at its later starts (sandbox-ai "
                                                       "mcp attach --live)"), self.add_mcp),
@@ -5688,6 +5695,115 @@ class SandboxesPage(QWidget):
         report(self, title, result, error)
         self.update_buttons()
         self.load_devices()
+
+    # -- build toolchains of a running sandbox (sandbox-ai toolchain attach, detach) --
+
+    def add_toolchain(self):
+        """Add toolchain…: the store and the signed catalog of the run's host and what the run has already (in the
+        background), then the choice."""
+        target = self.target()
+        if not target:
+            return
+        host, run = target
+
+        def read():
+            found = self.sai.host_toolchains(host)
+            try:
+                have = self.sai.toolchains_of_run(run, host)
+            except (ValueError, OSError):
+                have = []
+            return found, [row["name"] for row in have]
+        background(read, owner=self, source=self.run_buttons, timeout=150,
+                   done=lambda result, error: self.choose_toolchain(host, run, result, error))
+
+    def choose_toolchain(self, host, run, result, error):
+        self.update_buttons()
+        title = tr("Add toolchain to {run} on {host}", run=printable(run), host=printable(host)) if host != "local" \
+            else tr("Add toolchain to {run}", run=printable(run))
+        if error is not None:
+            warn(self, title, printable_text(str(error)))
+            return
+        found, have = result
+        stored = {row["name"]: row for row in found["installed"] if row["name"] not in have}
+        offered = {row["name"]: row for row in found["catalog"] if row["name"] not in have and row["name"] not in stored}
+        if not stored and not offered:
+            inform(self, title, tr("Every toolchain of the store is attached to it already.") if found["installed"]
+                   else tr("No toolchain is in the store, and the signed catalog offers none ({problem}). In a "
+                           "terminal: sandbox-ai toolchain catalog", problem=found.get("problem") or tr("it is empty")))
+            return
+        labels = {}
+        for name, row in stored.items():
+            labels[tr("{name} {version}: {commands}", name=name, version=printable(row["version"]),
+                      commands=printable(", ".join(row.get("commands") or [])[:80]))] = (name, False)
+        for name, row in offered.items():
+            labels[tr("{name} {version} (downloaded from the signed catalog first)", name=name,
+                      version=printable(row["version"]))] = (name, True)
+        chosen, ok = QInputDialog.getItem(self, title, tr("Toolchain"), list(labels), 0, False)
+        if not ok or chosen not in labels:
+            return
+        name, download = labels[chosen]
+        row = (offered if download else stored)[name]
+        opens = [*(row.get("hosts") or []), *(f"--allow-{preset}" for preset in row.get("allow") or [])]
+        text = tr("Mount {name} read-only into {run} at /opt/toolchains/{name}? Its commands are on the agent's "
+                  "PATH from then on.", name=name, run=printable(run))
+        if opens:
+            text += "\n\n" + tr("Its registries are opened for the run: {hosts} (not in the security modes high and "
+                                "paranoid).", hosts=printable(", ".join(opens)))
+        if download:
+            text += "\n\n" + tr("It is downloaded from the signed catalog into the store first ({size} MiB).",
+                                size=int((row.get("size") or 0) / (1 << 20)))
+        if not ask_first(self, "toolchain-add", title, text, tr("Add")):
+            return
+
+        def work():
+            if download:
+                status, out, err = self.sai.toolchain_add(name, host=host)
+                if status != 0:
+                    return status, out, err
+            return self.sai.toolchain_attach(run, name, host=host)
+        background(work, owner=self, source=self.run_buttons, work=True, timeout=3900,
+                   done=lambda result, error: self.device_done(title, result, error))
+
+    def remove_toolchain(self):
+        """Remove toolchain…: one attached during the run, chosen from what its host lists."""
+        target = self.target()
+        if not target:
+            return
+        host, run = target
+        background(lambda: self.sai.toolchains_of_run(run, host), owner=self, source=self.run_buttons, timeout=90,
+                   done=lambda found, error: self.choose_toolchain_removal(host, run, found, error))
+
+    def choose_toolchain_removal(self, host, run, found, error, force=False, name=None):
+        self.update_buttons()
+        title = tr("Remove toolchain from {run}", run=printable(run))
+        if error is not None:
+            warn(self, title, printable_text(str(error)))
+            return
+        added = [row["name"] for row in found if row.get("source") == "added"]
+        if not added:
+            short_notice(self, title, tr("No toolchain was attached to {run} during its run (toolchains given at "
+                                         "the start stay).", run=printable(run)))
+            return
+        name = added[0]
+        if len(added) > 1:
+            name, ok = QInputDialog.getItem(self, title, tr("Toolchain"), added, 0, False)
+            if not ok or name not in added:
+                return
+        self.detach_toolchain(host, run, name, title)
+
+    def detach_toolchain(self, host, run, name, title, force=False):
+        def done(result, error):
+            status, out, err = outcome(result, error)
+            if status != 0 and not force and "--force" in (out + err) and ask_first(
+                    self, "toolchain-force", title, tr("{name} is still in use in {run}: a program of it runs or has "
+                                                       "one of its files open. Detach it anyway? What is open stays "
+                                                       "usable until it is closed.", name=name, run=printable(run)),
+                    tr("Detach anyway")):
+                self.detach_toolchain(host, run, name, title, force=True)
+                return
+            self.device_done(title, result, error)
+        background(lambda: self.sai.toolchain_detach(run, name, host=host, force=force), owner=self,
+                   source=self.run_buttons, work=True, timeout=180, done=done)
 
     def add_workspace(self):
         """Add workspace…: what the run has been given already (`workspace list` on its host, in the background),
@@ -10301,9 +10417,9 @@ class MainWindow(QMainWindow):
 
     def watch_video(self, page=None):
         """The video about PAGE (None: the first of the series) in the app's player; when the videos are not on this
-        computer, the offer to download them once (video_player.py)."""
+        computer, the offer to download them once (video_player.py); an error on the way is said."""
         from . import video_player
-        return video_player.open_video(page, sai=self.sai, parent=self)
+        return video_player.watch(page, sai=self.sai, parent=self)
 
     def open_start_browser(self, instance):
         """The sandbox's own browser of INSTANCE (SandboxesPage.open_browser checked it): a tab of Terminals right
@@ -12120,18 +12236,28 @@ class MainWindow(QMainWindow):
             self.check_updates()
 
     def check_updates(self):
+        """A check the human asked for (Help > Check for updates, the System page's button): it answers in the
+        window's status bar wherever they are - that it runs, what it found (update_checked), or that one still runs
+        (the user 2026-11-22: "wenn ich auf updates pruefen klicke passiert nichts")."""
         if self.update_check.start(self.sai.command("update", "--check")):
+            self.update_asked = True
             self.show_update_text(tr("Checking for a newer sandbox-ai…"))
+            self.statusBar().showMessage(tr("Checking for a newer sandbox-ai…"))
+        else:
+            self.statusBar().showMessage(tr("A check for updates is still running; its result follows here."), 10000)
 
     def update_checked(self, status, out, err):
         """What `sandbox-ai update --check` found: a newer release signed by a trusted key - the status line offers
         it (Update now… where this copy replaces itself) and a notification tells it once per version; a newer one
         that is not signed so - the status line says why it is not offered; why a check failed (offline, GitHub's
         rate limit) - on the System page, quietly."""
+        asked, self.update_asked = getattr(self, "update_asked", False), False
         versions = backend.parse_update_check(status, out)
         if versions is None:
             self.show_update_text(tr("No update information: {why}", why=printable_text(
                 backend.update_check_error(status, out, err) or "")[:300]))
+            if asked:
+                self.statusBar().showMessage(self.update_said, 20000)
             return
         installed, available = versions
         signature = backend.update_check_signature(out)
@@ -12156,6 +12282,8 @@ class MainWindow(QMainWindow):
             if not self.update_running:
                 self.offer_update()
         self.show_update_text(text)
+        if asked:  # (a check nobody clicked keeps to the System page and the status line's notice)
+            self.statusBar().showMessage(text, 20000)
 
     def announce_update(self, installed, available):
         """The notification of a newer signed release, once per version (state.json remembers it across starts):

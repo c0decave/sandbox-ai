@@ -443,3 +443,35 @@ def test_the_check_is_asked_again_while_the_app_runs(window, monkeypatch):
     window.update_clock = lambda: day + 86400 + 60
     window.update_mode_read(data, None)
     assert checks == [1] and len(window.notified) == 1
+
+
+UP_TO_DATE = "installed: 0.10.1 (/x)\navailable: 0.10.1 (https://example.org)\nsignature: good, by the trusted key SHA256:x\n"
+
+
+def test_a_check_asked_for_by_a_click_answers_where_you_are(window, monkeypatch):
+    """The user 2026-11-22: "wenn ich auf updates pruefen klicke passiert nichts" - Help > Check for updates wrote what
+    it found only into the System page's line, so on any other page nothing showed; and a click while a check still
+    ran (up to 60 s against GitHub) did nothing at all. A check you ask for answers in the window's status bar: that
+    it runs, then what it found (up to date, available, why it failed), and that one is still running."""
+    started = []
+    monkeypatch.setattr(window.update_check, "start", lambda argv: started.append(argv) or len(started) == 1)
+    window.check_updates()
+    assert window.statusBar().currentMessage() == "Checking for a newer sandbox-ai…"
+    window.check_updates()  # (the first still runs)
+    assert "still running" in window.statusBar().currentMessage(), window.statusBar().currentMessage()
+    window.update_checked(0, UP_TO_DATE, "")
+    assert window.statusBar().currentMessage() == "sandbox-ai 0.10.1 is up to date."
+    started.clear()
+    window.check_updates()
+    window.update_checked(1, "", "cannot reach api.github.com: [Errno -3] Temporary failure in name resolution")
+    assert window.statusBar().currentMessage().startswith("No update information: "), \
+        window.statusBar().currentMessage()
+
+
+def test_the_daily_check_stays_quiet_in_the_status_bar(window):
+    """The check nobody clicked (at the start, the hourly tick) keeps to the System page and the status line's
+    notice of a newer release: no status-bar message for "up to date" or a failed check."""
+    window.statusBar().showMessage("before")
+    window.update_checked(0, UP_TO_DATE, "")
+    window.update_checked(1, "", "offline")
+    assert window.statusBar().currentMessage() == "before"

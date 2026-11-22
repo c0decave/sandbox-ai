@@ -32,7 +32,8 @@
     "12g"
   ],
   "notes": [
-    "The SDK: Microsoft's dotnet-install.sh (https://dot.net/v1/dotnet-install.sh) into the sandbox's HOME, kept with the start; Debian has no .NET.",
+    "The SDK (.NET 10): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox): sandbox-ai toolchain add dotnet once, then --toolchain dotnet on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN dotnet. Its registries are the ones this preset opens.",
+    "Without it: the SDK: Microsoft's dotnet-install.sh (https://dot.net/v1/dotnet-install.sh) into the sandbox's HOME, kept with the start; Debian has no .NET.",
     "Telemetry: set DOTNET_CLI_TELEMETRY_OPTOUT=1 in your environment and pass it with --env DOTNET_CLI_TELEMETRY_OPTOUT (its collector is not opened anyway).",
     "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
   ]

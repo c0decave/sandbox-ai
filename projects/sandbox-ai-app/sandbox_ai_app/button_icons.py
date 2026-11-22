@@ -34,6 +34,8 @@ def _svg(*parts):
 
 
 GLOBE = '<circle cx="9" cy="12" r="6.5"/><path d="M2.5 12h13"/><path d="M9 5.5c2.2 2.2 2.2 10.8 0 13M9 5.5c-2.2 2.2-2.2 10.8 0 13"/>'
+WRENCH = ('<path d="M12.5 4.5a3.8 3.8 0 0 0-4.6 4.9L2.5 14.8v2.7h2.7l5.4-5.4a3.8 3.8 0 0 0 4.9-4.6l-2.3 2.3-1.9-.5'
+          '-.5-1.9z"/>')  # (a wrench: a build toolchain)
 CHIP = '<rect x="4" y="8" width="9" height="8" rx="1.5"/><path d="M6.5 5v3M10.5 5v3M6.5 16v3M10.5 16v3M1.5 10.5H4M1.5 13.5H4"/>'
 FOLDER = '<path d="M2 7A1.5 1.5 0 0 1 3.5 5.5h3.5l2 2H14a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H3.5A1.5 1.5 0 0 1 2 17.5z"/>'
 SERVERS = ('<rect x="2.5" y="4.5" width="12" height="6" rx="1.5"/><rect x="2.5" y="13.5" width="12" height="6" rx="1.5"/>'
@@ -75,6 +77,8 @@ SVGS = {
     "log": _svg('<path d="M3.5 7.5h15M15 4l3.5 3.5L15 11"/><path d="M20.5 16.5h-15M9 13l-3.5 3.5L9 20"/>'),
     "add-device": _svg(CHIP, PLUS),
     "remove-device": _svg(CHIP, MINUS),
+    "add-toolchain": _svg(WRENCH, PLUS),
+    "remove-toolchain": _svg(WRENCH, MINUS),
     "add-workspace": _svg(FOLDER, PLUS),
     "remove-workspace": _svg(FOLDER, MINUS),
     "add-mcp": _svg(SERVERS, PLUS),

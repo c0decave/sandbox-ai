@@ -141,6 +141,18 @@ CHECKS = (
           "says so, and is gone after devices remove",
           ("sandbox", "image:codex", "linux", "device"),
           (f"{GAPS}::test_live_a_device_added_and_removed_while_it_runs",), source="board-devices"),
+    Check("toolchain-live",
+          "Build toolchains in a real running session, under Podman and under Bubblewrap: sandbox-ai toolchain add "
+          "go and python (the signed catalog; SAI_LIVE_TOOLCHAINS=FILE: a toolchains.json of your own builds, added "
+          "unsigned), attach into the running sandbox - mounted read-only, nosuid, nodev at /opt/toolchains/NAME, the "
+          "commands found by a shell that was started before - a hello world built and run with go, python3 the "
+          "toolchain's, toolchain list --run, detach (the commands and the mount gone); and a start with --toolchain go",
+          ("sandbox", "image:codex", "linux"),
+          (f"{GAPS}::test_live_toolchains_attached_to_a_running_session",
+           f"{GAPS}::test_live_a_start_with_a_toolchain"), timeout=2400,
+          network="HTTPS to raw.githubusercontent.com and github.com (the signed toolchains.json and the archives of "
+                  "go and python, about 90 MB; nothing with SAI_LIVE_TOOLCHAINS)",
+          source="the user, 2026-11-22: build toolchains for every language, mounted in at run time"),
     Check("update-live",
           "Signed updates from the real GitHub: the newest release's SHA256SUMS is signed by a key of this "
           "checkout's sandbox/release-signers and lists every kind's file (the bundle's SHA-256 checked); this "

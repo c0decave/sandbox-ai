@@ -76,7 +76,7 @@ def _page_tips():
 
 KIND_SECTIONS = {"workspace": "workspaces-mounts", "mount": "workspaces-mounts", "home": "secrets", "kits": "kits",
                  "agent": "sandbox", "approvals": "approvals", "proxy": "proxy", "git": "secrets", "mcp": "mcp",
-                 "llm": "llm", "service": "services", "network": "network", "vpn": "vpn-tor", "devices": "devices", "limits": "limits",
+                 "llm": "llm", "service": "services", "network": "network", "vpn": "vpn-tor", "devices": "devices", "toolchains": "toolchains", "limits": "limits",
                  "display": "display", "browser": "browser", "cairn": "cairn", "session": "sessions", "logs": "logs",
                  "engine": "sandbox", "bridge": "bridges", "team": "page-team"}
 KIND_DOES = {
@@ -135,6 +135,13 @@ KIND_DOES = {
                 "the task needs.",
                 "Die aufgeführten Geräte werden dem Agenten gegeben. Jedes schwächt die Isolation: Nennen Sie nur, "
                 "was die Aufgabe braucht."),
+    "toolchains": ("Each toolchain you list is mounted read-only at /opt/toolchains/NAME and its commands are on "
+                   "the agent's PATH; the registries it names are opened with it (not in the modes high and "
+                   "paranoid). It must be in the host's store first: sandbox-ai toolchain add NAME.",
+                   "Jede aufgeführte Toolchain wird nur lesbar unter /opt/toolchains/NAME eingehängt, ihre Befehle "
+                   "stehen im PATH des Agenten; die Registrys, die sie nennt, werden mit ihr geöffnet (nicht in den "
+                   "Modi high und paranoid). Sie muss zuerst im Lager des Hosts liegen: sandbox-ai toolchain add "
+                   "NAME."),
     "limits": ("Caps memory, CPUs and processes; a running sandbox of the project can get new limits at once.",
                "Begrenzt Speicher, CPUs und Prozesse; eine laufende Sandbox des Projekts kann sofort neue Grenzen "
                "bekommen."),

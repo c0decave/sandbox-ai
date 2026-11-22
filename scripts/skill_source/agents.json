@@ -1,0 +1,111 @@
+{
+  "_comment": "The facts of each agent the sandbox-ai skill names (scripts/gen_skills.py renders sandbox/builtin/AGENT/skills/sandbox-ai/SKILL.md and sandbox/templates/AGENT/skills/sandbox-example/SKILL.md from them; tests/test_skill_sync.py checks each against the code it comes from). title: kits.AGENT_NAMES; memory: kits.MEMORY_FILE's file with what it is; skills: kits.LAYOUT's skills folder; mcp_live: mcp.live_agent's restart (maybe: it may take up a server added while it runs; required: only at its start); skill_reload: kits_live.RELOAD's skills; helper: agent_sandbox.COMPANION_COMMANDS; example_kits: what the kits bring it, for the example skill. The agent's own section: agents/AGENT.md.",
+  "claude": {
+    "title": "Claude Code",
+    "memory": "`~/.claude/CLAUDE.md` and Claude's auto memory (`~/.claude/projects/-work/memory/`)",
+    "skills": "~/.claude/skills",
+    "mcp_live": "maybe",
+    "skill_reload": ["auto", null],
+    "helper": "claude -p --output-format json -- \"TASK\"",
+    "example_kits": "skills, agents and commands"
+  },
+  "codex": {
+    "title": "Codex",
+    "memory": "`~/.codex/AGENTS.md`",
+    "skills": "~/.agents/skills",
+    "mcp_live": "required",
+    "skill_reload": ["auto", null],
+    "helper": "codex exec --skip-git-repo-check -- \"TASK\"",
+    "example_kits": "skills and prompts"
+  },
+  "opencode": {
+    "title": "OpenCode",
+    "memory": "`~/.config/opencode/AGENTS.md`",
+    "skills": "~/.config/opencode/skills",
+    "mcp_live": "required",
+    "skill_reload": ["restart", null],
+    "helper": "opencode run -- \"TASK\"",
+    "example_kits": "skills, agents and commands"
+  },
+  "opencode2": {
+    "title": "OpenCode 2",
+    "memory": "`~/.config/opencode/AGENTS.md`",
+    "skills": "~/.config/opencode/skills",
+    "mcp_live": "required",
+    "skill_reload": ["restart", null],
+    "helper": "opencode2 run -- \"TASK\"",
+    "example_kits": "skills, agents and commands"
+  },
+  "hermes": {
+    "title": "Hermes",
+    "memory": "`~/.hermes/memories/MEMORY.md` (your memory tool's file)",
+    "skills": "~/.agents/skills",
+    "mcp_live": "required",
+    "skill_reload": ["command", "/reload-skills"],
+    "helper": "hermes --oneshot=\"TASK\"",
+    "example_kits": "skills (in `~/.agents/skills`)"
+  },
+  "dsh": {
+    "title": "DeepSeek Harness",
+    "memory": "`~/.dsh/AGENTS.md` (your user-global instructions)",
+    "skills": "~/.agents/skills",
+    "mcp_live": "required",
+    "skill_reload": ["auto", null],
+    "helper": "echo \"TASK\" | dsh headless -",
+    "example_kits": "skills (in `~/.agents/skills`)"
+  },
+  "qwen": {
+    "title": "Qwen Code",
+    "memory": "`~/.qwen/QWEN.md` (your global context file)",
+    "skills": "~/.qwen/skills",
+    "mcp_live": "required",
+    "skill_reload": ["auto", null],
+    "helper": "qwen --prompt=\"TASK\"",
+    "example_kits": "skills (in `~/.qwen/skills`)"
+  },
+  "goose": {
+    "title": "Goose",
+    "memory": "`~/.config/goose/AGENTS.md` (your global hints, read at every start)",
+    "skills": "~/.agents/skills",
+    "mcp_live": "required",
+    "skill_reload": ["restart", null],
+    "helper": "goose run --quiet --text=\"TASK\"",
+    "example_kits": "skills (in `~/.agents/skills`)"
+  },
+  "openhands": {
+    "title": "OpenHands",
+    "memory": "`~/.openhands/skills/AGENTS.md` (a skill without triggers: in every conversation)",
+    "skills": "~/.agents/skills",
+    "mcp_live": "required",
+    "skill_reload": ["command", "a new conversation"],
+    "helper": "openhands task --text=\"TASK\"",
+    "example_kits": "skills (in `~/.agents/skills`)"
+  },
+  "nanobot": {
+    "title": "nanobot",
+    "memory": "`~/.nanobot/workspace/memory/MEMORY.md` (your long-term memory, in your prompt every turn)",
+    "skills": "~/.nanobot/workspace/skills",
+    "mcp_live": "required",
+    "skill_reload": ["auto", null],
+    "helper": "nanobot agent --no-markdown --message=\"TASK\"",
+    "example_kits": "skills (in `~/.nanobot/workspace/skills`)"
+  },
+  "letta": {
+    "title": "Letta Code",
+    "memory": "`~/.letta/AGENTS.md` (sandbox-ai's notes about this project: read them when you start a task here; your own memory - memory blocks, MemFS, conversations - is in `~/.letta/lc-local-backend`, kept with this HOME)",
+    "skills": "~/.letta/skills",
+    "mcp_live": "required",
+    "skill_reload": ["auto", null],
+    "helper": "letta -p --new -- \"TASK\"",
+    "example_kits": "skills (in `~/.letta/skills`)"
+  },
+  "pi": {
+    "title": "Pi",
+    "memory": "`~/.pi/agent/AGENTS.md` (your instructions in every folder, read at every start)",
+    "skills": "~/.agents/skills",
+    "mcp_live": "required",
+    "skill_reload": ["command", "/reload"],
+    "helper": "pi -p -- \"TASK\"",
+    "example_kits": "skills (in `~/.agents/skills`)"
+  }
+}

@@ -109,7 +109,7 @@ such features). Telemetry is never switchable.
 | Web UI and its API (`127.0.0.1:3080`, a token per start; `--host` refuses wildcard binds) | on in `web` | on the sandbox's loopback only: reached from the sandbox's browser, not from the host; with `--browser` opened there by itself, the token masked in the terminal and the logs | `--browser` |
 | HMR, config editor, settings (rewrite the profile's patch) | on | on, in the start's HOME; sandbox-ai's patch is read-only and applied after them | - |
 | MCP servers (`dsh-mcp-client`, stdio or streamable HTTP) | none | `--mcp` servers through the launcher's stdio bridge (one patch row each) | `--mcp` |
-| Skills, sub-agents, workflows, scheduled jobs, plan mode | on | inside the sandbox; the kits' skills read-only in `~/.agents/skills`, the sandbox-ai skill in `~/.dsh/skills` | - |
+| Skills, sub-agents, workflows, scheduled jobs, plan mode | on | inside the sandbox; the kits' skills and the sandbox-ai skill read-only in `~/.agents/skills`, its own in `~/.dsh/skills` | - |
 
 ### Telemetry: always off, never switchable
 

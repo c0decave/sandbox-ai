@@ -174,6 +174,25 @@ def mcp_names():
     return quietly(lambda: sorted(module("mcp").definitions()))
 
 
+def toolchain_names():
+    """The toolchains of your store (sandbox-ai toolchain list): NAME, and NAME@VERSION where it has several."""
+    def names():
+        for name, versions in sorted(module("toolchains").installed().items()):
+            yield name
+            if len(versions) > 1:
+                yield from (f"{name}@{version}" for version in sorted(versions))
+    return quietly(names)
+
+
+def attached_toolchains():
+    """The toolchains attached to running sandboxes while they ran (toolchain detach takes one of them)."""
+    def names():
+        toolchains = module("toolchains")
+        for record in module("net").running().values():
+            yield from (row["name"] for row in toolchains.run_listing(record) if row["source"] == "added")
+    return sorted(set(quietly(names)))
+
+
 def llm_names():
     return quietly(lambda: sorted(module("llm").load_store().get("endpoints", {})))
 
@@ -424,6 +443,7 @@ NAMED = {
         ("show", "id"), ("diff", "id"), ("diff", "other"), ("delete", "ids"))},
     ("checkpoint", "restore", "target"): lambda: [*start_names(), *checkpoint_ids()],
     ("rules", "builtin", "name"): lambda: builtin_rulesets(),
+    ("toolchain", "show", "name"): toolchain_names, ("toolchain", "remove", "name"): toolchain_names,
 }
 
 def builtin_rulesets():
@@ -448,6 +468,10 @@ POSITIONS = {
     ("workspace", "remove"): lambda index, given: [*(run_names() if index == 0 else []), FILES],
     ("devices", "add"): lambda index, given: [*(run_names() if index == 0 else []), FILES],
     ("devices", "remove"): lambda index, given: [*(run_names() if index == 0 else []), FILES],
+    ("toolchain", "attach"): lambda index, given: [*(run_names() if index == 0 else []),
+                                                    *(toolchain_names() if index < 2 else [])],
+    ("toolchain", "detach"): lambda index, given: [*(run_names() if index == 0 else []),
+                                                    *(attached_toolchains() if index < 2 else [])],
     ("approvals", "forget"): lambda index, given: remembered_projects() if index == 0 else
     remembered_entries(given[0]) if index == 1 else [],
     ("completion", "install"): lambda index, given: [shell for shell in ("bash", "zsh", "fish") if shell not in given],
@@ -457,6 +481,8 @@ POSITIONS = {
 # (tests/test_completion.py) wants a provider above or an entry here for each position - a new command cannot miss
 # its completion unnoticed. Options by name (whatever command has them), positionals by (command, subcommand, name).
 FREE_TEXT = {
+    # a toolchain of the signed catalog: `sandbox-ai toolchain catalog` lists them (nothing is downloaded on a Tab)
+    ("toolchain", "add", "name"): "a toolchain of the catalog (sandbox-ai toolchain catalog)",
     # a search in a start's session files: a pattern and a text you type (session files --search, --text)
     **dict.fromkeys(("--search", "--text"), "a pattern or a text of yours"),
     # sizes, counts, times and numbers you choose
@@ -558,6 +584,7 @@ VALUES = {"--home": start_names, "--unpack": start_names, "--detail": start_name
           "--with": lambda: sorted(agent for agent in AGENTS if agent not in module("agent_sandbox").NOT_IN_TEAM),
           "--identity": lambda: identity_names(), "--image-variant": lambda: variant_names(),
           "--run": lambda: run_names(), "--history": lambda: start_names(), "--from-env": env_names,
+          "--toolchain": lambda: toolchain_names(),
 
           "--hermes-enable": lambda: hermes_features(), "--qwen-enable": lambda: qwen_features(),
           "--goose-enable": lambda: goose_features(), "--openhands-enable": lambda: openhands_features(), "--nanobot-enable": lambda: nanobot_features(), "--letta-enable": lambda: letta_features(),
