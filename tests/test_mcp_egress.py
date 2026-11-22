@@ -862,3 +862,52 @@ def test_mcp_export_says_what_of_your_network_a_server_reaches(home):
                                  "allow_tcp": ["192.168.1.30:8888"], "allow_private": ["10.1.0.0/16"]})
     assert network == {"network": "allowlist", "vpn": None,
                        "options": ["--allow-private 10.1.0.0/16", "--allow-tcp 192.168.1.30:8888"]}
+
+
+class NamespaceLibc:
+    """libc for enter_namespaces: records setns, answers NS_GET_USERNS with OWNER (or fails with ERRNO)."""
+
+    def __init__(self, owner=None, errno_=None):
+        self.calls, self.owner, self.errno_ = [], owner, errno_
+
+    def ioctl(self, fd, request):
+        self.calls.append(("ioctl", request))
+        if self.owner is None:
+            import ctypes
+            ctypes.set_errno(self.errno_)
+            return -1
+        return os.dup(self.owner)
+
+    def setns(self, fd, flag):
+        self.calls.append(("setns", os.readlink(f"/proc/self/fd/{fd}"), flag))
+        return 0
+
+    def capget(self, header, data):
+        return 0
+
+    def capset(self, header, data):
+        return 0
+
+    def prctl(self, *args):
+        return 0
+
+
+def test_the_egress_helper_enters_the_user_namespace_that_owns_the_network_one(tmp_path):
+    """MCP catalog CI 45006851694 (2026-11-22): every server with network under Bubblewrap failed with
+    "setns(CLONE_NEWNET): Operation not permitted". bwrap --unshare-user --uid U moves the sandboxed process into a
+    second, nested user namespace (so it holds no capability); its network namespace belongs to the first one, where
+    a process entering only the nested one has no right. The owner of the network namespace is entered now."""
+    owner = os.open(tmp_path, os.O_RDONLY)  # stands in for the fd NS_GET_USERNS returns
+    try:
+        libc = NamespaceLibc(owner=owner)
+        eg.enter_namespaces(os.getpid(), libc)
+        net = os.readlink(f"/proc/{os.getpid()}/ns/net")
+        assert libc.calls == [("ioctl", 0xB701), ("setns", str(tmp_path), 0x10000000), ("setns", net, 0x40000000)]
+        # A kernel without NS_GET_USERNS (before 4.9): the process's own user namespace, as before.
+        import errno
+        libc = NamespaceLibc(errno_=errno.ENOTTY)
+        eg.enter_namespaces(os.getpid(), libc)
+        user = os.readlink(f"/proc/{os.getpid()}/ns/user")
+        assert libc.calls == [("ioctl", 0xB701), ("setns", user, 0x10000000), ("setns", net, 0x40000000)]
+    finally:
+        os.close(owner)

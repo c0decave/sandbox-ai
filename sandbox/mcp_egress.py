@@ -318,17 +318,27 @@ class CapData(ctypes.Structure):
 
 
 def enter_namespaces(pid, libc=None):
-    """In a child about to exec nft: the user and network namespace of PID (a bwrap sandbox of this user, whose user
-    namespace gives the child every capability there), and CAP_NET_ADMIN kept across exec (ambient): nft runs as the
+    """In a child about to exec nft: the network namespace of PID and the user namespace that owns it (a bwrap
+    sandbox of this user, whose user namespace gives the child every capability there), and CAP_NET_ADMIN kept across exec (ambient): nft runs as the
     sandbox's user, with the right to change its network namespace's rules and nothing of the host's."""
     libc = libc or ctypes.CDLL(None, use_errno=True)
-    for kind, flag in (("user", 0x10000000), ("net", 0x40000000)):  # CLONE_NEWUSER, CLONE_NEWNET
-        fd = os.open(f"/proc/{int(pid)}/ns/{kind}", os.O_RDONLY | os.O_CLOEXEC)
+    # The user namespace that OWNS the network namespace: bwrap --unshare-user --uid U puts the sandboxed process
+    # into a second, nested user namespace, where a process entering only that one has no right over the network
+    # namespace (setns(CLONE_NEWNET): EPERM). NS_GET_USERNS (Linux 4.9) names the owner; without it, PID's own.
+    net = os.open(f"/proc/{int(pid)}/ns/net", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        user = libc.ioctl(net, 0xB701)  # NS_GET_USERNS: a new descriptor of the owning user namespace
+        if user < 0:
+            user = os.open(f"/proc/{int(pid)}/ns/user", os.O_RDONLY | os.O_CLOEXEC)
         try:
-            if libc.setns(fd, flag) != 0:
-                raise OSError(ctypes.get_errno(), f"setns({kind}) failed")
+            if libc.setns(user, 0x10000000) != 0:  # CLONE_NEWUSER
+                raise OSError(ctypes.get_errno(), "setns(user) failed")
         finally:
-            os.close(fd)
+            os.close(user)
+        if libc.setns(net, 0x40000000) != 0:  # CLONE_NEWNET
+            raise OSError(ctypes.get_errno(), "setns(net) failed")
+    finally:
+        os.close(net)
     header = CapHeader(0x20080522, 0)  # _LINUX_CAPABILITY_VERSION_3
     data = (CapData * 2)()
     if libc.capget(ctypes.byref(header), data) != 0:
