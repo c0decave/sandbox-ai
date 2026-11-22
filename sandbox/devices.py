@@ -200,19 +200,24 @@ def helper(op, user_pid, device, targets, proc=PROC, c=None):
         check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
         if op == "add":
             if not os.path.lexists(device):
+                # the folders above it too: a sandbox has no /dev/dri, /dev/snd or /dev/bus/usb/BBB of its own
+                os.makedirs(os.path.dirname(device), mode=0o755, exist_ok=True)
                 if os.path.isdir(f"/proc/self/fd/{trees[index]}"):
                     os.makedirs(device, exist_ok=True)
                 else:
                     os.close(os.open(device, os.O_CREAT | os.O_WRONLY, 0o600))
             check(c.syscall(SYS_MOVE_MOUNT, trees[index], b"", AT_FDCWD, device.encode(), MOVE_MOUNT_F_EMPTY_PATH),
                   f"mount {device}")
-        else:
-            check(c.umount2(device.encode(), MNT_DETACH), f"unmount {device}")
-            if os.path.isfile(device) or (os.path.lexists(device) and not os.path.isdir(device)):
-                try:
+        elif c.umount2(device.encode(), MNT_DETACH) < 0 and ctypes.get_errno() != errno.ENOENT:
+            check(-1, f"unmount {device}")  # (ENOENT: not there in this namespace, nothing to unmount)
+    if op != "add":
+        # The mount point add made, removed only once every namespace is unmounted: the sandbox's mount
+        # namespaces (the container's, Firejail's) may share one /dev, where it would be gone for the next one.
+        for fd in mounts:
+            check(c.setns(fd, CLONE_NEWNS), "enter a mount namespace of the sandbox")
+            if os.path.lexists(device) and not os.path.isdir(device):
+                with contextlib.suppress(OSError):
                     os.unlink(device)
-                except OSError:
-                    pass
     return 0
 
 

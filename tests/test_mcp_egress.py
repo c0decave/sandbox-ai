@@ -599,7 +599,11 @@ class FakeBwrap:
                     os.close(fake.gate)
                 fake.argv = argv
                 fake.args = os.read(int(argv[argv.index("--args") + 1]), 65536).split(b"\0")
-                os.write(int(argv[argv.index("--info-fd") + 1]), b'{"child-pid": 4242}\n')
+                # bwrap's own form: pretty-printed over several lines (the CI of sandbox-ai-mcp 2026-11-21: only
+                # the first line was read, "{", so every Bubblewrap server with network ran without it)
+                os.write(int(argv[argv.index("--info-fd") + 1]),
+                         b'{\n    "child-pid": 4242,\n    "cgroup-namespace": 4026532835,\n'
+                         b'    "ipc-namespace": 4026532833\n}\n')
                 fake.gate = os.dup(int(argv[argv.index("--block-fd") + 1]))
                 fake.events.append("bwrap")
             else:

@@ -572,9 +572,10 @@ never listed, a Tab must not unlock the keyring).
 | `sandbox-ai checkpoint list [RUN] [--project DIR] [--json]`, `checkpoint show ID [--files] [--json]`, `checkpoint diff ID [ID2] [--path P] [--json]`, `checkpoint delete ID... [--yes]` | | the checkpoints, one in detail, what changed since one, removing them |
 | `sandbox-ai session …` | | the same for sessions, in the older form |
 | `sandbox-ai session status NAME [--json]` | | what is there under a session's name right now: its agent, state, whether its supervisor runs, how far its terminal is (`ready`, `starting`, `missing`, `ended`), whether its relay answers and Podman lists its pod, whether its HOME holds a login - what a start of that name would meet |
-| `sandbox-ai session copy\|move NAME HOST [--as NAME] [--map LOCAL=REMOTE] [--check] [--replace]` | | a session's configuration started again on another host (move: then stopped here); [a session to another host](#a-session-to-another-host) |
+| `sandbox-ai session copy\|move NAME HOST [--as NAME] [--map LOCAL=REMOTE] [--with-workspace] [--no-checkpoints] [--include-secrets] [--grant-approvals] [--yes] [--check] [--replace] [--config-only]` | | a session with its state (HOME, the agent's conversation, memory, checkpoints, approvals) to another host and continued there (move: then stopped here); `--config-only`: only its configuration; [a session to another host](#a-session-to-another-host) |
+| `sandbox-ai session import FILE\|- [--as NAME] [--map LOCAL=REMOTE] [--no-workspace] [--check] [--replace] [--grant-approvals] [--yes] [--json]`, `session duplicate NAME NEW [--with-workspace] [--map ...] [--no-checkpoints] [--include-secrets] [--grant-approvals] [--yes] [--json]` | | an archive of `session export` (checked as untrusted input) as a session to resume; a second session here from a session's state; [a session as an archive](#a-session-as-an-archive) |
 | `sandbox-ai session memory NAME [--file F \| --all] [--from auto\|home\|store] [--raw] [--show-secret] [--hide-secrets] [--json] [--host HOST]` | | the agent's memory of a start: its memory file and auto memory - the live copy while it runs, else what went back to the project's memory store; [a session's memory and files](#a-sessions-memory-and-files) |
-| `sandbox-ai session files NAME [--file F [--full]] [--raw] [--show-secret] [--hide-secrets] [--json] [--host HOST]`, `session files NAME --search PATTERN [--text TEXT] [--case]`, `session export NAME OUT [--include-secrets [--yes]] [--json] [--host HOST]` | | the agents' session files in its HOME, one shown as a conversation (logins and keys listed and marked, shown with `--show-secret`); the start's folder as one tar.gz (logins and keys left out and named unless `--include-secrets`) |
+| `sandbox-ai session files NAME [--file F [--full]] [--raw] [--show-secret] [--hide-secrets] [--json] [--host HOST]`, `session files NAME --search PATTERN [--text TEXT] [--case]`, `session export NAME OUT [--with-workspace] [--no-checkpoints] [--include-secrets [--yes]] [--json] [--host HOST]` | | the agents' session files in its HOME, one shown as a conversation (logins and keys listed and marked, shown with `--show-secret`); the start with its state as one tar.gz with a manifest (logins and keys left out and named unless `--include-secrets`) |
 | `sandbox-ai board export (--session NAME \| --board FILE\|NAME\|-) OUT [--images] [--host HOST]` | | a session (running or not) or a board as one self-sufficient file: never a secret's value; [a board or session as one file](#a-board-or-session-as-one-file) |
 | `sandbox-ai board import FILE [--check] [--as NAME] [--map OLD=NEW] [--value NAME=VALUE] [--rename KIND:OLD=NEW] [--replace KIND:NAME] [--images] [--pull] [--yes] [--host HOST]` | | such a file taken in: its plan first, then its parts written and the board kept (never started); `board list`, `board show NAME [--check]`, `board delete NAME` |
 | `sandbox-ai schedule add NAME (--every SPEC \| --at TIME \| --cron SPEC) [--on-push REPO] [--prompt TEXT] ... -- AGENT [OPTIONS]` | | an agent started on a timetable or a trigger, with a report of each run; `schedule list\|show\|history\|report\|pause\|resume\|run-now\|remove`, `schedule enable\|disable` (the user-level timer); [scheduled runs](#scheduled-runs) |
@@ -618,7 +619,7 @@ never listed, a Tab must not unlock the keyring).
 | `sandbox-ai llm add\|set\|params\|list\|show\|remove\|models\|status\|loaded\|load\|unload\|check\|detect …` | | LLM servers, local or remote, for `--llm NAME[:MODEL[,MODEL...]]`, with sampling parameters and the loop guard per model; what a server has loaded, load and unload models; their keys stay with the connection proxy ([LLM servers](#llm-servers-local-and-remote)) |
 | `sandbox-ai llm traffic [RUN\|--session NAME] [--follow] [--full] [--request N] [--json\|--summary\|--markdown]` | | what an agent and its model exchanged, request by request: what is new in each, the answer, the relay's changes ([the LLM traffic log](#llm-servers-local-and-remote)) |
 | `sandbox-ai vpn add\|set\|list\|show\|remove\|check\|rotate …` | | VPN profiles for `--vpn` (WireGuard, OpenVPN, Mullvad, Tailscale, Tor); their keys stay in `sandbox-ai secrets` ([VPN](#vpn)) |
-| `sandbox-ai images [packages\|extend\|check\|recipe\|new\|remove\|history\|pull\|build-image\|list\|os\|search\|derive] [--json]` | | the agent images and variants with agent version, age, size and whether each is current with its extension; the packages in one; extensions, ready-made recipes (`media`, `dev`, `hyperframes`, `playwright`, `django`, `android`) and variants (each agent's own; `NAME@AGENT` where several agents have one) ([extensions](#extensions-and-variants)); your own images from registries and Containerfiles ([your own images](#your-own-images-services-beside-the-agent-bases-of-variants)) |
+| `sandbox-ai images [packages\|extend\|check\|recipe\|new\|remove\|history\|pull\|build-image\|list\|os\|search\|derive] [--json]` | | the agent images and variants with agent version, age, size and whether each is current with its extension; the packages in one; extensions, ready-made recipes (`media`, `dev`, `hyperframes`, `playwright`, `django`, `android`, `android-dev`) and variants (each agent's own; `NAME@AGENT` where several agents have one) ([extensions](#extensions-and-variants)); your own images from registries and Containerfiles ([your own images](#your-own-images-services-beside-the-agent-bases-of-variants)) |
 | `sandbox-ai update [--check] [--version X.Y.Z] [--allow-downgrade]` | `sandbox-ai-update` | update an installation made by `install.sh`; signed releases ([installation](#installation-and-updates)) |
 | `sandbox-ai update mode [off\|notify\|download\|auto] [--at HH:MM-HH:MM]`, `update --apply`, `update --rollback` | - | the update mode (a check once a day by default), installing what it downloaded, going back ([installation](#installation-and-updates)) |
 | `sandbox-ai version [--verbose]` | `-V`, `--version` | version; `--verbose`: where it is installed and the fingerprints of the trusted release keys |
@@ -1638,12 +1639,12 @@ sections, each preset's title and description in German too):
 
 | Category | Presets |
 |---|---|
-| Development | `development` (Python and JavaScript), `coding-memory`, `rust`, `go`, `jvm` (Java, Kotlin), `dotnet`, `database-services` (PostgreSQL and Redis beside the agent), `web-frontend` (Playwright), `infrastructure` (Terraform, OpenTofu), `dependency-upgrade`, `data-ml`, `axross-mcp-server` (axross's file tools on a folder of yours and on the SFTP connections saved in axross, as the MCP server axross; writes asked first) |
+| Development | `development` (Python and JavaScript), `coding-memory`, `rust`, `go`, `jvm` (Java, Kotlin), `dotnet`, `database-services` (PostgreSQL and Redis beside the agent), `web-frontend` (Playwright), `infrastructure` (Terraform, OpenTofu), `dependency-upgrade`, `data-ml`, `android-development` (Android apps with Kotlin, Jetpack Compose, the NDK and CMake: the image variant `android-dev`, the Gradle and Google Maven hosts, the host's adb server or a USB device, `/dev/kvm` for the emulator), `axross-mcp-server` (axross's file tools on a folder of yours and on the SFTP connections saved in axross, as the MCP server axross; writes asked first) |
 | Research & web | `research-memory` |
 | Local LLMs | `local-api` for any OpenAI-compatible server, `ollama`, `lm-studio`, `llama-cpp`, `vllm`, `cairn-local-llm` (Cairn's board, its workers Claude Code on your model) (`--llm NAME[:MODEL] --no-provider-defaults`; Claude Code only with a server that has the Anthropic Messages API) |
 | Security analysis | `code-audit` (read-only review), `observer` (watches another running session through a session bridge and alerts you), `pentest-lab` (one machine of yours, exactly its ports), `cairn-pentest-board` (Cairn's board with Claude Code and Codex as its workers, one machine of yours), `android-debugging` (an APK taken apart and watched while it runs: jadx, CFR, smali and Frida as MCP servers, the image variant `android` with adb, apktool, smali, jadx and Frida, the adb server of your host) |
 | Forensics & reverse engineering | `forensics`, `software-analysis` |
-| Hardware & devices | `hardware-analysis`, `firmware-iot`, `mobile-android` (an app's APK and a device through the host's adb server), `android-debugging` (listed under Security analysis: the full Android setup) |
+| Hardware & devices | `hardware-analysis`, `firmware-iot`, `mobile-android` (an app's APK and a device through the host's adb server), `android-debugging` (listed under Security analysis: the full Android setup), `android-development` (listed under Development: building apps, the emulator) |
 | Network | `network-analysis` |
 | Privacy & anonymity | `tor` (everything through a Tor profile of `sandbox-ai vpn add NAME --tor`, `--dns` for `.onion` names), `paranoid` (the mode paranoid, no memory, kits or plugins, every decoy) |
 | Writing & docs | `docs-writer`, `docs-lie-detector`, `onboarding-buddy` |
@@ -5377,6 +5378,42 @@ default ones (repeatable); `-a AS` names the server for `--mcp` (default: the en
 The app and the web show such a refusal and offer to add the server anyway,
 asked first (`mcp-unsigned`).
 
+**No signed image yet: built here.** A catalog entry without a digest (pending: reviewed, its
+image not published and signed yet) is refused by `add`, which names
+`sandbox-ai mcp add NAME --build` (`-B`): that builds it on this host from its source and adds it
+**unsigned**. The source is the catalog's own repository at an exact commit, never a moving branch:
+for a catalog on GitHub its branch is resolved to its commit once and the catalog, its signature
+and the entry are read again at that commit (GitHub's archive of the commit, kept in
+`~/.cache/sandbox-ai/mcp-build/` by its commit); for a catalog file in a git checkout (one of
+yours, or `SANDBOX_AI_LOCAL_CATALOGS=FOLDER`: `FOLDER/sandbox-ai-mcp/catalog.json` and
+`FOLDER/axross-mcp-hub/catalog.json` read instead of the published ones) its `HEAD`, with
+`catalog.json` and `servers/NAME` as committed. You are asked first, with the entry, the
+repository, the commit and the source archive's SHA-256; `--build-plan` prints that as JSON and
+builds nothing, and `--yes --commit SHA --source-sha256 HEX` builds exactly what was asked about
+(another commit or archive is refused) - as the app and the web interface do after their question,
+and as `sandbox-ai hosts run HOST -- mcp add NAME --build ...` does for another host. Only
+`servers/NAME` is taken out of the archive (regular files and folders only), every base image of
+its Dockerfile must be pinned by digest, and Podman builds it as the catalog's CI does
+(`--platform linux/amd64`, labels `sandbox-ai.mcp.commit` and `sandbox-ai.mcp.built=here`). Then
+the image is started with sandbox-ai's own run line and its smoke spec runs against it
+(`servers/NAME/smoke.json` and `tools.json`: `tools/list` must offer exactly the recorded tools,
+the real and the refused calls must pass; the file fixtures are written from
+`tests/fixtures/analysis-files.json` by their SHA-256; a call that needs a secret of CI's is left
+out, and said). Only then is it added - `"signed_by": null` and `"built"` (commit, repository,
+path, the archive's SHA-256) in `mcp.json`, never signed: `mcp list` says `built here, not
+signed`, so do the app and the web interface. A failed build or smoke test is said with the
+log's end and the log's file (`~/.local/state/sandbox-ai/mcp-build/`); the image is removed
+and nothing is added. An entry that has a published image is never built (`add` pulls the signed
+one), a catalog whose signature does not verify is refused, and one that is not signed needs
+`--unsigned` here too. `mcp export` and `mcp copy` take a server built here as an image of your
+own (`--copy-image`). A start that names such a server (`--mcp jadx`, a preset's) asks on a
+terminal whether to build it (the same question), else its refusal names the command (a dry run,
+as the app's checks are, neither asks nor reads the catalogs for it); the app's Board and Start ask before a start on this machine or another host and build
+it in the tab Preparing the start; the web interface offers it on the MCP page and when a resume is
+refused for it. A server in no catalog is refused as before (define it yourself). The mode
+`paranoid` refuses a start with a server it cannot see to have no network before anything is
+asked: add it with `mcp add NAME --build` first.
+
 **Bubblewrap.** Without Podman (or with `--backend bwrap`), `add` takes the
 entry's rootfs instead of its image (from `rootfs.json` beside the catalog,
 signed like it, since axross reads the catalog itself): an archive of the same image, checked
@@ -5746,32 +5783,108 @@ sandbox-ai hosts remove ct1
 ```
 
 <a id="a-session-to-another-host"></a>
-**A session to another host.** `sandbox-ai session copy NAME HOST` starts a
-session's configuration again on a host of the list: its options with what its
-trusted project file added (passed with `--no-config`, so exactly this starts
-there), checked first with a dry run on that host, then started there as a
-session of the same name (`--as NAME`: another). `session move` does the same
-and then stops the session here (its HOME stays until `sandbox-ai session
-delete`). Folders that lie elsewhere there are mapped with `--map
-/home/me/src=/srv/src` (repeatable; each folder of a `--workspace` list, mounts,
-copies, rulesets and a preset's folders alike); `--check` only checks; `session plan NAME --json` shows what a copy
-starts with and the host paths it names. The check is the host's dry run, which
-refuses what the start would fail on: a workspace that is not there and cannot be
-created there (its parent not writable, e.g. `/mnt` of root), an MCP server the
-host does not define. It warns when the host has no login of the agent (log in
-there once: `sandbox-ai hosts run HOST login AGENT`). Logins and the
-session's HOME are not copied: the host uses its own (`sandbox-ai login`
-there). A project's own MCP servers and ruleset (in its `.sandbox-ai.json`) are
-not taken along: the command says so and starts nothing. A session of that name
-on the host already is refused (a start of that name would resume it with its
-own saved options); `--replace` deletes it there first, its HOME there too. A
-start there that fails leaves no session behind: a new try, with other `--map`
-values, starts afresh.
+**A session to another host, with its state.** `sandbox-ai session copy NAME
+HOST` takes a session to a host of the list in one command, so that the agent
+continues its conversation there: its configuration (its options with what its
+trusted project file added, passed with `--no-config`, so exactly this starts
+there), its HOME with the agent's own session files, the project's agent memory
+(`CLAUDE.md`, `AGENTS.md`, ..., Claude's auto memory), the checkpoints of its
+workspace (`--no-checkpoints`: not) and its network approvals. A running
+session is paused (frozen) for the moment of the snapshot, so that all of it is
+consistent. The archive goes over SSH as the standard input of `sandbox-ai
+session import -` on the host (it needs only sshd and a sandbox-ai with
+`session import`, 0.1.193 on - no rsync or scp), which checks it as below with
+its own dry run first, and `session resume` starts it there. `session move`
+does the same, keeps the session paused here until it runs there, then stops it
+here (its HOME stays until `sandbox-ai session delete`); a move that fails
+there thaws it again. `--as NAME`: another name there. Folders that lie
+elsewhere there are mapped with `--map /home/me/src=/srv/src` (repeatable; each
+folder of a `--workspace` list, mounts, copies, rulesets and a preset's folders
+alike). The workspace is mapped by default (the folder of that path there, a
+clone or a shared folder); `--with-workspace` takes its files along (links,
+sockets and devices left out and listed) into a folder there that is not there
+yet or is empty. Logins and keys go along only with `--include-secrets`, asked
+each time (`--yes` for scripts): whoever has them can log in as you; otherwise
+the host uses its own login (`sandbox-ai hosts run HOST login AGENT`). The
+network approvals - what you allowed with `sandbox-ai net allow` and the
+approvals answered for its run, and what was allowed "always" for its project -
+are shown and granted again there only with `--grant-approvals` (asked; as
+`--allow-host` and `--allow-tcp` options of that one session, never for the
+project there). `--check` only checks (the import's dry run there, nothing
+kept). A session of that name on the host is refused; `--replace` deletes it
+there first (a stopped one), its HOME there too. A project's own MCP servers and
+ruleset (in its `.sandbox-ai.json`) are not taken along: the command says so and
+starts nothing. `--config-only` copies only the configuration, as before
+0.1.193: started afresh there, a new conversation, nothing of its HOME (`session
+plan NAME --json` shows what it starts with and the host paths it names); a
+start there that fails leaves no session behind.
+
+State is the default of copy and move because "move a sandbox to another
+system" means the agent goes on where it was: a copy of only its configuration
+starts a new conversation and leaves the memory and checkpoints behind.
+
+The conversation goes on by itself where the agent has a "continue the last
+one" of its own (`sandbox-ai resume`: Claude Code, Codex, OpenCode, OpenCode 2,
+Hermes, Qwen Code, Goose, Pi; Letta Code goes on with the project's last one
+anyway). DeepSeek Harness, OpenHands and nanobot have none: their sessions go
+along in the HOME and are listed in their own session list there, to be chosen.
+
+<a id="a-session-as-an-archive"></a>
+**A session as an archive, imported anywhere.** `sandbox-ai session export
+NAME OUT.tar.gz` writes the same state into one archive (see below; for a
+session with its configuration, memory, checkpoints, approvals and, with
+`--with-workspace`, its workspace's files) with a `manifest.json` that names
+its version and every file with its size and SHA-256. `sandbox-ai session
+import FILE [--as NAME] [--map LOCAL=REMOTE]...` takes it on any machine, also
+one that is not in your hosts (`-` reads the standard input), as a stopped
+session that `sandbox-ai resume NAME` continues, conversation and all. The
+archive is untrusted input, wherever it came from: it is read as a stream and
+never extracted by tar itself - only folders and regular files below its one
+top folder are taken (an absolute path, `..`, a link, hard link, device, FIFO or
+sparse file refuses the whole archive); each file is written with `O_EXCL` and
+`O_NOFOLLOW` into a private staging folder, its mode cut to your own
+read/write/execute bits (no setuid, setgid or sticky bit), within the export's
+limits (one file 4 GiB, 64 GiB and 500 000 files in all, tar headers 1 MiB) and
+keeping 512 MiB free on the disk; every file must match the manifest, and every
+checkpoint's content its SHA-256 name. Its configuration is checked as a start
+is: an agent this sandbox-ai has, options that parse, no option a session never
+saves (`--state-dir`, sockets, its pod, its name: refused), its folders mapped,
+and the launcher's own dry run (the administrator's policy, the security mode,
+private locations, devices, the network) before anything is kept. Options that
+give the sandbox secrets of this machine (`--api-key`, `--env`,
+`--secret-env`, `--git-token-*`, `--auth-file`, `--copy`, ...) or folders of it
+other than its workspace are listed and asked first (`--yes` for scripts).
+The memory goes into the project's memory store there where that has none of a
+file (one the project has differently there stays: it is the project's, and
+named); the checkpoints into that project's checkpoint store as the new
+session's (`sandbox-ai checkpoint list NAME`). `--check` checks and keeps
+nothing; `--no-workspace` leaves the archive's workspace files out (it starts
+on the folder there); `--replace` replaces a stopped session of that name;
+`--grant-approvals` as above. The canaries planted in its HOME never go along
+(the sandbox there gets its own).
+
+<a id="a-duplicate-of-a-session"></a>
+**A duplicate here.** `sandbox-ai session duplicate NAME NEW` makes a second
+session of this machine from the state of NAME, through the same export and
+import: its own HOME (a copy, with the agent's session files: it continues the
+same conversation) and name, its memory and checkpoints; both can run. The
+workspace is shared, or copied with `--with-workspace` (beside it as
+`WORKSPACE-NEW`, unless `--map WORKSPACE=FOLDER` says where). Not started:
+`sandbox-ai resume NEW`. Logins and approvals as above (`--include-secrets`,
+`--grant-approvals`, asked).
+
+The desktop app's Sandboxes page and Board have *Copy to host…*, *Move to
+host…* (with *Its state along*), *Duplicate…*, *Export…* and *Import…*; the web
+interface's start rows *Duplicate* and *Export*, its sessions list *Import*.
 
 ```bash
-sandbox-ai session copy web ct1 --check                    # can it start on ct1 as it is?
-sandbox-ai session move web ct1 --map /home/me/src=/srv/src  # there, then stopped here
-sandbox-ai session copy web ct1 --replace                  # its session web there is deleted first
+sandbox-ai session move web ct1 --map /home/me/src=/srv/src   # conversation, memory, checkpoints there; stopped here
+sandbox-ai session copy web ct1 --with-workspace --check      # its files along too: only checked
+sandbox-ai session copy web ct1 --config-only                 # only its configuration, a new conversation there
+sandbox-ai session export web ~/web.tar.gz --with-workspace
+sandbox-ai session import ~/web.tar.gz --as web --map /home/me/src=/srv/src --check
+sandbox-ai session import ~/web.tar.gz --as web --map /home/me/src=/srv/src --grant-approvals
+sandbox-ai session duplicate web web-try --with-workspace     # a second one beside it
 ```
 
 <a id="a-sessions-memory-and-files"></a>
@@ -5820,7 +5933,13 @@ row: *Memory*, *Session files*).
   file of a folder, logins and keys included.
 - `sandbox-ai session export NAME OUT.tar.gz` writes the start's
   `session.json`, `exit.json`, `supervisor.log` and its kept HOME into a new
-  archive (never over a file that is there). An archive is made to be passed
+  archive (never over a file that is there) - for a session also its state:
+  its configuration, memory, checkpoints (`--no-checkpoints`: not), network
+  approvals, with `--with-workspace` its workspace's files, and a
+  `manifest.json` with every file's SHA-256 ([a session as an
+  archive](#a-session-as-an-archive); a running session is paused for the
+  moment, logins and keys left out of the checkpoints too: skipped there, so a
+  restore keeps them). An archive is made to be passed
   on, so by default left out, and listed by name in the output and the
   archive's `export.json`: the agents' logins, keys and anything named like a
   login, files holding a placeholder of a secret the launcher gave - and
@@ -6913,6 +7032,47 @@ framework, baksmali and smali 3.0.10, jadx 1.5.6 and Frida 17.25.2's Python bind
 MCP servers `smali` and `frida`, so the agent sees the same tools either way. `frida-tools` is not included
 (`sandbox/recipes/android/requirements.txt` says why, and how to add it). The preset `android-debugging` uses this
 variant, the four MCP servers and a ruleset that asks before anything is installed on a device, wiped or flashed.
+
+**The Android development image.** `sandbox-ai images recipe android-dev --from AGENT` makes the variant
+`android-dev` and `sandbox-ai build android-dev` builds it: everything of the variant `android` (the recipe includes
+it), JDK 17 from Debian (what the Android Gradle plugin needs) and, in `/opt/android-sdk` (`ANDROID_HOME`), the
+Android SDK - cmdline-tools 23.0 (`sdkmanager`, `avdmanager`), platform-tools 37.0.1, the platforms `android-37.0`,
+`android-36` and `android-35` with build-tools 37.0.0, 36.0.0 and 35.0.0 (the current stable API level and the two
+before it), the NDK r30 (30.0.16248370, `ANDROID_NDK_HOME`), CMake 4.1.2 and 3.22.1 (the Android Gradle plugin's
+default), the emulator 37.2.13 and the system image `system-images;android-37.0;google_apis;x86_64` - Gradle 9.8.2 in
+`/opt/gradle` (projects use their wrapper) and the Kotlin compiler 2.4.21 for scripts; Jetpack Compose comes per
+project through Gradle. Every version was released at least 14 days before it was pinned and is on Google's stable
+channel.
+
+Every download is a row of `sandbox/recipes/android-dev/sdk.lock` with its size and checksums, fetched while the
+image is built and never at run time (`install.sh`: HTTPS only, the size, Google's SHA-1 and the SHA-256 checked
+before anything is unpacked, a difference stops the build; one build step per archive, so no layer keeps the
+archives). Google publishes a SHA-1 for each SDK archive and no SHA-256: the lock pins Google's SHA-1 (from its
+repository, `scripts/android_dev_lock.py` makes the lock from it) and the first real build prints the SHA-256 of each
+archive ("unconfirmed SHA-256"), which goes into the lock so that every later build checks it too. Gradle's and
+Kotlin's SHA-256 are their publishers'. Each SDK package gets the `package.xml` sdkmanager would write, so the SDK
+tools and the Android Gradle plugin see it; the build runs `sdkmanager --list_installed` and makes an AVD of the
+system image, and stops when either does not see a package.
+
+Sizes: about 4.1 GB to download (the system image 2.1 GB, the NDK 740 MB, the emulator 350 MB, cmdline-tools 180 MB,
+Gradle 150 MB, Kotlin 90 MB, each platform and build-tools about 65 MB), roughly 10 GB more in the image than the
+variant `android`. x86_64 only: Google ships the SDK's Linux tools for no other architecture (the build says so and
+stops on another machine). **Google's license:** by building the variant you accept the Android Software Development
+Kit License Agreement (https://developer.android.com/studio/terms); the build says so, and records the acceptance of
+that one license (`licenses/android-sdk-license`, as `sdkmanager --licenses` would), so that the Android Gradle plugin
+may fetch a package a project names and the image lacks.
+
+The preset `android-development` starts it: the project is the workspace, only `dl.google.com`,
+`maven.google.com`, `services.gradle.org`, `downloads.gradle.org`, `plugins.gradle.org`,
+`plugins-artifacts.gradle.org`, `repo.maven.apache.org` and `repo1.maven.org` are open (another repository a
+project names: `--allow-host NAME`), the host's adb server through port 5037 or a USB device (the value `device`),
+and `/dev/kvm` for the emulator (the value `kvm`, `/dev/kvm` by default; a host without it leaves it out with a
+note and everything but the emulator works). In the sandbox `android-emulator start` makes the AVD `dev` once and
+runs the emulator without a window (`--gui`: on the sandbox's screen) with its own adb server on port 5038 (5037 is
+the host's): `adb -P 5038 install -r app/build/outputs/apk/debug/app-debug.apk`. The MCP servers of
+`android-debugging` are optional values (`jadx`, `smali`, `frida`). Its ruleset asks before an app is installed on a
+device or the emulator (`adb install`, `./gradlew installDebug`, the connected tests), uninstalled or its data
+cleared, before the emulator is wiped or an AVD deleted, and before anything is flashed or unlocked.
 
 | Android device | `adb start-server` (port 5037) | `--allow-host-port 5037`; `adb -H 127.0.0.1 -P 5037 ...` (the image variant `android` brings adb, fastboot, apktool, smali, jadx and Frida: `sandbox-ai images recipe android --from AGENT`; the preset `android-debugging` sets it all up). A device handed over directly instead: `--device usb:VID:PID` (`sandbox-ai devices scan`). An MCP server reaches **neither** the host's port 5037 nor its forwarded ports: give the frida server the device's own address (`--env FRIDA_DEVICE=IP:27042` and `sandbox-ai mcp set frida --allow-tcp IP:27042`) |
 | GPU for models | Ollama, llama.cpp or vLLM | `--llm NAME` or `--allow-host-port 11434` and similar, see [LLM servers](#llm-servers-local-and-remote) |
@@ -9263,7 +9423,10 @@ is made from the calls' names for x86-64 and arm64 (and for the 32-bit calls a 6
   a kernel without it answers. Nothing new is open before somebody looked at it.
 
 Firejail gets its own options for the same where it has them (`--restrict-namespaces`,
-`--protocol=unix,inet,inet6,netlink`): a second filter of another maker. Before the agent starts, the guard asks
+`--protocol=unix,inet,inet6,netlink`): a second filter of another maker. Not with `--backend bwrap`: Firejail builds
+these two with a helper of its own and runs only helpers that belong to root, and there the host's `/usr` belongs
+to a root the sandbox's user namespace does not map. sandbox-ai's own filter refuses both all the same, and the run's
+manifest (`isolation.json`, `firejail.narrowing_left_out`) says why they are missing. Before the agent starts, the guard asks
 the kernel in a child process whether `io_uring`, an `AF_VSOCK` socket and a new user namespace are refused with
 the filter's own answer; if not, nothing starts. No option opens `io_uring` or another socket family for the
 agent. For a program that needs one, `SANDBOX_AI_SYSCALL_FILTER=off sandbox-ai ...` starts once without
@@ -10034,7 +10197,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai completion bash\|zsh\|fish\|install` | Tab completion scripts, or set them up |
 | `sandbox-ai vpn add NAME --wireguard FILE\|--openvpn FILE\|--mullvad\|--tailscale\|--tor [...]`, `vpn set NAME [--provider NAME] [--auth-secret SECRET] [--account-secret SECRET] [--auth-key-secret SECRET] [--exit-node HOST] [--login-server URL] [--hostname NAME] [--exit-country CC] [--bootstrap-*]` (a profile changed in place; `none` clears a value), `vpn list\|show NAME\|remove NAME\|check NAME [--json]`, `vpn rotate NAME` (Mullvad: a new key) | VPN profiles for `--vpn` (see [VPN](#vpn)) |
 | `sandbox-ai images [--json]`, `sandbox-ai images packages AGENT\|VARIANT [--json]` | Agent images and variants, current with their extensions or not, and their packages (read offline from the image) |
-| `sandbox-ai images extend\|check\|recipe\|new\|remove\|history …` | Extensions, ready-made recipes (`media`, `dev`, `hyperframes`, `playwright`, `django`, `android`) and variants (each agent's own; `NAME@AGENT` where several agents have one) (see [Extensions and variants](#extensions-and-variants)) |
+| `sandbox-ai images extend\|check\|recipe\|new\|remove\|history …` | Extensions, ready-made recipes (`media`, `dev`, `hyperframes`, `playwright`, `django`, `android`, `android-dev`) and variants (each agent's own; `NAME@AGENT` where several agents have one) (see [Extensions and variants](#extensions-and-variants)) |
 | `sandbox-ai images pull REFERENCE [--as NAME] [--replace]`, `images build-image NAME --file CONTAINERFILE [--context DIR] [--build-network] [--trust-agent-written]` (or `--builtin TEMPLATE`), `images list [--json]`, `images templates [--json]`, `images remove IMAGE`, `images new NAME --from AGENT --base IMAGE`, `images os NAME`, `images search NAME [QUERY] [--refresh] [--limit N]`, `images derive NAME --from IMAGE --add-os PKG` | Your own images from registries and Containerfiles, pinned by digest and marked unchecked: services (`--service`) and bases of variants (see [Your own images](#your-own-images-services-beside-the-agent-bases-of-variants)) |
 | `sandbox-ai build` | `[--podman-url URL] [--pin VERSION] [--uv VERSION] [--node IMAGE] [--extension-only] AGENT\|all\|VARIANT\|NAME@AGENT [podman build options]`; newest releases unless pinned; then the extension layers. `sandbox-ai build [--podman-url URL] team [--with AGENT,...]\|cairn\|vpn\|tor\|browser` builds the team image (with the other agents as its layers), Cairn's, the VPN or Tor container or the sandbox's browser; `all` every image with your variants, a failure stopping none of the others |
 | `sandbox-ai list [--stopped] [--mcp] [--all] [--flat] [--no-color] [--json]`, `list --history NAME` | What runs (`--stopped`: the kept starts too, `--mcp`: the MCP servers, `--all`: everything; grouped below their start, `--flat` one row each); the history of a name |
@@ -10054,7 +10217,7 @@ See [Project configuration](#project-configuration-and-wizard) and
 | `sandbox-ai gc --only ...` | Only what the options name (what the check's plan runs) |
 | `sandbox-ai session list\|attach\|pause\|resume\|stop\|delete` | The older form of the commands above |
 | `sandbox-ai mcp list` | Defined MCP servers, their status and limits, and the running instances of starts with limits of their own |
-| `sandbox-ai mcp catalog [-c FILE\|URL]... [--json]`, `sandbox-ai mcp add NAME [-a AS] [-m TARGET=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M SIZE] [-C N] [-p N] [-t SIZE] [-v VPN] [-b podman\|bwrap\|both] [-c FILE\|URL]... [-N] [--unsigned]` | Servers of the MCP catalogs; add one as a container server (see [Local MCP servers](#servers-from-an-mcp-catalog)) |
+| `sandbox-ai mcp catalog [-c FILE\|URL]... [--json]`, `sandbox-ai mcp add NAME [-a AS] [-m TARGET=HOST[:ro\|rw]] [-e VAR] [-n none\|full] [-M SIZE] [-C N] [-p N] [-t SIZE] [-v VPN] [-b podman\|bwrap\|both] [-c FILE\|URL]... [-N] [--unsigned] [--build [--yes --commit SHA --source-sha256 HEX] \| --build-plan]` | Servers of the MCP catalogs; add one as a container server (one without a signed image yet: built here from its source, unsigned) (see [Local MCP servers](#servers-from-an-mcp-catalog)) |
 | `sandbox-ai mcp set NAME [-M SIZE] [-C N] [-p N] [-t SIZE] [--recommended] [-n none\|full] [-m TARGET=HOST[:ro\|rw]]... [--no-mounts] [-e VAR]... [--no-env] [-v VPN \| --no-vpn] [-T SECONDS\|default] [--stop] [--json]` | Change a server of yours: its limits for every start (`default`: back to the default), network, folders, variables, VPN, how long an agent waits for one of its calls (`--tool-timeout`, 10-3600 s), checked as `add` checks them |
 | `sandbox-ai mcp start NAME [--backend podman\|bwrap] [--vpn PROFILE] [--for START [--restart]]`, `sandbox-ai mcp stop NAME` | Start or stop an MCP server sandbox (`--for`: for that start, attached to it; `stop NAME`: all of its instances, `NAME.HASH`: one) |
 | `sandbox-ai mcp attach NAME START [--restart \| --live] [--json]`, `--helper AGENT START --live` | Connect an MCP server (or a helper) to a kept agent start (a running one: restarted with it, or `--live`: now, without a restart) |

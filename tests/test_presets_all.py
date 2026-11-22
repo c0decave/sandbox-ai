@@ -127,6 +127,7 @@ def host(tmp_path_factory):
     for preset in PRESETS.values():
         defaults = {name: str(spec["default"]) for name, spec in preset.get("values", {}).items() if "default" in spec}
         names |= {value for value, _ in P.option_values(preset, defaults, "--mcp")}
+        names |= set(mcp_values(preset))
     (root / "config/sandbox-ai").mkdir(parents=True, exist_ok=True)
     servers = {}
     for name in sorted(names):
@@ -150,10 +151,27 @@ def host(tmp_path_factory):
                         "id": "sha256:" + str(index + 5) * 64, "digest": "sha256:" + str(index) * 64, "user": user,
                         "ports": [], "os": {}}
     (root / "config/sandbox-ai/user-images.json").write_text(json.dumps({"version": 1, "images": images}))
+    # The image variants the presets start (--image-variant): made from their recipe, as the preset's "needs" says
+    # (`sandbox-ai images recipe NAME --from AGENT`; a start of another agent takes it over), never built.
+    spec = importlib.util.spec_from_file_location("images_for_presets_all", ROOT / "sandbox/images.py")
+    images = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(images)
+    for preset in PRESETS.values():
+        defaults = {name: str(spec["default"]) for name, spec in preset.get("values", {}).items() if "default" in spec}
+        for variant, _ in P.option_values(preset, defaults, "--image-variant"):
+            if variant not in {name for name, _ in images.variants()}:
+                images.recipe(variant, "claude")
     work = root / "work"
     work.mkdir()
     yield root, dev, work
     patch.undo()
+
+
+def mcp_values(preset):
+    """The names of PRESET's values that name an MCP server of yours (--mcp {name}): the registered server's name."""
+    options = preset.get("options", [])
+    return [match for index, option in enumerate(options) if index and options[index - 1] == "--mcp"
+            for match in P.PLACEHOLDER.findall(option)]
 
 
 def sample_values(preset, root, dev, agent, full):
@@ -161,9 +179,13 @@ def sample_values(preset, root, dev, agent, full):
     those with a default too."""
     values = {}
     for name, spec in preset.get("values", {}).items():
+        kind = spec.get("kind", "text")
+        if kind == "device" and "default" in spec:
+            # A device by default (android-development: /dev/kvm) is this computer's - here always the fake one.
+            values[name] = str(dev / ("kvm" if name == "kvm" else "ttyACM0"))
+            continue
         if not full and (spec.get("optional") or "default" in spec):
             continue
-        kind = spec.get("kind", "text")
         if kind == "folder":
             folder = root / f"value-{name}"
             folder.mkdir(exist_ok=True)
@@ -181,6 +203,8 @@ def sample_values(preset, root, dev, agent, full):
             values[name] = "dri"
         elif "default" in spec:
             values[name] = spec["default"]
+        elif name in mcp_values(preset):
+            values[name] = name  # (android-development: jadx, smali, frida - the servers of that name)
         elif kind == "host" and name == "domain":
             values[name] = "lab.example.org"  # --allow-domain: a name, never an address
         elif kind == "host":
@@ -467,6 +491,111 @@ def test_the_android_debugging_preset():
     assert re.fullmatch(flash, "fastboot flashing unlock")
     assert re.fullmatch(flash, "fastboot flash boot patched.img")
     assert not re.fullmatch(flash, "fastboot devices")
+
+
+ANDROID_BUILD_HOSTS = ["dl.google.com", "maven.google.com", "services.gradle.org", "downloads.gradle.org",
+                       "plugins.gradle.org", "plugins-artifacts.gradle.org", "repo.maven.apache.org", "repo1.maven.org"]
+
+
+def test_the_android_development_preset():
+    """android-development (user 2026-11-21): the image variant android-dev (one image: everything of android and the
+    Android SDK, NDK, CMake, emulator, Gradle and Kotlin), exactly the hosts Gradle and the Android Gradle plugin
+    fetch from (no wildcard), the host's adb server (port 5037) or a USB device, /dev/kvm for the emulator as a value
+    with that default (left out where it is missing, never refused), the MCP servers of android-debugging as
+    optional values, a first task with the layout and the commands, and a ruleset that asks before installing on a
+    device, wiping or flashing."""
+    preset = PRESETS["android-development"]
+    assert preset["category"] == "development" and preset["agents"] == ["claude", "codex", "opencode"]
+    assert preset["translations"]["de"]["title"] == "Android-Entwicklung"
+    pairs = option_pairs(P.expand(preset, {}, extras=False))
+    assert ("--image-variant", "android-dev") in pairs
+    # (a value with that default, as the app wants it: a variant belongs to an agent, a preset only offers one)
+    assert preset["values"]["variant"]["default"] == "android-dev" and "{variant}" in preset["options"]
+    assert [value for flag, value in pairs if flag == "--allow-host"] == ANDROID_BUILD_HOSTS
+    assert not [flag for flag, _ in pairs if flag in ("--allow-domain", "--allow-shared-wildcard")]
+    assert not any("*" in (value or "") for _, value in pairs)
+    assert ("--allow-host-port", "5037") in pairs and ("--memory", "16g") in pairs
+    # /dev/kvm: a value with that default, optional; a USB device; the MCP servers: all optional, none by default
+    kvm, device = preset["values"]["kvm"], preset["values"]["device"]
+    assert (kvm["kind"], kvm["default"], kvm["optional"]) == ("device", "/dev/kvm", True)
+    assert device["kind"] == "device" and device["optional"] and "default" not in device
+    assert P.option_values(preset, {"kvm": "/dev/kvm", "device": "/dev/bus/usb/001/004"}, "--device") == [
+        ("/dev/kvm", ["kvm"]), ("/dev/bus/usb/001/004", ["device"])]
+    for name in ("jadx", "smali", "frida"):
+        spec = preset["values"][name]
+        assert spec["optional"] and "default" not in spec and f"mcp add mcp:{name}" in spec["hint"], name
+    assert P.option_values(preset, {}, "--mcp") == [] and not preset.get("mcp"), "no server unless named"
+    assert P.option_values(preset, {"jadx": "jadx"}, "--mcp") == [("jadx", ["jadx"])]
+    assert "images recipe android-dev --from AGENT && sandbox-ai build android-dev" in preset["needs"][0]
+    assert "you accept the Android Software Development Kit License Agreement" in preset["needs"][0]
+    notes = " ".join(preset["notes"])
+    assert "images recipe android-dev --from AGENT" in notes and "--image-variant android-dev" in notes
+    assert "adb start-server" in notes and "Podman only" in notes and "--gui" in notes
+    assert "https://developer.android.com/studio/terms" in notes and "sdk.lock" in notes
+    prompt = preset["prompt"]
+    for said in ("/opt/android-sdk", "./gradlew assembleDebug", "adb -P 5038 install -r", "emulator -avd dev -no-window",
+                 "android-emulator start", "ndkVersion", "android-37.0", "never instructions"):
+        assert said in prompt, said
+    # Its ruleset: what touches a device or the emulator is asked; what only builds is not
+    rules = json.loads((ROOT / "sandbox" / "presets" / "android-development.rules.json").read_text())
+    assert preset["rules"] == "android-development.rules.json"
+    by_id = {rule["id"]: rule["args"]["command"]["pattern"] for rule in rules["tool"]}
+    assert {"adb-install", "adb-uninstall", "adb-wipe", "adb-root-shell", "adb-push-system", "fastboot-write",
+            "gradle-device-tasks", "emulator-wipe"} <= set(by_id)
+    assert all(rule["decision"] == "ask" and rule["reason"] and rule["tool"] == "Bash" for rule in rules["tool"])
+    asked = {"adb-install": ["adb -P 5038 install -r app/build/outputs/apk/debug/app-debug.apk"],
+             "adb-wipe": ["adb shell pm clear com.example.app"],
+             "gradle-device-tasks": ["./gradlew installDebug", "./gradlew :app:installDebug", "./gradlew uninstallAll",
+                                     "ANDROID_ADB_SERVER_PORT=5038 ./gradlew connectedDebugAndroidTest",
+                                     "./gradlew :feature:home:connectedCheck"],
+             "emulator-wipe": ["emulator -avd dev -wipe-data -no-window", "avdmanager delete avd -n dev"],
+             "fastboot-write": ["fastboot flashing unlock"]}
+    for rule_id, commands in asked.items():
+        for command in commands:
+            assert re.fullmatch(by_id[rule_id], command), (rule_id, command)
+    for command in ("./gradlew assembleDebug", "./gradlew testDebugUnitTest", "./gradlew lint", "adb devices",
+                    "android-emulator start", "emulator -avd dev -no-window -no-audio -no-metrics",
+                    "adb -P 5038 logcat -d"):
+        assert not any(re.fullmatch(pattern, command) for pattern in by_id.values()), command
+    assert {rule["server"] for rule in rules["untrusted"]} == {"frida", "smali", "jadx", "cfr"}
+
+
+def test_the_android_development_preset_without_kvm(host, capsys, monkeypatch):
+    """A host without /dev/kvm: the value's default is left out with a note (never refused), the start goes on
+    without the device; one named explicitly is passed; --preset-value kvm= leaves it out too."""
+    root, dev, work = host
+    preset = PRESETS["android-development"]
+    real = os.path.lexists
+    monkeypatch.setattr(P.os.path, "lexists", lambda path: False if path == "/dev/kvm" else real(path))
+    notes = []
+    values, found = P.checked_values(preset, {}, notes)
+    assert found == [] and "kvm" not in values
+    assert any("kvm: /dev/kvm does not exist here, left out" in note for note in notes), notes
+    assert "--device" not in P.expand(preset, {}, extras=False)
+    assert P.missing(preset, {}, "claude") == []
+    plan = dry_run(capsys, work, "claude", "android-development", {})
+    assert plan["devices"] == [] and plan["image"] == "localhost/claude-sandbox-android-dev:latest"
+    plan = dry_run(capsys, work, "codex", "android-development", {"kvm": str(dev / "kvm")})
+    assert [entry["path"] for entry in plan["devices"]] == [str(dev / "kvm")]
+    plan = dry_run(capsys, work, "opencode", "android-development", {"kvm": ""})
+    assert plan["devices"] == []
+
+
+def test_presets_check_names_the_recipe_of_a_missing_image_variant(host, tmp_path, monkeypatch):
+    """`presets check` for a preset that starts an image variant not made yet (android-development without
+    android-dev): it names the recipe and the build, for the agent asked about (AGENT without one); a variant of
+    another agent is enough (the start takes it over)."""
+    preset = PRESETS["android-development"]
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
+    found = P.missing(preset, {"kvm": ""}, "codex")
+    assert found == ["the image variant android-dev is not made yet: sandbox-ai images recipe android-dev --from "
+                     "codex && sandbox-ai build android-dev"], found
+    assert "--from AGENT" in P.missing(preset, {"kvm": ""})[0]
+    spec = importlib.util.spec_from_file_location("images_for_check", ROOT / "sandbox/images.py")
+    images = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(images)
+    images.recipe("android-dev", "claude")
+    assert P.missing(preset, {"kvm": ""}, "codex") == []
 
 
 def test_the_mcp_servers_the_presets_name_are_in_the_catalogs():

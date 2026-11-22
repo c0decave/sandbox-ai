@@ -678,6 +678,9 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
                          + "".join(f" --mount {mount}" for mount in server_mounts(preset, values or {}, name)))
     if values is None:
         return found
+    # The image variant it starts (--image-variant): made once from its recipe (android-development: android-dev).
+    for variant, _ in option_values(preset, values, "--image-variant"):
+        found += variant_missing(variant, agent)
     # What the options name by a value of yours: an MCP server (--mcp), a publishing login (--publish).
     def leave_out(names):
         optional = names and all(preset["values"][n].get("optional") for n in names)
@@ -720,6 +723,23 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
                              servers else f"{name}: {value} does not exist (as a workspace a start creates it empty; "
                              "a mount or device is refused)")
     return found
+
+
+def variant_missing(variant, agent=None):
+    """[what to run] when no agent has the image variant VARIANT yet ([] when one has: a start of another agent takes
+    it over); whether its image is built only Podman knows (the start says so)."""
+    try:
+        images = _module("images")
+        if any(name == variant for name, _ in images.variants()):
+            return []
+    except (ValueError, OSError):
+        return []
+    who = agent or "AGENT"
+    if variant in images.RECIPES:
+        return [f"the image variant {variant} is not made yet: sandbox-ai images recipe {variant} --from {who} && "
+                f"sandbox-ai build {variant}"]
+    return [f"the image variant {variant} is not made yet: sandbox-ai images new {variant} --from {who}, then "
+            f"sandbox-ai images extend {variant} ... and sandbox-ai build {variant}"]
 
 
 def check_vpn_types(preset, values):

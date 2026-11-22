@@ -346,6 +346,23 @@ def refused(why):
     return 125
 
 
+def bwrap_info(stream, limit=65536):
+    """bwrap's --info-fd reply: one JSON object, pretty-printed over several lines ({"child-pid": ...}). Read until
+    it is complete (bwrap keeps the descriptor open while it waits on --block-fd); {} when it ends without one."""
+    import json
+    data = b""
+    while len(data) < limit:
+        chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
+        if not chunk:
+            break
+        data += chunk
+        try:
+            return json.loads(data)
+        except (ValueError, RecursionError):
+            continue
+    return {}
+
+
 def run(definition, environ=None):
     """One instance: bwrap with the arguments through --args; for a server with network, slirp4netns attached to its
     network namespace (the outside network, never the host's loopback) and its egress rules ("egress" of the checked
@@ -383,9 +400,9 @@ def run(definition, environ=None):
     os.close(gate_r)
     slirp = None
     try:
-        with os.fdopen(info_r) as stream:
+        with os.fdopen(info_r, "rb") as stream:
             info_r = None
-            pid = int(json.loads(stream.readline() or "{}")["child-pid"])
+            pid = int(bwrap_info(stream)["child-pid"])
         slirp = subprocess.Popen(["slirp4netns", "--configure", "--disable-host-loopback", "--enable-sandbox",
                                   "--enable-seccomp", "--mtu=65520", "--ready-fd", str(ready_w), str(pid), "tap0"],
                                  pass_fds=(ready_w,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)

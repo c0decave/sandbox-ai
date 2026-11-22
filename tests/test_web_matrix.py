@@ -451,6 +451,21 @@ ACTIONS = [
        "--show-secret"]]),
     ("POST", "/starts/web/session-export", {"path": "/srv/out/web.tar.gz", "include_secrets": True, "confirm": True},
      [["session", "export", "web", "--json", "--include-secrets", "--yes", "--", "/srv/out/web.tar.gz"]]),
+    # a session's state: its workspace's files into the archive too; a second session from it (session duplicate:
+    # logins and keys and approvals only confirmed); an archive taken as a session (session import: checked first,
+    # then confirmed)
+    ("POST", "/starts/web/session-export", {"path": "/srv/out/web.tar.gz", "with_workspace": True, "confirm": True},
+     [["session", "export", "web", "--json", "--with-workspace", "--", "/srv/out/web.tar.gz"]]),
+    ("POST", "/starts/web/session-duplicate", {"new": "web-2", "with_workspace": True},
+     [["session", "duplicate", "web", "web-2", "--json", "--with-workspace"]]),
+    ("POST", "/starts/web/session-duplicate", {"new": "web-2", "include_secrets": True, "confirm": True},
+     [["session", "duplicate", "web", "web-2", "--json", "--include-secrets", "--yes"]]),
+    ("POST", "/session-import", {"path": "/srv/in/web.tar.gz", "map": [["/home/me/w", "/srv/w"]], "check": True},
+     [["session", "import", "--json", "--map=/home/me/w=/srv/w", "--check", "--", "/srv/in/web.tar.gz"]]),
+    ("POST", "/session-import", {"path": "/srv/in/web.tar.gz", "as": "web", "replace": True, "grant_approvals": True,
+                                 "confirm": True},
+     [["session", "import", "--json", "--as", "web", "--replace", "--grant-approvals", "--yes", "--",
+       "/srv/in/web.tar.gz"]]),
     # the logins of the sessions (read only), and one imported as the central login (confirmed: login-import; only
     # the login shown, by its fingerprint)
     ("GET", "/session-logins", None, [["login", "--status", "--sessions", "--json"]]),
@@ -632,6 +647,8 @@ ACTIONS = [
                                                                               "--empty", "--json"]]),
     ("POST", "/images-recipe", {"recipe": "media", "from": "claude", "as": "mv"},
      [["images", "recipe", "media", "--from=claude", "--as=mv"]]),
+    ("POST", "/images-recipe", {"recipe": "android-dev", "from": "codex"},
+     [["images", "recipe", "android-dev", "--from=codex"]]),
     ("GET", "/images/mv", None, [["images", "extend", "mv", "--json"]]),
     ("GET", "/images/mv/packages", None, [["images", "packages", "mv", "--json"]]),
     ("GET", "/images/mv/history", None, [["images", "history", "mv", "--json"]]),

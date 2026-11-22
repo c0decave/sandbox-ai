@@ -4,6 +4,7 @@ kind, Tor included, and LLM servers of every kind registered for real with sandb
 configuration), its argv dry-run through the launcher. Claude Code with a server without the Anthropic Messages API is
 refused by the launcher, and the Model choice of the launch page and the board (wizard_llm) gives --llm and drops
 --model. Nothing is contacted: profiles and endpoints are only written."""
+import json
 import base64
 import os
 
@@ -143,10 +144,26 @@ def test_every_preset_with_every_agent_passes_a_dry_run(registered, preset, agen
     used = B.values(board)[0]
     assert used == (preset.agent or (agent if not preset.agents or agent in preset.agents else preset.agents[0]))
     registered_servers(root, board)
-    plan, message = sai.dry_run(used, B.check_argv(sai, board))
+    argv = B.check_argv(sai, board)
+    for variant in (argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "--image-variant"):
+        # a variant the user made once (sandbox-ai images recipe NAME --from AGENT): android-development's
+        # android-dev; the dry run checks its recipe, not a built image
+        recipe = root / "config" / "sandbox-ai" / "images" / variant
+        recipe.mkdir(parents=True, exist_ok=True)
+        (recipe / "image.json").write_text(json.dumps({"version": 1, "agent": used, "apt": [], "npm": [], "pip": [],
+                                                       "files": []}))
+    plan, message = sai.dry_run(used, argv)
     if plan is None and "--gpu dri: no /dev/dri" in message:  # this machine has no GPU: only that may be refused
         without = B.Board.from_state(board.state())
         without.first("devices").props.pop("--gpu")
+        plan, message = sai.dry_run(used, B.check_argv(sai, without))
+    if plan is None and "--device /dev/kvm: No such file" in message and not os.path.exists("/dev/kvm"):
+        # no KVM here (android-development's emulator): only that may be refused, the rest is checked without it
+        without = B.Board.from_state(board.state())
+        devices = without.first("devices").props
+        devices["--device"] = [d for d in devices.get("--device", []) if d != "/dev/kvm"]
+        if not devices["--device"]:
+            devices.pop("--device")
         plan, message = sai.dry_run(used, B.check_argv(sai, without))
     assert plan is not None, message
     assert plan["agent"] == used

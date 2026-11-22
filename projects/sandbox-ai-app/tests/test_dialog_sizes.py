@@ -318,8 +318,8 @@ def more_dialogs(window):
                                 file_properties, file_search_view, guide_view, help_view, llm_loaded_view, llm_params, llm_params_view,
                                 kits_live_view, mcp_copy_view, mcp_fields, notify_view, package_search, pages, preset_gallery,
                                 presets, registry_browser, remote_chooser, remote_source, schedules_view,
-                                session_inspect_dialog, session_logins_view, session_transfer, traffic_page, ui,
-                                wizard)
+                                session_inspect_dialog, session_logins_view, session_state_dialogs, session_transfer,
+                                traffic_page, ui, wizard)
     from sandbox_ai_app import board as B
     from sandbox_ai_app import credentials_page, device_window, images_page
     name = "auburn-kakapo-bamboo"
@@ -387,6 +387,9 @@ def more_dialogs(window):
         ("phone channel", lambda: notify_view.ChannelDialog(lambda _fields: None, parent=window)),
         ("session memory", lambda: session_inspect_dialog.SessionInspectDialog(window, window.sai, name)),
         ("session transfer", lambda: session_transfer.SessionTransferDialog(window, window.sai, name, move=True)),
+        ("session duplicate", lambda: session_state_dialogs.DuplicateDialog(window, window.sai, name)),
+        ("session export with state", lambda: session_state_dialogs.StateExportDialog(window, window.sai, name)),
+        ("session import", lambda: session_state_dialogs.ImportDialog(window, window.sai, path=LONG_FOLDER + "/s.tar.gz")),
         ("remote source", lambda: remote_source.RemoteSourceDialog(window, "ssh://build-box" + LONG_FOLDER)),
         ("questions", lambda: pages.QuestionsWindow(window.approvals)),
         ("secret value", lambda: widgets.SecretValueDialog(window, tr("Keep the key"),
@@ -511,7 +514,8 @@ def own_dialog_classes():
 
 
 # A dialog class not measured on its own, and why.
-NOT_MADE = {"kits_page.FormDialog": "the base of the kits page's dialogs, each of which is measured"}
+NOT_MADE = {"kits_page.FormDialog": "the base of the kits page's dialogs, each of which is measured",
+            "session_state_dialogs.StateDialog": "the base of Duplicate…, Export with state… and Import…, each measured"}
 
 
 def test_every_dialog_class_is_measured(window, screens, monkeypatch):  # noqa: F811

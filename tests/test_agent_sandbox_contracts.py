@@ -867,6 +867,112 @@ def test_firejail_narrowing(scenario):
         assert r.firejail_narrowing(text, nested=True) == []
         assert r.firejail_narrowing(text, settings={"syscall_filter": "off"}) == []
         assert r.firejail_narrowing(text, settings={"syscall_filter": "on"}) != []
+        # bwrap: Firejail refuses the host's helpers (not root's in the sandbox's user namespace): a start with them
+        # ended "fseccomp is not owned by root"; sandbox-ai's own filter holds both all the same.
+        assert r.firejail_narrowing(text, helpers="not root's") == []
+
+
+def test_firejail_helpers_unusable(scenario, tmp_path, monkeypatch):
+    """Live check 2026-11-21 (Arch, Firejail with bwrap): every bwrap start ended with "Error:
+    /run/firejail/lib/fseccomp is not owned by root, refusing to execute" - --protocol and --restrict-namespaces
+    need that helper, and the host's root owns it, whom bwrap's user namespace does not map."""
+    r = s.RUNTIME
+    lib = tmp_path / "firejail"
+    lib.mkdir()
+    (lib / "fseccomp").write_bytes(b"")
+    real_stat = os.stat
+
+    def stat_as(uid, gid):
+        def fake(path, *args, **kwargs):
+            found = real_stat(path, *args, **kwargs)
+            if str(path) == str(lib / "fseccomp"):
+                return os.stat_result((found.st_mode, found.st_ino, found.st_dev, found.st_nlink, uid, gid,
+                                       found.st_size, 0, 0, 0))
+            return found
+        return fake
+    if scenario == "happy":
+        for uid, gid in ((0, 0), (0, 65534), (65534, 0)):  # Firejail's own test: owner or group root
+            monkeypatch.setattr(r.os, "stat", stat_as(uid, gid))
+            assert r.firejail_helpers_unusable((str(lib),)) is None
+    elif scenario == "sad":
+        monkeypatch.setattr(r.os, "stat", stat_as(65534, 65534))
+        why = r.firejail_helpers_unusable((str(tmp_path / "missing"), str(lib)))
+        assert why and "65534" in why and str(lib) in why
+    else:
+        assert r.firejail_helpers_unusable((str(tmp_path / "missing"),)) is None  # none found: Firejail says so
+
+
+def test_mcp_mode_refusal(scenario, monkeypatch):
+    """A server not added yet (to be built from its catalog's source) is weighed by the security mode as if it were
+    defined: the mode's own rules see it among the definitions; the launcher itself is left as it was."""
+    seen = []
+    monkeypatch.setattr(s, "load_mcp_module", lambda: SimpleNamespace(definitions=lambda project=None: {"old": {}}))
+
+    def widening(l, a, mode):
+        seen.append(l.load_mcp_module().definitions())
+        return [(given, "it reaches the network") for given in widened]
+    monkeypatch.setattr(s.MODES, "widening", widening)
+    a = SimpleNamespace(mode="paranoid")
+    planned = {"image": s.MCP_BUILD_PLACEHOLDER, "network": "full"}
+    if scenario == "happy":
+        widened = []
+        assert s.mcp_mode_refusal(a, "jadx", planned) is None
+        assert seen == [{"old": {}, "jadx": planned}], "the mode saw the planned server among the defined ones"
+    elif scenario == "sad":
+        widened = ["--mcp jadx"]
+        assert s.mcp_mode_refusal(a, "jadx", planned) == ("the security mode paranoid refuses it (it reaches the "
+                                                          "network)")
+    else:
+        widened = ["--mcp old", "--mcp-mount jadx:/w=/x"]  # another server's widening, or no --mcp at all
+        assert s.mcp_mode_refusal(a, "jadx", planned) is None
+        assert s.load_mcp_module().definitions() == {"old": {}}, "the launcher's own loader is not replaced"
+
+
+def test_mcp_build_offers(scenario, monkeypatch):
+    """The user 2026-11-21: a start naming jadx, cfr, smali and frida - reviewed, but not published in their catalog
+    yet - only said "no catalog has it" ("warum werden die nicht automatisch gebaut oder gefragt ob sie direkt gebaut
+    werden sollen???"). A pending server is offered to be built (asked), a declined one gets the build command."""
+    built, asked = [], []
+    entry = {"name": "jadx", "network": "none", "_catalog": "/c/catalog.json", "_signature": {"state": "none"}}
+
+    class Builder:
+        @staticmethod
+        def pending_entry(entries, name):
+            return ("mcp", entry) if name == "jadx" else None
+
+        @staticmethod
+        def build_and_add(name, options, unsigned, confirm, out):
+            if not confirm(f"build {name}?"):
+                raise ValueError(f"{name} is not built: not confirmed.")
+            built.append((name, options, unsigned))
+    mcp = SimpleNamespace(catalog_entries=lambda: ([], []), build_module=lambda: Builder,
+                          start_mounts=lambda a: {}, catalog_label=lambda where: where)
+    monkeypatch.setattr(s, "mcp_mode_refusal", lambda a, name, definition: None)
+    a = SimpleNamespace(dry_run=False, podman_url=None, mcp_mount=[], mode="medium")
+
+    def ask(text):
+        asked.append(text)
+        return answer
+    if scenario == "happy":
+        answer = True
+        assert s.mcp_build_offers(a, mcp, ["jadx"], ask=ask) == (["jadx"], [])
+        assert built == [("mcp:jadx", {"mounts": []}, True)] and asked, "unsigned catalog: built unsigned, asked first"
+    elif scenario == "sad":
+        answer = False
+        added, hints = s.mcp_build_offers(a, mcp, ["jadx"], ask=ask)
+        assert added == [] and built == [] and "`sandbox-ai mcp add jadx --build --unsigned`" in hints[0]
+        mcp.catalog_entries = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+        assert s.mcp_build_offers(a, mcp, ["jadx"], ask=ask) == ([], []), "the refusal stands as it is"
+    else:
+        answer = True
+        assert s.mcp_build_offers(a, mcp, ["nowhere"], ask=ask) == ([], []), "in no catalog: no hint, no question"
+        a.dry_run = True
+        added, hints = s.mcp_build_offers(a, mcp, ["jadx"], ask=ask)
+        assert added == [] and asked == [] and "builds it here" in hints[0], "a dry run never asks or builds"
+        a.dry_run = False
+        monkeypatch.setattr(s, "mcp_mode_refusal", lambda a, name, definition: "the security mode refuses it")
+        added, hints = s.mcp_build_offers(a, mcp, ["jadx"], ask=ask)
+        assert added == [] and asked == [] and built == [] and "the security mode refuses it" in hints[0]
 
 
 def test_seal_firejail_config(scenario, tmp_path):
@@ -1431,6 +1537,8 @@ def test_isolation_plan(scenario, tmp_path, monkeypatch):
                 s.RUNTIME.seccomp_account(s.RUNTIME.seccomp_policy("sandbox"))["sha256"]
             assert set(plan["filters"]) == {"container", "sandbox"}
         json.dumps(plan)
+        a.backend = "bwrap"  # Firejail cannot run the host's helpers there: its two narrowing options are left out
+        assert s.isolation_plan(a)["firejail"] == ["--seccomp", "--caps.drop=all", "--nonewprivs"]
     elif scenario == "sad":
         monkeypatch.setenv(s.SYSCALL_FILTER_ENV, "off")
         plan = s.isolation_plan(a)
@@ -6894,6 +7002,28 @@ def plugin_store_fixture(installed=("sandcastle@sandbox-ai",), known=("sandbox-a
     return store
 
 
+def test_claude_plugins_store_with_marketplaces_only_gets_its_cache_folder(tmp_path):
+    """Live check 2026-11-21: a store with a marketplace but no plugin installed yet has no cache folder; the
+    sandbox started without the store's cache mounted, so `sandbox-ai plugins attach` refused it ("started without
+    the plugin store") although the store was there. The start makes the empty folder (the store's own, 0700)."""
+    store = plugin_store_fixture(installed=())
+    shutil.rmtree(store / "cache")
+    home = tmp_path / "home"
+    home.mkdir()
+    mounts = s.claude_plugins(home, {"sandbox-ai": {"source": "directory", "path": "/sandbox/marketplace"}}, [], [])
+    assert (store / "cache").is_dir() and not (store / "cache").is_symlink()
+    assert stat.S_IMODE((store / "cache").stat().st_mode) == 0o700
+    assert (store / "cache", "/root/.claude/plugins/cache", "ro") in mounts
+    # a link planted under the name is never followed nor replaced: nothing is mounted from it
+    shutil.rmtree(store / "cache")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (store / "cache").symlink_to(elsewhere, target_is_directory=True)
+    mounts = s.claude_plugins(home, {}, [], [])
+    assert (store / "cache").is_symlink() and not any(dest.endswith("/cache") for _, dest, _ in mounts)
+    assert list(elsewhere.iterdir()) == []
+
+
 def test_claude_plugins(scenario, tmp_path):
     home = tmp_path / "home"
     home.mkdir()
@@ -8031,6 +8161,41 @@ def test_host_matches(scenario):
         assert not rt.host_matches(None, ["*.example.org"]) and not rt.host_matches("x", [])
 
 
+def test_clear_inheritable_capabilities(scenario, monkeypatch):
+    """Live check 2026-11-22 (Arch, bubblewrap 0.13.1): every bwrap start ended with "the connection proxy kept
+    capabilities or can gain privileges: CapInh=000001ffffffffff" - setresuid() to the proxy's user empties the
+    effective, permitted and ambient sets, never the inheritable one, which that bwrap hands over full."""
+    rt_ = s.RUNTIME
+    if scenario == "happy":  # the real kernel: nothing to lower here, and the calls themselves work
+        rt_.clear_inheritable_capabilities()
+        status = dict(line.split(":\t", 1) for line in Path("/proc/self/status").read_text().splitlines()
+                      if ":\t" in line)
+        assert int(status["CapInh"], 16) == 0 and int(status["CapAmb"], 16) == 0
+        return
+    seen = {}
+
+    class Libc:
+        def prctl(self, *args):
+            seen.setdefault("prctl", []).append(args)
+            return 0
+
+        def capget(self, header, data):
+            for half in data:
+                half.effective = half.permitted = half.inheritable = 0xFFFFFFFF
+            return 0
+
+        def capset(self, header, data):
+            seen["set"] = [(h.effective, h.permitted, h.inheritable) for h in data]
+            return -1 if scenario == "sad" else 0
+    if scenario == "sad":
+        with pytest.raises(OSError, match="inheritable"):
+            rt_.clear_inheritable_capabilities(Libc())
+    else:
+        rt_.clear_inheritable_capabilities(Libc())
+        assert seen["set"] == [(0xFFFFFFFF, 0xFFFFFFFF, 0)] * 2, "only the inheritable set is lowered, both halves"
+        assert seen["prctl"] == [(47, 4, 0, 0, 0)], "the ambient set cleared too (PR_CAP_AMBIENT_CLEAR_ALL)"
+
+
 def test_drop_to_proxy_user(scenario, monkeypatch):
     calls = []
     for name in ("setgroups", "setresgid", "setresuid"):
@@ -8038,13 +8203,16 @@ def test_drop_to_proxy_user(scenario, monkeypatch):
     libc = Mock()
     libc.prctl.return_value = -1 if scenario == "sad" else 0
     monkeypatch.setattr(rt.ctypes, "CDLL", lambda *a, **kw: libc)
+    monkeypatch.setattr(rt, "clear_inheritable_capabilities", lambda libc=None: calls.append(("inheritable", ())))
     if scenario == "sad":
         with pytest.raises(OSError, match="no_new_privs"):
             rt.drop_to_proxy_user()
     else:
         rt.drop_to_proxy_user()
-        # Groups first, then the group, the user last (afterwards nothing could be changed).
-        assert calls == [("setgroups", ([],)), ("setresgid", (1, 1, 1)), ("setresuid", (1, 1, 1))]
+        # The inheritable set emptied (setresuid leaves it), groups, then the group, the user last (afterwards
+        # nothing could be changed).
+        assert calls == [("inheritable", ()), ("setgroups", ([],)), ("setresgid", (1, 1, 1)),
+                         ("setresuid", (1, 1, 1))]
         assert libc.prctl.call_args.args[:2] == (38, 1)
 
 

@@ -79,3 +79,9 @@ def test_the_web_ui_offers_only_recipes_sandbox_ai_has():
     webui = load("webui_ht1", "sandbox/webui.py")
     images = load("images_ht1", "sandbox/images.py")
     assert set(webui.IMAGE_RECIPES) <= set(images.RECIPES), set(webui.IMAGE_RECIPES) - set(images.RECIPES)
+    # The Android ones too (user 2026-11-21: the web interface knows the recipe of android-development); app.js and
+    # the desktop app's dialog offer the same ones.
+    assert {"media", "android", "android-dev"} <= set(webui.IMAGE_RECIPES)
+    page = (ROOT / "sandbox" / "web" / "app.js").read_text()
+    for recipe in webui.IMAGE_RECIPES:
+        assert f'["{recipe}", N_("{recipe}: ' in page, recipe

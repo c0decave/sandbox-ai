@@ -60,7 +60,8 @@ def test_sandbox_ais_presets_are_grouped_by_its_categories_in_their_order(env):
     for name, category in (("coding-memory", "development"), ("research-memory", "research"),
                            ("pentest-lab", "security"), ("paranoid", "privacy"), ("forensics", "forensics"),
                            ("software-analysis", "forensics"), ("mobile-android", "hardware"),
-                           ("android-debugging", "security"), ("axross-mcp-server", "development"), ("ollama", "llm"),
+                           ("android-debugging", "security"), ("android-development", "development"),
+                           ("axross-mcp-server", "development"), ("ollama", "llm"),
                            ("docs-writer", "writing"), ("sand-chess", "fun"), ("chaos-monkey", "testing")):
         assert name in by_key[f"{PR.SAI_CATEGORY}:{category}"], (name, category)
     every = {name for names in by_key.values() for name in names}

@@ -80,6 +80,9 @@ const ERROR_TEXTS = {
   "nothing-checked": N_("Nothing was checked on {host}: there is no all-clear."),
   "host-too-old": N_("sandbox-ai {version} on {host} does not know {what} yet: update it on the page Hosts (Update, or Update from this machine's copy)."),
   "mcp-unsigned-catalog": N_("{entry} was not added on {host}: its catalog is not signed by a trusted key."),
+  "mcp-unpublished": N_("{entry} was not added on {host}: its catalog has no signed image of it yet."),
+  "mcp-build-asked": N_("{entry} would be built on {host} from {repository} at the commit {commit} ({path}; source archive SHA-256 {archive_sha256}) and added unsigned."),
+  "mcp-unpublished-start": N_("{names}: the catalog on {host} has no signed image of it yet, so the start does not go on."),
   "shared-wildcard": N_("{wildcards} lies below {suffix}, a shared service where anyone can rent a name: the agent could open any server anyone rents below {suffix}, and send data there."),
 };
 
@@ -1226,6 +1229,9 @@ function startRow(s, starts, main, all) {
       onclick: () => exportSession(s, exported) });
     actions.append(exported);
   }
+  // A second session there from its state (sandbox-ai session duplicate): its own HOME with the agent's conversation
+  if (!mcp && s.keep && ["running", "paused", "stopped"].includes(s.state))
+    actions.append(iconRowButton("copy", t("Duplicate…"), s.name, host, { title: t("a second session from its state: its own HOME (the agent's conversation continued on its own), memory and checkpoints; the workspace shared or copied (sandbox-ai session duplicate)"), onclick: () => duplicateCard(main, s) }));
   // More… starts it again with more only when it keeps its start (a run without one has nothing to start again
   // with: the CLI refuses); a running or paused one without it still gets the longer stop
   if (!mcp && (s.keep ? ["running", "paused", "stopped"].includes(s.state) : ["running", "paused"].includes(s.state)))
@@ -1381,6 +1387,118 @@ function importCard(main, host) {
     el("div", { class: "row" }, el("label", { for: "import-as" }, t("Board's name")), name),
     el("label", {}, replace, " ", t("Replace the parts of the same name here")),
     el("label", {}, unsigned, " ", t("Take MCP servers of an unsigned catalog")), inputs,
+    el("div", { class: "row" }, el("button", { onclick: check }, t("Check")), el("button", { onclick: () => dropCard(card) }, t("Close"))),
+    actions, result);
+  openCard(main, card);
+  return card;
+}
+
+// What an import (or a duplicate: its import) made or would make (sandbox-ai session import --json), as lines.
+function sessionImportLines(r) {
+  const lines = [];
+  if (r.imported) lines.push(t("Made: {name}. Resume continues it (the agent resumes its conversation).", { name: String(r.name || "") }));
+  else if (r.checked) lines.push(t("It can start there as {name} (checked: nothing was kept).", { name: String(r.name || "") }));
+  lines.push(t("Starts with: {options}", { options: (r.options || []).map(String).join(" ") || "-" }));
+  if (r.workspace) lines.push(t("Workspace: {path}", { path: String(r.workspace) }) + (r.workspace_files ? " " + t("(its files from the archive)") : ""));
+  if (r.include_secrets) lines.push(t("The archive holds logins and keys."));
+  for (const item of r.asked || []) lines.push(t("Asked first: {item}", { item: String(item) }));
+  for (const item of r.warnings || []) lines.push(t("Note: {item}", { item: String(item) }));
+  if ((r.approvals || []).length) lines.push((r.granted || []).length ? t("Network approvals granted again: {list}", { list: r.approvals.join(" ") })
+    : t("Network approvals not granted (tick Grant its network approvals again): {list}", { list: r.approvals.join(" ") }));
+  if (r.memory) lines.push(t("Memory: {count} files added to the project's memory there", { count: r.memory.added || 0 }));
+  if (r.checkpoints) lines.push(t("Checkpoints: {count}", { count: (r.checkpoints.ids || []).length }));
+  return lines;
+}
+
+// Duplicate…: a second session of its host from the state of S (sandbox-ai session duplicate), not started. Its
+// logins and keys along and its network approvals granted again are each asked in place (session-export-secrets,
+// session-grant-approvals); what it made is listed (as text, never markup).
+function duplicateCard(main, s) {
+  const host = s.host, old = document.getElementById("duplicate-card");
+  if (old) dropCard(old);
+  const name = el("input", { id: "duplicate-name", class: "mono", size: 20, value: `${s.name}-2`.slice(0, 40) });
+  const files = el("input", { type: "checkbox", id: "duplicate-workspace" });
+  const secrets = el("input", { type: "checkbox", id: "duplicate-secrets" });
+  const grant = el("input", { type: "checkbox", id: "duplicate-grant" });
+  const actions = el("div", { class: "row" }), result = el("div");
+  const go = el("button", { class: "primary", onclick: () => {
+    const value = name.value.trim();
+    if (!NEW_START_NAME.test(value) || value.length > 40) { toast("warning", t("Which name?"), t("1-40 letters, digits, '_', '.' or '-', starting with a letter or digit.")); return; }
+    const asks = [secrets.checked ? t("its logins, keys and secrets go along: whoever has them can log in as you") : null,
+      grant.checked ? t("its network approvals are granted again as options of the duplicate") : null].filter(Boolean);
+    const run = () => busy(go, async () => {
+      let r;
+      try { r = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/session-duplicate`, host), Object.assign({ new: value, with_workspace: Boolean(files.checked), include_secrets: Boolean(secrets.checked), grant_approvals: Boolean(grant.checked) }, asks.length ? { confirm: true } : {})); }
+      catch (e) { clear(result).append(errorNotice(e)); return; }
+      secrets.checked = false;  // (chosen anew each time)
+      clear(result).append(el("ul", {}, sessionImportLines(r || {}).map(line => el("li", {}, line))));
+      toast("success", t("{name} duplicated as {new} on {host}", { name: s.name, new: value, host }), t("Not started: Resume starts it."));
+      if (state.page === "starts") refreshStarts(main, true);
+    });
+    if (asks.length) confirmIn(actions, t("Duplicate {name} as {new} on {host}? {asks}.", { name: s.name, new: value, host, asks: asks.join("; ") }), t("Yes, duplicate"), run, { trigger: go });
+    else run();
+  } }, t("Duplicate"));
+  const card = el("div", { class: "card", id: "duplicate-card" }, el("h2", {}, t("Duplicate {name} on {host}", { name: s.name, host })),
+    el("p", { class: "hint" }, t("A second session there from its state: its configuration, a copy of its HOME with the agent's conversation (both continue it on their own), memory and checkpoints. Both can run; a running one is paused for the moment of the snapshot. Not started.")),
+    el("div", { class: "row" }, el("label", { for: "duplicate-name" }, t("Name of the duplicate")), name),
+    el("label", {}, files, " ", t("Copy its workspace too (beside it as WORKSPACE-NEW)")),
+    el("label", {}, secrets, " ", t("With logins and keys")),
+    el("label", {}, grant, " ", t("Grant its network approvals again")),
+    el("div", { class: "row" }, go, el("button", { onclick: () => dropCard(card) }, t("Close"))), actions, result);
+  openCard(main, card, s);
+  return card;
+}
+
+// Import a session…: an archive of sandbox-ai session export on HOST (its path there) as a session to resume -
+// checked first (--check: its files against its manifest, its configuration with the launcher's dry run, what it
+// asks), then imported after a question in place (session-import; its network approvals: session-grant-approvals).
+function sessionImportCard(main, host) {
+  const old = document.getElementById("session-import-card");
+  if (old) dropCard(old);
+  const path = el("input", { id: "session-import-path", class: "mono", size: 40, placeholder: t("/home/you/web.tar.gz") });
+  const name = el("input", { id: "session-import-as", class: "mono", size: 20, placeholder: t("its name there") });
+  const maps = el("textarea", { id: "session-import-maps", class: "mono", rows: 2, cols: 50, placeholder: t("one per line: FOLDER THERE=FOLDER HERE") });
+  const noFiles = el("input", { type: "checkbox", id: "session-import-no-workspace" });
+  const replace = el("input", { type: "checkbox", id: "session-import-replace" });
+  const grant = el("input", { type: "checkbox", id: "session-import-grant" });
+  const actions = el("div", { class: "row" }), result = el("div");
+  const body = (check) => {
+    const pairs = [];
+    for (const line of maps.value.split("\n")) {
+      if (!line.trim()) continue;
+      const at = line.indexOf("=");
+      if (at < 1) throw new Error(t("A folder mapped is FOLDER THERE=FOLDER HERE: {line}", { line }));
+      pairs.push([line.slice(0, at).trim(), line.slice(at + 1).trim()]);
+    }
+    return Object.assign({ path: path.value.trim(), map: pairs, check, replace: Boolean(replace.checked), no_workspace: Boolean(noFiles.checked), grant_approvals: Boolean(grant.checked) && !check },
+      name.value.trim() ? { as: name.value.trim() } : {}, check ? {} : { confirm: true });
+  };
+  const check = (event) => busy(event.target, async () => {
+    clear(actions);
+    let r;
+    try { r = await api("POST", hostPath("/session-import", host), body(true)); } catch (e) { clear(result).append(errorNotice(e)); return; }
+    clear(result).append(el("ul", {}, sessionImportLines(r || {}).map(line => el("li", {}, line))));
+    const asked = (r.asked || []).map(String);
+    const question = t("Import it as {name} on {host}? It is not started.", { name: String(r.name || ""), host })
+      + (asked.length ? " " + t("Its configuration gives the sandbox this of that machine: {items}", { items: asked.join("; ") }) : "")
+      + (grant.checked && (r.approvals || []).length ? " " + t("Its network approvals are granted again: {list}", { list: r.approvals.join(" ") }) : "");
+    actions.append(el("button", { class: "primary", onclick: (go) => confirmIn(actions, question, t("Yes, import it"), async () => {
+      try {
+        const done = await api("POST", hostPath("/session-import", host), body(false));
+        clear(result).append(el("ul", {}, sessionImportLines(done || {}).map(line => el("li", {}, line))));
+        toast("success", t("Imported as {name} on {host}", { name: String((done && done.name) || ""), host }), t("Not started: Resume starts it."));
+        if (state.page === "starts") refreshStarts(main, true);
+      } catch (e) { clear(result).append(errorNotice(e)); }
+    }, { trigger: go.target }) }, t("Import")));
+  });
+  const card = el("div", { class: "card", id: "session-import-card" }, el("h2", {}, t("Import a session on {host}", { host })),
+    el("p", { class: "hint" }, t("An archive of sandbox-ai session export (a file on that host) as a session Resume continues, conversation and all. It is checked as untrusted input first - its files against its manifest, its configuration with the launcher's own dry run - and nothing is kept before you see what it starts with and confirm it.")),
+    el("div", { class: "row" }, el("label", { for: "session-import-path" }, t("Archive")), path),
+    el("div", { class: "row" }, el("label", { for: "session-import-as" }, t("Name there")), name),
+    el("div", { class: "row" }, el("label", { for: "session-import-maps" }, t("Folders mapped")), maps),
+    el("label", {}, noFiles, " ", t("Leave the archive's workspace files out")),
+    el("label", {}, replace, " ", t("Replace a stopped session of that name")),
+    el("label", {}, grant, " ", t("Grant its network approvals again")),
     el("div", { class: "row" }, el("button", { onclick: check }, t("Check")), el("button", { onclick: () => dropCard(card) }, t("Close"))),
     actions, result);
   openCard(main, card);
@@ -1584,6 +1702,7 @@ function inspectCard(main, s, kind) {
   const path = el("input", { id: `${id}-path`, class: "mono", size: 40, placeholder: t("/home/you/{name}.tar.gz", { name: s.name }) });
   const exportRow = el("div", { class: "row" });
   const withSecrets = el("input", { type: "checkbox", id: `${id}-secrets` });
+  const withFiles = el("input", { type: "checkbox", id: `${id}-workspace` });
   const exported = el("button", { onclick: () => {
     const value = path.value.trim();
     if (!value.startsWith("/")) { toast("error", t("Name the archive with its full path on {host}.", { host })); return; }
@@ -1593,7 +1712,7 @@ function inspectCard(main, s, kind) {
       : t("Write the folder of {name} - its records and its HOME as its agent left it (transcripts, memory, what it kept) - into {path} on {host}? Logins and keys are left out.", { name: s.name, path: value, host }),
       include ? t("Yes, export with logins and keys") : t("Yes, export"), () => busy(exported, async () => {
         let done;
-        try { done = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/session-export`, host), Object.assign({ path: value, confirm: true }, include ? { include_secrets: true } : {})); }
+        try { done = await api("POST", hostPath(`/starts/${encodeURIComponent(s.name)}/session-export`, host), Object.assign({ path: value, confirm: true }, include ? { include_secrets: true } : {}, withFiles.checked ? { with_workspace: true } : {})); }
         catch (e) { failed(t("Could not export {name} on {host}", { name: s.name, host }))(e); return; }
         withSecrets.checked = false;  // (each export with logins and keys is chosen anew)
         const left = Array.isArray(done && done.left_out) ? done.left_out : [];
@@ -1607,7 +1726,8 @@ function inspectCard(main, s, kind) {
       }), { trigger: exported });
   } }, t("Export…"));
   exportRow.append(el("label", { for: `${id}-path` }, t("Archive"), " "), path,
-    el("label", { title: t("Take the logins, keys and secrets of its HOME into the archive too (asked first; --include-secrets)") }, withSecrets, " ", t("With logins and keys")), exported);
+    el("label", { title: t("Take the logins, keys and secrets of its HOME into the archive too (asked first; --include-secrets)") }, withSecrets, " ", t("With logins and keys")),
+    el("label", { title: t("Take the workspace's files into the archive too (--with-workspace); without, the import maps the folder") }, withFiles, " ", t("With its workspace's files")), exported);
   // A search in the session files (sandbox-ai session files --search on the start's host), as the desktop app's file
   // manager searches: the names by a pattern (* ? [abc], ** for any folders, a part of the name without a wildcard),
   // and the files whose text holds what is typed - each with its line; bounded there, a login or key never looked into
@@ -1812,13 +1932,38 @@ function moreCard(main, s) {
     const trigger = event.target;
     confirmIn(row, t("Resume {name} on {host} with {what}? What is added is kept for its later starts.", { name, host, what: what.join(t(" and ")) }), t("Yes, resume it"), async () => {
       Object.assign(body, { confirm: true });
+      // (again after a server was built: its HOME was reviewed already)
+      const again = async () => {
+        try { done(await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/resume`, host), body)); }
+        catch (e) { if (!offerBuilds(e, again)) status.append(errorNotice(e)); }
+      };
       if (s.state === "stopped") {  // its kept HOME is reviewed first, as Resume does
-        await reviewThenResume(main, Object.assign({}, s, { name }), trigger, { body, done, fail: (e) => clear(status).append(errorNotice(e)) });
+        await reviewThenResume(main, Object.assign({}, s, { name }), trigger, { body, done,
+          fail: (e) => { if (!offerBuilds(e, again)) clear(status).append(errorNotice(e)); } });
         return;
       }
-      try { done(await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/resume`, host), body)); }
-      catch (e) { status.append(errorNotice(e)); }
+      await again();
     }, { kind: "primary", trigger });
+  };
+  // A server the launcher named as built with `mcp add NAME --build` (its catalog has no signed image yet): offered
+  // to be built there (asked with its commit), one after the other, then the resume again (AGAIN).
+  const offerBuilds = (e, again) => {
+    if (!(e instanceof ApiError && e.code === "mcp-unpublished-start")) return false;
+    const servers = Object.keys(e.params || {}).filter(k => /^server[0-9]$/.test(k)).sort().map(k => { try { return JSON.parse(e.params[k]); } catch (_) { return null; } })
+      .filter(x => x && typeof x.name === "string" && MCP_SERVER_NAME.test(x.name));
+    if (!servers.length) return false;
+    clear(status);
+    const offer = el("div", { class: "row" });
+    status.append(el("div", { class: "notice warn" }, el("p", {}, errorText(e)), offer, el("div", { class: "hint mono error-detail", lang: "en" }, e.message || "")));
+    const next = (left) => {
+      if (!left.length) { clear(status); again(); return; }
+      const [server, ...rest] = left;
+      buildMcpServer(offer, host, { entry: server.name, unsigned: !!server.unsigned, mounts: server.mounts || [], confirm: true },
+        (r) => { toast("success", t("{name} built and added on {host} (not signed)", { name: server.name, host }), (r && r.output) || ""); clear(offer); next(rest); },
+        (failure) => { clear(status).append(errorNotice(failure)); });
+    };
+    next(servers);
+    return true;
   };
   const stop = (event) => {
     const seconds = Number(wait.value);  // what the question names is what is sent, whatever the field says by then
@@ -1861,6 +2006,31 @@ function moreCard(main, s) {
   openCard(main, card, s);
   const opened = s.state;
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title, (now) => now === opened));
+}
+
+// An MCP server its catalog has no signed image of yet, built on HOST from its source and added UNSIGNED (POST /mcp
+// with build: `mcp add --build`). What would be built is read there first (the service answers mcp-build-asked with the
+// commit and the source archive's SHA-256: nothing built), asked in CONTAINER, and exactly that is built after a yes
+// (commit, source_sha256, confirm_build); DONE(result) after, FAIL(error) on a refusal or a No. BODY: what POST /mcp
+// takes (entry, mounts, unsigned, ...).
+function buildMcpServer(container, host, body, done, fail) {
+  const send = (extra) => api("POST", hostPath("/mcp", host), Object.assign({}, body, { build: true }, extra || {}));
+  (async () => {
+    let asked;
+    try { done(await send({})); return; } catch (e) { asked = e; }
+    if (!(asked instanceof ApiError && asked.code === "mcp-build-asked")) { fail(asked); return; }
+    const p = asked.params || {};
+    const mounts = (body.mounts || []).map(m => `${m.target}=${m.host}:${m.mode || "ro"}`).join(", ");
+    const question = [t("{entry} has no signed image in its catalog yet. Build it on {host} from its reviewed source and add it UNSIGNED?", { entry: p.entry || body.entry, host }),
+      t("Source: {repository}, commit {commit}, {path}; source archive SHA-256 {sha256}; catalog {catalog} ({signed}).", { repository: p.repository || "?", commit: p.commit || "?", path: p.path || "?",
+        sha256: p.archive_sha256 || "?", catalog: p.catalog_label || "?", signed: p.signature === "good" ? t("signed: the entry was reviewed, its image is not published yet") : t("NOT signed: nobody vouched for the entry") }),
+      mounts ? t("Its folders: {mounts}.", { mounts }) : null,
+      t("Podman builds it as the catalog's CI does (base images pinned by digest) and its smoke test checks it with sandbox-ai's own run line; that takes minutes. Built here, not signed: nobody signed this image.")].filter(Boolean).join(" ");
+    confirmIn(container, question, t("Build it, unsigned"), async () => {
+      try { done(await send({ commit: p.commit, source_sha256: p.archive_sha256, confirm_build: true, confirm: true })); }
+      catch (e) { fail(e); }
+    }, { kind: "primary", onCancel: () => fail(asked) });
+  })();
 }
 
 // A stopped start with a kept HOME: first what changed in the files of that HOME that decide what runs at a start
@@ -2327,7 +2497,8 @@ pages.starts = async (main) => {
     el("label", {}, every, " ", t("MCP servers that do not run too")),
     all ? null : el("button", { onclick: () => gcCard(main, host) }, t("Clean up…")),
     all ? null : withIcon(el("button", { "aria-label": t("Optimize…"), onclick: () => storageCard(main, host, null) }, t("Optimize…")), "optimize", t("Optimize…"), t("what could be freed, each with how much, its command and whether it is safe while starts run; tick and apply (sandbox-ai gc --check)")),
-    all ? null : el("button", { onclick: () => importCard(main, host) }, t("Import a board…")), ...view.folds,
+    all ? null : el("button", { onclick: () => importCard(main, host) }, t("Import a board…")),
+    all ? null : el("button", { title: t("an archive of sandbox-ai session export as a session to resume, checked first (sandbox-ai session import)"), onclick: () => sessionImportCard(main, host) }, t("Import a session…")), ...view.folds,
     el("label", { title: t(BUTTON_TEXTS_HELP) }, el("input", { type: "checkbox", id: "button-texts", checked: buttonTextsShown(), onchange: (event) => showButtonTexts(event.target.checked) }), " ", t("Show button texts beside the icons")));
   // Two tabs, as the desktop app's Sessions page has them: the starts (with a new start's form) and the schedules
   const parts = { starts: el("div", { id: "starts-panel", role: "tabpanel", "aria-label": t("Sessions & sandboxes") }),
@@ -7966,7 +8137,8 @@ pages.projects = async (main) => {
 // none), with whether its signature was verified.
 function mcpOriginCell(x) {
   const catalog = typeof x.catalog === "string" ? x.catalog : t("unknown");
-  const signed = x.signed === true ? t("signed") : x.signed === false ? t("unsigned") : "";
+  // (mcp add --build: built on that host from its source, never signed - said so)
+  const signed = x.built && typeof x.built === "object" ? t("built here, not signed") : x.signed === true ? t("signed") : x.signed === false ? t("unsigned") : "";
   return el("td", {}, catalog, signed ? el("div", { class: x.signed ? "hint" : "hint status-warn" }, signed) : null);
 }
 
@@ -8087,8 +8259,17 @@ pages.mcp = async (main) => {
         clear(addStatus);
         // refused only because no trusted key signed its catalog: said, and offered to add it anyway (--unsigned)
         if (e instanceof ApiError && e.code === "mcp-unsigned-catalog" && !body.unsigned) { offerUnsigned(e); return; }
+        // no signed image in its catalog yet (pending): offered to be built from its source (asked with the commit)
+        if (e instanceof ApiError && e.code === "mcp-unpublished") { offerBuild(e); return; }
         addStatus.append(errorNotice(e));
       }
+    };
+    const offerBuild = (e) => {
+      const offer = el("div", { class: "row" });
+      addStatus.append(el("div", { class: "notice warn" }, el("p", {}, errorText(e)), offer, el("div", { class: "hint mono error-detail", lang: "en" }, e.message || "")));
+      buildMcpServer(offer, host, Object.assign({}, body, { confirm: true }),
+        (r) => { toast("success", t("{name} built and added on {host} (not signed)", { name: body.entry, host }), (r && r.output) || ""); show("mcp"); },
+        (failure) => { clear(addStatus).append(errorNotice(failure)); });
     };
     const offerUnsigned = (e) => {
       const catalog = String((e.params && e.params.catalog) || ""), name = body.entry;
@@ -8872,7 +9053,7 @@ pages.images = async (main) => {
   const variantName = el("input", { id: "image-new-name", class: "mono", placeholder: "data", pattern: "(?=.{1,30}$)[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*" });
   const variantFrom = el("select", { id: "image-new-from" }, AGENTS.map(a => el("option", { value: a }, a)));
   const empty = el("input", { id: "image-new-empty", type: "checkbox" });
-  const recipe = el("select", { id: "image-recipe" }, [["media", N_("media: ffmpeg, PulseAudio, espeak-ng, Piper …")]].map(([v, label]) => el("option", { value: v }, t(label))));
+  const recipe = el("select", { id: "image-recipe" }, [["media", N_("media: ffmpeg, PulseAudio, espeak-ng, Piper …")], ["android", N_("android: Android debugging - adb, apktool, smali, jadx, Frida")], ["android-dev", N_("android-dev: Android development - everything of android, the SDK for API 37, 36 and 35, NDK, emulator, Gradle, Kotlin (about 4.1 GB; building it accepts Google's Android SDK license)")]].map(([v, label]) => el("option", { value: v }, t(label))));
   const recipeAs = el("input", { id: "image-recipe-as", class: "mono", placeholder: t("the recipe's name") });
   const variantStatus = el("div", { class: "wide" });
   const variant = (path, body, done) => async (ev) => busy(ev.target, async () => {

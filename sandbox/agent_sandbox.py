@@ -601,7 +601,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.188"
+__version__ = "0.1.198"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -4430,7 +4430,18 @@ def check_mcp_names(a):
     servers = {**mcp.definitions(getattr(a, "project_document", None)),
                **(getattr(a, "helper_definitions", None) or {})}
     missing = [name for name in names if name not in servers]
-    problems = [unknown_mcp_message(a, missing, servers)] if missing else []
+    hints = []
+    if missing and not a.dry_run:
+        # One that its catalog lists without a signed image yet (pending): built here from its source, asked first
+        # on a terminal - else the refusal names the command that builds it (mcp_build_offers). Not in a dry run:
+        # the app's and the Board's checks are dry runs, often, and must not wait for the catalogs' download (the
+        # app reads them itself before a start and asks there).
+        added, hints = mcp_build_offers(a, mcp, missing)
+        if added:
+            servers = {**mcp.definitions(getattr(a, "project_document", None)),
+                       **(getattr(a, "helper_definitions", None) or {})}
+            missing = [name for name in missing if name not in servers]
+    problems = [unknown_mcp_message(a, missing, servers) + "".join(f". {hint}" for hint in hints)] if missing else []
     # Every image is asked of Podman at once, each `podman image exists` in a thread of its own (one after another,
     # a start with three image servers waited for four Podman starts): the agent's own (asked meanwhile, answered
     # below) and those of its servers (start_problems takes the answers; one it did not foresee it asks itself).
@@ -4730,6 +4741,90 @@ def podman_store_note(a):
     except (KeyError, OSError):
         user = str(os.getuid())
     return f" (Podman's image store: {printable(root[0])}, user {printable(user)})"
+
+
+MCP_BUILD_PLACEHOLDER = "localhost/sandbox-ai-mcp-planned@sha256:" + "0" * 64  # (the mode's check of a planned one)
+
+
+def mcp_mode_refusal(a, name, definition):
+    """Why the security mode of the start A refuses the MCP server NAME were it DEFINITION (a server not added yet:
+    one its catalog lists without a signed image, built only when the mode takes it), else None - the mode's own
+    rules (modes.widening) asked with that definition among the defined ones."""
+    l = launcher_namespace()
+    loaded = l.load_mcp_module
+
+    class Planned:
+        def __getattr__(self, attribute):
+            return getattr(loaded(), attribute)
+
+        @staticmethod
+        def definitions(project=None):
+            return {**loaded().definitions(project), name: definition}
+    l.load_mcp_module = Planned
+    for given, why in MODES.widening(l, a, a.mode):
+        if given.startswith("--mcp ") and name in given.split()[1::2]:
+            return f"the security mode {a.mode} refuses it ({why})"
+    return None
+
+
+def mcp_build_offers(a, mcp, missing, ask=None):
+    """(names added, hints) for the MCP servers MISSING of the start A that a catalog lists without a signed image yet
+    (pending: reviewed, not published): on a terminal (ASK: the question, for tests) each is offered to be built here
+    from its source at the catalog's exact commit and added unsigned (mcp add NAME --build: what, which commit, the
+    archive's hash - asked; a no builds nothing) - never in a dry run, with a remote Podman, or where the security
+    mode would refuse the server anyway (check_mcp_names does not ask in a dry run at all). HINTS: for the refusal,
+    the command that builds each one not built (or why it cannot be). A server in no catalog gets no hint
+    (unknown_mcp_message says how to add one)."""
+    try:
+        entries, _problems = mcp.catalog_entries()
+        builder = mcp.build_module()
+        pending = {name: builder.pending_entry(entries, name) for name in missing}
+    except Exception as exc:  # noqa: BLE001 - only for the offer: the refusal stands as it is without it
+        LOG.debug("mcp", "the MCP catalogs could not be read for the missing servers", exc)
+        return [], []
+    added, hints = [], []
+    terminal = ask is not None or (sys.stdin.isatty() and sys.stderr.isatty())
+    mounts = mcp.start_mounts(a) if getattr(a, "mcp_mount", None) else {}
+    for name in missing:
+        if not isinstance(pending.get(name), tuple):
+            continue
+        prefix, entry = pending[name]
+        unsigned = (entry.get("_signature") or {}).get("state") != "good"
+        given = [f"{target}={value['host']}" + (f":{value['mode']}" if value.get("mode") else "")
+                 for target, value in mounts.get(name, {}).items()]
+        command = (f"sandbox-ai mcp add {name} --build" + (" --unsigned" if unsigned else "")
+                   + "".join(f" --mount {printable(value)}" for value in given))
+        refused = mcp_mode_refusal(a, name, {"image": MCP_BUILD_PLACEHOLDER,
+                                             "network": "full" if entry.get("network") in ("full", "lan") else
+                                             str(entry.get("network") or "none")})
+        if refused:
+            hints.append(f"{name}: its catalog has no signed image of it yet, and {refused}")
+            continue
+        hint = (f"{name}: its catalog ({mcp.catalog_label(entry.get('_catalog') or prefix)}) lists it, but has no "
+                f"signed image of it yet - `{command}` builds it here from its reviewed source (the commit asked "
+                "first) and adds it unsigned; then start again")
+        if a.dry_run or getattr(a, "podman_url", None) or not terminal:
+            hints.append(hint)
+            continue
+        question = ask
+        if question is None:
+            def question(text):
+                print(f"agent-sandbox: {printable(text)}", file=sys.stderr)
+                try:
+                    return input("agent-sandbox: build it? [y/N] ").strip().lower() in ("y", "yes", "j", "ja")
+                except EOFError:
+                    return False
+        print(f"agent-sandbox: the MCP server {name} is not added here; its catalog lists it without a signed image "
+              "yet, so it can be built here from its source (asked next)", file=sys.stderr)
+        try:
+            builder.build_and_add(f"{prefix}:{name}", {"mounts": given}, unsigned=unsigned, confirm=question,
+                                  out=lambda text: print(text, file=sys.stderr))
+        except ValueError as exc:  # (declined, refused, or its build failed: said, with the log's end)
+            LOG.info("mcp", f"{name} not built for the start: {str(exc).splitlines()[0]}")
+            hints.append(f"{name} is not built: {exc}" if "not confirmed" not in str(exc) else hint)
+            continue
+        added.append(name)
+    return added, hints
 
 
 def unknown_mcp_message(a, missing, servers):
@@ -10687,6 +10782,10 @@ def claude_plugins(home, marketplaces, plugins, notes):
     mounts = []
     store = kits.plugin_dir("claude")
     if store and (known or installed):
+        # A store with marketplaces and no plugin yet has no cache: made empty here (the store's own folder, never
+        # through a link), so the sandbox gets it mounted and `sandbox-ai plugins attach` works while it runs.
+        with contextlib.suppress(FileExistsError, OSError):
+            os.mkdir(store / "cache", 0o700)
         for name in ("cache", "marketplaces"):
             if (store / name).is_dir() and not (store / name).is_symlink():
                 ensure_mount_point(home, f".claude/plugins/{name}")
@@ -11459,10 +11558,16 @@ def isolation_plan(a):
     return {"strict": strict_mode(a), "syscall_filter": syscall_filter(a), "filters": filters,
             "firejail": ["--seccomp", "--caps.drop=all", "--nonewprivs",
                          *RUNTIME.firejail_narrowing("--restrict-namespaces --protocol=", nested(a),
-                                                     {"syscall_filter": syscall_filter(a)})],
+                                                     {"syscall_filter": syscall_filter(a)},
+                                                     BWRAP_FIREJAIL_HELPERS if a.backend == "bwrap" else None)],
             "host_folders": host_folders(a), "disk": disk_watch(a),
             "lsm": getattr(a, "policy_lsm", None) or "unconfined",
             "manifest": f"{RUNTIME.ISOLATION_FILE} in the run's log directory (what the supervisor found at the start)"}
+
+
+# With bwrap Firejail runs the host's own helpers, which belong to a root the sandbox's user namespace does not map
+# (runtime.firejail_helpers_unusable): its --protocol and --restrict-namespaces are left out there.
+BWRAP_FIREJAIL_HELPERS = "bwrap: Firejail's helpers belong to the host's root, whom the sandbox does not map"
 
 
 def isolation_notes(a):

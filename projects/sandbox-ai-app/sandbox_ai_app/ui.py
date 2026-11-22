@@ -3464,6 +3464,27 @@ class SandboxesPage(QWidget):
             button.setToolTip(safe_tooltip(tip))
             button.clicked.connect(lambda _=False, m=move: self.transfer(m))
             self.transfer_buttons["move" if move else "copy"] = button
+        # A session's state - its HOME with the agent's conversation, memory, checkpoints, approvals: as a second
+        # session here (session duplicate), as one archive (session export), and an archive taken as a session here
+        # (session import: checked first) - session_state_dialogs.
+        if self.sai_state_supported():
+            for key, text, name, tip in (
+                    ("duplicate", tr("Duplicate…"), tr("Duplicate the session"),
+                     tr("A second session here from the selected session's state: its own HOME (the agent's "
+                        "conversation continued on its own), memory and checkpoints; the workspace shared or copied "
+                        "({command})", command="sandbox-ai session duplicate")),
+                    ("export-state", tr("Export with state…"), tr("Export the session with its state"),
+                     tr("The selected session with its state as one archive another machine imports: configuration, "
+                        "HOME with the agent's conversation, memory, checkpoints, approvals ({command})",
+                        command="sandbox-ai session export")),
+                    ("import", tr("Import…"), tr("Import a session"),
+                     tr("A session's archive (Export with state…) as a session of this machine that Resume "
+                        "continues - checked as untrusted input first ({command})",
+                        command="sandbox-ai session import"))):
+                button = button_icons.IconButton(key, text, name)
+                button.setToolTip(safe_tooltip(tip))
+                button.clicked.connect(lambda _=False, k=key: self.session_state(k))
+                self.transfer_buttons[key] = button
         # The session as one self-sufficient file (sandbox-ai board export --session NAME): of this machine or a host,
         # running or not; the file is written here.
         export = button_icons.IconButton("export", tr("Export…"), tr("Export the session"))
@@ -4885,8 +4906,10 @@ class SandboxesPage(QWidget):
                    None if state in ("running", "paused", "stopped") else
                    tr("Not while the session is {state}.", state=tr(STATE_TITLES.get(state, state))))
         for key, button in self.transfer_buttons.items():
-            if key not in ("export", "checkpoints", "memory", "files"):
+            if key not in ("export", "checkpoints", "memory", "files", "import"):
                 set_enabled(button, why is None, why)
+        if "import" in self.transfer_buttons:  # (no start to select: an archive of anywhere)
+            set_enabled(self.transfer_buttons["import"], True)
         export_why = given if given is not None else self.export_why(instance)
         set_enabled(self.transfer_buttons["export"], export_why is None, export_why)
         ended = instance is not None and getattr(instance, "key", "").startswith("ended:")
@@ -6508,6 +6531,37 @@ class SandboxesPage(QWidget):
         dialog = SessionTransferDialog(self, self.sai, instance.session, move=move, owner=self, succeeded=succeeded)
         dialog.exec()
         dialog.deleteLater()  # a command still running reports to the page only (succeeded)
+
+    def sai_state_supported(self):
+        """Whether this sandbox-ai carries a session's state (duplicate, export with state, import: 0.1.193 on)."""
+        try:
+            return bool(self.sai.session_state_supported())
+        except Exception as _exc:  # noqa: BLE001 - not known: not offered
+            applog.swallowed("ui", "SandboxesPage.sai_state_supported: not known: not offered", _exc)
+            return False
+
+    def session_state(self, key, instance=None):
+        """Duplicate… (KEY duplicate), Export with state… (export-state) of the selected session of this machine, or
+        Import… (import): session_state_dialogs, the lists read again after it."""
+        from . import session_state_dialogs as SSD
+
+        def made():
+            if alive(self):
+                self.refresh_soon(again=True)
+        if key == "import":
+            self.log_asked("import a session", None)
+            SSD.open_import(self, self.sai, owner=self, succeeded=made)
+            return
+        instance = instance or self.current()
+        if instance is None or instance.kind != "session" or not instance.session or \
+                getattr(instance, "host", LOCAL) != LOCAL:
+            QMessageBox.information(self, tr("Sessions"), tr("Select a session of this machine first."))
+            return
+        self.log_asked("duplicate" if key == "duplicate" else "export with state", instance)
+        dialog = (SSD.DuplicateDialog(self, self.sai, instance.session, owner=self, succeeded=made)
+                  if key == "duplicate" else SSD.StateExportDialog(self, self.sai, instance.session, owner=self))
+        dialog.exec()
+        dialog.deleteLater()
 
     def resume_checked(self, instance, go):
         """Before a stopped kept start starts again (GO): what changed in the start files of its HOME since its last
@@ -10374,7 +10428,7 @@ class MainWindow(QMainWindow):
         """The intro once more (Help menu, Settings), skippable as at the start; it changes no setting."""
         from . import intro
         if getattr(self, "intro", None) is None or self.intro.over:
-            self.intro = intro.play(self, self.sai.settings(), force=True)
+            self.intro = intro.play(self, self.sai.settings(), force=True, state=self.state)  # (the next one)
         return self.intro
 
     def start_tour(self, index=None):

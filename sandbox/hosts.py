@@ -623,6 +623,28 @@ def run_once(name, args, input, seconds, timeout, path, runner, sudo, control):
     return done.returncode, done.stdout, done.stderr, True
 
 
+def run_with_file(name, args, source, timeout=3600, path=None, runner=subprocess.run):
+    """(exit status, stdout, stderr) of `sandbox-ai ARGS` on host NAME with the file SOURCE as its standard input, byte
+    for byte (a session's archive for `session import -`: no rsync or scp needed there, only sshd and sandbox-ai; what
+    arrives is checked by the import there). A connection of its own (no shared one: a long transfer never holds up
+    the commands of the app). 255 when SSH failed, 124 when it did not end within TIMEOUT seconds, 127 without ssh."""
+    begun = time.monotonic()
+    command = argv(name, args, path=path)
+    try:
+        with open(source, "rb") as stream:
+            done = runner(command, stdin=stream, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        status, out, err = 124, "", f"sandbox-ai on {name}: no answer within {timeout} s"
+    except OSError as exc:
+        status, out, err = 127, "", f"{command[0]}: {exc.strerror or exc}"
+    else:
+        status = done.returncode
+        out, err = (value.decode("utf-8", "replace") if isinstance(value, bytes) else value or ""
+                    for value in (done.stdout, done.stderr))
+    ran(name, f"sandbox-ai {LOG.command_line(args)} < {Path(source).name}", begun, status, err)
+    return status, out, err
+
+
 def run_json(name, args, timeout=120, path=None, runner=subprocess.run):
     """The JSON a `sandbox-ai ARGS --json` prints on host NAME, or a ValueError with what it said."""
     status, out, err = run(name, args, timeout=timeout, path=path, runner=runner)

@@ -76,8 +76,8 @@ const buttons = (node) => node.all().filter(n => n.tagName === "button");
 def test_the_rows_actions_are_icon_buttons_with_tooltips(tmp_path):
     result = run_driver(tmp_path, DRIVER, "sessions_icons")
     web = {key: rest for key, *rest in result["web"]}
-    assert list(web) == ["attach", "shell", "pause", "allow", "limits", "export", "resume-with", "checkpoints",
-                         "memory", "files", "storage"]
+    assert list(web) == ["attach", "shell", "pause", "allow", "limits", "export", "copy", "resume-with",
+                         "checkpoints", "memory", "files", "storage"]  # (copy: Duplicate…, session duplicate)
     assert web["attach"] == ["Attach", "Attach", "Attach web on local", "svg", "rect,path,path"], \
         "its text inside (shown with the texts), first in the tooltip, in the accessible name; the drawing as SVG"
     assert web["allow"][:2] == ["Network…", "Network…"] and web["limits"][0] == "Resources…"

@@ -7,9 +7,17 @@ the session's options name, each where it lies there (the same path unless chang
 agent, a session of that name there already); Copy (Move) checks and starts it there - Move then stops the session here,
 asked first (session-move). A session of that name there is refused, or replaced when chosen (--replace, asked first:
 session-replace). The command runs in the background; what it says (the problems, the dry run's complaints and
-warnings) is shown in the dialog. Logins and the session's HOME are not copied."""
+warnings) is shown in the dialog.
+
+With a sandbox-ai that carries a session's state (0.1.193 on), Its state along (on by default) takes its HOME with the
+agent's conversation, its memory, checkpoints and network approvals too (sandbox-ai session_state.transfer: the archive
+sent over SSH and imported there, then resumed there); off, only its configuration (--config-only), as before. Its
+workspace's files (--with-workspace), its logins and keys (--include-secrets: session-export-secrets) and its network
+approvals granted again there (--grant-approvals: session-grant-approvals) go along only when ticked, the last two
+asked first."""
 from __future__ import annotations
 
+import functools
 import os
 
 from PySide6.QtCore import Qt
@@ -43,13 +51,11 @@ class SessionTransferDialog(QDialog):
         self.setWindowTitle(tr("Move session {name} to a host", name=printable(name)) if move else
                             tr("Copy session {name} to a host", name=printable(name)))
         layout = QVBoxLayout(self)
-        layout.addWidget(plain_label(
-            tr("Its configuration starts again there as a session of its own, checked there first; then it is "
-               "stopped here (its HOME stays until it is deleted).") if move else
-            tr("Its configuration starts again there as a session of its own, checked there first; this one stays "
-               "as it is.")))
-        layout.addWidget(plain_label(tr("Logins and the session's HOME are not copied: the host uses its own."),
-                                     role="secondary"))
+        self.state_supported = _state_supported(sai)
+        self.intro = plain_label("")
+        layout.addWidget(self.intro)
+        self.logins_note = plain_label("", role="secondary")
+        layout.addWidget(self.logins_note)
         self.host = HostChooser(sai, tr("The host it starts on (sandbox-ai hosts; this machine is not offered)"),
                                 local=False)
         self.host.changed.connect(lambda _host: self.update_buttons())
@@ -70,6 +76,31 @@ class SessionTransferDialog(QDialog):
             "is refused when there is one: started again, it would keep its own options, not these.")))
         layout.addWidget(self.replace)
         self.replace.setVisible(_replace_supported(sai))  # (in the dialog first: no window of its own for a moment)
+        # What goes along: its state (on by default), or only its configuration.
+        self.state = QCheckBox(tr("Its state along: HOME, the agent's conversation, memory, checkpoints"))
+        self.state.setToolTip(safe_tooltip(tr(
+            "Its HOME with the agent's session files (it continues its conversation there), the project's agent "
+            "memory, the workspace's checkpoints and its network approvals go along, checked there before anything "
+            "is kept; a running session is paused for the moment of the snapshot. Off: only its configuration, "
+            "started afresh there (--config-only)")))
+        self.state.setChecked(True)
+        self.with_workspace = QCheckBox(tr("Its workspace's files too"))
+        self.with_workspace.setToolTip(safe_tooltip(tr(
+            "The workspace's files go along into its folder there, which must be new or empty (--with-workspace); "
+            "without, the folder of that path there (or as mapped below) is used")))
+        self.with_secrets = QCheckBox(tr("With logins and keys"))
+        self.with_secrets.setToolTip(safe_tooltip(tr(
+            "Its logins, keys and secrets go along (asked first; --include-secrets); without, the host uses its own "
+            "login")))
+        self.grant = QCheckBox(tr("Grant its network approvals again there"))
+        self.grant.setToolTip(safe_tooltip(tr(
+            "What it was allowed on the network is granted again there as options of that session (asked first; "
+            "--grant-approvals); without, it asks again when it needs them")))
+        for box in (self.state, self.with_workspace, self.with_secrets, self.grant):
+            layout.addWidget(box)
+            box.setVisible(self.state_supported)
+        self.state.toggled.connect(lambda _on: self.update_texts())
+        self.update_texts()
         layout.addWidget(plain_label(tr("Folders and files of the session: where each one lies on the host. One that "
                                         "lies elsewhere there is changed here (--map); the others stay the same.")))
         self.folders = QWidget()
@@ -117,6 +148,26 @@ class SessionTransferDialog(QDialog):
         background(self.sai.session_transfer_plan, name, timeout=60,
                    what=f"reading which folders session {name} names (sandbox-ai session plan)",
                    done=lambda result, error: alive(self) and self.plan_read(result, error))
+
+    def with_state(self):
+        return self.state_supported and self.state.isChecked()
+
+    def update_texts(self):
+        state = self.with_state()
+        for box in (self.with_workspace, self.with_secrets, self.grant):
+            box.setEnabled(state)
+        self.intro.setText(
+            (tr("It goes there with its state and continues there, checked there first; then it is stopped here (its "
+                "HOME stays until it is deleted).") if self.moving else
+             tr("It goes there with its state and continues there as a session of its own, checked there first; this "
+                "one stays as it is.")) if state else
+            (tr("Its configuration starts again there as a session of its own, checked there first; then it is "
+                "stopped here (its HOME stays until it is deleted).") if self.moving else
+             tr("Its configuration starts again there as a session of its own, checked there first; this one stays "
+                "as it is.")))
+        self.logins_note.setText(
+            tr("Logins and keys go along only when ticked (asked first); otherwise the host uses its own.") if state
+            else tr("Logins and the session's HOME are not copied: the host uses its own."))
 
     # -- the session's folders --
 
@@ -207,11 +258,25 @@ class SessionTransferDialog(QDialog):
                                                    f"{printable(host)} refused: {applog.error_text(exc)}")
             self.show_output(tr("Not started: {error}", error=printable_text(exc)))
             return
+        state = self.with_state()
+        secrets = state and self.with_secrets.isChecked() and not check
+        grant = state and self.grant.isChecked() and not check
         if self.moving and not check and not ask_first(
                 self, "session-move", tr("Move to host"),
-                tr("Start session {name} on {host} as {new}, then stop it here? Its HOME stays here until it is "
-                   "deleted; logins and HOME are not copied.", name=printable(self.name), host=printable(host),
-                   new=printable(new_name)), tr("Move")):
+                (tr("Take session {name} with its state to {host} as {new}, start it there, then stop it here? Its "
+                    "HOME stays here until it is deleted.", name=printable(self.name), host=printable(host),
+                    new=printable(new_name)) if state else
+                 tr("Start session {name} on {host} as {new}, then stop it here? Its HOME stays here until it is "
+                    "deleted; logins and HOME are not copied.", name=printable(self.name), host=printable(host),
+                    new=printable(new_name))), tr("Move")):
+            return
+        if secrets and not ask_first(self, "session-export-secrets", tr("With logins and keys"), tr(
+                "Take the logins, keys and secrets of its HOME along ({what})? Whoever has them can log in as you.",
+                what=printable(host)), tr("Yes, with logins and keys")):
+            return
+        if grant and not ask_first(self, "session-grant-approvals", tr("Grant network approvals"), tr(
+                "Grant its network approvals again, as options of that session ({what})? It reaches those "
+                "destinations at every start.", what=printable(host)), tr("Yes, grant them")):
             return
         if not check and not ask_first(
                 self, "session-replace", tr("Replace on host"),
@@ -219,9 +284,13 @@ class SessionTransferDialog(QDialog):
                    new=printable(new_name), host=printable(host)), tr("Replace"), detail={"replace": replace}):
             return
         function = self.sai.session_move if self.moving else self.sai.session_copy
+        if self.state_supported:  # (an older sandbox-ai is called as before: it knows none of these)
+            function = functools.partial(function, state=state, with_workspace=state and self.with_workspace.isChecked(),
+                                         include_secrets=secrets, grant=grant)
         applog.log("INFO", "session transfer", f"{'check of the ' if check else ''}{command} of session "
                    f"{printable(self.name)} to {printable(host)} as {printable(new_name)}"
-                   + (f", folders mapped: {len(maps)}" if maps else "") + (", replacing it there" if replace else ""))
+                   + (f", folders mapped: {len(maps)}" if maps else "") + (", replacing it there" if replace else "")
+                   + (", with its state" if state else ", only its configuration" if self.state_supported else ""))
         self.running = True
         self.status.setText(tr("Checking on {host}…", host=printable(host)) if check else
                             tr("Checking and starting on {host}… (this can take minutes)", host=printable(host)))
@@ -230,7 +299,8 @@ class SessionTransferDialog(QDialog):
         args = (self.name, host, new_name, maps, check) + ((True,) if replace else ())
         background(function, *args, owner=self.owner, work=True,
                    what=f"sandbox-ai session {command} {self.name} {host}" + (" (check only)" if check else ""),
-                   source=[self.check_button, self.go_button], timeout=backend.TRANSFER_SECONDS + 60,
+                   source=[self.check_button, self.go_button],
+                   timeout=backend.TRANSFER_SECONDS + 60 + (backend.STATE_SECONDS if state else 0),
                    done=lambda result, error: self.ran(host, check, result, error))
 
     def ran(self, host, check, result, error):
@@ -260,6 +330,15 @@ class SessionTransferDialog(QDialog):
     def show_output(self, text):
         self.output.show()
         self.output.setPlainText(output_text(text))
+
+
+def _state_supported(sai):
+    """Whether this sandbox-ai takes a session's state along (session copy|move with state: 0.1.193 on)."""
+    try:
+        return bool(sai.session_state_supported())
+    except Exception as _exc:  # noqa: BLE001 - not known: only its configuration, as before
+        applog.swallowed("session_transfer", "_state_supported: not known: only the configuration", _exc)
+        return False
 
 
 def _replace_supported(sai):

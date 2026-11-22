@@ -45,6 +45,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -645,8 +646,13 @@ def marketplace_source(marketplace):
 
 def install(plugin, runner=None, out=print):
     """PLUGIN into the plugin store, by the store's own install (`claude plugin install` in the store's sandbox, with
-    network access to the marketplace's hosts only) unless it is there. True when it was installed now."""
+    network access to the marketplace's hosts only) unless it is there. True when it was installed now. What the
+    store's command prints goes to stderr: stdout is the caller's (`plugins attach --json` prints its result there)."""
     k, p = kits(), plugins_module()
+    if runner is None:
+        def runner(command):
+            sys.stdout.flush()
+            return subprocess.run(command, stdout=sys.stderr.fileno())
     _, installed = k.installed("claude")
     if plugin in installed:
         return False

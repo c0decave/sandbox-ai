@@ -1406,7 +1406,75 @@ RUN cd /opt/android \
     && /opt/frida/venv/bin/python -c "import frida; print('frida', frida.__version__)"
 """
 
+# What a project built here finds: the API levels 37, 36 and 35 (platform and build-tools each), one NDK, two CMakes,
+# the emulator with one x86_64 system image of API 37 (sdk.lock: every version, size and checksum).
+ANDROID_DEV_FRAGMENT = r"""# Android app development (the recipe android-dev, on top of the recipe android). Every download is a row of
+# /opt/android-dev/sdk.lock with its size and checksums; install.sh fetches them while the image is built (never at
+# run time), stops the build on any difference, unpacks each in place and removes the archive in the same step (no
+# layer keeps the 4 GB of archives):
+#   the Android SDK in /opt/android-sdk: cmdline-tools 23.0, platform-tools 37.0.1, the platforms android-37.0,
+#   android-36 and android-35 with build-tools 37.0.0, 36.0.0 and 35.0.0, the NDK 30.0.16248370 (r30), CMake 4.1.2
+#   and 3.22.1, the emulator 37.2.13 and the system image system-images;android-37.0;google_apis;x86_64 (r08)
+#   Gradle 9.8.2 in /opt/gradle and the Kotlin compiler 2.4.21 in /opt/kotlinc
+# JDK 17 is Debian's (what the Android Gradle plugin needs). By building this image you accept the Android Software
+# Development Kit License Agreement (https://developer.android.com/studio/terms): the build says so, and writes the
+# acceptance of that one license (licenses/android-sdk-license) that sdkmanager would write, so that the Android Gradle
+# plugin may fetch a package a project names and the image lacks. x86_64 only (Google has no Linux arm64 SDK tools).
+ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk \
+    ANDROID_NDK_HOME=/opt/android-sdk/ndk/30.0.16248370 ANDROID_NDK_ROOT=/opt/android-sdk/ndk/30.0.16248370 \
+    JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 GRADLE_HOME=/opt/gradle KOTLIN_HOME=/opt/kotlinc
+RUN sh /opt/android-dev/install.sh /opt/android-dev/sdk.lock /opt/android-dev/package-xml \
+    && mkdir -p /opt/android-sdk/licenses \
+    && cp /opt/android-dev/android-sdk-license /opt/android-sdk/licenses/android-sdk-license \
+    && ln -s /opt/android-sdk/platform-tools/adb /usr/local/bin/adb \
+    && ln -s /opt/android-sdk/platform-tools/fastboot /usr/local/bin/fastboot \
+    && ln -s /opt/android-sdk/emulator/emulator /usr/local/bin/emulator \
+    && ln -s /opt/android-sdk/cmake/4.1.2/bin/cmake /usr/local/bin/cmake \
+    && ln -s /opt/android-sdk/cmake/4.1.2/bin/ninja /usr/local/bin/ninja \
+    && printf '#!/bin/sh\nexec /opt/android-sdk/cmdline-tools/23.0/bin/sdkmanager "$@"\n' > /usr/local/bin/sdkmanager \
+    && printf '#!/bin/sh\nexec /opt/android-sdk/cmdline-tools/23.0/bin/avdmanager "$@"\n' > /usr/local/bin/avdmanager \
+    && printf '#!/bin/sh\nexec /opt/android-sdk/ndk/30.0.16248370/ndk-build "$@"\n' > /usr/local/bin/ndk-build \
+    && printf '#!/bin/sh\nexec /opt/gradle/bin/gradle "$@"\n' > /usr/local/bin/gradle \
+    && printf '#!/bin/sh\nexec /opt/kotlinc/bin/kotlinc "$@"\n' > /usr/local/bin/kotlinc \
+    && printf '#!/bin/sh\nexec /opt/kotlinc/bin/kotlin "$@"\n' > /usr/local/bin/kotlin \
+    && chmod 0755 /usr/local/bin/sdkmanager /usr/local/bin/avdmanager /usr/local/bin/ndk-build /usr/local/bin/gradle \
+       /usr/local/bin/kotlinc /usr/local/bin/kotlin \
+    && chmod -R a+rX,go-w /opt/android-sdk /opt/gradle /opt/kotlinc \
+    && java -version 2>&1 | grep -q 'version "17\.' \
+    && sdkmanager --list_installed > /var/tmp/sdk-installed.txt \
+    && for package in $(awk '!/^#/ && NF == 7 && $1 != "-" {print $1}' /opt/android-dev/sdk.lock); do \
+         awk -F'|' '{gsub(/ /, "", $1); print $1}' /var/tmp/sdk-installed.txt | grep -qxF "$package" \
+         || { echo "sandbox-ai android-dev: ERROR: sdkmanager does not see $package" >&2; \
+              cat /var/tmp/sdk-installed.txt >&2; exit 1; }; \
+       done \
+    && printf 'no\n' | avdmanager --silent create avd --name build-check --device pixel_7 \
+       --package 'system-images;android-37.0;google_apis;x86_64' --path /var/tmp/avd-check \
+    && for qemu in /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless; do \
+         if [ -e "$qemu" ] && LD_LIBRARY_PATH=/opt/android-sdk/emulator/lib64:/opt/android-sdk/emulator/lib64/qt/lib \
+              ldd "$qemu" | grep 'not found'; then \
+           echo "sandbox-ai android-dev: ERROR: the emulator lacks the libraries above" >&2; exit 1; fi; \
+       done \
+    && rm -rf /var/tmp/sdk-installed.txt /var/tmp/avd-check /root/.android \
+    && adb version \
+    && emulator -version \
+    && sdkmanager --version \
+    && GRADLE_USER_HOME=/var/tmp/gradle-check gradle --version \
+    && rm -rf /var/tmp/gradle-check \
+    && kotlinc -version \
+    && cmake --version \
+    && ndk-build --version \
+    && echo "sandbox-ai android-dev: by building this image you accepted the Android Software Development Kit License" \
+            "Agreement (https://developer.android.com/studio/terms)"
+"""
+ANDROID_DEV_FILES = [("android-dev/sdk.lock", "/opt/android-dev/sdk.lock", "0644"),
+                     ("android-dev/install.sh", "/opt/android-dev/install.sh", "0644"),
+                     ("android-dev/android-sdk-license", "/opt/android-dev/android-sdk-license", "0644"),
+                     ("android-dev/android-emulator", "/usr/local/bin/android-emulator", "0755")] + [
+    (f"android-dev/package-xml/{path.name}", f"/opt/android-dev/package-xml/{path.name}", "0644")
+    for path in sorted((HERE / "recipes" / "android-dev" / "package-xml").glob("*.xml"))]
+
 # Ready extensions for a purpose: `sandbox-ai images recipe NAME --from AGENT` makes the variant NAME with them.
+# "includes": recipes whose packages, files and fragment come first (android-dev has everything of android).
 RECIPES = {
     "media": {"description": "sound, video and speech: ffmpeg, PulseAudio (for --audio virtual), SoX, espeak-ng, "
                              "ImageMagick and scrot for screenshots; Piper (neural text to speech) as a Python tool",
@@ -1455,6 +1523,29 @@ RECIPES = {
                         "default-jre-headless", "unzip", "xz-utils", "python3-venv", "sqlite3"],
                 "files": [("android/requirements.txt", "/opt/frida/requirements.txt", "0644")],
                 "fragment": ANDROID_FRAGMENT},
+    # Android app development (the preset android-development): everything of android, the Android SDK for the API
+    # levels 37, 36 and 35, the NDK, CMake, the emulator with an x86_64 system image, Gradle and Kotlin - every
+    # download pinned in sandbox/recipes/android-dev/sdk.lock (size, Google's SHA-1, SHA-256) and fetched only while
+    # the image is built. The emulator's libraries are Debian's (the emulator brings its own Qt).
+    "android-dev": {"description": "for Android app development (the preset android-development): everything of "
+                                   "the recipe android, JDK 17 from Debian, the Android SDK in /opt/android-sdk - "
+                                   "cmdline-tools 23.0, platform-tools 37.0.1, the platforms and build-tools of the "
+                                   "API levels 37, 36 and 35, the NDK r30 (30.0.16248370), CMake 4.1.2 and 3.22.1, "
+                                   "the emulator 37.2.13 with the system image android-37.0 google_apis x86_64 - "
+                                   "Gradle 9.8.2 and the Kotlin compiler 2.4.21; every download pinned by its size "
+                                   "and checksum (sandbox/recipes/android-dev/sdk.lock), about 4.1 GB to fetch and "
+                                   "roughly 10 GB more in the image; x86_64 only. By building it you accept the "
+                                   "Android Software Development Kit License Agreement "
+                                   "(https://developer.android.com/studio/terms)",
+                    "includes": ["android"],
+                    "apt": ["openjdk-17-jdk-headless", "curl", "ca-certificates", "unzip", "libpulse0", "libnss3",
+                            "libnspr4", "libxcomposite1", "libxcursor1", "libxdamage1", "libxi6", "libxtst6",
+                            "libxrandr2", "libasound2", "libgl1", "libegl1", "libxkbfile1", "libdbus-1-3",
+                            "libx11-xcb1", "libxkbcommon-x11-0", "libfontconfig1", "libtinfo5", "libbsd0",
+                            "libxcb-cursor0", "libxcb-icccm4", "libxcb-image0", "libxcb-keysyms1", "libxcb-randr0",
+                            "libxcb-render-util0", "libxcb-shape0", "libxcb-xfixes0", "libxcb-xkb1"],
+                    "files": ANDROID_DEV_FILES,
+                    "fragment": ANDROID_DEV_FRAGMENT},
     # The development image of the showcase preset showcase-full-stack: Python, JavaScript and Django on the agent's
     # own Python 3.11 and Node.js, from sandbox-ai's lockfiles (sandbox/recipes/django), psql for the --service db.
     "django": {"description": "for Python and JavaScript web development with Django: Django 5.2.18 LTS and psycopg "
@@ -1470,15 +1561,35 @@ RECIPES = {
 RECIPE_FILES = HERE / "recipes"  # the files the recipes copy into the image (part of sandbox-ai, read-only)
 
 
+def recipe_parts(name, seen=()):
+    """RECIPES[NAME] with what it includes put first: {kind: [packages]} (each once, in order), "files" and the
+    "fragment" (the included recipes' fragments, then its own)."""
+    if name not in RECIPES:
+        raise ValueError(f"no recipe {name!r}; recipes: {', '.join(sorted(RECIPES))}")
+    if name in seen:
+        raise ValueError(f"the recipe {name} includes itself")
+    wanted = RECIPES[name]
+    parts = {kind: [] for kind in KINDS}
+    parts.update(files=[], fragment="")
+    for included in [*wanted.get("includes", []), None]:
+        source = recipe_parts(included, (*seen, name)) if included else wanted
+        for kind in KINDS:
+            parts[kind] += [p for p in source.get(kind, []) if p not in parts[kind]]
+        parts["files"] += [entry for entry in source.get("files", []) if entry not in parts["files"]]
+        if source.get("fragment"):
+            parts["fragment"] += ("\n" if parts["fragment"] else "") + source["fragment"]
+    return parts
+
+
 @under_lock
 def recipe(name, agent, variant=None):
     """The variant VARIANT (default NAME) of AGENT with the recipe NAME's packages; build it with sandbox-ai build."""
     if name not in RECIPES:
         raise ValueError(f"no recipe {name!r}; recipes: {', '.join(sorted(RECIPES))}")
     variant = variant or name
+    wanted = recipe_parts(name)
     new_variant(variant, agent)
     variant = f"{variant}@{agent}"  # (the same name may be a variant of another agent too)
-    wanted = RECIPES[name]
     fragment = None
     if wanted.get("fragment"):  # after the agent's own fragment, which the variant copied
         own = load(variant)[1].rstrip("\n")

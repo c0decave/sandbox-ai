@@ -33,6 +33,20 @@ image variant (`sandbox-ai images recipe hyperframes|playwright`), each checked 
   in the lockfile).
 - `recipes/playwright`: playwright and playwright-core 1.64.1 (Apache-2.0, Microsoft).
 
+## The Android SDK of the image recipe android-dev (sandbox/recipes/android-dev)
+
+None of the Android SDK is part of sandbox-ai: `install.sh` downloads its packages from dl.google.com when you build
+the image variant (`sandbox-ai images recipe android-dev`), each checked against the size and checksums in
+`sdk.lock`; by building it you accept the Android Software Development Kit License Agreement
+(https://developer.android.com/studio/terms), which they are published under. Gradle 9.8.2 (Apache-2.0, Gradle Inc.)
+and the Kotlin compiler 2.4.21 (Apache-2.0, JetBrains) are downloaded from their GitHub releases the same way.
+
+- `recipes/android-dev/package-xml/*.xml`: the `package.xml` sdkmanager writes beside a package it installs, made by
+  `scripts/android_dev_lock.py` from Google's SDK repository as nixpkgs keeps it
+  (`pkgs/development/mobile/androidenv/repo.json`, MIT; the format follows its `deploy-androidpackages.nix`). Each
+  carries the text of the Android Software Development Kit License Agreement (Google LLC), as sdkmanager's own does.
+- `recipes/android-dev/android-sdk-license`: the acceptance sdkmanager records for that license (the SHA-1 of its text).
+
 ## Other
 
 - `sandbox/marketplace`: sandbox-ai's own Claude plugin marketplace; its entries `egm` (google/elephant-goldfish-model,

@@ -1,0 +1,42 @@
+# The downloads of the image recipe android-dev, each pinned by its size and checksum; install.sh fetches them while
+# the image is built (never at run time), stops the build on any difference and unpacks them in place.
+# Made by scripts/android_dev_lock.py from Google's SDK repository as nixpkgs keeps it (nixpkgs@f3a0ff26c758).
+#
+# sha1: Google's own checksum of an SDK archive (its repository XML; the NDK's also on github.com/android/ndk).
+# sha256: Google publishes none - "-" until a build has confirmed it: install.sh then prints the SHA-256 it computed
+# ("unconfirmed SHA-256"); write it here and every later build checks it too. Gradle's and Kotlin's are their
+# publishers' SHA-256.
+# Every archive: by downloading and building it you accept the Android Software Development Kit License Agreement
+# (https://developer.android.com/studio/terms), the license all of them are published under.
+#
+# package                                     version        dest                                                     size        sha1                                      sha256                                                            url
+# Android SDK Command-line Tools 23.0, in Google's repository by 2026-10-09
+cmdline-tools;23.0                            23.0           /opt/android-sdk/cmdline-tools/23.0                      181052239   e025545c62a8e64c7559119566a569fb1dec5f60  -                                                                 https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip
+# Android SDK Platform-Tools 37.0.1, in Google's repository by 2026-08-11
+platform-tools                                37.0.1         /opt/android-sdk/platform-tools                          9054187     477254aa5f903c15cf51001717bdf347fb6b53e0  -                                                                 https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip
+# Android SDK Platform 37.0 r02, in Google's repository by 2026-08-11
+platforms;android-37.0                        r02            /opt/android-sdk/platforms/android-37.0                  67281901    ed8ebf7f8822a4de5686d427f237d2fa30ff7410  -                                                                 https://dl.google.com/android/repository/platform-37.0_r02.zip
+# Android SDK Platform 36 r02, in Google's repository by 2026-08-11
+platforms;android-36                          r02            /opt/android-sdk/platforms/android-36                    65878410    2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576  -                                                                 https://dl.google.com/android/repository/platform-36_r02.zip
+# Android SDK Platform 35 r02, in Google's repository by 2026-08-11
+platforms;android-35                          r02            /opt/android-sdk/platforms/android-35                    64273788    0bb560a90a7a2cbd0dd8348224d518b638fe7949  -                                                                 https://dl.google.com/android/repository/platform-35_r02.zip
+# Android SDK Build-Tools 37 37.0.0, in Google's repository by 2026-08-11
+build-tools;37.0.0                            37.0.0         /opt/android-sdk/build-tools/37.0.0                      66135704    70954e99f4c3d9d46ee70fa32624672fe7cd6ebe  -                                                                 https://dl.google.com/android/repository/build-tools_r37_linux.zip
+# Android SDK Build-Tools 36 36.0.0, in Google's repository by 2026-08-11
+build-tools;36.0.0                            36.0.0         /opt/android-sdk/build-tools/36.0.0                      63737259    b0b6376977657e8ad9b969bacf4093601da2c6fb  -                                                                 https://dl.google.com/android/repository/build-tools_r36_linux.zip
+# Android SDK Build-Tools 35 35.0.0, in Google's repository by 2026-08-11
+build-tools;35.0.0                            35.0.0         /opt/android-sdk/build-tools/35.0.0                      61958799    2cfaa0bbb2336e9ec18ed3ecea84fa2e2af607bc  -                                                                 https://dl.google.com/android/repository/build-tools_r35_linux.zip
+# NDK (Side by side) 30.0.16248370 30.0.16248370, in Google's repository by 2026-09-08
+ndk;30.0.16248370                             30.0.16248370  /opt/android-sdk/ndk/30.0.16248370                       738633529   5107f898313790e449e87eee2183d9a20602dee9  -                                                                 https://dl.google.com/android/repository/android-ndk-r30-linux.zip
+# CMake 4.1.2 4.1.2, in Google's repository by 2026-08-11
+cmake;4.1.2                                   4.1.2          /opt/android-sdk/cmake/4.1.2                             31275750    c8c4f1c19b75c56f28b9dcf1af928d25cf1a1471  -                                                                 https://dl.google.com/android/repository/cmake-4.1.2-linux.zip
+# CMake 3.22.1 3.22.1, in Google's repository by 2026-08-11
+cmake;3.22.1                                  3.22.1         /opt/android-sdk/cmake/3.22.1                            22308647    fd0a48b4a758310df8c7aa51f59840ed48fe7ed8  -                                                                 https://dl.google.com/android/repository/cmake-3.22.1-linux.zip
+# Android Emulator 37.2.13, in Google's repository by 2026-11-01
+emulator                                      37.2.13        /opt/android-sdk/emulator                                349658551   f41f9e31eb5ca64926603c03265c50bbc0ff4172  -                                                                 https://dl.google.com/android/repository/emulator-linux_x64-16740729.zip
+# Google APIs Intel x86_64 Atom System Image r08, in Google's repository by 2026-11-01
+system-images;android-37.0;google_apis;x86_64 r08            /opt/android-sdk/system-images/android-37.0/google_apis/x86_64 2143899425  a266cfbcf4d6c769b166c0af4d68eff0e4f4a5e3  -                                                                 https://dl.google.com/android/repository/sys-img/google_apis/x86_64-37.0_r08.zip
+# Gradle 9.8.2, released 2026-10-19; the SHA-256 of its GitHub release asset
+-                                             9.8.2          /opt/gradle                                              151620138   -                                         21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607  https://github.com/gradle/gradle-distributions/releases/download/v9.8.2/gradle-9.8.2-bin.zip
+# the Kotlin compiler 2.4.21, released 2026-10-08; the SHA-256 of JetBrains' kotlin-compiler-2.4.21.zip.sha256
+-                                             2.4.21         /opt/kotlinc                                             89733618    -                                         7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd  https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip

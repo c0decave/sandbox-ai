@@ -137,7 +137,7 @@ def test_a_right_click_on_the_canvas_opens_its_menu_and_moves_nothing(page, qapp
     assert len(page.menus) == 1
     menu = page.menus[0]
     assert texts(menu) == ["Add a part here", "Paste", "Select all", "Fit the board", "Zoom 100 %", "Arrange",
-                           "Save as preset…", "Export…", "Import…", "Discard the changes not applied", "Undo", "Redo",
+                           "Save as preset…", "Export…", "Import…", "Import a session with its state…", "Discard the changes not applied", "Undo", "Redo",
                            "What is this?"]
     assert not action(menu, "Undo").isEnabled()
     parts = action(menu, "Add a part here").menu()

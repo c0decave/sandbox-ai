@@ -46,6 +46,8 @@
           named in FAKE_PODMAN_IMAGE_IN_USE (comma-separated): "image is in use by a container", exit status 2.
   tmux    never a real server: every call fails (and is logged).
   ssh     every host is unreachable (exit status 255, "No route to host"); `ssh -G` answers. Logged to FAKE_SSH_LOG.
+          Host.route_ssh(TARGET, OTHER): TARGET reaches the other user OTHER instead (its sandbox-ai, with the
+          standard input given: an archive streamed to `session import -`).
   npm     `npm view PACKAGE version` answers 2.0.0 (the agents built at their newest release).
   sshfs, fusermount3 (Host.add_sshfs(): not on PATH otherwise): real FUSE is not there. `sshfs TARGET:PATH POINT
           -o ...` logs its arguments (and whether its standard input was a terminal) to FAKE_SSHFS_LOG, writes
@@ -688,8 +690,23 @@ exit 1
 SSH = r'''#!/bin/sh
 echo "ssh $*" >> "${FAKE_SSH_LOG:-/dev/null}"
 for a in "$@"; do [ "$a" = -G ] && { printf 'hostname ct1\nuser user\nport 22\n'; exit 0; }; done
+[ -n "${FAKE_SSH_ROUTES:-}" ] && exec "$FAKE_SSH_PYTHON" "$(dirname "$0")/fake_ssh_route.py" "$@"
 echo "ssh: connect to host ct1 port 22: No route to host" >&2
 exit 255
+'''
+
+# ssh to a host routed by Host.route_ssh(): the remote command runs as that other Host (its HOME, PATH, fakes) with
+# this standard input (an archive streamed to `session import -`); a host not routed is unreachable.
+SSH_ROUTE = r'''import json, os, subprocess, sys
+args = sys.argv[1:]
+routes = json.loads(open(os.environ["FAKE_SSH_ROUTES"]).read())
+target = args[args.index("--") + 1] if "--" in args else None
+if target not in routes or "-O" in args or len(args) <= args.index("--") + 2:
+    print(f"ssh: connect to host {target} port 22: No route to host", file=sys.stderr)
+    sys.exit(255)
+route = routes[target]
+done = subprocess.run(["/bin/sh", "-c", args[args.index("--") + 2]], env=route["env"], cwd=route["cwd"])
+sys.exit(done.returncode)
 '''
 
 NPM = '''#!/bin/sh
@@ -1092,6 +1109,22 @@ class Host:
         if self.shimmed:
             self.env["FAKE_RESOLVE_EUID"] = "1"
         return log
+
+    def route_ssh(self, target, other):
+        """ssh from this user to TARGET (USER@HOST as `sandbox-ai hosts add` was given it) reaches OTHER (a Host): its
+        sandbox-ai (this checkout, as ~/.local/bin/sandbox-ai there, where a non-interactive login finds it) runs as
+        that user. SSH multiplexing is off (no shared connection to fake)."""
+        routes_file = self.directory / "ssh-routes.json"
+        routes = json.loads(routes_file.read_text()) if routes_file.exists() else {}
+        (other.home / ".local/bin").mkdir(parents=True, exist_ok=True)
+        link = other.home / ".local/bin/sandbox-ai"
+        if not link.exists():
+            link.symlink_to(ROOT / "sandbox-ai")
+        routes[target] = {"env": other.env, "cwd": str(other.workspace)}
+        routes_file.write_text(json.dumps(routes))
+        (self.bin / "fake_ssh_route.py").write_text(SSH_ROUTE)
+        self.env.update(FAKE_SSH_ROUTES=str(routes_file), FAKE_SSH_PYTHON=sys.executable,
+                        SANDBOX_AI_SSH_MULTIPLEX="0")
 
     def command(self, *args):
         return [str(ROOT / "sandbox-ai"), *map(str, args)]

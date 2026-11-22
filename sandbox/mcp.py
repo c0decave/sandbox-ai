@@ -111,7 +111,10 @@ READY_TIMEOUT = 120
 KEYS = {"command", "options", "agent", "workspace", "description", "tool_timeout"}
 IMAGE_KEYS = {"image", "network", "mounts", "env", "memory", "cpus", "pids", "tmp", "description", "source", "vpn",
               "signed_by", "rootfs", "catalog", "env_optional", "env_values", "env_secrets", "tool_timeout", "pid1",
-              "hosts", "allow_private", "allow_tcp"}
+              "hosts", "allow_private", "allow_tcp", "built"}
+# "built": an image built on this host from a catalog entry's reviewed source (mcp add --build: mcp_build.py), never
+# signed - {"commit", "repository", "path", "archive_sha256", "at"}; its "signed_by" is null.
+BUILT_KEYS = ("commit", "repository", "path", "archive_sha256", "at")
 # An image server's network (mcp_egress.py: what each one reaches, enforced in its network namespace):
 #   none       nothing
 #   full       the internet, never your local network nor this host (private, carrier-grade NAT, loopback,
@@ -278,6 +281,8 @@ def validated_image(definition, where):
             raise ValueError(f"{where}: {key} must be text")
     if "tool_timeout" in definition:
         checked_tool_timeout(definition["tool_timeout"], where)
+    if "built" in definition:
+        checked_built(definition, where)
     if "pid1" in definition:
         checked_pid1(definition["pid1"], where)
     if "vpn" in definition:
@@ -286,6 +291,21 @@ def validated_image(definition, where):
         if definition.get("network", "none") == "none":
             raise ValueError(f"{where}: a VPN needs network full (without network nothing would use it)")
     return definition
+
+
+def checked_built(definition, where):
+    """DEFINITION's "built" (an image built here: mcp add --build) checked: its commit, repository, path and the source
+    archive's hash, and never signed ("signed_by" null): nothing built here is presented as signed."""
+    built = definition["built"]
+    if not isinstance(built, dict) or set(built) - set(BUILT_KEYS) or \
+            not all(isinstance(built.get(key), str) and built[key].isprintable() and len(built[key]) <= 1024
+                    for key in BUILT_KEYS) or not re.fullmatch(r"[0-9a-f]{40}", built["commit"]) or \
+            not re.fullmatch(r"[0-9a-f]{64}", built["archive_sha256"]):
+        raise ValueError(f"{where}: built is {{commit (40 hex), repository, path, archive_sha256 (64 hex), at}}")
+    if definition.get("signed_by") is not None:
+        raise ValueError(f"{where}: an image built here is never signed (signed_by must be null)")
+    if "image" not in definition or "rootfs" in definition:
+        raise ValueError(f"{where}: a server built here is its image, for Podman")
 
 
 _egress = None
@@ -1475,19 +1495,24 @@ def read_sidecar(source, signature, fetch=None):
             {name: entry for name, entry in limits.items() if isinstance(entry, dict)}, None)
 
 
-LOCAL_CATALOGS_VARIABLE = "SANDBOX_AI_LOCAL_CATALOGS"  # =1: the copies in sandbox-ai's own tree (development)
+LOCAL_CATALOGS_VARIABLE = "SANDBOX_AI_LOCAL_CATALOGS"  # =1: the copies in sandbox-ai's own tree (development);
+# =FOLDER (absolute): the checkouts FOLDER/sandbox-ai-mcp and FOLDER/axross-mcp-hub (a catalog's own git checkout, which
+# mcp add --build builds a pending entry from, at its commit)
 
 
 def default_catalogs(root=None, environ=None):
     """CATALOGS: the published, signed catalogs. The copy in sandbox-ai's own tree (projects/NAME/catalog.json, a
-    development checkout's) only with SANDBOX_AI_LOCAL_CATALOGS=1: an installation carried such a copy, old and
-    unsigned, and took it before the published one - every entry was "not signed by a trusted key"."""
+    development checkout's) only with SANDBOX_AI_LOCAL_CATALOGS=1 (=FOLDER: FOLDER/NAME/catalog.json, the catalogs'
+    own checkouts): an installation carried such a copy, old and unsigned, and took it before the published one -
+    every entry was "not signed by a trusted key". A copy's signature is checked as the published one's."""
     environ = os.environ if environ is None else environ
     root = Path(root) if root else Path(__file__).resolve().parent.parent
-    local_wanted = environ.get(LOCAL_CATALOGS_VARIABLE) == "1"
+    wanted = environ.get(LOCAL_CATALOGS_VARIABLE) or ""
+    local_wanted = wanted == "1" or os.path.isabs(wanted)
+    folder = Path(wanted) if os.path.isabs(wanted) else root / "projects"
     chosen = []
     for prefix, url in CATALOGS:
-        local = root / "projects" / LOCAL_CATALOGS.get(prefix, "") / "catalog.json"
+        local = folder / LOCAL_CATALOGS.get(prefix, "") / "catalog.json"
         chosen.append((prefix, str(local) if local_wanted and prefix in LOCAL_CATALOGS and local.is_file() else url))
     return chosen
 
@@ -1879,7 +1904,9 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
     ALLOW_PRIVATE, ALLOW_TCP: parts of your network opened to it (--allow-private, --allow-tcp)."""
     digest, image = entry.get("digest"), entry.get("image")
     if entry.get("kind") != "oci" or not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-        raise ValueError(f"{entry.get('name')}: the catalog has no digest for it yet (not published)")
+        raise ValueError(f"{entry.get('name')}: the catalog has no digest for it yet (not published): sandbox-ai mcp "
+                         f"add {entry.get('name')} --build builds it here from its reviewed source and adds it "
+                         "unsigned (asked first)")
     wanted = entry.get("network", "none")
     if network is None:
         network = wanted
@@ -2009,11 +2036,14 @@ def check_pull_room(local, entry):
 
 def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=None, catalogs=None,
         pull=True, fetch=None, out=print, vpn=None, unsigned=False, backend=None, cpus=None, tmp=None,
-        allow_private=(), allow_tcp=()):
+        allow_private=(), allow_tcp=(), built=None):
     """sandbox-ai mcp add: write the definition of catalog entry NAME into mcp.json, once its catalog's signature
     verified (or UNSIGNED): for Podman its image pulled by digest, for Bubblewrap its rootfs fetched, checked and
     unpacked (BACKEND podman, bwrap or both; default: Podman when it is there or the entry has no rootfs). The limits
-    given, else those the entry recommends; a writable folder that is not there yet is created (once all is checked)."""
+    given, else those the entry recommends; a writable folder that is not there yet is created (once all is checked).
+    BUILT ({"image", "digest", "record"}: mcp_build.build_and_add, `mcp add --build`): the entry has no image of its
+    own, this one was built here from its source - added unsigned ("signed_by": null, "built": RECORD), whatever its
+    catalog's signature says of the entry; nothing is pulled."""
     LOG.info("mcp", f"add asked: {name}" + (f" as {local}" if local else "") + (f", backend {backend}" if backend else ""))
     entries, problems = catalog_entries(catalogs, fetch)
     for problem in problems:
@@ -2022,13 +2052,23 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     entry = find_entry(entries, name)
     unsigned_note = []
     signed = check_signature(entry, unsigned, unsigned_note.append)
+    if built is not None:
+        # Built here (its catalog lists it, unpublished): the image is nobody's signed one, the note says so.
+        entry = {**entry, "kind": "oci", "image": built["image"], "digest": built["digest"]}
+        entry.pop("rootfs", None)
+        signed, backend, pull = {"signed_by": None}, "podman", False
+        unsigned_note = [f"sandbox-ai mcp: {entry.get('name')}: built here from {built['record']['repository']} at "
+                         f"{built['record']['commit'][:12]}, not signed (no signature covers this image)"]
     backend = backend or ("podman" if shutil.which("podman") or not entry.get("rootfs") else "bwrap")
     if backend not in ("podman", "bwrap", "both"):
         raise ValueError("--backend is podman, bwrap or both")
     definition = {**definition_from_entry(entry, mounts, env, network, memory, pids, vpn, cpus=cpus, tmp=tmp,
                                           allow_private=allow_private, allow_tcp=allow_tcp),
                   **signed,
-                  **({"catalog": entry["_catalog"]} if isinstance(entry.get("_catalog"), str) else {})}
+                  **({"catalog": entry["_catalog"]} if isinstance(entry.get("_catalog"), str) else {}),
+                  **({"built": dict(built["record"])} if built is not None else {})}
+    if built is not None:
+        definition = validated_image(definition, entry["name"])
     if backend in ("bwrap", "both"):
         definition = validated_image({**definition, "rootfs": entry_rootfs(entry, fetch)}, entry["name"])
     if backend == "bwrap":
@@ -2056,6 +2096,8 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
         out(line)
     form = " and ".join(([definition["image"]] if "image" in definition else []) +
                         ([f"rootfs {definition['rootfs']['sha256'][:12]} (Bubblewrap)"] if "rootfs" in definition else []))
+    if built is not None:
+        form += ", built here, not signed"
     LOG.info("mcp", f"{local} added ({form}; catalog {definition.get('catalog') or 'none'})")
     out(f"sandbox-ai mcp: {local} added ({form}); use it with --mcp {local}")
     return definition
@@ -2357,7 +2399,8 @@ def catalog_label(source):
 def origin(name, definition):
     """Where server NAME's DEFINITION comes from, for mcp list: {"catalog": a name for people, "catalog_source":
     the catalog's URL or path (None if not from a catalog or not known), "signed": True (its catalog's signature
-    verified), False (added --unsigned), None (not from a catalog, or not known)}. `mcp add` records the catalog
+    verified), False (added --unsigned, or built here), None (not from a catalog, or not known), and for an image built
+    here (mcp add --build) "built": {commit, repository, path, archive_sha256, at}}. `mcp add` records the catalog
     since 0.1.78; an image server added before says so."""
     if name in BUILTIN and definition == BUILTIN[name]:
         return {"catalog": "built-in", "catalog_source": None, "signed": None}
@@ -2365,10 +2408,12 @@ def origin(name, definition):
         return {"catalog": "team" if name.startswith("team-") else "own (mcp.json)", "catalog_source": None,
                 "signed": None}
     signed = (definition["signed_by"] is not None) if "signed_by" in definition else None
+    # Built here (mcp add --build): never signed, whatever is said of it - and said so wherever it is shown.
+    built = {"built": dict(definition["built"]), "signed": False} if isinstance(definition.get("built"), dict) else {}
     if isinstance(definition.get("catalog"), str):
         return {"catalog": catalog_label(definition["catalog"]), "catalog_source": definition["catalog"],
-                "signed": signed}
-    return {"catalog": "unknown (added before 0.1.78)", "catalog_source": None, "signed": signed}
+                "signed": signed, **built}
+    return {"catalog": "unknown (added before 0.1.78)", "catalog_source": None, "signed": signed, **built}
 
 
 def config_file():
@@ -4610,6 +4655,39 @@ def copy_module():
     return _copy
 
 
+_build = None
+
+
+def build_module():
+    """mcp_build.py: mcp add --build (a catalog entry without a signed image, built here from its source), with this
+    module's names."""
+    global _build
+    if _build is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_mcp_build", HERE / "mcp_build.py")
+        with LOADING:
+            if _build is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                loaded.bind(globals())
+                _build = loaded
+    return _build
+
+
+def build_question(text, yes=False):
+    """The human's answer to TEXT (mcp add --build: what is built, from which commit, unsigned): yes with YES
+    (--yes: asked already, by the app or the web interface), else asked on a terminal; without one, refused."""
+    if yes:
+        return True
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        raise ValueError("nothing is built without a yes: run it on a terminal, or look at what would be built "
+                         "(--build-plan) and pass --yes with its --commit and --source-sha256")
+    print(f"sandbox-ai mcp: {launcher().printable(text)}", file=sys.stderr)
+    try:
+        return input("sandbox-ai mcp: build it? [y/N] ").strip().lower() in ("y", "yes", "j", "ja")
+    except EOFError:
+        return False
+
+
 def help_style(prog):
     """The layout of this command's help, the one of every command with subcommands (helpstyle.py)."""
     loaded = sys.modules.get("sandbox_ai_helpstyle")
@@ -4633,6 +4711,36 @@ def pins_module():
             spec.loader.exec_module(loaded)
             PINS["mcp_pins"] = loaded
         return PINS["mcp_pins"]
+
+
+def build_cli(a, sources):
+    """mcp add NAME --build | --build-plan (mcp_build.py)."""
+    if a.commit is not None and not re.fullmatch(r"[0-9a-f]{40}", a.commit):
+        raise ValueError("--commit takes the full commit (40 hex digits)")
+    if a.source_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", a.source_sha256):
+        raise ValueError("--source-sha256 takes 64 hex digits")
+    if a.no_pull:
+        raise ValueError("--no-pull is for an image that is pulled; --build builds one")
+    builder = build_module()
+    options = {"local": a.local, "mounts": a.mount, "env": a.env, "network": a.network, "memory": a.memory,
+               "pids": a.pids, "vpn": a.vpn, "backend": a.backend, "cpus": a.cpus, "tmp": a.tmp,
+               "allow_private": a.allow_private, "allow_tcp": a.allow_tcp}
+    if a.build_plan:
+        found = builder.build_and_add(a.name, options, sources, unsigned=a.unsigned, commit=a.commit,
+                                      source_sha256=a.source_sha256, plan_only=True,
+                                      out=lambda text: print(text, file=sys.stderr))
+        print(json.dumps(found, indent=2))
+        return 0
+    try:
+        builder.build_and_add(a.name, options, sources, unsigned=a.unsigned, commit=a.commit,
+                              source_sha256=a.source_sha256, confirm=lambda text: build_question(text, a.yes))
+    except builder.BuildFailed as exc:
+        # The log's end first, then what failed and where the whole log is: the last line (the app shows it).
+        if exc.tail:
+            print("sandbox-ai mcp: the log's end:\n" + launcher().printable(exc.tail), file=sys.stderr)
+        print(f"sandbox-ai mcp: {exc.summary}" + (f"; the whole log: {exc.log}" if exc.log else ""), file=sys.stderr)
+        return 1
+    return 0
 
 
 def cli(argv):
@@ -4781,6 +4889,22 @@ def cli(argv):
                             "signature that does not verify is refused anyway")
     added.add_argument("-v", "--vpn", metavar="PROFILE",
                        help="Its network only through this VPN profile, with a kill switch (a server with network)")
+    added.add_argument("-B", "--build", action="store_true",
+                       help="An entry with no signed image yet (not published): build it here with Podman from its "
+                            "reviewed source - the catalog's repository at the catalog's exact commit, servers/NAME, "
+                            "as its CI builds it - check it with its smoke test, and add it UNSIGNED (built here, not "
+                            "signed). Asked first, naming the commit and the source archive's SHA-256")
+    added.add_argument("--build-plan", action="store_true",
+                       help="What --build would build (catalog, repository, commit, the source archive's SHA-256, the "
+                            "question) as JSON; nothing is built")
+    added.add_argument("--commit", metavar="SHA",
+                       help="With --build: only this commit (the one asked about); refused when the catalog is at "
+                            "another one now")
+    added.add_argument("--source-sha256", metavar="HEX",
+                       help="With --build: only a source archive of this SHA-256 (the one asked about)")
+    added.add_argument("-y", "--yes", action="store_true",
+                       help="With --build: build without the question (asked already: give --commit and "
+                            "--source-sha256 of what was asked)")
     exporting = commands.add_parser("export", help="what a server of yours is, for another host (no secret's value)",
                                     description="What the server NAME of your mcp.json is, as another host needs to "
                                                 "know it (mcp import, mcp copy): a catalog server's entry and the "
@@ -4889,7 +5013,12 @@ def cli(argv):
             print(f"{shown(prefix)}:{shown(str(entry.get('name')))}  [{shown(network)}]  "
                   f"{shown(str(entry.get('title', '')))}{state}")
         return 0
+    if a.command == "add" and (a.build or a.build_plan):
+        return build_cli(a, sources)
     if a.command == "add":
+        for option, given in (("--commit", a.commit), ("--source-sha256", a.source_sha256), ("--yes", a.yes)):
+            if given:
+                raise ValueError(f"{option} is for --build")
         try:
             add(a.name, a.local, a.mount, a.env, a.network, a.memory, a.pids, sources, pull=not a.no_pull, vpn=a.vpn,
                 unsigned=a.unsigned, backend=a.backend, cpus=a.cpus, tmp=a.tmp, allow_private=a.allow_private,
@@ -4926,7 +5055,8 @@ def cli(argv):
             rows.append([e["name"], e["status"] + (" (!)" if e["last_problem"] else ""),
                          limits_text(e["limits"]) + (" (below its catalog's)" if e["below_recommended"] else ""),
                          printable(", ".join(e["serves"]) or "-"),
-                         printable(e["catalog"] + {True: ", signed", False: ", unsigned", None: ""}[e["signed"]]),
+                         printable(e["catalog"] + (", built here, not signed" if e.get("built") else
+                                                   {True: ", signed", False: ", unsigned", None: ""}[e["signed"]])),
                          printable(e["command"])])
             if e["below_recommended"]:
                 notes.append(f"{e['name']}: below the limits its catalog recommends ({limits_text(e['below_recommended'])})"

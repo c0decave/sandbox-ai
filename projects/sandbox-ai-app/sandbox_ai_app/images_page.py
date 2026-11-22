@@ -39,7 +39,8 @@ KINDS = ("apt", "npm", "pip")
 LOCAL = "local"
 PIN_EXAMPLE = "2.1.0"  # the same in every language
 UV_EXAMPLE = "0.9.5"
-MEDIA = "media"  # the recipe of sandbox-ai images recipe offered here (Tor needs none: its container carries it)
+MEDIA = "media"  # the recipes of sandbox-ai images recipe offered here (Tor needs none: its container carries it)
+ANDROID, ANDROID_DEV = "android", "android-dev"  # (android-dev: the image of the preset android-development)
 INSTRUCTIONS = ("ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE", "FROM", "HEALTHCHECK", "LABEL",
                 "MAINTAINER", "ONBUILD", "RUN", "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR")
 
@@ -459,14 +460,19 @@ class BuildDialog(QDialog):
 
 
 class RecipeDialog(QDialog):
-    """`sandbox-ai images recipe media --from AGENT [--as NAME]`: a variant with a ready extension."""
+    """`sandbox-ai images recipe RECIPE --from AGENT [--as NAME]` (media, android, android-dev): a variant with a
+    ready extension."""
 
     def __init__(self, parent, agents, agent):
         super().__init__(parent)
         self.setWindowTitle(tr("Variant from a recipe"))
         layout = QFormLayout(self)
         self.recipe = QComboBox()
-        for key, label in ((MEDIA, tr("media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)")),):
+        for key, label in ((MEDIA, tr("media: sound, video and speech (ffmpeg, PulseAudio, SoX, espeak-ng, Piper)")),
+                           (ANDROID, tr("android: Android debugging (adb, apktool, smali, jadx, Frida)")),
+                           (ANDROID_DEV, tr("android-dev: Android development (everything of android, the SDK for "
+                                            "API 37, 36 and 35, NDK, emulator, Gradle, Kotlin; about 4.1 GB; building "
+                                            "it accepts Google's Android SDK license)"))):
             self.recipe.addItem(label, key)
         self.agent = QComboBox()
         for name in agents:

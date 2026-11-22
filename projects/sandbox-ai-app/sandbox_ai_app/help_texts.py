@@ -970,8 +970,10 @@ AREA_TIPS = (
          "", "app-tours"),
     # Settings dialog: one per tab
     _tip("settings.appearance", ("Appearance", "Aussehen"),
-         ("Theme, fonts and language, the guide for new board parts, the guided tour and the intro.",
-          "Farbschema, Schriften und Sprache, der Guide für neue Teile des Boards, die geführte Tour und das Intro."),
+         ("Theme, fonts and language, the guide for new board parts, the guided tour and the intro (which of the four "
+          "plays).",
+          "Farbschema, Schriften und Sprache, der Guide für neue Teile des Boards, die geführte Tour und das Intro "
+          "(welches der vier spielt)."),
          ("Each field is saved when it changes; a new language applies at the next start. A font marked not installed "
           "is not downloaded: install it (the list says how) and start the app again.",
           "Jedes Feld wird gespeichert, wenn es sich ändert; eine neue Sprache gilt beim nächsten Start. Eine als nicht "
@@ -1349,6 +1351,9 @@ SETTING_TIPS = _terms(
      "markiert, erst nach Rückfrage geöffnet."),
     ("intro", "A short animation when the app starts; Esc skips it.",
      "Eine kurze Animation beim Start der App; Esc überspringt sie."),
+    ("intro_animation", "A different intro at each start (the four take turns, never the same twice in a row), or "
+     "always the one chosen.", "Bei jedem Start ein anderes Intro (die vier wechseln sich ab, nie zweimal dasselbe "
+     "hintereinander) oder immer das gewählte."),
     ("show_flags", "On: each option's field also shows its command-line option (--workspace, --allow-host…) and has "
      "it in its tooltip. Off: the field's name alone.",
      "An: das Feld jeder Option zeigt auch ihre Kommandozeilen-Option (--workspace, --allow-host…) und hat sie im "

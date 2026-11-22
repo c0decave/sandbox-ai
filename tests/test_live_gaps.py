@@ -178,7 +178,9 @@ def test_live_firejail_hides_the_proxy_and_control_folders(request, backend, tmp
     agent = answer(view.read_text(), "VIEW")
     shell = answer(started.python(PRIVATE_VIEW).stdout, "VIEW")
     for seen, who in ((agent, "the agent"), (shell, "sandbox-ai shell")):
-        assert seen["/sandbox/proxy"] in HIDDEN, (who, seen)  # there (the proxy runs), and blacklisted
+        # there (the proxy runs: its folder holds proxy.json), and blacklisted: unreachable, or Firejail's empty
+        # read-only stand-in (root's, mode 0400), which the agent - root in the sandbox - may list
+        assert hidden(seen, "/sandbox/proxy") and seen["/sandbox/proxy"] != "ENOENT", (who, seen)
         assert hidden(seen, "/sandbox/control"), (who, seen)
         assert hidden(seen, "/sandbox/log") and hidden(seen, "/run/sandbox-proxy"), (who, seen)
         assert seen["/sandbox/proxy/proxy.json"] != "readable", (who, seen)
@@ -350,11 +352,12 @@ import os, pathlib
 home = pathlib.Path.home()
 for index in range(10500):
     (home / f"lc-{index:05d}").touch()
-(home / "elsewhere" / "gh").mkdir(parents=True, exist_ok=True)
-(home / "elsewhere" / "gh" / "hosts.yml").write_text("FIXTURE-GH-LOGIN\n")
+(home / "elsewhere" / "glab").mkdir(parents=True, exist_ok=True)
+(home / "elsewhere" / "glab" / "config.yml").write_text("FIXTURE-GLAB-LOGIN\n")
 (home / ".config").mkdir(exist_ok=True)
-if not os.path.lexists(home / ".config" / "gh"):
-    os.symlink(home / "elsewhere" / "gh", home / ".config" / "gh")
+if not os.path.lexists(home / ".config" / "glab-cli"):
+    os.symlink(home / "elsewhere" / "glab", home / ".config" / "glab-cli")
+print("LINKED", os.path.islink(home / ".config" / "glab-cli"))
 (home / ".codex").mkdir(exist_ok=True)
 (home / ".codex" / "auth.json").write_text("FIXTURE-CODEX-LOGIN\n")
 print("MADE", home)
@@ -362,26 +365,26 @@ print("MADE", home)
 
 
 def test_live_untrusted_with_a_crowded_and_linked_home_in_a_sandbox(request, backend, tmp_path, sessions):
-    """In a real sandbox: a HOME of more than 10000 entries, ~/.config/gh a link to ~/elsewhere/gh, ~/.codex with a
-    made-up login. A command run with --untrusted reads neither login (by the link nor where it really lies), runs
+    """In a real sandbox: a HOME of more than 10000 entries, ~/.config/glab-cli a link to ~/elsewhere/glab, ~/.codex
+    with a made-up login (not ~/.config/gh: a canary of the sandbox lies there, a folder, so no link could be made). A command run with --untrusted reads neither login (by the link nor where it really lies), runs
     at all (it once refused a crowded HOME), and does so in reasonable time; --check names the real folder."""
     started = session(sessions, request, backend, tmp_path, options=["--offline", *SLEEP])
     started.start()
     made = started.python(CROWD, timeout=300)
-    assert "MADE" in made.stdout, said(made)
+    assert "MADE" in made.stdout and "LINKED True" in made.stdout, said(made)
     check = started.shell("python3 -I /sandbox/runtime.py --untrusted --check")
     assert check.returncode == 0, said(check)
     plan = json.loads(check.stdout.strip().splitlines()[-1])
     home = made.stdout.split("MADE", 1)[1].strip().splitlines()[0]
     assert plan["landlock"] >= 1, plan
-    assert f"{home}/elsewhere/gh" in plan["protected"] and f"{home}/.config/gh" in plan["protected"], plan
+    assert f"{home}/elsewhere/glab" in plan["protected"] and f"{home}/.config/glab-cli" in plan["protected"], plan
     begin = time.monotonic()
-    confined = started.shell("python3 -I /sandbox/runtime.py --untrusted -- sh -c 'cat ~/.config/gh/hosts.yml; "
-                             "cat ~/elsewhere/gh/hosts.yml; cat ~/.codex/auth.json; echo CONFINED_DONE'", timeout=300)
+    confined = started.shell("python3 -I /sandbox/runtime.py --untrusted -- sh -c 'cat ~/.config/glab-cli/config.yml; "
+                             "cat ~/elsewhere/glab/config.yml; cat ~/.codex/auth.json; echo CONFINED_DONE'", timeout=300)
     spent = time.monotonic() - begin
     text = confined.stdout + confined.stderr
     assert "CONFINED_DONE" in confined.stdout, said(confined)
-    assert "FIXTURE-GH-LOGIN" not in text and "FIXTURE-CODEX-LOGIN" not in text, said(confined)
+    assert "FIXTURE-GLAB-LOGIN" not in text and "FIXTURE-CODEX-LOGIN" not in text, said(confined)
     assert spent < 120, f"--untrusted took {spent:.0f} s with a crowded HOME"
     print(f"--untrusted with a crowded HOME: {spent:.1f} s; unreadable: {plan.get('unreadable')}")
 
@@ -474,8 +477,7 @@ def test_live_plugins_attach_enables_a_plugin_in_a_running_claude(request, backe
         assert done.returncode == 0, (step, said(done))
     fetched = sai(env, "plugins", "claude", "--marketplaces-only", timeout=900)
     assert fetched.returncode == 0, said(fetched)
-    store = Path(env["XDG_DATA_HOME"]) / "sandbox-ai" / "plugins" / "claude"
-    (store / "cache").mkdir(mode=0o700, parents=True, exist_ok=True)
+    # (no plugin installed yet, so the store has no cache folder: the start makes it, else attach could not work)
     started = session(sessions, request, backend, tmp_path, agent="claude", env=env,
                       options=["--offline", "--kit", "lcplugins", *SLEEP])
     started.start()
@@ -557,7 +559,8 @@ def test_live_remote_mcp_on_a_real_host(tmp_path):
     host = os.environ.get("SAI_LIVE_HOST")
     if not host:
         pytest.skip("give scripts/live_check.sh --host NAME")
-    env = environment(tmp_path)
+    # Your HOME: the host's key (its identity, ~/.ssh/...) lies there, and it is never copied
+    env = environment(tmp_path, HOME=os.environ.get("SAI_LIVE_REAL_HOME") or os.path.expanduser("~"))
     config = Path(env["XDG_CONFIG_HOME"]) / "sandbox-ai"
     config.mkdir(mode=0o700, parents=True, exist_ok=True)
     for name in ("hosts.json", "known_hosts"):
@@ -598,9 +601,30 @@ ONE_SHOT = {"claude": lambda prompt: ["-p", prompt],
             "opencode": lambda prompt: ["run", prompt]}
 
 
+# Models these runs loaded on the server (not loaded before): {model: (server, environment)}. LM Studio refuses a
+# large model while another is loaded ("insufficient system resources": the live check 2026-11-21, the 122b after
+# the 35b), so the one loaded here is unloaded before the next model and at the end - never one that was loaded
+# before (someone else's).
+LOADED_HERE = {}
+
+
+def unload_loaded_here(keep=None):
+    for model in [name for name in LOADED_HERE if name != keep]:
+        server, env = LOADED_HERE.pop(model)
+        done = sai(env, "llm", "unload", server, model, timeout=300)
+        print(f"{server}: unloaded {model}" if done.returncode == 0 else f"{server}: {model} not unloaded: "
+              f"{said(done)}")
+
+
+@pytest.fixture(scope="module")
+def models_unloaded_after():
+    yield
+    unload_loaded_here()
+
+
 @pytest.mark.parametrize("agent", list(ONE_SHOT))
 @pytest.mark.parametrize("model", MODELS)
-def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model):
+def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model, models_unloaded_after):
     """AGENT with --llm SERVER:MODEL (SAI_LIVE_LLM_ENDPOINT: the server's entry, without secrets) and nothing else
     open: it writes live.txt with a nonce through its own tool and replies with it."""
     path = os.environ.get("SAI_LIVE_LLM_ENDPOINT")
@@ -618,18 +642,33 @@ def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model):
     LG.write_private(config / "llm.json", json.dumps({"version": 1, "endpoints": {entry["name"]: record}}) + "\n")
     offered = sai(env, "llm", "models", entry["name"], "--json", timeout=120)
     assert offered.returncode == 0, said(offered)
-    names = {m.get("name") or m.get("key") or m.get("id") for m in json.loads(offered.stdout) if isinstance(m, dict)}
+    listed = [m for m in json.loads(offered.stdout) if isinstance(m, dict)]
+    names = {m.get("name") or m.get("key") or m.get("id") for m in listed}
     if model not in names:
         pytest.skip(f"{entry['name']} does not offer {model}")
+    unload_loaded_here(keep=model)
+    if model not in LOADED_HERE and not any((m.get("name") or m.get("key") or m.get("id")) == model and m.get("loaded")
+                                            for m in listed):
+        LOADED_HERE[model] = (entry["name"], env)
     work = tmp_path / "w"
     work.mkdir()
     nonce = "LIVE" + secrets.token_hex(4).upper()
     prompt = (f"Create a file named live.txt in the current directory that contains exactly {nonce}. Then reply with "
               f"exactly {nonce} and nothing else.")
     begin = time.monotonic()
-    stdout, stderr = once(request, backend, agent, work,
-                          ["--no-auth", "--no-provider-defaults", "--dangerously-skip-permissions", "--llm",
-                           f"{entry['name']}:{model}"], ONE_SHOT[agent](prompt), env, timeout=1800)
+    try:
+        stdout, stderr = once(request, backend, agent, work,
+                              ["--no-auth", "--no-provider-defaults", "--dangerously-skip-permissions", "--llm",
+                               f"{entry['name']}:{model}"], ONE_SHOT[agent](prompt), env, timeout=1800)
+    except AssertionError as failed:
+        # Live check 2026-11-22: LM Studio refused to load the 122b model ("Model loading was stopped due to
+        # insufficient system resources") - the server's memory, not the sandbox: said as such, not as a failure.
+        text = str(failed)
+        if "insufficient system resources" in text or f"LM Studio did not load {model}" in text:
+            pytest.skip(f"{entry['name']} could not load {model} (its server's resources): "
+                        + next((line.strip() for line in text.splitlines()
+                                if "insufficient system resources" in line or "did not load" in line), "")[:300])
+        raise
     spent = time.monotonic() - begin
     print(f"{agent} x {model}: {spent:.0f} s")
     written = (work / "live.txt").read_text().strip() if (work / "live.txt").is_file() else None

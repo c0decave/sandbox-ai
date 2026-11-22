@@ -474,7 +474,7 @@ class Sessions:
 ERROR_CODES = ("no-host", "confirm-needed", "bad-path", "bad-name", "host-unreachable", "timeout", "command-failed",
                "unknown-preset-value", "no-preset", "login-needed", "page-outdated", "too-many-logins", "busy",
                "changed-meanwhile", "nothing-checked", "host-too-old", "mcp-unsigned-catalog",
-               "shared-wildcard")
+               "shared-wildcard", "mcp-unpublished", "mcp-build-asked", "mcp-unpublished-start")
 
 # What the page sends that only newer sandbox-ai versions know: (since, what, test of the argv). A host whose last
 # status (hosts list, kept; never asked for this) names an older version is told so before anything runs there
@@ -510,6 +510,8 @@ def with_beyond_the_trio(args):
 
 
 NEWER = (
+    ((0, 1, 196), "mcp add --build (an MCP server its catalog has no signed image of, built from its source)",
+     lambda a: a[:2] == ["mcp", "add"] and any(x in ("--build", "--build-plan") for x in a)),
     ((0, 1, 168), "net allow --allow-shared-wildcard (a wildcard below a shared service, after its confirmation)",
      lambda a: a[:2] == ["net", "allow"] and any(x.startswith("--allow-shared-wildcard=") for x in a)),
     ((0, 1, 98), "--with an agent beyond Claude Code, Codex and OpenCode", with_beyond_the_trio),
@@ -526,6 +528,9 @@ NEWER = (
     ((0, 1, 99), "sandbox-ai checkpoint", lambda a: a[:1] == ["checkpoint"]),
     ((0, 1, 99), "sandbox-ai session memory, files and export", lambda a: a[:1] == ["session"] and
      a[1:2] in (["memory"], ["files"], ["export"])),
+    ((0, 1, 193), "a session's state (session import, duplicate, export --with-workspace)",
+     lambda a: a[:2] in (["session", "import"], ["session", "duplicate"]) or (
+         a[:2] == ["session", "export"] and "--with-workspace" in a)),
     ((0, 1, 97), "sandbox-ai shell", lambda a: a[:1] == ["shell"]),
     ((0, 1, 96), "team start --vpn, --member-vpn and --allow-shared-openvpn", lambda a: any(
         x.startswith(("--vpn=", "--member-vpn=")) or x == "--allow-shared-openvpn" for x in team_start_words(a))),
@@ -829,6 +834,9 @@ def checkpoint_id(value):
     return value
 
 
+SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}")  # the launcher's SESSION_NAME (--session, --as)
+
+
 def start_name(value):
     if not (isinstance(value, str) and START_NAME.fullmatch(value)):
         raise Refused(400, "a start's name is 1-48 letters, digits, '_', '.' or '-'", code="bad-name",
@@ -995,7 +1003,8 @@ TEAM_DAMAGED_LINE = re.compile(r"(?P<name>[a-z0-9][a-z0-9_-]{0,19})\s+\(damaged\
 IMAGE_KINDS = ("apt", "npm", "pip")  # images extend --add-KIND / --remove-KIND
 IMAGE_PACKAGE = re.compile(r"[A-Za-z0-9@][A-Za-z0-9@/._+~=<>!*^:\[\],-]{0,200}")  # images.py checks each kind's own
 IMAGE_MODE = re.compile(r"0?[0-7]{3}")
-IMAGE_RECIPES = ("media",)  # images.RECIPES the web UI offers (the recipe tor is gone: its container carries Tor)
+IMAGE_RECIPES = ("media", "android", "android-dev")  # images.RECIPES the web UI offers (the recipe tor is gone:
+# its container carries Tor; android-dev: the preset android-development's image)
 FRAGMENT_LIMIT = 64 << 10  # images.FRAGMENT_LIMIT
 
 
@@ -1122,6 +1131,10 @@ NEEDS_CONFIRM = {
                       "files it kept (logins and keys are left out) - in a new file on that host",
     "session-export-secrets": "the archive then holds the start's logins, keys and secrets too: whoever has it can "
                               "log in as you with them, wherever it goes",
+    "session-grant-approvals": "the network approvals are granted again as options of that session: it reaches those "
+                               "destinations at every start",
+    "session-import": "the imported session's configuration gives the sandbox secrets or folders of this machine (as "
+                      "listed): they reach it at its first resume",
     "show-secret-file": "the file is marked as a login or key: its text is shown on this screen, where anyone who "
                         "sees it can read it",
     "board-import": "importing a bundle from elsewhere writes its parts here (MCP and LLM servers, kits, presets, "
@@ -1176,6 +1189,8 @@ NEEDS_CONFIRM = {
     "mcp-detach": "detaching an MCP server from a running start closes its relay there now: the agent's "
                   "connections to it end and its calls fail (its later starts go without it)",
     "mcp-unsigned": "an MCP server from a catalog no trusted key signed is taken without that check",
+    "mcp-build": "an MCP server its catalog has no signed image of is built on that host from its source at the commit "
+                 "and source archive shown, and added unsigned: nobody signed the image built",
     "mcp-writable-mount": "a writable mount lets the MCP server change that directory on the host",
     "mcp-lan": "network lan lets the MCP server reach your local network and that host, not only the internet",
     "git-login-add": "a Git login is used by the connection proxy of every sandbox that reaches that server",
@@ -1270,7 +1285,25 @@ def shared_risk(value):
 
 # An action asked by a question of its own beside another one of the same request (CONFIRM_KEYS: the key its yes is
 # sent as, else "confirm"): a wildcard below a shared service in a net allow, which the net-allow yes is not.
-CONFIRM_KEYS = {"shared-wildcard": "confirm_shared_wildcard"}
+CONFIRM_KEYS = {"shared-wildcard": "confirm_shared_wildcard", "mcp-build": "confirm_build"}
+
+
+MCP_BUILD_HINT = re.compile(r"`sandbox-ai mcp add (?P<name>[A-Za-z0-9_-]{1,32}) --build(?P<unsigned> --unsigned)?"
+                            r"(?P<mounts>(?: --mount [^`\s]+)*)` builds it here")
+
+
+def mcp_build_hints(text):
+    """[{"name", "unsigned", "mounts": [{target, host, mode}]}] of the servers a start's refusal TEXT names as built
+    with `mcp add NAME --build` (agent_sandbox.mcp_build_offers): the page offers each one's build."""
+    found = []
+    for match in MCP_BUILD_HINT.finditer(str(text)):
+        mounts = []
+        for value in match["mounts"].split(" --mount ")[1:]:
+            target, _, rest = value.partition("=")
+            host, _, mode = rest.partition(":")
+            mounts.append({"target": target, "host": host, "mode": mode or "ro"})
+        found.append({"name": match["name"], "unsigned": bool(match["unsigned"]), "mounts": mounts})
+    return found[:8]
 
 
 def confirmed(body, action, detail=None, code="confirm-needed", params=None):
@@ -1511,6 +1544,11 @@ class Api:
              self.memory_secret_file, ("show-secret-file",)),
             ("POST", H + r"/starts/(?P<name>[^/]+)/session-export", self.session_export,
              ("session-export", "session-export-secrets")),
+            # a session's state as a second session there (session duplicate), and an archive of session export
+            # taken as a session there (session import: checked first, then confirmed)
+            ("POST", H + r"/starts/(?P<name>[^/]+)/session-duplicate", self.session_duplicate,
+             ("session-export-secrets", "session-grant-approvals")),
+            ("POST", H + r"/session-import", self.session_import, ("session-import", "session-grant-approvals")),
             # the workspace checkpoints of a start (sandbox-ai checkpoint): listed, taken, compared, restored, deleted
             ("GET", H + r"/starts/(?P<name>[^/]+)/checkpoints", self.checkpoints, ()),
             ("POST", H + r"/starts/(?P<name>[^/]+)/checkpoints", self.take_checkpoint, ()),
@@ -1627,7 +1665,8 @@ class Api:
             ("POST", H + r"/projects/forget", self.project_forget, ("project-forget",)),
             # MCP servers (sandbox-ai mcp)
             ("GET", H + r"/mcp", self.mcp_list, ()),
-            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount", "mcp-replace", "mcp-lan")),
+            ("POST", H + r"/mcp", self.mcp_add, ("mcp-unsigned", "mcp-writable-mount", "mcp-replace", "mcp-lan",
+                                                 "mcp-build")),
             ("POST", H + r"/mcp-catalog", self.mcp_catalog, ()),
             # MCP servers of another host copied to this one (sandbox-ai mcp copy, run here: it reaches both)
             ("POST", H + r"/mcp-copy", self.mcp_copy, ("mcp-copy",)),
@@ -2123,7 +2162,18 @@ class Api:
         if action == "resume":
             options = self.resume_options(body, name)
             if options:
-                return self.done(params["host"], ["resume", *options, name], timeout=300)
+                try:
+                    return self.done(params["host"], ["resume", *options, name], timeout=300)
+                except Refused as exc:
+                    # A server its catalog has no signed image of (the launcher names `mcp add NAME --build`): the
+                    # page offers to build it there (asked), then resumes again.
+                    servers = mcp_build_hints(str(exc))
+                    if servers:
+                        raise Refused(exc.status, str(exc), code="mcp-unpublished-start",
+                                      params={"host": params["host"], "names": ", ".join(x["name"] for x in servers),
+                                              **{f"server{i}": json.dumps(x) for i, x in enumerate(servers)}}) \
+                            from None
+                    raise
         return self.done(params["host"], [action, name], timeout=180)
 
     @staticmethod
@@ -2345,14 +2395,66 @@ class Api:
         PATH on its host; what was left out is in the answer."""
         name = start_name(params["name"])
         path = clean_path(body.get("path"), "the archive")
-        include = body.get("include_secrets", False)
-        if not isinstance(include, bool):
-            raise Refused(400, "include_secrets is true or false")
+        include, files = flag(body, "include_secrets"), flag(body, "with_workspace")
         confirmed(body, "session-export-secrets" if include else "session-export",
                   f"export {name} to {path}" + (" with its logins and keys" if include else ""))
         return self.json_of(params["host"], ["session", "export", name, "--json",
-                                             *(["--include-secrets", "--yes"] if include else []), "--", path], 3600,
+                                             *(["--include-secrets", "--yes"] if include else []),
+                                             *(["--with-workspace"] if files else []), "--", path], 3600,
                             ok=(0,))
+
+    def session_duplicate(self, params, body):
+        """sandbox-ai session duplicate NAME NEW --json [--with-workspace] [--include-secrets] [--grant-approvals]
+        [--yes]: a second session of that host from the state of NAME (not started). Its logins and keys along are
+        confirmed (session-export-secrets), its network approvals granted again too (session-grant-approvals)."""
+        name = start_name(params["name"])
+        new = body.get("new")
+        if not (isinstance(new, str) and SESSION_NAME.fullmatch(new)):
+            raise Refused(400, "the new session's name is 1-40 letters, digits, '_', '.' or '-'", code="bad-name",
+                          params={"what": "session"})
+        include, grant, files = flag(body, "include_secrets"), flag(body, "grant_approvals"), flag(body, "with_workspace")
+        if include:
+            confirmed(body, "session-export-secrets", f"duplicate {name} as {new} with its logins and keys")
+        if grant:
+            confirmed(body, "session-grant-approvals", f"duplicate {name} as {new} with its network approvals")
+        return self.json_of(params["host"], ["session", "duplicate", name, new, "--json",
+                                             *(["--with-workspace"] if files else []),
+                                             *(["--include-secrets"] if include else []),
+                                             *(["--grant-approvals"] if grant else []),
+                                             *(["--yes"] if include or grant else [])], 7200, ok=(0,))
+
+    def session_import(self, params, body):
+        """sandbox-ai session import PATH --json [--as NAME] [--map=THERE=HERE]... [--check] [--replace]
+        [--no-workspace] [--grant-approvals] [--yes]: an archive of session export on that host (a path there) as a
+        session of it. With check: what it starts with and what it asks (nothing kept); else confirmed
+        (session-import: what it asks was shown by its check; session-grant-approvals with grant_approvals)."""
+        path = clean_path(body.get("path"), "the archive")
+        check, replace, grant, no_workspace = (flag(body, key) for key in ("check", "replace", "grant_approvals",
+                                                                            "no_workspace"))
+        name = body.get("as")
+        if name is not None and not (isinstance(name, str) and SESSION_NAME.fullmatch(name)):
+            raise Refused(400, "the session's name is 1-40 letters, digits, '_', '.' or '-'", code="bad-name",
+                          params={"what": "session"})
+        maps = body.get("map") or []
+        if not isinstance(maps, list) or len(maps) > 64:
+            raise Refused(400, "map is a list of [folder there, folder here] (64 at most)")
+        words = []
+        for pair in maps:
+            if not (isinstance(pair, list) and len(pair) == 2):
+                raise Refused(400, "map is a list of [folder there, folder here]")
+            there, here = clean_path(pair[0], "a folder there"), clean_path(pair[1], "its folder here")
+            if "=" in there:
+                raise Refused(400, "a folder with '=' in it cannot be mapped")
+            words.append(f"--map={there}={here}")
+        if not check:
+            confirmed(body, "session-import", f"import {path}" + (f" as {name}" if name else ""))
+            if grant:
+                confirmed(body, "session-grant-approvals", f"import {path} with its network approvals")
+        return self.json_of(params["host"], ["session", "import", "--json", *(["--as", name] if name else []), *words,
+                                             *(["--check"] if check else []), *(["--replace"] if replace else []),
+                                             *(["--no-workspace"] if no_workspace else []),
+                                             *(["--grant-approvals"] if grant and not check else []),
+                                             *([] if check else ["--yes"]), "--", path], 7200, ok=(0,))
 
     @staticmethod
     def gc_days(value):
@@ -4060,14 +4162,24 @@ class Api:
             args.append("--unsigned")
         if writable:
             confirmed(body, "mcp-writable-mount", ", ".join(writable))
+        build = flag(body, "build")
+        if build:
+            if flag(body, "no_pull"):
+                raise Refused(400, "no_pull is for an image that is pulled; build builds one")
+            args = [*args, *self.mcp_build_words(params["host"], args, entry, body)]
         if body.get("confirm") is not True:  # the name it gets: --as, else the entry's own (without its catalog)
             local = body.get("as") or entry.rsplit(":", 1)[-1]
             defined = self.json_of(params["host"], ["mcp", "list", "--json"], 60, ok=(0,))
             if any(isinstance(server, dict) and server.get("name") == local for server in defined or []):
                 confirmed(body, "mcp-replace", local)
-        status, out, err = self.run(params["host"], [*args, entry], 900)  # it pulls the image: that takes its time
+        # it pulls the image (or builds it): that takes its time
+        status, out, err = self.run(params["host"], [*args, entry], 7200 if build else 900)
         if status != 0:
             said = (err or out).strip()
+            if not build and "no digest for it yet (not published)" in said:
+                # no signed image yet (a pending entry): the page offers to build it from its source (build, asked)
+                raise Refused(502, f"sandbox-ai mcp on {params['host']}: {printable(said[-600:])}",
+                              code="mcp-unpublished", params={"host": params["host"], "entry": entry})
             if "--unsigned" not in args and MCP_UNSIGNED_HINT in said and "not signed by a trusted key" in said:
                 # refused only for its unsigned catalog: the page offers to add it anyway (mcp-unsigned)
                 source = MCP_UNSIGNED_SOURCE.search(said)
@@ -4077,6 +4189,34 @@ class Api:
                                       "catalog": source["catalog"] if source else ""})
             raise self.failed(params["host"], args, status, out, err)
         return {"output": printable(out.strip()[-4000:])}
+
+    def mcp_build_words(self, host, args, entry, body):
+        """The words `mcp add ARGS ENTRY` gets to build ENTRY from its source (mcp add --build) - once asked: without
+        the "commit" and "source_sha256" to build, what would be built is read on HOST (--build-plan: nothing built)
+        and refused with it (mcp-build-asked: the page asks, naming the commit, the source archive's SHA-256 and that
+        it is added unsigned); with them, exactly that is built (--yes) once confirmed ({"confirm_build": true})."""
+        commit, sha256 = body.get("commit"), body.get("source_sha256")
+        if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit) and isinstance(sha256, str) and \
+                re.fullmatch(r"[0-9a-f]{64}", sha256):
+            confirmed(body, "mcp-build", f"{entry} at the commit {commit} (source archive SHA-256 {sha256})")
+            return ["--build", f"--commit={commit}", f"--source-sha256={sha256}", "--yes"]
+        status, out, err = self.run(host, [*args, "--build-plan", entry], 900)
+        if status != 0:
+            raise self.failed(host, args, status, out, err)
+        try:
+            plan = json.loads(out)
+        except (ValueError, RecursionError):
+            plan = None
+        if not isinstance(plan, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(plan.get("commit"))) or \
+                not re.fullmatch(r"[0-9a-f]{64}", str(plan.get("archive_sha256"))):
+            raise Refused(502, f"sandbox-ai mcp add --build-plan on {host}: not a build plan")
+        facts = {key: printable(str(plan.get(key) or ""))[:300] for key in
+                 ("entry", "repository", "commit", "path", "archive_sha256", "catalog_label", "signature")}
+        raise Refused(400, f"{facts['entry']} on {host}: built from {facts['repository']} at the commit "
+                           f"{facts['commit']} ({facts['path']}, source archive SHA-256 {facts['archive_sha256']}) and "
+                           f"added unsigned: {NEEDS_CONFIRM['mcp-build']}: send {{\"confirm_build\": true}} with its "
+                           "commit and source_sha256", confirm="mcp-build", code="mcp-build-asked",
+                      params={"host": host, **facts})
 
     # logins and identities: the token is always a secret of that host, named, never a value here
     # phone notifications (sandbox-ai notify on that host): its channels, by secret names
@@ -4842,7 +4982,7 @@ class Api:
                                              *(["--empty"] if flag(body, "empty") else []), "--json"], 60, ok=(0,))
 
     def image_recipe(self, params, body):
-        """images recipe media --from AGENT [--as VARIANT]: a variant with a ready extension."""
+        """images recipe RECIPE --from AGENT [--as VARIANT] (one of IMAGE_RECIPES): a variant with a ready extension."""
         recipe, agent, variant = body.get("recipe"), body.get("from"), body.get("as")
         if recipe not in IMAGE_RECIPES or agent not in AGENTS:
             raise Refused(400, f"recipe is {' or '.join(IMAGE_RECIPES)}, from {', '.join(AGENTS)}")

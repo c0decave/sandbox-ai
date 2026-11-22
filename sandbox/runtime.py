@@ -3214,12 +3214,38 @@ def own_filter(profile, settings, nested=False, install=None, probe=None, machin
     return seccomp_account(policy, machine)
 
 
-def firejail_narrowing(help_text, nested=False, settings=None):
+# Where Firejail keeps its helper programs (its LIBDIR/firejail, bind-mounted at /run/firejail/lib in its sandbox):
+# Arch, Fedora and openSUSE, Debian and Ubuntu (multiarch), a build from source.
+FIREJAIL_LIB_DIRS = ("/usr/lib/firejail", "/usr/lib64/firejail", "/usr/lib/x86_64-linux-gnu/firejail",
+                     "/usr/lib/aarch64-linux-gnu/firejail", "/usr/lib/arm-linux-gnueabihf/firejail",
+                     "/usr/lib/riscv64-linux-gnu/firejail", "/usr/local/lib/firejail")
+
+
+def firejail_helpers_unusable(dirs=FIREJAIL_LIB_DIRS):
+    """Why Firejail cannot run its helper fseccomp here, or None. Firejail builds --protocol's and
+    --restrict-namespaces' filters with it and refuses a helper whose owner and group are both other than root as
+    this user namespace sees them (sbox.c: "... is not owned by root, refusing to execute"). With bwrap the host's
+    /usr belongs to the host's root, whom the sandbox's user namespace does not map (it shows as nobody): every
+    start with those options ended there. Plain --seccomp loads Firejail's prebuilt filter and needs no helper."""
+    for directory in dirs:
+        try:
+            found = os.stat(os.path.join(directory, "fseccomp"))
+        except OSError:
+            continue
+        if found.st_uid != 0 and found.st_gid != 0:
+            return (f"{directory}/fseccomp belongs to uid {found.st_uid}, gid {found.st_gid} in this user namespace "
+                    "(the host's root, not mapped here), and Firejail runs only root's helpers")
+        return None
+    return None
+
+
+def firejail_narrowing(help_text, nested=False, settings=None, helpers=None):
     """Firejail's own options for what the sandbox's filter refuses too - a second filter, of another maker: no new
     namespaces (--restrict-namespaces, Firejail 0.9.72) and sockets of the sandbox's families only (--protocol).
-    None with --nested-containers (its engines need both), none the installed Firejail does not have (HELP_TEXT)
-    and none when the human switched the filters off."""
-    if nested or (settings or {}).get("syscall_filter") == "off":
+    None with --nested-containers (its engines need both), none the installed Firejail does not have (HELP_TEXT),
+    none when the human switched the filters off, and none when Firejail cannot run the helper that builds them
+    (HELPERS: firejail_helpers_unusable's reason; bwrap) - sandbox-ai's own filter refuses both all the same."""
+    if nested or (settings or {}).get("syscall_filter") == "off" or helpers:
         return []
     return [option for option, marker in (("--restrict-namespaces", "--restrict-namespaces"),
                                           ("--protocol=unix,inet,inet6,netlink", "--protocol="))
@@ -3502,7 +3528,8 @@ def isolation_manifest(cfg, settings, container, firejail, proxy_pid=None, proc=
             "agent": "no capability in any set, no_new_privs, seccomp and mount and PID namespaces of its own: "
                      "checked by the guard inside Firejail (verify_inner), which starts nothing otherwise",
             "firejail": {"version": firejail_version(), "config_sealed": settings.get("sealed"),
-                         "options": [option for option in firejail if option.startswith("--")]},
+                         "options": [option for option in firejail if option.startswith("--")],
+                         "narrowing_left_out": firejail_helpers_unusable()},
             "filters": filters,
             "lsm": {"wanted": settings.get("lsm"), "label": process_account("self", proc).get("label")},
             "mounts": mount_table(text_of(proc / "self" / "mountinfo")),
@@ -5787,7 +5814,8 @@ def firejail_command(before, nested=False, shutdown=False):
     command = ["firejail", "--noprofile", "--quiet", "--caps.drop=all", "--nonewprivs",
                NESTED_SECCOMP if nested else "--seccomp"]
     # Firejail's own filters for new namespaces and socket families, beside sandbox-ai's (own_filter).
-    command += firejail_narrowing(help_text, nested, RUN_ISOLATION or isolation_settings({}))
+    command += firejail_narrowing(help_text, nested, RUN_ISOLATION or isolation_settings({}),
+                                  firejail_helpers_unusable())
     if sealed_firejail_folder():
         # Firejail's folder in the agent's HOME (seal_firejail_config): nothing in the sandbox reads or writes it.
         command.append(f"--blacklist={FIREJAIL_CONFIG}")
@@ -13677,14 +13705,39 @@ class ProxyServer:
         return line + b"\n"
 
 
+class CapHeader(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+
+class CapData(ctypes.Structure):
+    _fields_ = [("effective", ctypes.c_uint32), ("permitted", ctypes.c_uint32), ("inheritable", ctypes.c_uint32)]
+
+
+def clear_inheritable_capabilities(libc=None):
+    """Empty this process's inheritable and ambient capability sets (lowering them needs no privilege). setresuid()
+    to another user empties the effective, permitted and ambient sets but never the inheritable one, which a backend
+    may hand over full (bubblewrap 0.13: CapInh=000001ffffffffff) - proxy_confined refuses a proxy that kept it."""
+    libc = libc or ctypes.CDLL(None, use_errno=True)
+    libc.prctl(47, 4, 0, 0, 0)  # PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL (an old kernel without it has none)
+    header = CapHeader(0x20080522, 0)  # _LINUX_CAPABILITY_VERSION_3
+    data = (CapData * 2)()
+    if libc.capget(ctypes.byref(header), data) != 0:
+        raise OSError(ctypes.get_errno(), "capget failed while the inheritable capabilities were emptied")
+    for half in data:
+        half.inheritable = 0
+    if libc.capset(ctypes.byref(header), data) != 0:
+        raise OSError(ctypes.get_errno(), "the inheritable capabilities could not be emptied")
+
+
 def drop_to_proxy_user(settings=None):
     """No capabilities, groups or privilege gain from here on: the proxy reads what agents send. The bounding set
-    goes first (while this process may still drop it), then the groups and the user - which empties the other
-    sets -, its memory is no other process's to read, and it gets the filter of a sandbox's processes
+    goes first (while this process may still drop it), then the inheritable and ambient sets, the groups and the
+    user - which empties the effective and permitted sets -, its memory is no other process's to read, and it gets the filter of a sandbox's processes
     (proxy_confined; SETTINGS: isolation_settings, read while the session's configuration can still be read)."""
     libc = ctypes.CDLL(None, use_errno=True)
     for capability in range(64):  # PR_CAPBSET_DROP (not taken above the kernel's last capability, nor without
         libc.prctl(24, capability, 0, 0, 0)  # CAP_SETPCAP: proxy_confined looks at what is left)
+    clear_inheritable_capabilities()  # (setresuid below leaves the inheritable set as it is)
     os.setgroups([])
     os.setresgid(PROXY_UID, PROXY_UID, PROXY_UID)
     os.setresuid(PROXY_UID, PROXY_UID, PROXY_UID)

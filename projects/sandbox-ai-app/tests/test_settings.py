@@ -65,6 +65,33 @@ def stat_mode(path):
     return os.stat(path).st_mode & 0o777
 
 
+def test_the_intro_animation_is_chosen_in_appearance(qapp, env, monkeypatch):
+    """Settings > Appearance: "Intro animation" - a different one at each start (the default), or Classic, Glass
+    cube, Night city or Vault every time; its tooltip says so. An unknown value in the file shows (and is) the
+    rotation. The on/off switch for the intro stays."""
+    from sandbox_ai_app import help_texts, intro_choice as IC, terminal
+    from sandbox_ai_app.ui import MainWindow
+    monkeypatch.setattr(terminal, "available", lambda web=None: (False, "x"))
+    w = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=1000)
+    try:
+        dialog = w.settings_dialog()
+        combo = dialog.fields["intro_animation"]
+        assert [combo.itemData(k) for k in range(combo.count())] == list(IC.CHOICES)
+        assert [combo.itemText(k) for k in range(combo.count())] == [
+            "A different one at each start", "Classic", "Glass cube", "Night city", "Vault"]
+        assert combo.currentData() == IC.ROTATE and backend.SETTINGS["intro_animation"] == IC.ROTATE
+        assert dialog.tabs.widget(0).widget().isAncestorOf(combo), "on the Appearance tab"
+        assert "intro" in dialog.fields, "the switch stays"
+        assert IC.SETTING in help_texts.SETTING_TIPS and "different" in combo.toolTip()
+        combo.setCurrentIndex(combo.findData("vault"))
+        assert w.sai.settings()["intro_animation"] == "vault"
+        dialog.close()
+        w.sai.save_setting("intro_animation", "fireworks")
+        assert w.settings_dialog().fields["intro_animation"].currentData() == IC.ROTATE
+    finally:
+        w.shutdown()
+
+
 def test_what_needs_notifications_follows_their_switch(qapp, env):
     """With notifications off (the default) "Desktop notification for each new question" stayed ticked and could be
     changed, and nothing it says happened: the switch above it holds every popup back. It, how long they stay and how

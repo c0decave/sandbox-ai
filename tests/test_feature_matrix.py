@@ -2645,9 +2645,23 @@ def every_builtin_preset_starts(m, dev):
         if m.agent not in preset.get("agents", PRESETS.AGENTS):
             m.refused("--preset", preset["id"], match=f"preset {preset['id']} is for")
             continue
+        for variant in (value for value, _ in PRESETS.option_values(
+                preset, {n: str(v["default"]) for n, v in preset.get("values", {}).items() if "default" in v},
+                "--image-variant")):
+            # a variant the user made once (sandbox-ai images recipe NAME --from AGENT): android-development's
+            # android-dev; the dry run checks its recipe, not a built image
+            recipe = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sandbox-ai" / "images" / variant
+            recipe.mkdir(parents=True, exist_ok=True)
+            (recipe / "image.json").write_text(json.dumps({"version": 1, "agent": m.agent, "apt": [], "npm": [],
+                                                           "pip": [], "files": []}))
         if any(spec.get("kind") in ("vpn", "llm") and not spec.get("optional")
                for spec in preset.get("values", {}).values()):
             continue  # a registered VPN profile or LLM server: test_presets_all.py registers them and starts these
+        if m.backend == "bwrap" and "--image-variant" in preset.get("options", []):
+            # an image variant is an image: bwrap runs the host's own programs
+            m.refused("--preset", preset["id"], *preset_values(m, preset, dev),
+                      match="--image-variant applies only to the Podman backend")
+            continue
         if m.backend == "bwrap" and ("--allow-host-port" in preset.get("options", [])
                                      or "--service" in preset.get("options", [])
                                      or "--browser" in preset.get("options", [])

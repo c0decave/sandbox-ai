@@ -606,3 +606,49 @@ def test_docs_live_check_names_every_check_and_option():
         for option in action.option_strings:
             if option.startswith("--") and option != "--help":
                 assert f"`{option}" in text, option
+
+
+def test_a_pytest_only_in_the_users_site_gets_a_venv_of_its_own(tmp_path, monkeypatch):
+    """User 2026-11-21 (Arch, /usr/bin/python3.14, pytest from `pip install --user`): every check ended in 0 s with
+    "No module named pytest" - the checks run with a HOME of their own, where the real HOME's user site is not found,
+    and pytest_python had taken this Python's pytest as found. Now it is looked for outside the user site (-s)."""
+    real = LG.load_live_check()
+    calls = []
+
+    def run(command, timeout=None, **_):
+        calls.append(command)
+        if command[1:3] == ["-s", "-c"]:
+            return 1, "", "ModuleNotFoundError: No module named 'pytest'"  # only in ~/.local: not found with -s
+        if command[1:3] == ["-m", "venv"]:
+            (Path(command[3]) / "bin").mkdir(parents=True)
+            (Path(command[3]) / "bin" / "python").write_text("")
+        return 0, "", ""
+    monkeypatch.setattr(real, "run", run)
+    python = real.pytest_python(tmp_path)
+    assert python == str(tmp_path / "venv" / "bin" / "python") and python != sys.executable
+    assert calls[0] == [sys.executable, "-s", "-c", "import pytest"]
+    assert any(command[1:3] == ["-m", "pip"] and "--require-hashes" in command for command in calls)
+    calls.clear()
+    monkeypatch.setattr(real, "run", lambda command, timeout=None, **_: calls.append(command) or (0, "", ""))
+    assert real.pytest_python(tmp_path / "other") == sys.executable, "a pytest outside the user site is this one's"
+    status_found = LG.pytest_found(tmp_path / "none")
+    assert status_found.ok
+
+
+def test_a_checks_basetemp_has_its_parent_when_pytest_starts(tmp_path, monkeypatch):
+    """User 2026-11-21: every check failed on setup, "No such file or directory: '<tmp>/p/releasegates'" - pytest
+    makes --basetemp, never its parents, and <tmp>/p was not there. The whole-run test fakes pytest, so it never
+    showed."""
+    seen = {}
+
+    def run_logged(command, log, timeout, env, cwd):
+        basetemp = Path(next(part for part in command if str(part).startswith("--basetemp="))[len("--basetemp="):])
+        seen["parent"] = basetemp.parent.is_dir()
+        seen["exists"] = basetemp.exists()
+        return 0, 0.1
+    monkeypatch.setattr(LG, "run_logged", run_logged)
+    lc = SimpleNamespace(SUITES={}, NEEDS_LOGIN=set(), junit_results=lambda path: [])
+    check = next(c for c in LG.CHECKS if c.name == "release-gates")
+    entry = {}
+    LG.run_check(check, entry, sys.executable, ["podman"], tmp_path / "t", {}, lc, lambda line: None)
+    assert seen == {"parent": True, "exists": False}, seen  # its parent made; the folder itself is pytest's to make

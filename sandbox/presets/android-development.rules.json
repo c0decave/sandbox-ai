@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "description": "android-development: installing on a device or the emulator, uninstalling, clearing an app's data, taking a device's root, writing into its system, flashing or unlocking it, wiping the emulator or deleting an AVD is asked first (adb, fastboot, the Gradle tasks that install or test on a device, emulator -wipe-data, avdmanager delete) - and the optional MCP servers' tools that write to a device or sign an APK; everything a device, an app or a decompiler reports is untrusted.",
+  "tool": [
+    {
+      "id": "adb-install",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\badb\\b[^;&|\\n]*\\s(?:install|install-multiple|install-multi-package)\\b.*"
+        }
+      },
+      "decision": "ask",
+      "reason": "installs an app on the device"
+    },
+    {
+      "id": "adb-uninstall",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\badb\\b[^;&|\\n]*\\suninstall\\b.*"
+        }
+      },
+      "decision": "ask",
+      "reason": "removes an app (and its data) from the device"
+    },
+    {
+      "id": "adb-wipe",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\badb\\b[^;&|\\n]*\\sshell\\b[^;&|\\n]*\\b(?:pm\\s+(?:clear|uninstall|disable|disable-user|install|grant|revoke)\\b|rm\\s|cmd\\s+package\\b|wipe\\b|svc\\s|settings\\s+put\\b).*"
+        }
+      },
+      "decision": "ask",
+      "reason": "changes or wipes something on the device (pm clear/uninstall/grant, rm, settings put, svc)"
+    },
+    {
+      "id": "adb-root-shell",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\badb\\b[^;&|\\n]*\\s(?:root|remount|disable-verity|shell\\b[^;&|\\n]*\\bsu\\b).*"
+        }
+      },
+      "decision": "ask",
+      "reason": "takes the device's root (adb root, remount, disable-verity, shell su)"
+    },
+    {
+      "id": "adb-push-system",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\badb\\b[^;&|\\n]*\\spush\\b[^;&|\\n]*\\s/(?:system|vendor|product|apex|data/app)\\b.*"
+        }
+      },
+      "decision": "ask",
+      "reason": "writes into the device's system (adb push to /system, /vendor, /data/app)"
+    },
+    {
+      "id": "adb-reboot-bootloader",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\badb\\b[^;&|\\n]*\\sreboot\\s+(?:bootloader|recovery|fastboot|sideload).*"
+        }
+      },
+      "decision": "ask",
+      "reason": "reboots the device into the bootloader or recovery"
+    },
+    {
+      "id": "fastboot-write",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\bfastboot\\b[^;&|\\n]*\\s(?:flash|flashall|erase|format|update|wipe|oem\\b|flashing\\b|--wipe-and-use-fbe|set_active)\\b.*"
+        }
+      },
+      "decision": "ask",
+      "reason": "writes to or erases the device's flash, or unlocks it (fastboot flash, erase, flashing unlock)"
+    },
+    {
+      "id": "gradle-device-tasks",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\bgradlew?\\b[^;&|\\n]*\\s(?::?[\\w.-]+:)*(?:install\\w*|uninstall\\w*|connected\\w*|device\\w*Check)\\b.*"
+        }
+      },
+      "decision": "ask",
+      "reason": "a Gradle task that installs on, uninstalls from or tests on a device or the emulator (installDebug, uninstallAll, connectedDebugAndroidTest)"
+    },
+    {
+      "id": "emulator-wipe",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*(?:\\bemulator\\b[^;&|\\n]*\\s-wipe-data\\b|\\bavdmanager\\b[^;&|\\n]*\\sdelete\\b|\\badb\\b[^;&|\\n]*\\semu\\s+avd\\s+snapshot\\s+delete\\b).*"
+        }
+      },
+      "decision": "ask",
+      "reason": "wipes the emulator's data or deletes an AVD or a snapshot"
+    },
+    {
+      "id": "frida-cli-spawn",
+      "tool": "Bash",
+      "args": {
+        "command": {
+          "pattern": "(?s).*\\bfrida(?:-trace|-ps|-kill|-inject)?\\b[^;&|\\n]*\\s(?:-f|--file|--spawn|-U\\b[^;&|\\n]*-f)\\b.*"
+        }
+      },
+      "decision": "ask",
+      "reason": "starts (or stops) an app on the device through Frida"
+    }
+  ],
+  "mcp": [
+    {
+      "id": "frida-device-writes",
+      "server": "frida",
+      "tool": [
+        "spawn",
+        "resume",
+        "kill",
+        "push_server"
+      ],
+      "decision": "ask",
+      "reason": "starts, stops or writes something on the device"
+    },
+    {
+      "id": "frida-scripts",
+      "server": "frida",
+      "tool": [
+        "run_script",
+        "attach"
+      ],
+      "decision": "ask",
+      "reason": "runs code inside an app on the device"
+    },
+    {
+      "id": "smali-signing",
+      "server": "smali",
+      "tool": [
+        "sign_apk",
+        "apktool_build",
+        "assemble"
+      ],
+      "decision": "ask",
+      "reason": "builds or signs an APK (with a throwaway debug key) that could be installed"
+    }
+  ],
+  "untrusted": [
+    {
+      "id": "device-output",
+      "server": "frida",
+      "tool": "*"
+    },
+    {
+      "id": "app-code",
+      "server": "smali",
+      "tool": "*"
+    },
+    {
+      "id": "decompiled-code",
+      "server": "jadx",
+      "tool": "*"
+    },
+    {
+      "id": "java-code",
+      "server": "cfr",
+      "tool": "*"
+    }
+  ]
+}

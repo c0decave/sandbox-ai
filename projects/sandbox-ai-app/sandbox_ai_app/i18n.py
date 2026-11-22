@@ -3085,6 +3085,15 @@ TEXTS = {
     "the recipe's name": {
         'en': "the recipe's name",
         'de': 'der Name des Rezepts'},
+    'android: Android debugging (adb, apktool, smali, jadx, Frida)': {
+        'en': 'android: Android debugging (adb, apktool, smali, jadx, Frida)',
+        'de': 'android: Android-Debugging (adb, apktool, smali, jadx, Frida)'},
+    "android-dev: Android development (everything of android, the SDK for API 37, 36 and 35, NDK, emulator, Gradle, "
+    "Kotlin; about 4.1 GB; building it accepts Google's Android SDK license)": {
+        'en': "android-dev: Android development (everything of android, the SDK for API 37, 36 and 35, NDK, emulator, "
+              "Gradle, Kotlin; about 4.1 GB; building it accepts Google's Android SDK license)",
+        'de': 'android-dev: Android-Entwicklung (alles von android, das SDK für API 37, 36 und 35, NDK, Emulator, '
+              'Gradle, Kotlin; etwa 4,1 GB; wer es baut, akzeptiert Googles Android-SDK-Lizenz)'},
     'Recipe': {
         'en': 'Recipe',
         'de': 'Rezept'},
@@ -9403,9 +9412,6 @@ TEXTS = {
     'Open the link?': {
         'en': 'Open the link?',
         'de': 'Den Link öffnen?'},
-    'Open {url} in your web browser? Links in a file can lead anywhere; this one is in {name}.': {
-        'en': 'Open {url} in your web browser? Links in a file can lead anywhere; this one is in {name}.',
-        'de': '{url} in Ihrem Webbrowser öffnen? Links in einer Datei können überallhin führen; dieser steht in {name}.'},
     'Outline': {
         'en': 'Outline',
         'de': 'Gliederung'},
@@ -9448,6 +9454,40 @@ TEXTS = {
     'refers to other files': {
         'en': 'refers to other files',
         'de': 'verweist auf andere Dateien'},
+    # == The Markdown viewer's additions from the axross-markdown review (docs/AXROSS_MARKDOWN_REVIEW.md) ==
+    'Open this address in your web browser? Links in a file can lead anywhere; this one is in {name}.\n\n{address}\n\nHost: {host}': {
+        'en': 'Open this address in your web browser? Links in a file can lead anywhere; this one is in {name}.\n\n{address}\n\nHost: {host}',
+        'de': 'Diese Adresse in Ihrem Webbrowser öffnen? Links in einer Datei können überallhin führen; dieser steht in {name}.\n\n{address}\n\nHost: {host}'},
+    'The link in the file reads: {text}': {
+        'en': 'The link in the file reads: {text}',
+        'de': 'Der Link in der Datei lautet: {text}'},
+    '… ({count} characters)': {
+        'en': '… ({count} characters)',
+        'de': '… ({count} Zeichen)'},
+    'Not opened: {target} is no valid web address.': {
+        'en': 'Not opened: {target} is no valid web address.',
+        'de': 'Nicht geöffnet: {target} ist keine gültige Webadresse.'},
+    'draws too much': {
+        'en': 'draws too much',
+        'de': 'zeichnet zu viel'},
+    'Copy code block': {
+        'en': 'Copy code block',
+        'de': 'Codeblock kopieren'},
+    'alert|Note': {
+        'en': 'alert|Note',
+        'de': 'Hinweis'},
+    'alert|Tip': {
+        'en': 'alert|Tip',
+        'de': 'Tipp'},
+    'alert|Important': {
+        'en': 'alert|Important',
+        'de': 'Wichtig'},
+    'alert|Warning': {
+        'en': 'alert|Warning',
+        'de': 'Warnung'},
+    'alert|Caution': {
+        'en': 'alert|Caution',
+        'de': 'Vorsicht'},
     'a line of more than {count} characters without a space': {
         'en': 'a line of more than {count} characters without a space',
         'de': 'eine Zeile mit mehr als {count} Zeichen ohne Leerzeichen'},
@@ -10753,6 +10793,85 @@ TEXTS = {
     'Play the intro animation at start (Esc skips it)': {
         'en': 'Play the intro animation at start (Esc skips it)',
         'de': 'Beim Start die Intro-Animation zeigen (Esc überspringt sie)'},
+    # the intro animations to choose from (intro_choice.py) and their texts (intro_glass/city/vault.py)
+    'Intro animation': {
+        'en': 'Intro animation',
+        'de': 'Intro-Animation'},
+    'A different one at each start': {
+        'en': 'A different one at each start',
+        'de': 'Bei jedem Start eine andere'},
+    'Classic': {
+        'en': 'Classic',
+        'de': 'Klassisch'},
+    'Glass cube': {
+        'en': 'Glass cube',
+        'de': 'Glaswürfel'},
+    'Night city': {
+        'en': 'Night city',
+        'de': 'Nachtstadt'},
+    'Vault': {
+        'en': 'Vault',
+        'de': 'Tresor'},
+    'Your AI agent thinks and works inside a sandbox.': {
+        'en': 'Your AI agent thinks and works inside a sandbox.',
+        'de': 'Ihr KI-Agent denkt und arbeitet in einer Sandbox.'},
+    'Its walls hold. The only way out is through the proxy.': {
+        'en': 'Its walls hold. The only way out is through the proxy.',
+        'de': 'Die Wände halten. Der einzige Weg hinaus führt durch den Proxy.'},
+    'Allowed hosts pass; anything else bounces off.': {
+        'en': 'Allowed hosts pass; anything else bounces off.',
+        'de': 'Erlaubte Hosts kommen durch; alles andere prallt ab.'},
+    'Your AI agent works in its sandbox. Outside: the internet.': {
+        'en': 'Your AI agent works in its sandbox. Outside: the internet.',
+        'de': 'Ihr KI-Agent arbeitet in seiner Sandbox. Draußen: das Internet.'},
+    'Its requests reach only the hosts you allow; a new one asks you first.': {
+        'en': 'Its requests reach only the hosts you allow; a new one asks you first.',
+        'de': 'Seine Anfragen erreichen nur Hosts, die Sie erlauben; ein neuer fragt zuerst.'},
+    'A decoy key is taken? The canary sings: the leak is refused, the run paused.': {
+        'en': 'A decoy key is taken? The canary sings: the leak is refused, the run paused.',
+        'de': 'Köder-Schlüssel genommen? Das Leck wird verweigert, der Lauf angehalten.'},
+    'Run paused': {
+        'en': 'Run paused',
+        'de': 'Lauf angehalten'},
+    'Decoy key': {
+        'en': 'Decoy key',
+        'de': 'Köder-Schlüssel'},
+    "The sandbox's layers lock around your AI agent, each one verified.": {
+        'en': "The sandbox's layers lock around your AI agent, each one verified.",
+        'de': 'Die Schichten der Sandbox schließen sich um Ihren KI-Agenten, jede geprüft.'},
+    'Each layer stops something: a system call, a privilege, your files, a host.': {
+        'en': 'Each layer stops something: a system call, a privilege, your files, a host.',
+        'de': 'Jede Schicht hält etwas auf: einen Systemaufruf, ein Privileg, Ihre Dateien, einen Host.'},
+    'Allowed requests pass; the proxy adds your key outside the sandbox.': {
+        'en': 'Allowed requests pass; the proxy adds your key outside the sandbox.',
+        'de': 'Erlaubte Anfragen kommen durch; Ihren Schlüssel fügt der Proxy draußen ein.'},
+    'Firejail namespaces': {
+        'en': 'Firejail namespaces',
+        'de': 'Firejail-Namespaces'},
+    'Firewall · proxy': {
+        'en': 'Firewall · proxy',
+        'de': 'Firewall · Proxy'},
+    'Seccomp filter': {
+        'en': 'Seccomp filter',
+        'de': 'Seccomp-Filter'},
+    'capabilities dropped, NoNewPrivs': {
+        'en': 'capabilities dropped, NoNewPrivs',
+        'de': 'Capabilities entzogen, NoNewPrivs'},
+    'mount and PID namespaces': {
+        'en': 'mount and PID namespaces',
+        'de': 'Mount- und PID-Namespaces'},
+    'rootless Podman or Bubblewrap': {
+        'en': 'rootless Podman or Bubblewrap',
+        'de': 'Podman ohne Root-Rechte oder Bubblewrap'},
+    'default-deny network, proxy': {
+        'en': 'default-deny network, proxy',
+        'de': 'Netz standardmäßig gesperrt, Proxy'},
+    'agent started': {
+        'en': 'agent started',
+        'de': 'Agent gestartet'},
+    'key added by the proxy': {
+        'en': 'key added by the proxy',
+        'de': 'Schlüssel vom Proxy eingefügt'},
     "Show the command-line options (--…) beside the fields' names": {
         'en': "Show the command-line options (--…) beside the fields' names",
         'de': 'Die Kommandozeilen-Optionen (--…) neben den Namen der Felder zeigen'},
@@ -21657,4 +21776,289 @@ TEXTS = {
     'Choose a model server of your own first: a use case picks among its models': {
         'en': 'Choose a model server of your own first: a use case picks among its models',
         'de': 'Wählen Sie zuerst einen eigenen Modellserver: Ein Einsatzzweck wählt unter seinen Modellen'},
+    'Starts with: {options}': {
+        'en': 'Starts with: {options}',
+        'de': 'Startet mit: {options}'},
+    'Made: {name}. Continue it with Resume (the agent resumes its conversation).': {
+        'en': 'Made: {name}. Continue it with Resume (the agent resumes its conversation).',
+        'de': 'Angelegt: {name}. Setzen Sie sie mit Fortsetzen fort (der Agent setzt sein Gespräch fort).'},
+    'From: {name} (sandbox-ai {version}, {created})': {
+        'en': 'From: {name} (sandbox-ai {version}, {created})',
+        'de': 'Aus: {name} (sandbox-ai {version}, {created})'},
+    'The archive holds logins and keys.': {
+        'en': 'The archive holds logins and keys.',
+        'de': 'Das Archiv enthält Anmeldungen und Schlüssel.'},
+    'Asked first: {item}': {
+        'en': 'Asked first: {item}',
+        'de': 'Zuerst gefragt: {item}'},
+    'Note: {item}': {
+        'en': 'Note: {item}',
+        'de': 'Hinweis: {item}'},
+    "Memory: {count} files added to the project's memory here": {
+        'en': "Memory: {count} files added to the project's memory here",
+        'de': 'Gedächtnis: {count} Dateien zum Gedächtnis des Projekts hier hinzugefügt'},
+    'Checkpoints: {count}': {
+        'en': 'Checkpoints: {count}',
+        'de': 'Sicherungspunkte: {count}'},
+    'Duplicate session {name}': {
+        'en': 'Duplicate session {name}',
+        'de': 'Sitzung {name} duplizieren'},
+    'Name of the duplicate': {
+        'en': 'Name of the duplicate',
+        'de': 'Name des Duplikats'},
+    'Copy its workspace too': {
+        'en': 'Copy its workspace too',
+        'de': 'Auch ihren Arbeitsordner kopieren'},
+    "The workspace's files are copied beside it as WORKSPACE-NEW (--with-workspace); without, both work in the same folder": {
+        'en': "The workspace's files are copied beside it as WORKSPACE-NEW (--with-workspace); without, both work in the same folder",
+        'de': 'Die Dateien des Arbeitsordners werden daneben als ARBEITSORDNER-NEU kopiert (--with-workspace); ohne arbeiten beide im selben Ordner'},
+    'Its logins, keys and secrets go along into the copy (asked first; --include-secrets); without, the duplicate gets the login of this machine': {
+        'en': 'Its logins, keys and secrets go along into the copy (asked first; --include-secrets); without, the duplicate gets the login of this machine',
+        'de': 'Ihre Anmeldungen, Schlüssel und Geheimnisse gehen mit in die Kopie (zuerst gefragt; --include-secrets); ohne bekommt das Duplikat die Anmeldung dieses Rechners'},
+    'Grant its network approvals again': {
+        'en': 'Grant its network approvals again',
+        'de': 'Ihre Netzwerk-Freigaben wieder erteilen'},
+    'What it was allowed on the network (net allow, approvals for its run, always for its project) is granted again as options of the duplicate (asked first; --grant-approvals)': {
+        'en': 'What it was allowed on the network (net allow, approvals for its run, always for its project) is granted again as options of the duplicate (asked first; --grant-approvals)',
+        'de': 'Was ihr im Netz erlaubt wurde (net allow, Freigaben für ihren Lauf, immer für ihr Projekt), wird als Optionen des Duplikats wieder erteilt (zuerst gefragt; --grant-approvals)'},
+    'Duplicate': {
+        'en': 'Duplicate',
+        'de': 'Duplizieren'},
+    'Duplicate the session': {
+        'en': 'Duplicate the session',
+        'de': 'Die Sitzung duplizieren'},
+    'Duplicating {name}… (a large HOME takes a while)': {
+        'en': 'Duplicating {name}… (a large HOME takes a while)',
+        'de': '{name} wird dupliziert… (ein großes HOME dauert eine Weile)'},
+    'Done: {name} is made.': {
+        'en': 'Done: {name} is made.',
+        'de': 'Fertig: {name} ist angelegt.'},
+    'Export session {name} with its state': {
+        'en': 'Export session {name} with its state',
+        'de': 'Sitzung {name} mit ihrem Zustand exportieren'},
+    'Archive': {
+        'en': 'Archive',
+        'de': 'Archiv'},
+    "With its workspace's files": {
+        'en': "With its workspace's files",
+        'de': 'Mit den Dateien ihres Arbeitsordners'},
+    "The workspace's files go into the archive too (--with-workspace); without, the import starts on the folder of that path there, or where it is mapped to": {
+        'en': "The workspace's files go into the archive too (--with-workspace); without, the import starts on the folder of that path there, or where it is mapped to",
+        'de': 'Die Dateien des Arbeitsordners kommen auch ins Archiv (--with-workspace); ohne startet der Import auf dem Ordner dieses Pfads dort oder dort, wohin er umgesetzt wird'},
+    'Its logins, keys and secrets go into the archive too (asked first; --include-secrets)': {
+        'en': 'Its logins, keys and secrets go into the archive too (asked first; --include-secrets)',
+        'de': 'Ihre Anmeldungen, Schlüssel und Geheimnisse kommen auch ins Archiv (zuerst gefragt; --include-secrets)'},
+    'Import a session': {
+        'en': 'Import a session',
+        'de': 'Eine Sitzung importieren'},
+    'its name there': {
+        'en': 'its name there',
+        'de': 'ihr Name dort'},
+    'Name here': {
+        'en': 'Name here',
+        'de': 'Name hier'},
+    'Folders mapped': {
+        'en': 'Folders mapped',
+        'de': 'Umgesetzte Ordner'},
+    'one per line: FOLDER THERE=FOLDER HERE': {
+        'en': 'one per line: FOLDER THERE=FOLDER HERE',
+        'de': 'einer pro Zeile: ORDNER DORT=ORDNER HIER'},
+    "Leave the archive's workspace files out": {
+        'en': "Leave the archive's workspace files out",
+        'de': 'Die Dateien des Arbeitsordners im Archiv auslassen'},
+    'It starts on the folder that is here (--no-workspace)': {
+        'en': 'It starts on the folder that is here (--no-workspace)',
+        'de': 'Sie startet auf dem Ordner, der hier ist (--no-workspace)'},
+    'Replace a stopped session of that name': {
+        'en': 'Replace a stopped session of that name',
+        'de': 'Eine gestoppte Sitzung dieses Namens ersetzen'},
+    'A stopped session of that name here is deleted first, its HOME too (--replace)': {
+        'en': 'A stopped session of that name here is deleted first, its HOME too (--replace)',
+        'de': 'Eine gestoppte Sitzung dieses Namens hier wird zuerst gelöscht, ihr HOME auch (--replace)'},
+    'The network approvals it brings are granted again as options of the session (asked first; --grant-approvals); without, it asks again when it needs them': {
+        'en': 'The network approvals it brings are granted again as options of the session (asked first; --grant-approvals); without, it asks again when it needs them',
+        'de': 'Die Netzwerk-Freigaben, die sie mitbringt, werden als Optionen der Sitzung wieder erteilt (zuerst gefragt; --grant-approvals); ohne fragt sie wieder, wenn sie sie braucht'},
+    'It can start here as {name} (checked: nothing was kept).': {
+        'en': 'It can start here as {name} (checked: nothing was kept).',
+        'de': 'Sie kann hier als {name} starten (geprüft: nichts wurde behalten).'},
+    'Workspace: {path}': {
+        'en': 'Workspace: {path}',
+        'de': 'Arbeitsordner: {path}'},
+    'Network approvals granted again: {list}': {
+        'en': 'Network approvals granted again: {list}',
+        'de': 'Netzwerk-Freigaben wieder erteilt: {list}'},
+    'Network approvals not granted (tick Grant its network approvals again): {list}': {
+        'en': 'Network approvals not granted (tick Grant its network approvals again): {list}',
+        'de': 'Netzwerk-Freigaben nicht erteilt (kreuzen Sie Ihre Netzwerk-Freigaben wieder erteilen an): {list}'},
+    "Kept as it is here (the project's own): {file}": {
+        'en': "Kept as it is here (the project's own): {file}",
+        'de': 'So behalten, wie es hier ist (das des Projekts): {file}'},
+    "A second session here from its state: its configuration, a copy of its HOME with the agent's conversation (both continue it on their own), its memory and checkpoints. Both can run; the workspace is shared unless its files are copied too. A running session is paused for the moment of the snapshot. Not started: Resume starts it.": {
+        'en': "A second session here from its state: its configuration, a copy of its HOME with the agent's conversation (both continue it on their own), its memory and checkpoints. Both can run; the workspace is shared unless its files are copied too. A running session is paused for the moment of the snapshot. Not started: Resume starts it.",
+        'de': 'Eine zweite Sitzung hier aus ihrem Zustand: ihre Konfiguration, eine Kopie ihres HOME mit dem Gespräch des Agenten (beide setzen es für sich fort), ihr Gedächtnis und ihre Sicherungspunkte. Beide können laufen; der Arbeitsordner wird geteilt, außer seine Dateien werden mitkopiert. Eine laufende Sitzung wird für den Moment der Aufnahme pausiert. Nicht gestartet: Fortsetzen startet sie.'},
+    'Make the duplicate ({command})': {
+        'en': 'Make the duplicate ({command})',
+        'de': 'Das Duplikat anlegen ({command})'},
+    "A session's name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or digit.": {
+        'en': "A session's name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or digit.",
+        'de': "Der Name einer Sitzung besteht aus 1-40 Buchstaben, Ziffern, '_', '.' oder '-' und beginnt mit einem Buchstaben oder einer Ziffer."},
+    'the duplicate {name}': {
+        'en': 'the duplicate {name}',
+        'de': 'das Duplikat {name}'},
+    'Not duplicated: see what sandbox-ai said below.': {
+        'en': 'Not duplicated: see what sandbox-ai said below.',
+        'de': 'Nicht dupliziert: siehe unten, was sandbox-ai sagte.'},
+    "One archive another machine imports (Import… there, or sandbox-ai session import): its configuration, HOME with the agent's conversation, memory, checkpoints and network approvals, with a manifest of every file's checksum. A running session is paused for the moment of the snapshot. Logins and keys are left out unless ticked.": {
+        'en': "One archive another machine imports (Import… there, or sandbox-ai session import): its configuration, HOME with the agent's conversation, memory, checkpoints and network approvals, with a manifest of every file's checksum. A running session is paused for the moment of the snapshot. Logins and keys are left out unless ticked.",
+        'de': 'Ein Archiv, das ein anderer Rechner importiert (dort Importieren… oder `sandbox-ai session import`): ihre Konfiguration, ihr HOME mit dem Gespräch des Agenten, Gedächtnis, Sicherungspunkte und Netzwerk-Freigaben, mit einem Manifest der Prüfsumme jeder Datei. Eine laufende Sitzung wird für den Moment der Aufnahme pausiert. Anmeldungen und Schlüssel bleiben draußen, außer angekreuzt.'},
+    'Choose where the archive is written.': {
+        'en': 'Choose where the archive is written.',
+        'de': 'Wählen Sie, wohin das Archiv geschrieben wird.'},
+    'Logins, keys and secrets left out ({count}):': {
+        'en': 'Logins, keys and secrets left out ({count}):',
+        'de': 'Ausgelassene Anmeldungen, Schlüssel und Geheimnisse ({count}):'},
+    "A session's archive (Export with state…, or sandbox-ai session export) as a session of this machine that Resume continues, conversation and all. The archive is checked as untrusted input first - its files against its manifest, its configuration with the launcher's own dry run - and what it starts with is shown before anything is kept.": {
+        'en': "A session's archive (Export with state…, or sandbox-ai session export) as a session of this machine that Resume continues, conversation and all. The archive is checked as untrusted input first - its files against its manifest, its configuration with the launcher's own dry run - and what it starts with is shown before anything is kept.",
+        'de': 'Das Archiv einer Sitzung (Mit Zustand exportieren… oder `sandbox-ai session export`) als Sitzung dieses Rechners, die Fortsetzen fortsetzt, samt Gespräch. Das Archiv wird zuerst als nicht vertrauenswürdige Eingabe geprüft - seine Dateien gegen sein Manifest, seine Konfiguration mit dem eigenen Probelauf des Launchers -, und womit sie startet, wird gezeigt, bevor etwas bleibt.'},
+    'Check the archive and what it starts with: nothing is kept ({command})': {
+        'en': 'Check the archive and what it starts with: nothing is kept ({command})',
+        'de': 'Das Archiv prüfen und womit es startet: nichts bleibt ({command})'},
+    'Choose the archive first.': {
+        'en': 'Choose the archive first.',
+        'de': 'Wählen Sie zuerst das Archiv.'},
+    'Check it first.': {
+        'en': 'Check it first.',
+        'de': 'Prüfen Sie es zuerst.'},
+    'Checking {path}…': {
+        'en': 'Checking {path}…',
+        'de': '{path} wird geprüft…'},
+    'Importing {path}…': {
+        'en': 'Importing {path}…',
+        'de': '{path} wird importiert…'},
+    'Take the logins, keys and secrets of its HOME along ({what})? Whoever has them can log in as you.': {
+        'en': 'Take the logins, keys and secrets of its HOME along ({what})? Whoever has them can log in as you.',
+        'de': 'Die Anmeldungen, Schlüssel und Geheimnisse ihres HOME mitnehmen ({what})? Wer sie hat, kann sich als Sie anmelden.'},
+    'Yes, with logins and keys': {
+        'en': 'Yes, with logins and keys',
+        'de': 'Ja, mit Anmeldungen und Schlüsseln'},
+    'Grant network approvals': {
+        'en': 'Grant network approvals',
+        'de': 'Netzwerk-Freigaben erteilen'},
+    'Grant its network approvals again, as options of that session ({what})? It reaches those destinations at every start.': {
+        'en': 'Grant its network approvals again, as options of that session ({what})? It reaches those destinations at every start.',
+        'de': 'Ihre Netzwerk-Freigaben wieder erteilen, als Optionen dieser Sitzung ({what})? Sie erreicht diese Ziele bei jedem Start.'},
+    'Yes, grant them': {
+        'en': 'Yes, grant them',
+        'de': 'Ja, erteilen'},
+    'A folder mapped is FOLDER THERE=FOLDER HERE: {line}': {
+        'en': 'A folder mapped is FOLDER THERE=FOLDER HERE: {line}',
+        'de': 'Ein umgesetzter Ordner ist ORDNER DORT=ORDNER HIER: {line}'},
+    'Not checked: see what sandbox-ai said below.': {
+        'en': 'Not checked: see what sandbox-ai said below.',
+        'de': 'Nicht geprüft: siehe unten, was sandbox-ai sagte.'},
+    'Not imported: see what sandbox-ai said below.': {
+        'en': 'Not imported: see what sandbox-ai said below.',
+        'de': 'Nicht importiert: siehe unten, was sandbox-ai sagte.'},
+    'Checked: it can start here. Import keeps it.': {
+        'en': 'Checked: it can start here. Import keeps it.',
+        'de': 'Geprüft: Sie kann hier starten. Importieren behält sie.'},
+    '(its files from the archive)': {
+        'en': '(its files from the archive)',
+        'de': '(seine Dateien aus dem Archiv)'},
+    'Its configuration gives the sandbox this of this machine:\n{items}\nImport it with these options?': {
+        'en': 'Its configuration gives the sandbox this of this machine:\n{items}\nImport it with these options?',
+        'de': 'Ihre Konfiguration gibt der Sandbox dies von diesem Rechner:\n{items}\nMit diesen Optionen importieren?'},
+    'Yes, import': {
+        'en': 'Yes, import',
+        'de': 'Ja, übernehmen'},
+    "Its state along: HOME, the agent's conversation, memory, checkpoints": {
+        'en': "Its state along: HOME, the agent's conversation, memory, checkpoints",
+        'de': 'Ihr Zustand mit: HOME, das Gespräch des Agenten, Gedächtnis, Sicherungspunkte'},
+    "Its workspace's files too": {
+        'en': "Its workspace's files too",
+        'de': 'Auch die Dateien ihres Arbeitsordners'},
+    'Grant its network approvals again there': {
+        'en': 'Grant its network approvals again there',
+        'de': 'Ihre Netzwerk-Freigaben dort wieder erteilen'},
+    "Its HOME with the agent's session files (it continues its conversation there), the project's agent memory, the workspace's checkpoints and its network approvals go along, checked there before anything is kept; a running session is paused for the moment of the snapshot. Off: only its configuration, started afresh there (--config-only)": {
+        'en': "Its HOME with the agent's session files (it continues its conversation there), the project's agent memory, the workspace's checkpoints and its network approvals go along, checked there before anything is kept; a running session is paused for the moment of the snapshot. Off: only its configuration, started afresh there (--config-only)",
+        'de': 'Ihr HOME mit den Sitzungsdateien des Agenten (er setzt sein Gespräch dort fort), das Agenten-Gedächtnis des Projekts, die Sicherungspunkte des Arbeitsordners und ihre Netzwerk-Freigaben gehen mit, dort geprüft, bevor etwas bleibt; eine laufende Sitzung wird für den Moment der Aufnahme pausiert. Aus: nur ihre Konfiguration, dort neu gestartet (--config-only)'},
+    "The workspace's files go along into its folder there, which must be new or empty (--with-workspace); without, the folder of that path there (or as mapped below) is used": {
+        'en': "The workspace's files go along into its folder there, which must be new or empty (--with-workspace); without, the folder of that path there (or as mapped below) is used",
+        'de': 'Die Dateien des Arbeitsordners gehen mit in seinen Ordner dort, der neu oder leer sein muss (--with-workspace); ohne wird der Ordner dieses Pfads dort (oder wie unten umgesetzt) verwendet'},
+    'Its logins, keys and secrets go along (asked first; --include-secrets); without, the host uses its own login': {
+        'en': 'Its logins, keys and secrets go along (asked first; --include-secrets); without, the host uses its own login',
+        'de': 'Ihre Anmeldungen, Schlüssel und Geheimnisse gehen mit (zuerst gefragt; --include-secrets); ohne verwendet der Host seine eigene Anmeldung'},
+    'What it was allowed on the network is granted again there as options of that session (asked first; --grant-approvals); without, it asks again when it needs them': {
+        'en': 'What it was allowed on the network is granted again there as options of that session (asked first; --grant-approvals); without, it asks again when it needs them',
+        'de': 'Was ihr im Netz erlaubt wurde, wird dort als Optionen dieser Sitzung wieder erteilt (zuerst gefragt; --grant-approvals); ohne fragt sie wieder, wenn sie es braucht'},
+    'Logins and keys go along only when ticked (asked first); otherwise the host uses its own.': {
+        'en': 'Logins and keys go along only when ticked (asked first); otherwise the host uses its own.',
+        'de': 'Anmeldungen und Schlüssel gehen nur mit, wenn angekreuzt (zuerst gefragt); sonst verwendet der Host seine eigenen.'},
+    'It goes there with its state and continues there, checked there first; then it is stopped here (its HOME stays until it is deleted).': {
+        'en': 'It goes there with its state and continues there, checked there first; then it is stopped here (its HOME stays until it is deleted).',
+        'de': 'Sie geht mit ihrem Zustand dorthin und macht dort weiter, dort zuerst geprüft; dann wird sie hier gestoppt (ihr HOME bleibt, bis sie gelöscht wird).'},
+    'It goes there with its state and continues there as a session of its own, checked there first; this one stays as it is.': {
+        'en': 'It goes there with its state and continues there as a session of its own, checked there first; this one stays as it is.',
+        'de': 'Sie geht mit ihrem Zustand dorthin und macht dort als eigene Sitzung weiter, dort zuerst geprüft; diese bleibt, wie sie ist.'},
+    'Take session {name} with its state to {host} as {new}, start it there, then stop it here? Its HOME stays here until it is deleted.': {
+        'en': 'Take session {name} with its state to {host} as {new}, start it there, then stop it here? Its HOME stays here until it is deleted.',
+        'de': 'Sitzung {name} mit ihrem Zustand als {new} auf {host} bringen, dort starten und dann hier stoppen? Ihr HOME bleibt hier, bis sie gelöscht wird.'},
+    'Duplicate…': {
+        'en': 'Duplicate…',
+        'de': 'Duplizieren…'},
+    "A second session here from the selected session's state: its own HOME (the agent's conversation continued on its own), memory and checkpoints; the workspace shared or copied ({command})": {
+        'en': "A second session here from the selected session's state: its own HOME (the agent's conversation continued on its own), memory and checkpoints; the workspace shared or copied ({command})",
+        'de': 'Eine zweite Sitzung hier aus dem Zustand der gewählten Sitzung: ihr eigenes HOME (das Gespräch des Agenten für sich fortgesetzt), Gedächtnis und Sicherungspunkte; der Arbeitsordner geteilt oder kopiert ({command})'},
+    'Export with state…': {
+        'en': 'Export with state…',
+        'de': 'Mit Zustand exportieren…'},
+    'Export the session with its state': {
+        'en': 'Export the session with its state',
+        'de': 'Die Sitzung mit ihrem Zustand exportieren'},
+    "The selected session with its state as one archive another machine imports: configuration, HOME with the agent's conversation, memory, checkpoints, approvals ({command})": {
+        'en': "The selected session with its state as one archive another machine imports: configuration, HOME with the agent's conversation, memory, checkpoints, approvals ({command})",
+        'de': 'Die gewählte Sitzung mit ihrem Zustand als ein Archiv, das ein anderer Rechner importiert: Konfiguration, HOME mit dem Gespräch des Agenten, Gedächtnis, Sicherungspunkte, Freigaben ({command})'},
+    "A session's archive (Export with state…) as a session of this machine that Resume continues - checked as untrusted input first ({command})": {
+        'en': "A session's archive (Export with state…) as a session of this machine that Resume continues - checked as untrusted input first ({command})",
+        'de': 'Das Archiv einer Sitzung (Mit Zustand exportieren…) als Sitzung dieses Rechners, die Fortsetzen fortsetzt - zuerst als nicht vertrauenswürdige Eingabe geprüft ({command})'},
+    'Import a session with its state…': {
+        'en': 'Import a session with its state…',
+        'de': 'Eine Sitzung mit ihrem Zustand importieren…'},
+    "A session's archive (Export with state…, sandbox-ai session export) as a session of this machine that Resume continues (sandbox-ai session import)": {
+        'en': "A session's archive (Export with state…, sandbox-ai session export) as a session of this machine that Resume continues (sandbox-ai session import)",
+        'de': 'Das Archiv einer Sitzung (Mit Zustand exportieren…, `sandbox-ai session export`) als Sitzung dieses Rechners, die Fortsetzen fortsetzt (`sandbox-ai session import`)'},
+    'This sandbox-ai cannot import a session yet ({command}): update it.': {
+        'en': 'This sandbox-ai cannot import a session yet ({command}): update it.',
+        'de': 'Dieses sandbox-ai kann noch keine Sitzung importieren ({command}): Aktualisieren Sie es.'},
+    'built here, not signed': {
+        'en': 'built here, not signed',
+        'de': 'hier gebaut, nicht signiert'},
+    'MCP server {name}: not built (another start is shown now).': {
+        'en': 'MCP server {name}: not built (another start is shown now).',
+        'de': 'MCP-Server {name}: nicht gebaut (jetzt wird ein anderer Start gezeigt).'},
+    'MCP server {name}: its catalog has no signed image of it yet, and what would be built from its source on {host} could not be read: {error}': {
+        'en': 'MCP server {name}: its catalog has no signed image of it yet, and what would be built from its source on {host} could not be read: {error}',
+        'de': 'MCP-Server {name}: sein Katalog hat noch kein signiertes Image von ihm, und was aus seinem Quelltext auf {host} gebaut würde, konnte nicht gelesen werden: {error}'},
+    'signed: the entry was reviewed, its image is not published yet': {
+        'en': 'signed: the entry was reviewed, its image is not published yet',
+        'de': 'signiert: der Eintrag wurde geprüft, sein Image ist noch nicht veröffentlicht'},
+    'NOT signed: nobody vouched for the entry': {
+        'en': 'NOT signed: nobody vouched for the entry',
+        'de': 'NICHT signiert: niemand hat sich für den Eintrag verbürgt'},
+    'Build MCP server {name}?': {
+        'en': 'Build MCP server {name}?',
+        'de': 'MCP-Server {name} bauen?'},
+    "{entry} has no signed image in its catalog yet. Build it {place} from its reviewed source and add it UNSIGNED?\n\nSource: {repository}, commit {commit}, {path}\nSource archive SHA-256: {sha256}\nCatalog: {catalog} ({signed})\n\nPodman builds it as the catalog's CI does (base images pinned by digest) and its smoke test checks it with sandbox-ai's own run line; that takes minutes, its output goes to the tab Preparing the start. Built here, not signed: nobody signed this image, and it is shown so wherever it appears.": {
+        'en': "{entry} has no signed image in its catalog yet. Build it {place} from its reviewed source and add it UNSIGNED?\n\nSource: {repository}, commit {commit}, {path}\nSource archive SHA-256: {sha256}\nCatalog: {catalog} ({signed})\n\nPodman builds it as the catalog's CI does (base images pinned by digest) and its smoke test checks it with sandbox-ai's own run line; that takes minutes, its output goes to the tab Preparing the start. Built here, not signed: nobody signed this image, and it is shown so wherever it appears.",
+        'de': '{entry} hat in seinem Katalog noch kein signiertes Image. Ihn {place} aus seinem geprüften Quelltext bauen und UNSIGNIERT hinzufügen?\n\nQuelle: {repository}, Commit {commit}, {path}\nSHA-256 des Quellarchivs: {sha256}\nKatalog: {catalog} ({signed})\n\nPodman baut ihn so, wie es die CI des Katalogs tut (Basis-Images per Digest gepinnt), und sein Smoke-Test prüft ihn mit der eigenen Startzeile von sandbox-ai; das dauert Minuten, die Ausgabe steht im Tab Der Start wird vorbereitet. Hier gebaut, nicht signiert: niemand hat dieses Image signiert, und so wird es überall gezeigt, wo es erscheint.'},
+    'MCP server {name}: not built - its catalog has no signed image of it yet (sandbox-ai mcp add {name} --build builds it from its reviewed source and adds it unsigned, asked first).': {
+        'en': 'MCP server {name}: not built - its catalog has no signed image of it yet (sandbox-ai mcp add {name} --build builds it from its reviewed source and adds it unsigned, asked first).',
+        'de': 'MCP-Server {name}: nicht gebaut - sein Katalog hat noch kein signiertes Image von ihm (sandbox-ai mcp add {name} --build baut ihn aus seinem geprüften Quelltext und fügt ihn unsigniert hinzu, nach Rückfrage).'},
+    'building the MCP server {name} from its source (unsigned; minutes)': {
+        'en': 'building the MCP server {name} from its source (unsigned; minutes)',
+        'de': 'MCP-Server {name} wird aus seinem Quelltext gebaut (unsigniert; Minuten)'},
+    ' (built from its source: minutes)': {
+        'en': ' (built from its source: minutes)',
+        'de': ' (aus seinem Quelltext gebaut: Minuten)'},
 }

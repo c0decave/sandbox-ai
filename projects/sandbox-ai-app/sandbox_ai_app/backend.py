@@ -53,6 +53,7 @@ LOGIN_AGENTS_ANYWHERE = ("claude", "codex", "opencode", "hermes", "qwen", "pi")
 MIN_VERSION = "0.1.21"  # the first release with approvals, secrets, images and log telemetry
 PLUGINS_WAIT = 1800  # seconds `sandbox-ai plugins claude` may take (each marketplace and plugin is fetched)
 TRANSFER_SECONDS = 1200  # sandbox-ai session copy|move: its dry run there (up to 180 s) and the start (up to 900 s)
+STATE_SECONDS = 7200  # ... with its state: the archive sent over SSH and imported there (session_state.transfer)
 BUNDLE_SECONDS = 3600  # sandbox-ai board export|import: with --images, image archives saved, sent and loaded
 # What the app uses of sandbox-ai: a development checkout may have it before its version number says so.
 REQUIRED = {"approvals": ("questions", "answer", "describe", "ID"), "secret_store": ("store", "FileStore", "NAME"),
@@ -685,16 +686,52 @@ class SandboxAI:
             raise ValueError("sandbox-ai session plan: not a plan")
         return [str(p) for p in paths if isinstance(p, str)], [str(p) for p in problems]
 
-    def session_copy(self, name, host, new_name=None, maps=(), check=False, replace=False):
-        """`sandbox-ai session copy NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check] [--replace]`: a dry run on
-        HOST over SSH, then the start there (minutes, at most). (status, out, err)."""
-        return self.call(*session_transfer_args("copy", name, host, new_name, maps, check, replace),
-                         timeout=TRANSFER_SECONDS)
+    def session_copy(self, name, host, new_name=None, maps=(), check=False, replace=False, **state):
+        """`sandbox-ai session copy NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check] [--replace]` (STATE:
+        state_words - its state along, or --config-only): the state sent and checked on HOST over SSH (or only a dry
+        run there), then the start there (minutes, at most; an archive of its HOME may take longer). (status, out,
+        err)."""
+        return self.call(*session_transfer_args("copy", name, host, new_name, maps, check, replace, **state),
+                         timeout=TRANSFER_SECONDS + (STATE_SECONDS if state.get("state") else 0))
 
-    def session_move(self, name, host, new_name=None, maps=(), check=False, replace=False):
+    def session_move(self, name, host, new_name=None, maps=(), check=False, replace=False, **state):
         """`sandbox-ai session move ...`: as session_copy, then the session here is stopped (its HOME stays)."""
-        return self.call(*session_transfer_args("move", name, host, new_name, maps, check, replace),
-                         timeout=TRANSFER_SECONDS)
+        return self.call(*session_transfer_args("move", name, host, new_name, maps, check, replace, **state),
+                         timeout=TRANSFER_SECONDS + (STATE_SECONDS if state.get("state") else 0))
+
+    def session_state_supported(self):
+        """Whether this sandbox-ai carries a session's state: session copy|move with it, duplicate, import (0.1.193)."""
+        return (self.directory / "session_state.py").is_file()
+
+    def session_state_json(self, *args, timeout=None):
+        """The JSON object `sandbox-ai ARGS` prints; ValueError with the end of what it said when it failed (several
+        lines: an import lists what it asks)."""
+        status, out, err = self.call(*args, timeout=timeout or TRANSFER_SECONDS + STATE_SECONDS)
+        try:
+            data = json.loads(out) if status == 0 else None
+        except (ValueError, RecursionError):
+            data = None
+        if not isinstance(data, dict):
+            lines = [line for line in (err or out or "").strip().splitlines() if line.strip()]
+            raise ValueError(printable_text("\n".join(lines[-12:]) if lines else f"exit status {status}")[:3000])
+        return data
+
+    def session_duplicate(self, name, new_name, **state):
+        """`sandbox-ai session duplicate NAME NEW --json` (STATE: state_words' with_workspace, include_secrets, grant):
+        a second session of this machine from the state of NAME, not started. Its import's result; ValueError."""
+        for value in (name, new_name):
+            if not isinstance(value, str) or not SESSION_NAME.fullmatch(value):
+                raise ValueError("a session's name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or "
+                                 "digit")
+        return self.session_state_json("session", "duplicate", name, new_name, "--json",
+                                       *state_words(True, **state))
+
+    def session_import(self, path, new_name=None, maps=(), check=False, replace=False, grant=False,
+                       no_workspace=False, yes=False):
+        """`sandbox-ai session import PATH --json ...` (session_import_args): with CHECK what it would start with -
+        {"options", "asked", "approvals", "warnings", ...} - nothing kept; else the session made. ValueError."""
+        return self.session_state_json(*session_import_args(path, new_name, maps, check, replace, grant, no_workspace,
+                                                            yes))
 
     def board_bundle_supported(self):
         """Whether this sandbox-ai has `sandbox-ai board export|import` (a board or session as one file); looked up
@@ -2968,7 +3005,7 @@ class SandboxAI:
                                    *(["--full"] if full and file is not None else []),
                                    *(["--show-secret"] if show_secret and file is not None else []), timeout=300)
 
-    def session_export(self, name, out, include_secrets=False):
+    def session_export(self, name, out, include_secrets=False, with_workspace=False):
         """The folder of the kept start NAME of this machine as a new tar.gz OUT (`sandbox-ai session export NAME OUT
         --json [--include-secrets --yes]`): {"path", "files", "bytes", "left_out": [{"path", "why", "secret"}],
         "secrets_left_out", "include_secrets"}. INCLUDE_SECRETS: its logins and keys too (asked first:
@@ -2978,7 +3015,8 @@ class SandboxAI:
         if not isinstance(out, str) or not os.path.isabs(out) or any(c in out for c in "\n\r\0"):
             raise ValueError("choose where the archive is written (a new file of this machine)")
         return self.checkpoint_json("local", "session", "export", name, "--json",
-                                    *(["--include-secrets", "--yes"] if include_secrets else []), "--", out,
+                                    *(["--include-secrets", "--yes"] if include_secrets else []),
+                                    *(["--with-workspace"] if with_workspace else []), "--", out,
                                     timeout=3600)
 
     def collect(self, host="local", dry_run=True, days=None, caches=False):
@@ -5613,6 +5651,10 @@ NEEDS_CONFIRM = {
                       "files it kept (logins and keys are left out) - in a new file on that host",
     "session-export-secrets": "the archive then holds the start's logins, keys and secrets too: whoever has it can "
                               "log in as you with them, wherever it goes",
+    "session-grant-approvals": "the network approvals are granted again as options of that session: it reaches those "
+                               "destinations at every start",
+    "session-import": "the imported session's configuration gives the sandbox secrets or folders of this machine (as "
+                      "listed): they reach it at its first resume",
     "show-secret-file": "the file is marked as a login or key: its text is shown on this screen, where anyone who "
                         "sees it can read it",
     "board-import": "importing a bundle from elsewhere writes its parts here (MCP and LLM servers, kits, presets, "
@@ -5664,6 +5706,8 @@ NEEDS_CONFIRM = {
     'project-forget': 'a project configuration no longer trusted stops the starts of that project from starting until it is trusted again',
     'mcp-stop': 'stopping an MCP server ends it for every start that uses it now',
     'mcp-unsigned': 'an MCP server from a catalog no trusted key signed is taken without that check',
+    "mcp-build": "an MCP server its catalog has no signed image of is built on that host from its source at the commit "
+                 "and source archive shown, and added unsigned: nobody signed the image built",
     'mcp-writable-mount': 'a writable mount lets the MCP server change that directory on the host',
     "mcp-lan": "network lan lets the MCP server reach your local network and that host, not only the internet",
     'git-login-add': 'a Git login is used by the connection proxy of every sandbox that reaches that server',
@@ -5743,7 +5787,7 @@ APP_NEEDS_CONFIRM = {
     "net-revoke": "revoking takes back what the running sandbox may reach, at once (open connections to it end)",
     # sandbox-ai session move: no route of the web interface does it
     "session-move": "moving a session stops it here once it runs on the other host (its HOME stays here until it is "
-                    "deleted; logins and HOME are not copied)",
+                    "deleted)",
     # sandbox-ai session copy|move --replace: a session of that name on the other host is deleted first
     "session-replace": "replacing deletes the session of that name on the other host first, its HOME there too",
     "preset-delete": "deleting a preset of your own removes it for good (export it first to keep a copy)",
@@ -6496,6 +6540,8 @@ SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "", "language": "syst
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
             "default_template": "development", "board_grid": 20, "board_confirm_remove": True, "auto_tabs": True, "reopen_terminals": False, "guide_nodes": True,
             "guide_tour": True, "intro": True, "debug": False, "help_buttons": True,
+            # which intro plays (intro_choice.py): "rotate" - a different one at each start - or one of its IDS
+            "intro_animation": "rotate",
             # the explanatory texts of the pages and dialogs (widgets.explanation): off, only the (?)s and tooltips
             "explanations": False,
             # the Sessions page's icon buttons (button_icons.py): their texts beside the icons; off: the icons alone,
@@ -8090,7 +8136,8 @@ def board_import_args(path, host="local", as_name=None, maps=(), values=(), rena
     return words + ["--", path]
 
 
-def session_transfer_args(command, name, host, new_name=None, maps=(), check=False, replace=False):
+def session_transfer_args(command, name, host, new_name=None, maps=(), check=False, replace=False, state=None,
+                          **extra):
     """The words after `sandbox-ai` of `session copy|move NAME HOST [--as NEW] [--map=LOCAL=REMOTE]... [--check]
     [--replace]`, checked: COMMAND copy or move, NAME and NEW session names, HOST one of sandbox-ai hosts (never this
     machine), MAPS [(local, remote)] absolute paths (a local one without '='); a pair that does not move anything is
@@ -8118,7 +8165,48 @@ def session_transfer_args(command, name, host, new_name=None, maps=(), check=Fal
             args.append(f"--map={local}={remote}")
     if moved > TRANSFER_MAPS:
         raise ValueError("too many folders at once")
-    return args + (["--check"] if check else []) + (["--replace"] if replace else [])
+    return args + (["--check"] if check else []) + (["--replace"] if replace else []) + state_words(state, **extra)
+
+
+def state_words(state=None, with_workspace=False, include_secrets=False, grant=False):
+    """The words of what a copy, move or duplicate takes along (sandbox-ai 0.1.193 on): STATE False only its
+    configuration (--config-only), True its state - with WITH_WORKSPACE its workspace's files, INCLUDE_SECRETS its
+    logins and keys, GRANT its network approvals granted again there (both asked first by the dialog: --yes). STATE
+    None: none of them (a sandbox-ai before 0.1.193 knows none)."""
+    if state is None:
+        return []
+    if state is False:
+        return ["--config-only"]
+    return ((["--with-workspace"] if with_workspace else []) + (["--include-secrets"] if include_secrets else [])
+            + (["--grant-approvals"] if grant else []) + (["--yes"] if include_secrets or grant else []))
+
+
+def session_import_args(path, new_name=None, maps=(), check=False, replace=False, grant=False, no_workspace=False,
+                        yes=False):
+    """The words after `sandbox-ai` of `session import PATH --json [--as NEW] [--map=OLD=HERE]... [--check]
+    [--replace] [--grant-approvals] [--no-workspace] [--yes]`, checked: PATH an absolute file of this machine, NEW a
+    session name, MAPS [(folder of the machine it came from, where it lies here)] absolute paths. ValueError."""
+    path = path_value(path, "the archive")
+    args = ["session", "import", "--json"]
+    if new_name not in (None, ""):
+        if not isinstance(new_name, str) or not SESSION_NAME.fullmatch(new_name):
+            raise ValueError("a session's name is 1-40 letters, digits, '_', '.' or '-', beginning with a letter or "
+                             "digit")
+        args += ["--as", new_name]
+    maps = list(maps)
+    if len(maps) > TRANSFER_MAPS:
+        raise ValueError("too many folders at once")
+    for there, here in maps:
+        there, here = path_value(there, "a folder there"), path_value(here, "its folder here")
+        if "=" in there:
+            raise ValueError(f"a folder with '=' in it cannot be mapped: {printable(there)}")
+        there, here = there.rstrip("/") or "/", here.rstrip("/") or "/"
+        if there != here:
+            args.append(f"--map={there}={here}")
+    args += ((["--check"] if check else []) + (["--replace"] if replace else [])
+             + (["--grant-approvals"] if grant else []) + (["--no-workspace"] if no_workspace else [])
+             + (["--yes"] if yes else []))
+    return args + ["--", path]
 
 
 LIVE_HELPERS = AGENTS  # mcp attach --helper AGENT (and the launcher's --helper): every agent can be a helper
@@ -8422,6 +8510,8 @@ def origin_text(origin):
     if catalog in (N_("built-in"), N_("own (mcp.json)"), N_("team"), N_("unknown (added before 0.1.78)")):
         catalog = tr(catalog)
     signed = origin.get("signed")
+    if isinstance(origin.get("built"), dict):  # (mcp add --build: never signed, said so wherever it is shown)
+        return printable(catalog + ", " + tr("built here, not signed"))[:300]
     return printable(catalog + (", " + tr("signed") if signed is True else ", " + tr("unsigned") if signed is False
                                 else ""))[:300]
 

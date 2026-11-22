@@ -1,12 +1,17 @@
 """The intro animation at the app's start (intro_timeline.py tells the story; this draws it).
 
+This module draws the classic intro and holds what all four share (intro_choice.py says which plays): the overlay,
+the layout of the texts, the cached background and sprites, the captions, the title card and the Skip button. The
+others - intro_glass.py, intro_city.py, intro_vault.py - subclass its Layout and Renderer with their own stories.
+
 An overlay over the main window, drawn with QPainter (no images, nothing fetched) in the colours and the font of
 the theme in use. Shapes are drawn on the timeline's stage, scaled into the window; texts are laid out in
 pixels (Layout), each fitted into its box, so that they stay sharp and inside the window at every size. The
 background is painted once per size into pixmaps (HiDPI aware); a frame only draws what moves.
 
 A click or any key (Esc, Space, ...) skips it, and so does the Skip button. The "intro" setting (Settings,
-Appearance) or $SANDBOX_AI_APP_NO_INTRO=1 turns it off; $SANDBOX_AI_APP_REDUCED_MOTION=1 shows a short static
+Appearance) or $SANDBOX_AI_APP_NO_INTRO=1 turns it off, "intro_animation" chooses one or a different one at each start
+(remembered in the window's state.json); $SANDBOX_AI_APP_REDUCED_MOTION=1 shows a short static
 title card instead. A drawing error ends it: it never stands between the user and the app.
 """
 from __future__ import annotations
@@ -21,7 +26,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication, QWidget
 
-from . import applog, intro_timeline as T, theme
+from . import applog, intro_choice, intro_timeline as T, theme
 from .i18n import tr
 
 AGENTS_LINE = "Claude Code  ·  Codex  ·  OpenCode"  # names: the same in every language
@@ -103,7 +108,9 @@ class Text:
 
 
 class Layout:
-    """The stage's scale and offset in a WIDTH x HEIGHT window, and every text fitted into its box."""
+    """The stage's scale and offset in a WIDTH x HEIGHT window, and every text fitted into its box. The classic
+    intro's story texts (build_story) and captions; another intro's Layout has its own (intro_glass.py, ...), the
+    title card and the Skip button are the same in all."""
 
     def __init__(self, width, height, font=None):
         self.width, self.height = float(width), float(height)
@@ -153,7 +160,14 @@ class Layout:
         return self.texts[name]
 
     def build(self):
-        bold, semi, medium = QFont.Weight.Bold, QFont.Weight.DemiBold, QFont.Weight.Medium
+        self.build_story()
+        self.build_title()
+
+    def captions(self):
+        return captions()
+
+    def build_story(self):
+        semi, medium = QFont.Weight.DemiBold, QFont.Weight.Medium
         left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         px, py, pw, _ = T.PANEL
         self.add("header", tr("Sandbox"), 22, self.rect(px + 72, py + 14, 260, T.HEADER - 28), left, weight=semi,
@@ -180,7 +194,12 @@ class Layout:
                  least=11)
         self.add("deny", tr("Deny"), 16, self.rect(*self.button(0)), weight=medium, least=10)
         self.add("allow", tr("Allow"), 16, self.rect(*self.button(1)), weight=semi, least=10)
-        for k, text in enumerate(captions()):
+
+    def build_title(self):
+        """The captions, the title card and the Skip button: the same in every intro."""
+        bold, medium = QFont.Weight.Bold, QFont.Weight.Medium
+        left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        for k, text in enumerate(self.captions()):
             self.add(f"caption{k}", text, 31, self.centred(T.WIDTH / 2, T.CAPTION_Y, 1240, 50), weight=medium,
                      least=14)
         self.add("word", "".join(WORDMARK), 120, self.centred(T.WIDTH / 2, T.TITLE_Y[0], 1100, 140), weight=bold,
@@ -311,6 +330,14 @@ def grain():
     return _grain[0]
 
 
+def vignette(width, height, pal, inner=0.55, dark=90, light=14):
+    """A gradient darkening the corners of a WIDTH x HEIGHT area a little."""
+    gradient = QRadialGradient(QPointF(width / 2, height / 2), math.hypot(width, height) * 0.62)
+    gradient.setColorAt(inner, QColor(0, 0, 0, 0))
+    gradient.setColorAt(1, QColor(0, 0, 0, dark if pal.dark else light))
+    return gradient
+
+
 def draw_text(p, item, color, dx=0.0, dy=0.0):
     p.setFont(item.font)
     p.setPen(color)
@@ -318,7 +345,11 @@ def draw_text(p, item, color, dx=0.0, dy=0.0):
 
 
 class Renderer:
-    """Draws scenes for one palette; keeps the background of the last size in pixmaps."""
+    """Draws scenes for one palette; keeps the background of the last size in pixmaps. This one draws the classic
+    intro; the others (intro_glass.py, ...) are its subclasses with their own TIMELINE, LAYOUT, background and
+    story (paint_story), sharing everything else."""
+    TIMELINE = T
+    LAYOUT = Layout
 
     def __init__(self, mode=None, font=None):
         self.pal = Palette(mode)
@@ -327,14 +358,16 @@ class Renderer:
         self.layout = self.background = None
         self.layer = {}  # buffers for the moments something fades as one (released after them)
         self.sprites, self.scale, self.ratio = {}, 1.0, 1.0
+        self.versions = {}  # latest(): the version of each named pixmap kept
+        self.text_cache = {}  # text(): texts painted once, at this size
 
     def prepare(self, width, height, ratio=1.0):
         key = (int(width), int(height), round(ratio, 3))
         if key != self.key:
             self.key = key
-            self.layout = Layout(width, height, self.font)
+            self.layout = self.LAYOUT(width, height, self.font)
             self.scale, self.ratio = self.layout.s * ratio, ratio
-            self.sprites = {}
+            self.sprites, self.versions, self.text_cache = {}, {}, {}
             self.background = self.paint_layer(width, height, ratio, self.paint_background)
             self.layer = {}
         return self.layout
@@ -345,7 +378,7 @@ class Renderer:
         """The pixmap KEY of SIZE (stage units) at the current resolution, painted by DRAW(painter) once."""
         found = self.sprites.get(key)
         if found is None:
-            if len(self.sprites) > 96:
+            if len(self.sprites) > 256:
                 self.sprites.clear()
             scale = self.scale
             found = QPixmap(QSize(max(1, math.ceil(size.width() * scale)), max(1, math.ceil(size.height() * scale))))
@@ -433,10 +466,7 @@ class Renderer:
         p.fillRect(QRectF(0, 0, width, height), gradient)
         centre = QPointF(width / 2, L.oy + 300 * L.s)
         glow(p, centre, max(width, height) * 0.62, pal.accent, 0.10 if pal.dark else 0.06)
-        vignette = QRadialGradient(QPointF(width / 2, height / 2), math.hypot(width, height) * 0.62)
-        vignette.setColorAt(0.55, QColor(0, 0, 0, 0))
-        vignette.setColorAt(1, QColor(0, 0, 0, 90 if pal.dark else 14))
-        p.fillRect(QRectF(0, 0, width, height), vignette)
+        p.fillRect(QRectF(0, 0, width, height), vignette(width, height, pal))
         self.paint_grid(p, width, height)
         p.setOpacity(0.022 if pal.dark else 0.018)  # a fine grain: no banding in the soft gradients
         p.drawTiledPixmap(QRectF(0, 0, width, height), grain())
@@ -611,14 +641,68 @@ class Renderer:
         pixmap = self.sprite(key, area.size(), paint)
         self.blit(p, QRectF(area.topLeft(), QSizeF(pixmap.width() / self.scale, pixmap.height() / self.scale)), pixmap)
 
+    def text(self, p, font, text, colour, top_left):
+        """TEXT in FONT and COLOUR, the top left of its box at TOP_LEFT (in P's units), from a pixmap painted once:
+        at large sizes (a caption or the title on a 4K screen) Qt draws glyphs as paths, every frame anew."""
+        colour = QColor(colour)
+        key = (font.key(), font.letterSpacing(), text, colour.rgba())
+        found = self.text_cache.get(key)
+        if found is None:
+            if len(self.text_cache) > 64:
+                self.text_cache.clear()
+            metrics = QFontMetricsF(font)
+            pad = math.ceil(metrics.height() * 0.3)
+            ratio = self.ratio
+            pixmap = QPixmap(max(1, math.ceil((metrics.horizontalAdvance(text) + 2 * pad) * ratio)),
+                             max(1, math.ceil((metrics.height() + 2 * pad) * ratio)))
+            pixmap.setDevicePixelRatio(ratio)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                painter.setFont(font)
+                painter.setPen(colour)
+                painter.drawText(QPointF(pad, pad + metrics.ascent()), text)
+            finally:
+                painter.end()
+            found = self.text_cache[key] = (pixmap, pad)
+        pixmap, pad = found
+        at = QPointF(top_left.x() - pad, top_left.y() - pad)
+        if p.worldTransform().type() == QTransform.TransformationType.TxNone:  # on whole device pixels: sharp
+            at = QPointF(round(at.x() * self.ratio) / self.ratio, round(at.y() * self.ratio) / self.ratio)
+            p.drawPixmap(at, pixmap)
+        else:
+            p.save()
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawPixmap(at, pixmap)
+            p.restore()
+
+    def ground(self):
+        """The colour mostly behind the story (solid() mixes over it)."""
+        return self.pal.bg
+
+    def solid(self, colour, alpha):
+        """COLOUR at ALPHA over ground(), as an opaque colour: Qt's raster engine strokes an opaque antialiased line
+        many times faster than a translucent one (for lines over about that colour)."""
+        return mix(self.ground(), colour, T.clamp(alpha))
+
+    def latest(self, p, name, version, area, draw):
+        """As cached(), for a part that changes now and then (VERSION: what it shows): only its latest pixmap is
+        kept."""
+        old = self.versions.get(name)
+        if old != version:
+            self.sprites.pop((name, old), None)
+            self.versions[name] = version
+        self.cached(p, (name, version), area, draw)
+
     @staticmethod
-    def texts(p, L, items, dx=0.0):
-        """Layout texts ((name, colour), ...) on P, which is in stage units."""
+    def texts(p, L, items, dx=0.0, dy=0.0):
+        """Layout texts ((name, colour), ...) on P, which is in stage units; DX, DY: moved by that (pixels)."""
         p.save()
         p.scale(1 / L.s, 1 / L.s)
         p.translate(-L.ox, -L.oy)
         for name, colour in items:
-            draw_text(p, L.texts[name], colour, dx=dx)
+            draw_text(p, L.texts[name], colour, dx=dx, dy=dy)
         p.restore()
 
     def paint_story(self, p, L, s):
@@ -1097,14 +1181,15 @@ class Renderer:
             return
         p.save()
         p.setOpacity(p.opacity() * caption["alpha"])
-        draw_text(p, L.texts[f"caption{caption['index']}"], pal.fg, dy=caption["rise"] * 16 * L.s)
+        item = L.texts[f"caption{caption['index']}"]
+        self.text(p, item.font, item.text, pal.fg, item.rect.topLeft() + QPointF(0, caption["rise"] * 16 * L.s))
         p.restore()
         # where in the story: three dots, the current one long
         p.save()
         self.stage(p, L)
         p.setPen(Qt.PenStyle.NoPen)
         y, gap = T.CAPTION_Y + 46, 8.0
-        widths = [24.0 if k == caption["index"] else 7.0 for k in range(len(T.CAPTIONS))]
+        widths = [24.0 if k == caption["index"] else 7.0 for k in range(len(self.TIMELINE.CAPTIONS))]
         x = T.WIDTH / 2 - (sum(widths) + gap * (len(widths) - 1)) / 2
         for k, width in enumerate(widths):
             p.setBrush(pal.accent if k == caption["index"] else pal.line)
@@ -1120,9 +1205,6 @@ class Renderer:
         word = L.texts["word"]
         metrics = QFontMetricsF(word.font)
         text = "".join(WORDMARK)
-        p.save()
-        p.setFont(word.font)
-        baseline = word.rect.top() + metrics.ascent()
         for index, char in enumerate(text):
             f = T.ease_out_cubic(T.clamp(title["word"] * 1.9 - index * 0.085))
             if f <= 0:
@@ -1130,16 +1212,16 @@ class Renderer:
             x = word.rect.left() + metrics.horizontalAdvance(text[:index])
             p.save()
             p.setOpacity(p.opacity() * f)
-            p.setPen(pal.accent if index >= len(WORDMARK[0]) else pal.fg)
-            p.drawText(QPointF(x, baseline + (1 - f) * 22 * L.s), char)
+            self.text(p, word.font, char, pal.accent if index >= len(WORDMARK[0]) else pal.fg,
+                      QPointF(x, word.rect.top() + (1 - f) * 22 * L.s))
             p.restore()
-        p.restore()
         for name, value, colour in (("tag", title["tag"], pal.muted), ("agents", title["agents"],
                                                                         mix(pal.muted, pal.bg, 0.2))):
             if value > 0:
                 p.save()
                 p.setOpacity(p.opacity() * value)
-                draw_text(p, L.texts[name], colour, dy=(1 - value) * 12 * L.s)
+                item = L.texts[name]
+                self.text(p, item.font, item.text, colour, item.rect.topLeft() + QPointF(0, (1 - value) * 12 * L.s))
                 p.restore()
 
     def paint_chrome(self, p, L, s, base):
@@ -1168,29 +1250,48 @@ class Renderer:
         p.restore()
 
 
-def render_image(width, height, t, mode=None, reduced=False, ratio=1.0, renderer=None):
-    """Scene T as an image (for tests and stills)."""
+def renderer_class(which):
+    """The Renderer of intro WHICH (intro_choice.IDS; unknown: the classic one)."""
+    if which == "glass":
+        from .intro_glass import GlassRenderer
+        return GlassRenderer
+    if which == "city":
+        from .intro_city import CityRenderer
+        return CityRenderer
+    if which == "vault":
+        from .intro_vault import VaultRenderer
+        return VaultRenderer
+    return Renderer
+
+
+def render_image(width, height, t, mode=None, reduced=False, ratio=1.0, renderer=None, which="classic"):
+    """Scene T of intro WHICH (or RENDERER's) as an image (for tests and stills)."""
     image = QImage(QSize(round(width * ratio), round(height * ratio)), QImage.Format.Format_ARGB32_Premultiplied)
     image.setDevicePixelRatio(ratio)
     image.fill(Qt.GlobalColor.transparent)
+    renderer = renderer or renderer_class(which)(mode)
     painter = QPainter(image)
-    (renderer or Renderer(mode)).paint(painter, width, height, T.scene(t, reduced), ratio)
-    painter.end()
+    try:
+        renderer.paint(painter, width, height, renderer.TIMELINE.scene(t, reduced), ratio)
+    finally:
+        painter.end()
     return image
 
 
 class Intro(QWidget):
-    """The animation, over PARENT's whole area; `finished` when it ends or is skipped."""
+    """Intro WHICH (intro_choice.IDS), over PARENT's whole area; `finished` when it ends or is skipped."""
     finished = Signal()
 
-    def __init__(self, parent, reduced=None):
+    def __init__(self, parent, reduced=None, which="classic"):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(tr("Press Esc to skip"))
+        self.which = which if which in intro_choice.IDS else "classic"
         self.reduced = reduced_motion() if reduced is None else reduced
-        self.duration = T.duration(self.reduced)
-        self.renderer = Renderer()
+        self.renderer = renderer_class(self.which)()
+        self.timeline = self.renderer.TIMELINE
+        self.duration = self.timeline.duration(self.reduced)
         self.clock, self.timer, self.over = QElapsedTimer(), QTimer(self), False
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.setInterval(16)  # about 60 frames a second; the scene follows the clock, not the frames
@@ -1249,8 +1350,8 @@ class Intro(QWidget):
             return
         painter = QPainter(self)
         try:
-            self.renderer.paint(painter, self.width(), self.height(), T.scene(self.elapsed(), self.reduced),
-                                self.devicePixelRatioF())
+            self.renderer.paint(painter, self.width(), self.height(),
+                                self.timeline.scene(self.elapsed(), self.reduced), self.devicePixelRatioF())
         except Exception as error:  # noqa: BLE001 - a broken frame must never keep the app from the user
             applog.write(applog.entry(type(error), error, error.__traceback__, delivered="the intro: it stops"))
             QTimer.singleShot(0, self.skip)
@@ -1258,13 +1359,24 @@ class Intro(QWidget):
             painter.end()
 
 
-def play(window, settings, force=False):
-    """The intro over WINDOW, if wanted (see wanted()) or FORCEd (watched again); returns it, or None."""
+def choose(settings, state=None):
+    """The intro to play now (intro_choice.pick): the chosen one, or the next of the rotation after the one STATE
+    (the window's state.json) says was played last; STATE keeps the choice for the next time."""
+    last = state.get(intro_choice.STATE_KEY, "") if state is not None else None
+    which = intro_choice.pick(settings, last)
+    if state is not None:
+        state.set(intro_choice.STATE_KEY, which)
+    return which
+
+
+def play(window, settings, force=False, state=None, which=None):
+    """The intro over WINDOW, if wanted (see wanted()) or FORCEd (watched again); returns it, or None. WHICH (an
+    id of intro_choice.IDS), else the one choose() picks."""
     if not force and not wanted(settings):
         return None
     intro = None
     try:
-        intro = Intro(window, reduced_motion(settings))
+        intro = Intro(window, reduced_motion(settings), which or choose(settings, state))
         intro.start()
     except Exception as error:  # noqa: BLE001 - without the intro the app starts all the same
         applog.write(applog.entry(type(error), error, error.__traceback__, delivered="the intro: it is left out"))

@@ -2397,6 +2397,15 @@ CONFIRM_CASES = {
                                {"path": "/srv/out/web.tar.gz", "include_secrets": True},
                                ["session", "export", "web", "--json", "--include-secrets", "--yes", "--",
                                 "/srv/out/web.tar.gz"]),
+    # an archive of session export taken as a session there (its check needs no confirmation), and a session's
+    # network approvals granted again at a duplicate (or an import)
+    "session-import": ("POST", "/api/hosts/ct1/session-import", {"path": "/srv/in/web.tar.gz", "as": "web-2",
+                                                                 "map": [["/home/me/w", "/srv/w"]]},
+                       ["session", "import", "--json", "--as", "web-2", "--map=/home/me/w=/srv/w", "--yes", "--",
+                        "/srv/in/web.tar.gz"]),
+    "session-grant-approvals": ("POST", "/api/hosts/ct1/starts/web/session-duplicate",
+                                {"new": "web-2", "grant_approvals": True},
+                                ["session", "duplicate", "web", "web-2", "--json", "--grant-approvals", "--yes"]),
     "show-secret-file": ("POST", "/api/hosts/ct1/starts/web/session-files/.git-credentials/secret", {},
                          ["session", "files", "web", "--json", "--file=.git-credentials", "--show-secret"]),
     # a bundle from elsewhere written here (sandbox-ai board import): its plan (check) needs no confirmation
@@ -2465,6 +2474,11 @@ CONFIRM_CASES = {
                    ["mcp", "detach", "files", "web", "--live", "--json"]),
     "mcp-unsigned": ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "unsigned": True},
                      ["mcp", "add", "--unsigned", "hub:binwalk"]),
+    # built from its source (no signed image in its catalog yet): that commit and source archive only, unsigned - its
+    # own question (confirm_build) beside the add's ({"confirm": true}: a server of that name replaced, asked first)
+    "mcp-build": ("POST", "/api/hosts/ct1/mcp", {"entry": "jadx", "build": True, "commit": "1" * 40,
+                                                 "source_sha256": "a" * 64, "confirm": True},
+                  ["mcp", "add", "--build", "--commit=" + "1" * 40, "--source-sha256=" + "a" * 64, "--yes", "jadx"]),
     "mcp-writable-mount": ("POST", "/api/hosts/ct1/mcp", {"entry": "duckduckgo", "mounts": [
         {"target": "/data", "host": "/home/u/data", "mode": "rw"}]}, ["mcp", "add", "--mount=/data=/home/u/data:rw",
                                                                      "duckduckgo"]),
@@ -4520,10 +4534,11 @@ def test_the_page_splits_options_confirms_in_place_and_keeps_the_starts_table(tm
     assert result["cancelled"] == [True, 0], "Cancel puts back what was there, nothing is sent"
     assert result["yes"] == [[["POST", "/api/x", '{"confirm":true}']], True]
     assert result["buttons"] == [["Attach", "Shell", "Pause", "Stop", "Network…", "Resources…", "Rename…", "Export",
-                                  "More…", "History", "Checkpoints…", "Memory…", "Session files…", "Storage…"],
+                                  "Duplicate…", "More…", "History", "Checkpoints…", "Memory…", "Session files…",
+                                  "Storage…"],
                                  ["Stop", "Attach to…", "History"],
-                                 ["Resume", "Delete", "Rename…", "Export", "More…", "History", "Checkpoints…", "Memory…",
-                                  "Session files…", "Storage…"]], \
+                                 ["Resume", "Delete", "Rename…", "Export", "Duplicate…", "More…", "History",
+                                  "Checkpoints…", "Memory…", "Session files…", "Storage…"]], \
         "an MCP server has no Pause, Network, Resources or Rename"
     assert "Stop web on ct1?" in result["stopAsk"] and "its HOME is kept" in result["stopAsk"]
     same, asking, names, polled = result["refreshed"]
@@ -8079,3 +8094,67 @@ def test_logins_and_keys_in_the_web_file_views(tmp_path):
     assert result["hiddenNote"]
     assert result["boxBefore"] is False
     assert result["saved"] == [{"key": "hide_secrets", "value": True}, {"key": "hide_secrets", "value": None}]
+
+
+SESSION_STATE_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c" }; state.page = "starts"; state.host = "ct1";', context);
+  const made = { name: "web-2", imported: true, checked: true, options: ["--no-config", "--workspace", "/srv/w"],
+    workspace: "/srv/w", asked: [], warnings: [], approvals: ["--allow-host pypi.org"], granted: [],
+    memory: { added: 2, kept_here: [] }, checkpoints: { ids: ["20261121-000000-aaaaaa"] } };
+  answer = (method, path, body) => {
+    if (path.endsWith("/session-duplicate")) return made;
+    if (path.endsWith("/session-import")) return Object.assign({}, made, JSON.parse(body).check
+      ? { imported: false, asked: ["--api-key evil.example=OPENAI_API_KEY: gives the sandbox a secret or login of this machine"] } : {});
+    return {};
+  };
+  const s = { name: "web", host: "ct1", keep: true, state: "stopped" };
+  vm.runInContext("var __s = " + JSON.stringify(s), context);
+  // Duplicate…: without logins or approvals no question; with logins and keys asked in place first
+  vm.runInContext("duplicateCard(__main, __s)", context); await settle();
+  let card = document.getElementById("duplicate-card");
+  document.getElementById("duplicate-workspace").checked = true;
+  button(card, "Duplicate").fire("click"); await settle();
+  result.plain = calls.filter(c => c.path.endsWith("/session-duplicate")).map(c => JSON.parse(c.body));
+  result.made = card.textContent.includes("Made: web-2") && card.textContent.includes("--allow-host pypi.org");
+  document.getElementById("duplicate-secrets").checked = true;
+  button(card, "Duplicate").fire("click"); await settle();
+  result.asked = card.all().filter(n => n.className === "confirm").map(n => n.textContent).join("");
+  result.beforeYes = calls.filter(c => c.path.endsWith("/session-duplicate")).length;
+  button(card, "Yes, duplicate").fire("click"); await settle();
+  result.withSecrets = JSON.parse(calls.filter(c => c.path.endsWith("/session-duplicate")).pop().body);
+  // Import a session…: checked first, what it asks shown, then imported after the question
+  calls.length = 0;
+  vm.runInContext('sessionImportCard(__main, "ct1")', context); await settle();
+  card = document.getElementById("session-import-card");
+  document.getElementById("session-import-path").value = "/srv/in/web.tar.gz";
+  document.getElementById("session-import-as").value = "";
+  document.getElementById("session-import-maps").value = "/home/me/w=/srv/w\n";
+  button(card, "Check").fire("click"); await settle();
+  result.checked = calls.map(c => JSON.parse(c.body));
+  result.checkText = card.textContent.includes("Asked first: --api-key");
+  button(card, "Import").fire("click"); await settle();
+  result.importAsk = card.all().filter(n => n.className === "confirm").map(n => n.textContent).join("");
+  button(card, "Yes, import it").fire("click"); await settle();
+  result.imported = calls.map(c => JSON.parse(c.body));
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_duplicate_and_import_of_a_session_in_the_web(tmp_path):
+    """User 2026-11-21: a sandbox moved or duplicated with its state. Duplicate… sends the new name and what goes
+    along, asks in place before logins and keys go along (and only then sends confirm); Import a session… is checked
+    first (what its configuration gives the sandbox shown), then imported after a question in place."""
+    result = run_driver(tmp_path, SESSION_STATE_DRIVER, "session-state")
+    assert result["plain"] == [{"new": "web-2", "with_workspace": True, "include_secrets": False,
+                                "grant_approvals": False}]
+    assert result["made"]
+    assert "log in as you" in result["asked"] and result["beforeYes"] == 1, "nothing sent before the answer"
+    assert result["withSecrets"]["include_secrets"] is True and result["withSecrets"]["confirm"] is True
+    assert result["checked"] == [{"path": "/srv/in/web.tar.gz", "map": [["/home/me/w", "/srv/w"]], "check": True,
+                                  "replace": False, "no_workspace": False, "grant_approvals": False}]
+    assert result["checkText"] and "--api-key evil.example" in result["importAsk"]
+    assert result["imported"][-1]["confirm"] is True and result["imported"][-1]["check"] is False

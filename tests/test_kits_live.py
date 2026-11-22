@@ -424,6 +424,29 @@ def test_plugin_attach_installs_into_the_store_and_enables_it_in_the_running_cla
     assert json.loads((made.home / ".claude/settings.json").read_text())["enabledPlugins"]["new@m"] is False
 
 
+def test_the_store_installs_output_goes_to_stderr_so_json_stays_json(live, monkeypatch, capfd):
+    """Live check 2026-11-22: `plugins attach NAME PLUGIN --json` printed Claude Code's own 'Installing plugin
+    "sandcastle@sandbox-ai"...✔ Successfully installed' before its JSON document on stdout - the store's command
+    is a child process with the launcher's stdout. Its output goes to stderr; stdout carries only the result."""
+    store_with(["old@m"])
+    real = L.plugins_module()
+
+    class Store:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        @staticmethod
+        def run_in_store(args, options, sources, runner):
+            done = runner([sys.executable, "-c", "print('Installing plugin new@m... Successfully installed')"])
+            if args == ["install", "new@m"]:
+                store_with(["old@m", "new@m"])
+            return done.returncode
+    monkeypatch.setattr(L, "plugins_module", lambda: Store())
+    assert L.install("new@m", out=lambda text: None) is True
+    said = capfd.readouterr()
+    assert said.out == "" and "Successfully installed" in said.err
+
+
 def test_a_plugins_hooks_stay_off_unless_approved(live):
     hooks = {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
                                                             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/x.sh"}]}]}

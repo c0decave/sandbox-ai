@@ -910,7 +910,7 @@ def changed_settings(env):
             "guide_tour": False, "intro": False, "debug": True, "help_buttons": False, "web_without_sandbox": True,
             "show_flags": True, "login_links": "system", "copy_on_select": True, "paste_warn": False,
             "terminal_osc52": "off", "short_notices": False, "explanations": True,
-            "button_texts": True, "device_signin": "app"}
+            "button_texts": True, "device_signin": "app", "intro_animation": "vault"}
 
 
 def field_value(widget):

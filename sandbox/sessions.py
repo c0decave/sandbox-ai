@@ -3118,11 +3118,23 @@ def session_inspect():
     return loaded
 
 
+def session_state():
+    """session_state.py (a session's state exported, imported, duplicated, copied or moved), loaded once."""
+    loaded = sys.modules.get("sandbox_ai_session_state")
+    if loaded is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_session_state", HERE / "session_state.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        loaded = sys.modules.setdefault("sandbox_ai_session_state", loaded)
+    return loaded
+
+
 def cli(argv):
     p = argparse.ArgumentParser(prog="sandbox-ai session", formatter_class=help_style,
                                 description="Manage named sandbox sessions (the older form of sandbox-ai list, attach, "
-                                            "pause, resume, stop and delete), copy or move one to another host, and "
-                                            "read a start's agent memory and session files or export its folder. "
+                                            "pause, resume, stop and delete), copy, move or duplicate one with its "
+                                            "state (to another host, or here), export it into an archive and import "
+                                            "one, and read a start's agent memory and session files. "
                                             "Start one with: sandbox-ai AGENT --session NAME [options]")
     p.add_argument("-V", "--version", action=LauncherVersion)
     commands = p.add_subparsers(dest="command", required=True)
@@ -3138,9 +3150,16 @@ def cli(argv):
         sub.add_argument("name")
         if command == "delete":
             sub.add_argument("-y", "--yes", action="store_true", help="Confirm removal of the session's HOME")
-    for command, text in [("copy", "Start a session's configuration again on another host (sandbox-ai hosts)"),
+    for command, text in [("copy", "A session with its state to another host (sandbox-ai hosts), continued there"),
                           ("move", "As copy, then stop the session here (its HOME stays until it is deleted)")]:
-        sub = commands.add_parser(command, help=text)
+        sub = commands.add_parser(command, help=text, description=(
+            "Take the session with its state - its configuration, HOME and the agent's session files (the agent "
+            "continues its conversation there), its memory, checkpoints and network approvals (granted again only "
+            "with --grant-approvals) - to a host of sandbox-ai hosts over SSH, check it there (sandbox-ai session "
+            "import, a dry run first) and start it there. A running session is paused for the snapshot; "
+            + ("a move stops it here once it runs there." if command == "move" else "a copy thaws it right after.")
+            + " Logins and keys only with --include-secrets (asked). --config-only: only its configuration, "
+              "started afresh there (as before 0.1.193)."))
         sub.add_argument("name")
         sub.add_argument("host", help="a host of sandbox-ai hosts")
         sub.add_argument("--as", dest="new_name", metavar="NAME", help="the session's name there (default: the same)")
@@ -3150,6 +3169,10 @@ def cli(argv):
         sub.add_argument("--replace", action="store_true",
                          help="a session of that name there is deleted first (its HOME there too); without, it is "
                               "refused")
+        sub.add_argument("--config-only", action="store_true",
+                         help="only its configuration, started afresh there: no HOME, memory, checkpoints or "
+                              "approvals (the agent begins a new conversation)")
+        session_state().add_state_options(sub)
     shown = commands.add_parser("status", help="What is there under a name now: its agent, state, supervisor, "
                                                "terminal")
     shown.add_argument("name")
@@ -3159,8 +3182,16 @@ def cli(argv):
     plan.add_argument("--map", action="append", default=[], metavar="LOCAL=REMOTE", help="a folder of this machine that lies elsewhere there: LOCAL=REMOTE (repeatable)")
     plan.add_argument("--json", action="store_true", help="(the only output there is)")
     session_inspect().add_parsers(commands)  # memory, files, export: read only (session_inspect.py)
+    session_state().add_parsers(commands)  # import, duplicate (session_state.py)
     a = p.parse_args(argv)
-    if a.command in ("memory", "files", "export"):
+    here = sys.modules.get(__name__) or SimpleNamespace(**globals())  # (loaded by path in tests: not registered)
+    if a.command == "export":
+        return session_state().run_export(here, a)
+    if a.command == "import":
+        return session_state().run_import(here, a)
+    if a.command == "duplicate":
+        return session_state().run_duplicate(here, a)
+    if a.command in ("memory", "files"):
         return session_inspect().run(a)
     if a.command == "list":
         return list_sessions(trunc=not a.no_trunc)
@@ -3170,8 +3201,19 @@ def cli(argv):
     if a.command == "status":
         return show_status(resolve(a.name), a.json)
     if a.command in ("copy", "move"):
-        return copy_to_host(resolve(a.name), a.host, a.new_name, a.map, move=a.command == "move", start=not a.check,
-                            replace=a.replace)
+        if a.config_only:
+            state_only = [option for option, given in (("--with-workspace", a.with_workspace),
+                                                       ("--no-checkpoints", a.no_checkpoints),
+                                                       ("--include-secrets", a.include_secrets),
+                                                       ("--grant-approvals", a.grant_approvals)) if given]
+            if state_only:
+                raise ValueError(f"--config-only copies no state: not with {', '.join(state_only)}")
+            return copy_to_host(resolve(a.name), a.host, a.new_name, a.map, move=a.command == "move",
+                                start=not a.check, replace=a.replace)
+        return session_state().transfer(here, a.name, a.host, a.new_name, a.map, move=a.command == "move",
+                                        check=a.check, replace=a.replace, include_secrets=a.include_secrets,
+                                        with_workspace=a.with_workspace, checkpoints=not a.no_checkpoints,
+                                        grant=a.grant_approvals, yes=a.yes)
     key = resolve(a.name)
     if a.command == "delete":
         return delete(key, a.yes)

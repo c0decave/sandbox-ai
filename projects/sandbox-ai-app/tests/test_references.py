@@ -174,7 +174,9 @@ BLOCKING_SAI = {"call", "_call", "bridges", "bridge_json", "bridge_plan", "bridg
                 "rw_mounts", "autostart_risk",
                 # a session to another host: sandbox-ai session copy|move (a dry run and a start over SSH, minutes),
                 # and its plan (the session's files and its project file, read in the session's directory)
-                "session_copy", "session_move", "session_transfer_plan"}
+                "session_copy", "session_move", "session_transfer_plan",
+                # a session's state: duplicated, imported (an archive read and checked, the launcher's dry run)
+                "session_duplicate", "session_import", "session_state_json"}
 # (approvals_snapshot and questions read the registry with live_runs: files and /proc only, never Podman.)
 # (host_statuses(cached=True) reads what `sandbox-ai hosts list` kept, without SSH: the Hosts page lists it at once.)
 # Slow, but on the GUI thread on purpose (each call site says so with a comment "on the GUI thread on purpose"):
@@ -538,6 +540,8 @@ MUTATIONS = {
     "web-listen": [("serve",)],
     "session-move": ["session_move", ("session", "move")],
     "session-replace": ["session_copy", "session_move"],
+    "session-import": ["session_import"],
+    "session-grant-approvals": ["session_import", "session_duplicate", "session_copy", "session_move"],
     "home-restore": ["restore_home"],
     "rules-reload": ["rules_reload"],
     "bridge-add": ["bridge_add"],

@@ -14,6 +14,8 @@ The showcase preset showcase-full-stack: PostgreSQL 17.6 and sandbox-ai's own ng
 showcase-web) with the preset's --service values, reached by the agent (nginx passing /app/ to the agent's server);
 and the image recipe django built (its lockfiles' hashes against PyPI and npm) and used against that PostgreSQL
 (SANDBOX_AI_SKIP_DJANGO_BUILD=1 leaves it out).
+The image recipe android-dev (the preset android-development) is built for real only when SANDBOX_AI_ANDROID_DEV_BUILD=1
+is set: about 4.1 GB from dl.google.com and GitHub; its output names the SHA-256 sdk.lock has not confirmed yet.
 
 Needs Podman, the claude image (sandbox-ai build claude) and the network for Docker Hub; the image and the references
 can be given: SANDBOX_AI_LIVE_IMAGE, SANDBOX_AI_SERVICE_REF (default docker.io/library/redis:7-alpine),
@@ -391,4 +393,52 @@ def test_the_django_recipe_builds_and_reaches_the_showcases_database(tmp_path, o
     assert found.get("django", "").startswith("5.2.18 3.3.6 1"), report
     assert found.get("admin") == "5.2.18" and found.get("tsc") == "Version 6.0.3", report
     removed = sandbox_ai(own_config, "images", "remove", "django")
+    assert removed.returncode == 0, removed.stderr
+
+
+ANDROID_DEV_AGENT = r"""
+echo "RESULT java $(java -version 2>&1 | head -n 1)"
+echo "RESULT sdk $(sdkmanager --list_installed 2>/dev/null | awk -F'|' 'NR > 2 && NF > 2 {gsub(/ /, "", $1); print $1}' | sort | tr '\n' ' ')"
+echo "RESULT gradle $(gradle --version 2>/dev/null | awk '/^Gradle /{print $2}')"
+echo "RESULT kotlinc $(kotlinc -version 2>&1 | grep -o 'kotlinc-jvm [0-9.]*')"
+echo "RESULT cmake $(cmake --version | head -n 1)"
+echo "RESULT emulator $(emulator -version 2>/dev/null | head -n 1)"
+echo "RESULT apktool $(apktool --version 2>&1)"
+echo "RESULT tools $(command -v adb avdmanager ndk-build android-emulator jadx | tr '\n' ' ')"
+"""
+
+
+@pytest.mark.skipif(not os.environ.get("SANDBOX_AI_ANDROID_DEV_BUILD"),
+                    reason="the android-dev build fetches about 4.1 GB: SANDBOX_AI_ANDROID_DEV_BUILD=1")
+def test_the_android_dev_recipe_builds_and_has_its_tools(tmp_path, own_config):
+    """The image recipe android-dev built for real (opt in: SANDBOX_AI_ANDROID_DEV_BUILD=1, about 4.1 GB): every pin
+    of sandbox/recipes/android-dev/sdk.lock holds against Google's and GitHub's files (sizes, Google's SHA-1, the
+    SHA-256 the lock has), sdkmanager sees every SDK package, and the variant's JDK, Gradle, Kotlin, CMake, the
+    emulator and android's tools run. The SHA-256 the lock has not confirmed yet are printed for it."""
+    made = sandbox_ai(own_config, "images", "recipe", "android-dev", "--from", "claude")
+    assert made.returncode == 0, made.stdout + made.stderr
+    built = sandbox_ai(own_config, "build", "android-dev", timeout=7200)
+    output = built.stdout + built.stderr
+    assert built.returncode == 0, output[-6000:]
+    assert "you accepted the Android Software Development Kit License Agreement" in output
+    unconfirmed = [line for line in output.splitlines() if "unconfirmed SHA-256" in line]
+    print("\n".join(unconfirmed))  # (for sdk.lock: the first build confirms Google's archives)
+    work = tmp_path / "work"
+    work.mkdir()
+    done = subprocess.run([str(ROOT / "sandbox-ai"), "claude", "--image-variant", "android-dev", "--workspace",
+                           str(work), "--no-config", "--no-auth", "--no-tmux", "--no-keep", "--ask", "off",
+                           "--binary", "/bin/sh", "--", "-c", ANDROID_DEV_AGENT],
+                          capture_output=True, text=True, timeout=900, env=own_config)
+    found = results(done.stdout)
+    report = f"exit {done.returncode}\nSTDOUT:\n{done.stdout}\nSTDERR:\n{done.stderr}"
+    assert done.returncode == 0, report
+    assert 'version "17.' in found.get("java", ""), report
+    for package in ("platforms;android-37.0", "platforms;android-36", "platforms;android-35", "build-tools;37.0.0",
+                    "ndk;30.0.16248370", "cmake;4.1.2", "emulator", "system-images;android-37.0;google_apis;x86_64"):
+        assert package in found.get("sdk", "").split(), (package, report)
+    assert found.get("gradle") == "9.8.2" and found.get("kotlinc") == "kotlinc-jvm 2.4.21", report
+    assert "4.1.2" in found.get("cmake", "") and "37.2.13" in found.get("emulator", ""), report
+    assert found.get("apktool") == "3.0.3", report
+    assert len(found.get("tools", "").split()) == 5, report
+    removed = sandbox_ai(own_config, "images", "remove", "android-dev")
     assert removed.returncode == 0, removed.stderr

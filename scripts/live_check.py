@@ -189,8 +189,10 @@ def agents_main(args, directory, report, facts):
 
 
 def pytest_python(directory):
-    """A Python with pytest: this one, else a venv in DIRECTORY with requirements-ci.txt (hashes checked)."""
-    if run([sys.executable, "-c", "import pytest"])[0] == 0:
+    """A Python with pytest: this one, else a venv in DIRECTORY with requirements-ci.txt (hashes checked). This one's
+    pytest only counts outside the user's site-packages (-s): the checks run with a HOME of their own, where a
+    `pip install --user pytest` of the real HOME is not found ("No module named pytest" in every check)."""
+    if run([sys.executable, "-s", "-c", "import pytest"])[0] == 0:
         return sys.executable
     venv = directory / "venv"
     python = venv / "bin" / "python"

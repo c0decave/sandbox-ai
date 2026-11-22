@@ -2,6 +2,8 @@
 live tests run it for real)."""
 import importlib.util
 import json
+import ctypes
+import errno
 import os
 from pathlib import Path
 import types
@@ -108,7 +110,8 @@ def test_helper_enters_the_user_namespace_clones_once_per_mount_namespace_and_mo
     assert c.calls[0] == ("setns", d.CLONE_NEWUSER) and c.calls[1] == ("unshare", d.CLONE_NEWNS)
     c = FakeLibc()
     d.helper("remove", 100, str(device), [100], proc, c)
-    assert [call[0] for call in c.calls] == ["setns", "setns", "umount2"]
+    # unmounted in every namespace, then the mount point removed in each (they may share one /dev)
+    assert [call[0] for call in c.calls] == ["setns", "setns", "umount2", "setns"]
     # A kernel without the new mount API says so.
     broken = FakeLibc()
     broken.syscall = lambda *a: -1
@@ -120,6 +123,54 @@ def test_helper_enters_the_user_namespace_clones_once_per_mount_namespace_and_mo
             d.helper("add", 100, str(device), [100], proc, broken)
     finally:
         ctypes.get_errno = original
+
+
+def test_helper_makes_the_folders_above_a_node_the_sandbox_lacks(world, tmp_path):
+    """Live check 2026-11-21: devices add RUN /dev/dri/renderD128 failed "No such file or directory" - a sandbox has
+    no /dev/dri, and only the node's own mount point was made (a serial port at /dev/ttyUSB0 worked)."""
+    proc, _ = world
+    for kind in ("user", "mnt"):
+        link = proc / "100" / "ns" / kind
+        link.unlink()
+        link.write_text("")
+    node = tmp_path / "dev" / "dri" / "renderD128"  # as the sandbox sees it: no dri folder yet
+    (tmp_path / "dev").mkdir()
+    c = FakeLibc()
+    assert d.helper("add", 100, str(node), [100], proc, c) == 0
+    assert node.is_file() and (tmp_path / "dev" / "dri").is_dir()
+    assert stat.S_IMODE((tmp_path / "dev" / "dri").stat().st_mode) == 0o755
+    assert c.calls[-1] == ("syscall", d.SYS_MOVE_MOUNT)
+
+
+def test_helper_removes_a_node_from_mount_namespaces_that_share_one_dev(world, tmp_path):
+    """Live check 2026-11-22: devices remove RUN /dev/dri/renderD128 failed "unmount /dev/dri/renderD128: No such
+    file or directory" - the sandbox's mount namespaces (the container's, Firejail's) see the same /dev, and the
+    mount point the first one's removal deleted was gone when the second one unmounted it. Every namespace is
+    unmounted first, the mount point removed after; one whose node is gone already has nothing left to unmount."""
+    proc, _ = world
+    for pid in (100, 101):
+        for kind in ("user", "mnt"):
+            link = proc / str(pid) / "ns" / kind
+            link.unlink()
+            link.write_text("")
+    node = tmp_path / "dev" / "dri" / "renderD128"
+    node.parent.mkdir(parents=True)
+    node.write_bytes(b"")
+
+    class Shared(FakeLibc):
+        def umount2(self, path, flags):
+            self.calls.append(("umount2", path))
+            if not os.path.lexists(path):
+                ctypes.set_errno(errno.ENOENT)
+                return -1
+            return 0
+    c = Shared()
+    assert d.helper("remove", 100, str(node), [100, 101], proc, c) == 0
+    assert [call for call in c.calls if call[0] == "umount2"] == [("umount2", str(node).encode())] * 2
+    assert not node.exists(), "the mount point made by add is removed"
+    node.write_bytes(b"")
+    node.unlink()  # gone in every namespace already (removed before): nothing to unmount, no error
+    assert d.helper("remove", 100, str(node), [100, 101], proc, Shared()) == 0
 
 
 def plain_device(value, launcher=None):

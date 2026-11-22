@@ -85,3 +85,14 @@ sandbox-ai today trusts only the keys shipped in `sandbox/mcp-signers`; an
 update replaces that file. A second list in `~/.config/sandbox-ai/mcp-signers`
 (trusted for your machine only, kept across updates) is not built yet; ask for it
 if you want to trust a key without a sandbox-ai release.
+
+## Before an entry is signed: built where it is used
+
+An entry without a digest (pending: reviewed, its image not published and signed yet) is refused by
+`mcp add`. `sandbox-ai mcp add NAME --build` builds it on that host from the catalog's own
+repository at the catalog's exact commit (asked first, naming the commit and the source archive's
+SHA-256; `--build-plan` shows it without building), runs its smoke spec with sandbox-ai's own run
+line and adds it **unsigned** (`"signed_by": null`, `"built"` with the commit): no signature of
+this document ever covers such an image, and nothing shows it as signed. Once the entry is signed
+and published, `sandbox-ai mcp add NAME` pulls the signed image instead (README: Servers from an
+MCP catalog).

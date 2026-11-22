@@ -1033,7 +1033,7 @@ def needed(checks):
 
 def pytest_found(cache):
     """Found: pytest for the checks - this Python's, the venv of an earlier run, or one to install from PyPI."""
-    status, _, _ = run_command([sys.executable, "-c", "import pytest"], timeout=60)
+    status, _, _ = run_command([sys.executable, "-s", "-c", "import pytest"], timeout=60)  # (as lc.pytest_python)
     if status == 0:
         return Found(True, f"pytest of {sys.executable}")
     if (Path(cache) / "venv" / "bin" / "python").exists():
@@ -1130,6 +1130,7 @@ def run_check(check, entry, python, backends, temporary, env, lc, out):
     junit = temporary / "junit" / f"{check.name}.xml"
     junit.parent.mkdir(parents=True, exist_ok=True)
     basetemp = temporary / "p" / check.name.replace("-", "")[:12]
+    basetemp.parent.mkdir(parents=True, exist_ok=True)  # (pytest makes --basetemp itself, never its parents)
     command = pytest_command(python, check, backend, basetemp, junit, lc.SUITES, lc.NEEDS_LOGIN)
     entry["command"] = shlex.join(str(part) for part in command)
     log = temporary / "logs" / f"{check.name}.txt"

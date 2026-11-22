@@ -200,7 +200,8 @@ def export(name, run=subprocess.run):
     if "image" in definition or "rootfs" in definition:
         # A catalog server: the entry it was added from ("source"; its catalog since 0.1.78) - re-added from its
         # catalog there, never taken as it is.
-        kind = "catalog" if isinstance(definition.get("source"), str) else "image"
+        kind = "catalog" if isinstance(definition.get("source"), str) and "built" not in definition else "image"
+        # (one built here, mcp add --build: its catalog has no image of it to add there - its own image, copied)
         if kind == "image" and "rootfs" in definition:
             raise ValueError(f"MCP server {name}: a Bubblewrap rootfs of your own is this host's unpacked folder; add "
                              "it from its catalog on the other host instead")
@@ -651,7 +652,8 @@ def vpn_known(name):
 def plan_image(plan, document, pull_image, no_vpn):
     """An image server of your own: its definition with the folders resolved, validated as mcp.json is."""
     definition = dict(document["definition"])
-    for key in ("source", "catalog", "signed_by", "rootfs"):  # (an image of your own: no catalog's word on it)
+    for key in ("source", "catalog", "signed_by", "rootfs", "built"):  # (an image of your own: no catalog's word on it;
+        # one built on the other host is an image of your own here, never signed)
         definition.pop(key, None)
     mounts = []
     for path in plan["paths"]:

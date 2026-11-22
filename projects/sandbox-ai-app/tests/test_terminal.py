@@ -338,7 +338,7 @@ sys.path.insert(0, sys.argv[1])
 from sandbox_ai_app import main as app_main, intro, terminal, ui, widgets
 web = sys.argv[2]
 widgets.AUTO_ANSWER = True
-intro.play = lambda window, settings: None
+intro.play = lambda window, settings, **options: None
 show = ui.MainWindow.show
 
 def shown(window):

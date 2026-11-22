@@ -549,13 +549,16 @@ def test_the_django_recipe(config):
 
 
 def test_the_packaging_ships_the_recipes_and_service_images():
-    """The recipes' lockfiles (json and txt) and sandbox-ai's own Containerfiles go into the wheel and the sdist."""
+    """The recipes' files (lockfiles, android-dev's scripts and package.xml files) and sandbox-ai's own Containerfiles
+    go into the wheel and the sdist: every file below sandbox/recipes, also in a folder of a recipe's own."""
     tomllib = pytest.importorskip("tomllib")
     patterns = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]["package-data"]["sandbox_ai"]
     assert {"recipes/*/*.json", "recipes/*/*.txt", "service-images/*/*"} <= set(patterns)
     manifest = (ROOT / "MANIFEST.in").read_text()
     assert "graft sandbox/recipes" in manifest and "graft sandbox/service-images" in manifest
-    shipped = {path.relative_to(ROOT / "sandbox").as_posix() for path in (ROOT / "sandbox").glob("recipes/*/*")}
+    shipped = {path.relative_to(ROOT / "sandbox").as_posix() for path in (ROOT / "sandbox").glob("recipes/**/*")
+               if path.is_file()}
+    assert "recipes/android-dev/package-xml/emulator.xml" in shipped and "recipes/android-dev/sdk.lock" in shipped
     shipped |= {path.relative_to(ROOT / "sandbox").as_posix() for path in (ROOT / "sandbox").glob("service-images/*/*")}
     for path in shipped:
         assert any(fnmatch.fnmatch(path, pattern) for pattern in patterns), path
@@ -780,3 +783,277 @@ def test_the_android_recipe_warns_about_nothing_the_other_recipes_do_not(config)
     findings = im.check(document, fragment, files)
     assert [f for f in findings if f["severity"] == "error"] == []
     assert {f["id"] for f in findings} <= {"add-url"}, findings
+
+
+ANDROID_DEV = im.RECIPE_FILES / "android-dev"
+
+
+def sdk_lock_rows():
+    """[(package, version, dest, size, sha1, sha256, url)] of sandbox/recipes/android-dev/sdk.lock."""
+    rows = []
+    for line in (ANDROID_DEV / "sdk.lock").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            words = line.split()
+            assert len(words) == 7, line
+            rows.append(tuple(words))
+    return rows
+
+
+def test_the_android_dev_recipe_has_everything_of_the_android_recipe(config):
+    """User 2026-11-21: ONE combined image - android-dev builds on the variant android. Its recipe includes android's
+    (packages, files and fragment first, unchanged), so the variant has adb, apktool, smali, jadx and Frida too, and
+    the validator takes it as it takes android's."""
+    lines = []
+    assert im.main(["recipe", "android-dev", "--from", "claude"], out=lines.append) == 0
+    assert "sandbox-ai build android-dev" in lines[-1] and "--image-variant android-dev" in lines[-1]
+    document, fragment, files = im.load("android-dev")
+    findings = im.check(document, fragment, files)
+    assert findings == [], findings
+    android = im.RECIPES["android"]
+    assert im.RECIPES["android-dev"]["includes"] == ["android"]
+    assert document["apt"][:len(android["apt"])] == android["apt"], "android's packages first"
+    for package in ("openjdk-17-jdk-headless", "curl", "unzip", "libpulse0", "libnss3", "libxcomposite1"):
+        assert package in document["apt"], package
+    assert len(document["apt"]) == len(set(document["apt"])), "each package once"
+    assert all("=" not in package for package in document["apt"])  # Debian's own versions of the release
+    assert not document["npm"] and not document["pip"]
+    targets = {entry["target"] for entry in document["files"]}
+    assert "/opt/frida/requirements.txt" in targets  # android's
+    assert {"/opt/android-dev/sdk.lock", "/opt/android-dev/install.sh", "/opt/android-dev/android-sdk-license",
+            "/usr/local/bin/android-emulator"} <= targets
+    modes = {entry["target"]: entry["mode"] for entry in document["files"]}
+    assert modes["/usr/local/bin/android-emulator"] == "0755" and modes["/opt/android-dev/install.sh"] == "0644"
+    assert files["sdk.lock"] == (ANDROID_DEV / "sdk.lock").read_bytes()
+    assert files["install.sh"] == (ANDROID_DEV / "install.sh").read_bytes()
+    # android's fragment comes first, as it is; android-dev's after it
+    assert fragment.startswith(im.ANDROID_FRAGMENT) and fragment.endswith(im.ANDROID_DEV_FRAGMENT)
+    assert fragment.index("apktool --version") < fragment.index("install.sh")
+    text = im.containerfile("android-dev", document, fragment)
+    assert not re.search(r"\|\s*(?:sh|bash|python3?)\b", text), "no script from the network"
+    # The android variant itself is unchanged by it.
+    assert "install.sh" not in im.recipe_parts("android")["fragment"]
+    assert im.recipe_parts("android")["apt"] == android["apt"]
+    with pytest.raises(ValueError, match="no recipe"):
+        im.recipe_parts("no-such-recipe")
+
+
+def test_the_android_dev_recipe_pins_every_download():
+    """Every download of android-dev is a row of sdk.lock: HTTPS, its size, Google's SHA-1 for an SDK archive (Google
+    publishes no SHA-256; the first real build prints it, to be added) or the publisher's SHA-256 (Gradle, Kotlin),
+    one folder below /opt each; the API levels 37, 36 and 35 with platform and build-tools, the NDK, CMake, the
+    emulator and one x86_64 system image of API 37. The package.xml of each SDK package is beside it."""
+    rows = sdk_lock_rows()
+    by_package = {row[0]: row for row in rows if row[0] != "-"}
+    for package, version, dest, size, sha1, sha256, url in rows:
+        assert url.startswith("https://"), url
+        assert dest.startswith("/opt/") and ".." not in dest, dest
+        assert size.isdigit() and int(size) > 1 << 20, (url, size)
+        assert re.fullmatch(r"[0-9a-f]{40}|-", sha1) and re.fullmatch(r"[0-9a-f]{64}|-", sha256), url
+        assert sha1 != "-" or sha256 != "-", f"{url}: no checksum"
+        if url.startswith("https://dl.google.com/android/repository/"):
+            assert sha1 != "-", f"{url}: Google's SHA-1"
+            assert dest == "/opt/android-sdk/" + package.replace(";", "/") or package in ("platform-tools", "emulator")
+        else:
+            assert url.startswith("https://github.com/") and sha256 != "-", f"{url}: the publisher's SHA-256"
+    assert len({row[2] for row in rows}) == len(rows), "one folder each"
+    # The API levels: 37 (the current stable one) and the two before it, platform and build-tools each
+    for platform, tools in (("platforms;android-37.0", "build-tools;37.0.0"), ("platforms;android-36", "build-tools;36.0.0"),
+                            ("platforms;android-35", "build-tools;35.0.0")):
+        assert platform in by_package and tools in by_package, (platform, tools)
+    assert {"cmdline-tools;23.0", "platform-tools", "ndk;30.0.16248370", "cmake;4.1.2", "cmake;3.22.1", "emulator",
+            "system-images;android-37.0;google_apis;x86_64"} <= set(by_package)
+    assert by_package["emulator"][1] == "37.2.13" and by_package["platform-tools"][1] == "37.0.1"
+    # the NDK's SHA-1 and size as Google gives them on github.com/android/ndk/releases/tag/r30 as well
+    assert by_package["ndk;30.0.16248370"][3:5] == ("738633529", "5107f898313790e449e87eee2183d9a20602dee9")
+    others = {row[6]: row for row in rows if row[0] == "-"}
+    gradle = others["https://github.com/gradle/gradle-distributions/releases/download/v9.8.2/gradle-9.8.2-bin.zip"]
+    assert gradle[1:6] == ("9.8.2", "/opt/gradle", "151620138", "-",
+                           "21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607")
+    kotlin = others["https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip"]
+    assert kotlin[1:6] == ("2.4.21", "/opt/kotlinc", "89733618", "-",
+                           "7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd")
+    assert len(rows) == 15
+    # The package.xml sdkmanager would write, one per SDK package and no other
+    import xml.etree.ElementTree as ET
+    xmls = {path.name: path for path in (ANDROID_DEV / "package-xml").glob("*.xml")}
+    assert set(xmls) == {package.replace(";", "_") + ".xml" for package in by_package}
+    for package in by_package:
+        root = ET.parse(xmls[package.replace(";", "_") + ".xml"]).getroot()
+        local = root.find("localPackage")
+        assert local is not None and local.get("path") == package and local.get("obsolete") == "false", package
+        assert local.find("uses-license").get("ref") == "android-sdk-license"
+        assert root.find("license").get("id") == "android-sdk-license"
+        assert "Android Software Development Kit License Agreement" in root.find("license").text
+    image = ET.parse(xmls["system-images_android-37.0_google_apis_x86_64.xml"]).getroot().find("localPackage")
+    details = image.find("type-details")
+    assert [child.tag for child in details] == ["api-level", "extension-level", "base-extension", "tag", "vendor",
+                                                "abi"], "each element once"
+    assert details.find("abi").text == "x86_64" and details.find("tag/id").text == "google_apis"
+    assert ET.parse(xmls["platforms_android-37.0.xml"]).getroot().find("localPackage/type-details/api-level").text \
+        == "37.0"
+    # The license acceptance sdkmanager writes for that license (the SHA-1 of its text), and only that one
+    assert (ANDROID_DEV / "android-sdk-license").read_text() == "\n24333f8a63b6825ea9c5514f83c2829b004d1fee"
+    # Every file the recipe copies in is there, and every file there is copied in
+    copied = {source for source, _, _ in im.RECIPES["android-dev"]["files"]}
+    present = {str(path.relative_to(im.RECIPE_FILES)) for path in ANDROID_DEV.rglob("*") if path.is_file()}
+    assert copied == present, copied ^ present
+
+
+def test_the_android_dev_lock_is_what_its_script_makes():
+    """sdk.lock and package-xml/ come from scripts/android_dev_lock.py (Google's repository as nixpkgs keeps it):
+    regenerated from the rows themselves the script keeps every SHA-256 a build confirmed and writes the same
+    header; a package of a preview channel (the preview license) is refused."""
+    spec = importlib.util.spec_from_file_location("android_dev_lock", ROOT / "scripts" / "android_dev_lock.py")
+    lock = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lock)
+    text = (ANDROID_DEV / "sdk.lock").read_text()
+    assert "as nixpkgs keeps it (nixpkgs@" in text
+    assert lock.confirmed(text) == {row[6]: row[5] for row in sdk_lock_rows() if row[5] != "-"}
+    confirmed = text.replace("-" + " " * 64 + " https://dl.google.com/android/repository/platform-tools_r37.0.1",
+                             "a" * 64 + " https://dl.google.com/android/repository/platform-tools_r37.0.1")
+    assert lock.confirmed(confirmed)["https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip"] \
+        == "a" * 64
+    assert [name for _, name, _ in lock.PACKAGES][-1] == "37.0/google_apis/x86_64"
+    # Every pin was at least 14 days old (sandbox-ai's rule) when it was made, which its comment line says.
+    for _, _, by in lock.PACKAGES:
+        assert by <= "2026-11-07", by
+    for row in sdk_lock_rows():
+        assert re.search(r"# .*(?:in Google's repository by|released) 2026-\d\d-\d\d.*\n" + re.escape(row[0] + " "),
+                         text), row
+    entry = {"license": "android-sdk-preview-license", "path": "emulator", "archives": []}
+    lock.PACKAGES = [("packages/emulator", "37.3.6", "2026-11-01")]
+    with pytest.raises(SystemExit, match="preview"):
+        lock.generate({"packages": {"emulator": {"37.3.6": entry}}, "licenses": {}}, "test")
+
+
+def test_the_android_dev_fragment_installs_checks_and_says_the_license():
+    """The fragment: install.sh with the lock, the one license acceptance, the tools on PATH through /usr/local/bin
+    (PATH itself stays the image's), and every tool run once while the image is built - sdkmanager must see every
+    package of the lock and avdmanager must make an AVD of the system image, else the build stops. The build says
+    that building it accepts Google's SDK license; no ENV of a watched variable."""
+    fragment = im.ANDROID_DEV_FRAGMENT
+    assert "RUN sh /opt/android-dev/install.sh /opt/android-dev/sdk.lock /opt/android-dev/package-xml" in fragment
+    assert "cp /opt/android-dev/android-sdk-license /opt/android-sdk/licenses/android-sdk-license" in fragment
+    assert "By building this image you accept the Android Software" in fragment
+    assert "you accepted the Android Software Development Kit License" in fragment
+    assert "ENV PATH" not in fragment and "LD_LIBRARY_PATH=" not in fragment.split("RUN", 1)[0]
+    for name in ("ANDROID_HOME=/opt/android-sdk", "ANDROID_NDK_HOME=/opt/android-sdk/ndk/30.0.16248370",
+                 "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"):
+        assert name in fragment, name
+    for tool in ("adb", "fastboot", "emulator", "cmake", "ninja", "sdkmanager", "avdmanager", "ndk-build", "gradle",
+                 "kotlinc", "kotlin"):
+        assert f"/usr/local/bin/{tool}" in fragment, tool
+    for ran in ("sdkmanager --list_installed", "avdmanager --silent create avd", "adb version", "emulator -version",
+                "gradle --version", "kotlinc -version", "cmake --version", "ndk-build --version",
+                "java -version 2>&1 | grep -q 'version \"17\\.'"):
+        assert ran in fragment, ran
+    assert "does not see $package" in fragment and "exit 1" in fragment
+    assert im.check_fragment(fragment) == []
+    for text in (im.RECIPES["android-dev"]["description"], fragment):
+        assert "https://developer.android.com/studio/terms" in text
+    assert "x86_64 only" in im.RECIPES["android-dev"]["description"]
+    assert "4.1 GB" in im.RECIPES["android-dev"]["description"]
+
+
+def fake_sdk_tools(tmp_path, downloads):
+    """A bin folder with stand-ins: curl copies the file named by the URL's last part from DOWNLOADS, unzip unpacks
+    with Python's zipfile (modes kept) where Info-ZIP is missing."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "curl").write_text("#!/bin/sh\nout=''\nwhile [ $# -gt 1 ]; do case \"$1\" in --output) out=$2; shift;; "
+                               "esac; shift; done\nexec cp \"" + str(downloads) + "/${1##*/}\" \"$out\"\n")
+    (shim / "unzip").write_text(
+        f"#!{sys.executable}\nimport os, sys, zipfile\nargs = [a for a in sys.argv[1:] if a != '-q']\n"
+        "target = args[args.index('-d') + 1]\nwith zipfile.ZipFile(args[0]) as z:\n"
+        "    for info in z.infolist():\n        path = z.extract(info, target)\n"
+        "        mode = info.external_attr >> 16\n        if mode & 0o777 and not info.is_dir():\n"
+        "            os.chmod(path, mode & 0o777)\n")
+    for tool in ("curl", "unzip"):
+        (shim / tool).chmod(0o755)
+    return shim
+
+
+def fake_archive(path, entries):
+    import zipfile
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, (data, mode) in entries.items():
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (0o100000 | mode) << 16
+            archive.writestr(info, data)
+    data = path.read_bytes()
+    import hashlib
+    return len(data), hashlib.sha1(data).hexdigest(), hashlib.sha256(data).hexdigest()
+
+
+def run_install(tmp_path, rows, shim):
+    lock = tmp_path / "sdk.lock"
+    lock.write_text("# a lock for the test\n" + "".join(" ".join(str(word) for word in row) + "\n" for row in rows))
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}", "ANDROID_DEV_PREFIX": str(tmp_path / "opt"),
+           "ANDROID_DEV_WORK": str(tmp_path / "work")}
+    return subprocess.run(["sh", str(ANDROID_DEV / "install.sh"), str(lock), str(ANDROID_DEV / "package-xml")],
+                          env=env, capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.skipif(shutil.which("sha1sum") is None or shutil.which("sha256sum") is None,
+                    reason="needs coreutils' sha1sum and sha256sum")
+def test_install_sh_checks_every_download_before_it_unpacks_it(tmp_path):
+    """install.sh, run as the image build runs it (with stand-ins for curl and unzip): a download whose size, SHA-1
+    or SHA-256 differs from the lock stops the build loudly and nothing of it is unpacked; a good one is unpacked to
+    its folder (an archive's one folder becomes the package, its modes kept) with the package.xml of the SDK
+    package; a Google archive without a SHA-256 in the lock gets it printed for the lock; the license is said."""
+    if os.uname().machine not in ("x86_64", "amd64"):
+        pytest.skip("install.sh refuses other machines (the SDK's Linux tools are x86_64 only)")
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    shim = fake_sdk_tools(tmp_path, downloads)
+    size, sha1, sha256 = fake_archive(downloads / "platform-tools_r37.0.1-linux.zip",
+                                      {"platform-tools/adb": (b"#!/bin/sh\necho adb\n", 0o755),
+                                       "platform-tools/source.properties": (b"Pkg.Revision=37.0.1\n", 0o644)})
+    tsize, tsha1, tsha256 = fake_archive(downloads / "gradle-9.8.2-bin.zip", {"gradle-9.8.2/bin/gradle": (b"x", 0o755)})
+    opt = tmp_path / "opt"
+    good = [("platform-tools", "37.0.1", opt / "android-sdk/platform-tools", size, sha1, "-",
+             "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip"),
+            ("-", "9.8.2", opt / "gradle", tsize, "-", tsha256,
+             "https://github.com/gradle/gradle-distributions/releases/download/v9.8.2/gradle-9.8.2-bin.zip")]
+    result = run_install(tmp_path, good, shim)
+    assert result.returncode == 0, result.stderr
+    assert "you accept the Android Software Development Kit License Agreement" in result.stdout
+    assert f"unconfirmed SHA-256 {sha256} of https://dl.google.com/android/repository/platform-tools_r37.0.1" \
+        in result.stdout
+    assert "2 downloads checked and installed" in result.stdout
+    adb = opt / "android-sdk/platform-tools/adb"
+    assert adb.read_text() == "#!/bin/sh\necho adb\n" and os.access(adb, os.X_OK)
+    assert (opt / "android-sdk/platform-tools/package.xml").read_bytes() == \
+        (ANDROID_DEV / "package-xml/platform-tools.xml").read_bytes()
+    assert (opt / "gradle/bin/gradle").exists() and not (opt / "gradle/package.xml").exists()
+    assert not (tmp_path / "work").exists(), "no archive left behind"
+
+    # Each kind of difference: the build stops with the reason, the package is not there.
+    for name, row in (("size", (size + 1, sha1, "-")), ("SHA-1", (size, "0" * 40, "-")),
+                      ("SHA-256", (size, sha1, "0" * 64)), ("checksum", (size, "-", "-"))):
+        shutil.rmtree(opt, ignore_errors=True)
+        result = run_install(tmp_path, [("platform-tools", "37.0.1", opt / "android-sdk/platform-tools", *row,
+                                         good[0][6])], shim)
+        assert result.returncode == 1, name
+        assert "ERROR" in result.stderr and (name.upper() in result.stderr or name in result.stderr), result.stderr
+        assert not (opt / "android-sdk/platform-tools").exists(), name
+    # Only HTTPS, only below the prefix (/opt in the build)
+    for bad_url, bad_dest, said in (("http://dl.google.com/x.zip", opt / "x", "only https://"),
+                                    (good[0][6], tmp_path / "elsewhere", "a destination below")):
+        result = run_install(tmp_path, [("platform-tools", "37.0.1", bad_dest, size, sha1, "-", bad_url)], shim)
+        assert result.returncode == 1 and said in result.stderr, result.stderr
+
+
+def test_the_android_emulator_helper():
+    """android-emulator (in the variant's /usr/local/bin): the AVD of the image's own system image, headless unless
+    --gui, its own adb server on port 5038 (5037 is the host's), no usage metrics, and a clear word when the sandbox
+    has no /dev/kvm."""
+    text = (ANDROID_DEV / "android-emulator").read_text()
+    assert text.startswith("#!/bin/sh\n")
+    assert 'image="system-images;android-37.0;google_apis;x86_64"' in text
+    assert "ANDROID_EMULATOR_ADB_PORT:-5038" in text and "-no-window" in text and "-no-metrics" in text
+    assert "--device /dev/kvm" in text and "sys.boot_completed" in text
+    assert subprocess.run(["sh", "-n", str(ANDROID_DEV / "android-emulator")]).returncode == 0
+    assert subprocess.run(["sh", "-n", str(ANDROID_DEV / "install.sh")]).returncode == 0
+    usage = subprocess.run(["sh", str(ANDROID_DEV / "android-emulator")], capture_output=True, text=True)
+    assert usage.returncode == 2 and "usage: android-emulator start|stop|status" in usage.stderr

@@ -2571,6 +2571,9 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         menu.addAction(tr("Save as preset…"), lambda: self.save_as_preset())
         menu.addAction(tr("Export…"), lambda: self.export_board())
         menu.addAction(tr("Import…"), lambda: self.import_board())
+        state = menu.addAction(tr("Import a session with its state…"), lambda: self.import_session_state())
+        state.setToolTip(tr("A session's archive (Export with state…, sandbox-ai session export) as a session of this "
+                            "machine that Resume continues (sandbox-ai session import)"))
         discard = menu.addAction(tr("Discard the changes not applied"), lambda: self.discard_changes())
         discard.setEnabled(self.dirty())  # (the board of no project folder too: it is kept like a project's now)
         # The board of no project folder (a new one, another host's) kept with changes while a project's is shown:
@@ -7018,6 +7021,21 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         dialog.exec()
         widgets.drop_after_exec(dialog)
         return dialog.written
+
+    def import_session_state(self):
+        """Import a session with its state…: session_state_dialogs.ImportDialog (sandbox-ai session import, checked
+        first) - the session it makes is on the Sandboxes page, to resume."""
+        try:
+            supported = self.sai.session_state_supported()
+        except Exception as _exc:  # noqa: BLE001 - not known: said as not supported
+            applog.swallowed("board", "import_session_state: not known", _exc)
+            supported = False
+        if not supported:
+            warn(self, tr("Import a session"), tr("This sandbox-ai cannot import a session yet ({command}): update it.",
+                                                  command="sandbox-ai session import"))
+            return None
+        from . import session_state_dialogs as SSD
+        return SSD.open_import(self, self.sai, owner=self)
 
     def import_board(self, path=None):
         """Import…: a board's or session's file taken in on the board's host (bundle_dialogs.ImportDialog: its plan

@@ -277,7 +277,8 @@ def main(argv=None):
             if settings.get("guide_tour", True) and not window.state.get("tour_offered", False) \
                     and not os.environ.get("SANDBOX_AI_APP_NO_TOUR"):
                 window.start_tour(0)
-        window.intro = intro.play(window, settings)  # the agents into the sandbox; Esc skips it
+        # the agents into the sandbox (a different intro at each start, or the one chosen); Esc skips it
+        window.intro = intro.play(window, settings, state=window.state)
         if window.intro is not None:
             window.intro.finished.connect(offer_tour)
         else:

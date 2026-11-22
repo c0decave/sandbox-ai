@@ -158,6 +158,25 @@ def test_the_intro_can_be_watched_again(window, qapp):
     assert window.sai.settings() == before and window.state.get("tour_offered", False) == offered
 
 
+def test_watching_the_intro_again_plays_the_next_one_of_the_rotation(window, qapp):
+    """Help > Watch the intro again (and the button in Settings): the next intro of the rotation, remembered in the
+    window's state (state.json) like a start; with one chosen in Settings > Appearance, that one."""
+    from sandbox_ai_app import intro_choice as IC
+    window.state.set(IC.STATE_KEY, "glass")
+    played = []
+    for _ in range(len(IC.IDS)):
+        window.actions["intro"].trigger()
+        played.append(window.intro.which)
+        assert window.state.get(IC.STATE_KEY) == window.intro.which
+        window.intro.skip()
+    assert played == ["city", "vault", "classic", "glass"]
+    window.sai.save_setting(IC.SETTING, "city")
+    dialog = window.settings_dialog()
+    dialog.replay.click()
+    assert window.intro.which == "city"
+    window.intro.skip()
+
+
 def test_profile_round_trip_through_the_form(window):
     launch = window.launch
     window.sai.save_profile("p", "opencode", ["-o", "--gpu", "dri", "-w", "/tmp/x"])

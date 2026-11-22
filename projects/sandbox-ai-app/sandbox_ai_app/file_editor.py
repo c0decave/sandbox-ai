@@ -18,8 +18,11 @@ view; Escape closes it before it cancels the window.
 A Markdown file (markdown_view.is_markdown) opens rendered (markdown_view.MarkdownView: nothing in it runs or is
 loaded from the network, images come through the pane's Root); Edit shows its text, Markdown the rendering again,
 and Preview the rendering beside the text as it is typed. A link clicked there is never followed in the window:
-open_link asks before a web link goes to the browser and opens a Markdown file of the same root in a viewer of
-its own; anything else is named, not opened.
+open_link asks before a web link goes to the browser - naming the address as it is sent (its host in punycode, a
+look-alike "аpple.com" shows as "xn--pple-43d.com"; controls visible), its host, and the link's text when that differs
+- and opens a Markdown file of the same root in a viewer of its own; anything else is named, not opened. (The
+question's parts follow axross-markdown's ui/markdown_safe.py - github.com/c0decave/axross-markdown, Apache-2.0; the
+code here is this app's own.)
 
 The hex editor's layout - offset, hex and ASCII columns painted line by line, typing over a byte nibble by nibble, Tab
 between the two columns - follows the idea of axross's ui/hex_editor.py (github.com/c0decave/axross, Apache-2.0);
@@ -55,12 +58,19 @@ from .widgets import (
 
 BYTES_PER_LINE = 16
 MATCH_LIMIT = 1000  # matches the find bar counts ("1000+" beyond)
+ADDRESS_SHOWN = 1000  # characters of an address the link question shows (a longer one is cut, its length said)
+LINE_SHOWN = 80  # characters of each of its lines (a long one made the question wider than the screen)
 # Replace: Ctrl+H; on macOS Cmd+H hides the app (the system's), so there Cmd+Option+F, as in its editors.
 REPLACE_KEY = "Ctrl+Alt+F" if sys.platform == "darwin" else "Ctrl+H"
 # Characters that do not show or turn the direction of what follows (zero width, bidi controls, a BOM in the middle):
 # what is shown may then differ from what a compiler or a shell reads.
 INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\u061c\ufeff]")
 CONTROL = re.compile("[\x00-\x08\x0b\x0e-\x1f\x7f-\x9f]")
+
+
+def in_lines(text):
+    """TEXT in lines of at most LINE_SHOWN characters."""
+    return "\n".join(text[at:at + LINE_SHOWN] for at in range(0, len(text), LINE_SHOWN)) or text
 
 
 def split_text(text):
@@ -813,13 +823,13 @@ class EditorWindow(QDialog):
         source = ImageSource(root, relative, self.top)
         self.preview = MarkdownView(source, outline=False)
         self.preview.hide()
-        self.preview.link.connect(self.open_link)
+        self.preview.link.connect(lambda url: self.open_link(url, self.preview.last_link_text))
         self.text_page = QSplitter(Qt.Orientation.Horizontal)
         self.text_page.addWidget(self.text)
         self.text_page.addWidget(self.preview)
         self.text.textChanged.connect(self.follow_typing)
         self.markdown = MarkdownView(source)
-        self.markdown.link.connect(self.open_link)
+        self.markdown.link.connect(lambda url: self.open_link(url, self.markdown.last_link_text))
         self.stack.addWidget(self.text_page)
         self.stack.addWidget(self.hex)
         self.stack.addWidget(self.markdown)
@@ -1221,16 +1231,18 @@ class EditorWindow(QDialog):
         elif self.view == "text" and not self.preview.isHidden():
             self.preview.zoom_by(steps)
 
-    def open_link(self, url):
-        """A link clicked in the rendering (never followed there): http(s) opens in the browser once the human said
-        yes; a relative link to a Markdown file of the same root opens it in a viewer of its own; anything else is
-        named, not opened."""
+    def open_link(self, url, text=""):
+        """A link clicked in the rendering (never followed there) - TEXT: what it reads there: http(s) opens in the
+        browser once the human said yes (link_question); a relative link to a Markdown file of the same root opens
+        it in a viewer of its own; anything else is named, not opened."""
         target = url.toString()
         scheme = url.scheme().lower()
         if scheme in ("http", "https"):
-            if confirm(self, tr("Open the link?"), tr("Open {url} in your web browser? Links in a file can lead "
-                                                      "anywhere; this one is in {name}.", url=printable(target),
-                                                      name=printable(self.name)), tr("Open")):
+            if not url.isValid() or not url.host():
+                self.say(tr("Not opened: {target} is no valid web address.",
+                            target=printable(target or url.errorString())), True)
+                return False
+            if confirm(self, tr("Open the link?"), self.link_question(url, text), tr("Open")):
                 open_url(url)
             return True
         path = QUrl.fromPercentEncoding(url.path(QUrl.ComponentFormattingOption.FullyEncoded).encode())
@@ -1243,6 +1255,22 @@ class EditorWindow(QDialog):
         self.say(tr("Not opened: {target} (web links open after a question, Markdown files of this folder in a "
                     "viewer of their own).", target=printable(target)), True)
         return False
+
+    def link_question(self, url, text=""):
+        """The Open the link? question: the address as it is sent (QUrl.toEncoded: an IDN host in punycode, never its
+        look-alike letters; a bidi control or a space percent-encoded; past ADDRESS_SHOWN characters cut, its length
+        said; in lines of LINE_SHOWN), its host on a line of its own, and TEXT, the link's text, when it differs."""
+        address = printable(bytes(url.toEncoded()).decode("ascii", "replace"))
+        if len(address) > ADDRESS_SHOWN:
+            address = address[:ADDRESS_SHOWN] + tr("… ({count} characters)", count=len(address))
+        host = printable(url.host(QUrl.ComponentFormattingOption.FullyEncoded))
+        question = tr("Open this address in your web browser? Links in a file can lead anywhere; this one is in {name}."
+                      "\n\n{address}\n\nHost: {host}", name=printable(self.name), address=in_lines(address),
+                      host=in_lines(host))
+        text = " ".join(str(text or "").split())
+        if text and text not in (url.toString(), address):
+            question += "\n\n" + tr("The link in the file reads: {text}", text=in_lines(printable(text[:300])))
+        return question
 
     # -- writing --
 

@@ -333,8 +333,6 @@ KEPT = {
     "What a session's login file says about its account": "the agent wrote it: not checked",
     "Memory and instructions files may hold private notes.": "before an import: private notes",
     "Secrets are never kept: a board with one is not saved.": "what is (not) saved, before Save",
-    "Logins and the session's HOME are not copied": "what the copy or move leaves behind",
-    "Its configuration starts again there as a session of its own": "what the copy or move does (stops it here)",
     "It is opened in the running sandbox now, without a restart": "what to do for the agent to use it (restart)",
     "A server that runs a command: its network, folders": "why the fields are greyed out",
     "{name} is {system}. The packages are installed": "the image and its result stay UNCHECKED",

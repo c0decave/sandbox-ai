@@ -1,7 +1,8 @@
 """The Files page's Markdown viewer: a file of a pane rendered as Markdown (CommonMark and GitHub's tables, task lists,
-strikethrough and autolinks; footnotes made into links), headings in an outline beside it to jump to, fenced code
-highlighted, images beside the file shown, zoom, and the editor's find bar (file_editor.py). The editor's text view
-shows the same rendering as a live preview beside the text.
+strikethrough and autolinks; footnotes made into links; front matter, alerts and math as GitHub shows them:
+markdown_text.py), headings in an outline beside it to jump to (the heading being read marked in it), fenced code
+highlighted (Copy code block on its menu), images beside the file shown, zoom, and the editor's find bar
+(file_editor.py). The editor's text view shows the same rendering as a live preview beside the text.
 
 What is shown may have been written by an agent, so it is untrusted:
 
@@ -13,16 +14,19 @@ What is shown may have been written by an agent, so it is untrusted:
   never through a symbolic link, never above the root - and for a file of a sandbox's folder shown in the host pane,
   never outside that folder: ImageSource's top), in a thread, at most IMAGE_LIMIT bytes and IMAGE_PIXELS pixels, at
   most IMAGES of them and IMAGES_PIXELS pixels together; Reload reads them again; an SVG image that names anything
-  but a part of itself is not shown (Qt's SVG reader would read the files it names, past the Root: svg_refers);
+  but a part of itself is not shown (Qt's SVG reader would read the files it names, past the Root: svg_refers), nor
+  one whose references draw its parts again and again (a few KB drew a billion paths: svg_draws_too_much);
 - what Qt cannot lay out in time is not rendered: the rendering ends before the line that goes past LIST_ITEMS list
   items, TABLE_ROWS table rows or LONG_RUN characters without a space, and says so (renderable);
 - a link is never followed inside the viewer: "#heading" scrolls there, a relative link to another Markdown file of
   the same root opens that file in a viewer of its own, an http(s) link opens in the browser only after the human
-  said so (the window asks, naming the URL); anything else is named, not opened.
+  said so (the window asks, naming the address as it is sent - its host in punycode, controls visible - and the
+  link's text when that differs: last_link_text); anything else is named, not opened.
 """
 from __future__ import annotations
 
 import base64
+import bisect
 import posixpath
 import re
 import threading
@@ -33,9 +37,11 @@ from PySide6.QtGui import (
     QColor, QFont, QImage, QImageReader, QPainter, QPalette, QSyntaxHighlighter, QTextCharFormat, QTextCursor,
     QTextDocument, QTextFormat,
 )
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QSplitter, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QListWidget, QListWidgetItem, QSplitter, QTextBrowser, QVBoxLayout, QWidget,
+)
 
-from . import theme
+from . import markdown_text, theme
 from .files import printable
 from .i18n import tr
 from .widgets import background, plain_label
@@ -219,6 +225,101 @@ def svg_refers(data):
     return any(not value.startswith(b"#") for _quote, value in SVG_NAMES.findall(data))
 
 
+# What the references of an SVG (<use>, url(#id)) may draw again (svg_draws_too_much): each one draws its target - and
+# the target's own references - once more, so ten levels of ten <use> in 1.9 KB drew a billion paths (seven levels: 6 s,
+# every level ten times longer, in a thread nothing can stop). Counted are the elements drawn again and the
+# characters of their attributes (one path of 10,000 segments drawn 1000 times is 1000 elements, 60 MB to draw).
+SVG_REDRAWN = 20_000
+SVG_REDRAWN_CHARS = 2_000_000
+SVG_PAINTS = {"linearGradient", "radialGradient", "stop", "solidColor"}  # (a fill="url(#g)" of these: nothing drawn)
+SVG_LOCAL_URL = re.compile(r"url\(\s*[\"']?\s*#([^)\"'\s]*)")
+
+
+def svg_draws_too_much(data):
+    """Why the SVG DATA (bytes, not compressed) is not drawn - its references draw more than SVG_REDRAWN elements or
+    SVG_REDRAWN_CHARS characters of attributes again, refer to themselves, or it is no XML -, or None. One streaming
+    parse (expat: no tree, no entity, no external DTD read) and one pass over its elements: time grows with the file,
+    not with what it draws. An id named twice counts its biggest element (which one QtSvg draws is its own choice)."""
+    from xml.parsers import expat
+
+    ids, refs, weights, children, opened, paints = {}, [], [], {}, [], set()
+    parser = expat.ParserCreate()
+
+    def start(_name, attrs):
+        index = len(refs)
+        if opened:
+            children.setdefault(opened[-1], []).append(index)
+        own = []
+        for key, value in attrs.items():
+            local = key.rsplit(":", 1)[-1].lower()
+            if local == "id":
+                ids.setdefault(value, []).append(index)
+            elif local == "href" and value.strip().startswith("#"):
+                own.append(value.strip()[1:])
+            elif "url(" in value:
+                own += SVG_LOCAL_URL.findall(value)
+        refs.append(own)
+        weights.append(1 + sum(len(value) for value in attrs.values()))
+        if _name.rsplit(":", 1)[-1] in SVG_PAINTS:
+            paints.add(index)
+        opened.append(index)
+
+    def refuse(*_args):
+        raise ValueError("an entity is declared")
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = lambda _name: opened.pop()
+    parser.EntityDeclHandler = refuse
+    try:
+        parser.Parse(data, True)
+    except (expat.ExpatError, ValueError) as exc:
+        return f"not XML ({exc})"
+    if not refs:
+        return None
+    # Per element, its subtree worked out once (after its children and its references' targets; a target still being
+    # worked out is a cycle): what it draws itself (count, characters) and what its subtree's references draw again.
+    caps = (SVG_REDRAWN + 1, SVG_REDRAWN_CHARS + 1)
+    size, extra = [(0, 0)] * len(refs), [(0, 0)] * len(refs)
+    state = bytearray(len(refs))  # 0 not seen, 1 being worked out, 2 done
+    for root in range(len(refs)):
+        if state[root]:
+            continue
+        stack = [root]
+        while stack:
+            node = stack[-1]
+            targets = [t for name in refs[node] for t in ids.get(name, ())]
+            depends = children.get(node, []) + targets
+            if state[node] == 0:
+                state[node] = 1
+                for other in depends:
+                    if state[other] == 1:
+                        return "refers to itself"
+                    if state[other] == 0:
+                        stack.append(other)
+                continue
+            stack.pop()
+            if state[node] == 2:
+                continue
+            if any(state[other] != 2 for other in depends):
+                return "refers to itself"
+            kids = children.get(node, ())
+            size[node] = (0, 0) if node in paints else tuple(
+                min(cap, own + sum(size[kid][part] for kid in kids))
+                for part, (cap, own) in enumerate(zip(caps, (1, weights[node]))))
+            drawn = [0, 0]
+            for name in refs[node]:
+                named = ids.get(name, ())
+                if named:
+                    biggest = max(named, key=lambda t: (size[t][1] + extra[t][1], size[t][0] + extra[t][0]))
+                    drawn = [drawn[part] + size[biggest][part] + extra[biggest][part] for part in (0, 1)]
+            extra[node] = tuple(min(caps[part], drawn[part] + sum(extra[kid][part] for kid in kids))
+                                for part in (0, 1))
+            state[node] = 2
+    if extra[0][0] > SVG_REDRAWN or extra[0][1] > SVG_REDRAWN_CHARS:  # (the root's subtree: the whole drawing)
+        return f"its references draw more than {SVG_REDRAWN} elements or {SVG_REDRAWN_CHARS} characters again"
+    return None
+
+
 def unpacked(data):
     """DATA as it is - or, compressed with gzip (an .svgz), unpacked: at most IMAGE_LIMIT bytes (None beyond, or when it
     does not unpack)."""
@@ -247,6 +348,8 @@ def decode(data, budget=None):
             return None, tr("too big")
         if svg_refers(plain):
             return None, tr("refers to other files")
+        if svg_draws_too_much(plain):
+            return None, tr("draws too much")
         if plain is not data:  # (an .svgz: read as the SVG it holds - what was looked at)
             buffer.close()
             buffer.setData(QByteArray(plain))
@@ -354,13 +457,18 @@ class ImageSource:
         return found
 
 
+ALERT_COLOURS = {"TIP": "ok", "WARNING": "warn", "CAUTION": "bad"}  # (a status colour; NOTE, IMPORTANT: the accent)
+
+
 class MarkdownBrowser(QTextBrowser):
     """A QTextBrowser that loads nothing itself: images come from VIEW's cache (read through the pane's Root), every
-    other resource is refused; links are never followed here (the view decides)."""
+    other resource is refused; links are never followed here (the view decides). Its menu has Copy code block on a
+    fenced code block."""
 
     def __init__(self, view):
         super().__init__(view)
         self.view = view
+        self.pressed_at = None  # (where the mouse was pressed: the link clicked there - its text: MarkdownView.clicked)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
         self.setReadOnly(True)
@@ -370,6 +478,40 @@ class MarkdownBrowser(QTextBrowser):
         if kind != QTextDocument.ResourceType.ImageResource:
             return None  # (no style sheet, no frame, nothing else)
         return self.view.image(url.toString())
+
+    def mousePressEvent(self, event):  # noqa: N802
+        self.pressed_at = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def code_block_at(self, position):
+        """The text of the fenced code block at the page's POSITION (its lines together), or None."""
+        block = self.document().findBlock(position)
+        fence = QTextFormat.Property.BlockCodeFence
+        if not block.isValid() or not block.blockFormat().hasProperty(fence):
+            return None
+        first = block
+        while first.previous().isValid() and first.previous().blockFormat().hasProperty(fence):
+            first = first.previous()
+        lines, block = [], first
+        while block.isValid() and block.blockFormat().hasProperty(fence):
+            lines.append(block.text())
+            block = block.next()
+        return "\n".join(lines)
+
+    def menu_at(self, point):
+        """The menu at POINT (viewport coordinates): Qt's own (Copy, Select all, a link's Copy) - and Copy code block on
+        a code block."""
+        menu = self.createStandardContextMenu(point)
+        code = self.code_block_at(self.cursorForPosition(point).position())
+        if code is not None:
+            menu.addSeparator()
+            menu.addAction(tr("Copy code block"), lambda: QApplication.clipboard().setText(code))
+        return menu
+
+    def contextMenuEvent(self, event):  # noqa: N802
+        menu = self.menu_at(event.pos())
+        menu.exec(event.globalPos())
+        menu.deleteLater()
 
 
 class MarkdownView(QWidget):
@@ -383,6 +525,8 @@ class MarkdownView(QWidget):
         self.images, self.asked = {}, set()  # name: QImage (or a placeholder); names being read or read
         self.too_many = None  # the one picture of every image beyond 2 * IMAGES (image())
         self.generation = 0  # forget_images(): what a read begun before it brings is dropped
+        self.headings = []  # the page's positions of the headings, in order (their rows in the outline)
+        self.last_link_text = ""  # the text of the link clicked last (the window's question names it if it differs)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.split = QSplitter(Qt.Orientation.Horizontal)
@@ -395,6 +539,7 @@ class MarkdownView(QWidget):
         self.highlighter = CodeHighlighter(self.browser.document())
         self.browser.anchorClicked.connect(self.clicked)
         self.browser.highlighted.connect(self.hovered)
+        self.browser.verticalScrollBar().valueChanged.connect(self.follow)
         self.split.addWidget(self.outline)
         self.split.addWidget(self.browser)
         self.split.setStretchFactor(1, 1)
@@ -428,19 +573,22 @@ class MarkdownView(QWidget):
         part, why = renderable(text)
         self.notice.setText(why)
         self.notice.setVisible(bool(why))
-        shown, notes = with_footnotes(part)
+        shown, notes = with_footnotes(markdown_text.prepared(part))
         self.highlighter.formats = None  # (the look's colours of now)
         self.browser.document().setMarkdown(shown, FEATURES)
         self.read_outline(notes)
         bar.setValue(where)
+        self.follow()
         # The live preview waits for a pause in the typing at least twice as long as a rendering takes: a big text's
         # rendering (a second or more) after every pause of RENDER_DELAY left the typing stuck most of the time.
         self.timer.setInterval(max(RENDER_DELAY, int(2000 * (time.monotonic() - began))))
         self.read_missing()
 
     def read_outline(self, notes=()):
+        """The outline and the anchors of the page made anew - and the title lines of its alerts coloured."""
         self.outline.clear()
-        self.anchors = {}
+        self.anchors, self.headings = {}, []
+        titles, alerts = markdown_text.alert_titles(), []
         # (the number each name goes on from: counted up from 1 past every heading of that name before, 20,000
         # headings of one name held up the window for half a minute; and each paragraph compared with every note's
         # name, 10,000 footnotes for 15 s)
@@ -459,11 +607,33 @@ class MarkdownView(QWidget):
                 item = QListWidgetItem("    " * (level - 1) + text)
                 item.setData(Qt.ItemDataRole.UserRole, block.position())
                 self.outline.addItem(item)
+                self.headings.append(block.position())
+            elif text in titles and block.blockFormat().hasProperty(QTextFormat.Property.BlockQuoteLevel):
+                alerts.append((block, titles[text]))
             if notes and text.startswith("[") and "] " in text:
                 name = text[1:text.index("] ")]
                 if name in notes:
                     self.anchors.setdefault(f"fn-{name}", block.position())
             block = block.next()
+        for block, kind in alerts[:1000]:  # (in the look's colours, as GitHub's: a few - each one changes the page)
+            status = ALERT_COLOURS.get(kind)
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(theme.color(status) if status else theme.colors().get("accent",
+                                                                                          theme.color("muted"))))
+            cursor = QTextCursor(block)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+            cursor.mergeCharFormat(fmt)
+
+    def follow(self, *_):
+        """The heading being read (the last one above the view's top) marked in the outline as the page scrolls."""
+        if not self.headings:
+            return
+        top = self.browser.cursorForPosition(self.browser.viewport().rect().topLeft()).position()
+        row = max(0, bisect.bisect_right(self.headings, top) - 1)
+        if self.outline.currentRow() != row:
+            self.outline.blockSignals(True)
+            self.outline.setCurrentRow(row)
+            self.outline.blockSignals(False)
 
     def scroll_to(self, position):
         block = self.browser.document().findBlock(position)
@@ -480,8 +650,31 @@ class MarkdownView(QWidget):
     def hovered(self, url):
         self.status.setText(tr("Link: {target}", target=printable(url.toString())) if url.toString() else "")
 
+    def link_text_at(self, position, href):
+        """The text of the link to HREF at the page's POSITION (all of its pieces in its line), or ""."""
+        block = self.browser.document().findBlock(position)
+        parts, inside, piece = [], False, block.begin()
+        while not piece.atEnd():
+            fragment = piece.fragment()
+            fmt = fragment.charFormat()
+            if fmt.isAnchor() and fmt.anchorHref() == href:
+                parts.append(fragment.text())
+                inside = inside or fragment.position() <= position <= fragment.position() + fragment.length()
+            elif parts:
+                if inside:
+                    break
+                parts = []
+            piece += 1
+        return "".join(parts).replace("\ufffc", "").strip() if inside else ""
+
     def clicked(self, url):
-        """A link clicked: "#anchor" of this text scrolls there; anything else goes to the window (LINK)."""
+        """A link clicked: "#anchor" of this text scrolls there; anything else goes to the window (LINK) - its text in
+        last_link_text."""
+        pressed, self.browser.pressed_at = self.browser.pressed_at, None
+        position = (self.browser.cursorForPosition(pressed).position() if pressed is not None
+                    else self.browser.textCursor().position())
+        self.last_link_text = self.link_text_at(position, url.toString()) or \
+            self.link_text_at(max(0, position - 1), url.toString())
         if not url.scheme() and not url.path() and url.hasFragment():
             position = self.anchors.get(url.fragment()) or self.anchors.get(slug(url.fragment()))
             if position is None:

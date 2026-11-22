@@ -497,8 +497,13 @@ found["flags"] = {point: flags.get(point) for point in ("/work", "/root")}
 status = dict(line.split(":\t", 1) for line in open("/proc/self/status").read().splitlines() if ":\t" in line)
 found["status"] = {key: status.get(key) for key in ("CapEff", "CapBnd", "NoNewPrivs", "Seccomp", "Seccomp_filters")}
 try:
-    os.listdir("/root/.config/firejail")
-    found["firejail_folder"] = "readable"
+    seen = {"entries": len(os.listdir("/root/.config/firejail")), "mounted": "/root/.config/firejail" in flags}
+    try:
+        open("/root/.config/firejail/planted", "w").close()
+        seen["write"] = "ok"
+    except OSError as exc:
+        seen["write"] = errno.errorcode.get(exc.errno, exc.errno)
+    found["firejail_folder"] = seen
 except OSError as exc:
     found["firejail_folder"] = errno.errorcode.get(exc.errno, exc.errno)
 try:
@@ -533,17 +538,26 @@ def test_real_isolation_filters_mount_flags_sealed_folder_and_manifest(request, 
     assert int(found["status"]["CapEff"], 16) == 0 and int(found["status"]["CapBnd"], 16) == 0
     assert found["status"]["NoNewPrivs"] == "1" and found["status"]["Seccomp"] == "2"
     assert int(found["status"]["Seccomp_filters"]) >= 4, found  # the container's, Firejail's, the sandbox's
-    assert found["firejail_folder"] in ("EACCES", "ENOENT", "EPERM"), found
+    # Firejail's --blacklist puts its own empty, read-only folder (root's, mode 0400) over it: the agent, root in
+    # the sandbox, may list that one (nothing in it) but put nothing there - or it cannot reach it at all.
+    assert found["firejail_folder"] in ("EACCES", "ENOENT", "EPERM") or found["firejail_folder"] == \
+        {"entries": 0, "mounted": True, "write": found["firejail_folder"].get("write")} and \
+        found["firejail_folder"]["write"] in ("EROFS", "EACCES", "EPERM"), found
     assert found["manifest"] != "readable", found
     manifest = json.loads((logs / "isolation.json").read_text())
     assert manifest["filters"]["container"]["profile"] == "container", manifest["filters"]
     assert manifest["filters"]["sandbox"]["new_namespaces"] == "refused"
-    assert "--restrict-namespaces" in manifest["filters"]["firejail"]
+    if backend == "bwrap":  # the host's root owns Firejail's helpers there, unmapped: its narrowing is left out
+        assert manifest["firejail"]["narrowing_left_out"] and "--restrict-namespaces" not in \
+            manifest["filters"]["firejail"], manifest["firejail"]
+    else:
+        assert "--restrict-namespaces" in manifest["filters"]["firejail"]
+        assert manifest["firejail"]["narrowing_left_out"] is None, manifest["firejail"]
     assert manifest["firejail"]["config_sealed"] is True and manifest["firejail"]["version"]
     assert manifest["host_folders"]["/work"] == ["nosuid", "nodev"]
-    for name in ("CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd"):
-        assert int(manifest["proxy"][name], 16) == 0, manifest["proxy"]
-    assert manifest["proxy"]["NoNewPrivs"] == "1" and manifest["proxy"]["Seccomp"] == "2"
+    # (live check 2026-11-22: --offline starts no connection proxy, so there is none to account for; the proxy's
+    # empty capability sets are checked where one runs: test_real_strict_mode_starts_with_every_part_of_its_isolation)
+    assert manifest["proxy"] is None, manifest["proxy"]
     assert str(tmp_path) not in json.dumps(manifest)  # no path of the host
     assert "does not hold" not in stderr
 
@@ -559,6 +573,11 @@ def test_real_strict_mode_starts_with_every_part_of_its_isolation(request, backe
     assert "STRICT_OK" in stdout
     manifest = json.loads((logs / "isolation.json").read_text())
     assert manifest["strict"] is True and manifest["filters"]["container"] and manifest["disk"]["act"] == "stop"
+    # The proxy reads what the agent sends: no capability in any set (the inheritable one too, which bubblewrap 0.13
+    # hands over full and setresuid leaves - live check 2026-11-22), no privilege to gain, sandbox-ai's filter.
+    for name in ("CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd"):
+        assert int(manifest["proxy"][name], 16) == 0, manifest["proxy"]
+    assert manifest["proxy"]["NoNewPrivs"] == "1" and manifest["proxy"]["Seccomp"] == "2"
 
 
 @pytest.mark.agent_provider

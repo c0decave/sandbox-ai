@@ -71,6 +71,9 @@ sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signe
               # so the agent folders' markers are named.
               "builtin/kits/**/*", "builtin/kits/*/*/.shared-skills",
               "recipes/*/*.json", "recipes/*/*.txt", "recipes/*/*.yaml", "service-images/*/*",
+              # the recipe android-dev: its lock, scripts, license acceptance and the SDK packages' package.xml
+              "recipes/*/*.lock", "recipes/*/*.sh", "recipes/*/package-xml/*.xml",
+              "recipes/android-dev/android-sdk-license", "recipes/android-dev/android-emulator",
               "marketplace/.claude-plugin/*",
               "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
 # The same as projects/sandbox-ai-app/pyproject.toml's (tests/test_pypi_package.py).

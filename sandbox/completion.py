@@ -418,6 +418,7 @@ NAMED = {
     ("completion", None, "only"): lambda: ["bash", "zsh", "fish"],
     ("board", "show", "name"): lambda: board_names(), ("board", "delete", "name"): lambda: board_names(),
     ("board", "export", "out"): lambda: [FILES], ("session", "export", "out"): lambda: [FILES],
+    ("session", "import", "file"): lambda: [FILES],
     ("checkpoint", "create", "run"): lambda: start_names(), ("checkpoint", "list", "run"): lambda: start_names(),
     **{("checkpoint", sub, field): lambda: checkpoint_ids() for sub, field in (
         ("show", "id"), ("diff", "id"), ("diff", "other"), ("delete", "ids"))},
@@ -490,9 +491,11 @@ FREE_TEXT = {
                      "--prompt", "--commit", "--push",
                      "--label",
                      "--ca-of"), "a text or name of your own"),
+    ("session", "duplicate", "new"): "the new session's name, of your own",
     # the package guard: a package of a registry, named by you (never looked up anywhere: not on a Tab either)
     "--allow-package": "a package you name: ECOSYSTEM:NAME[@VERSION]",
     "--sha256": "the SHA-256 you got for the file (64 hex digits)",
+    "--source-sha256": "the source archive's SHA-256 mcp add --build-plan said (64 hex digits)",
     ("packages", "*", "spec"): "a package you name: ECOSYSTEM:NAME[@VERSION]",
     # the secret guard: a kind of value and a host, named by you (sandbox-ai secret-guard status lists the kinds)
     "--allow-send": "a kind of value and a host you name: WHAT@HOST",

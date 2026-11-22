@@ -287,4 +287,5 @@ def test_without_the_intro_the_app_starts_all_the_same(qapp, window, monkeypatch
     def broken(*args, **kwargs):
         raise RuntimeError("no intro today")
     monkeypatch.setattr(intro, "Renderer", broken)
+    monkeypatch.setattr(intro, "renderer_class", lambda which: broken)  # (every intro's renderer)
     assert intro.play(window, {}) is None and "no intro today" in capsys.readouterr().err

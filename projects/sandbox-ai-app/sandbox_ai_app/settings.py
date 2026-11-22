@@ -27,7 +27,9 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from . import backend, fonts, help_texts, help_view, notifications, presets as PR, project_trust as PT, theme
+from . import (
+    backend, fonts, help_texts, help_view, intro_choice, notifications, presets as PR, project_trust as PT, theme,
+)
 from .board_view import PathEdit
 from .files import printable, printable_text
 from .i18n import tr
@@ -453,6 +455,10 @@ class SettingsDialog(QDialog):
                                             "intro lines)"), current)
         self.check(form, "button_texts", tr("Show button texts beside the icons"), current)
         self.check(form, "intro", tr("Play the intro animation at start (Esc skips it)"), current)
+        self.combo(form, intro_choice.SETTING, tr("Intro animation"),
+                   [(intro_choice.ROTATE, tr(intro_choice.ROTATE_TITLE))] +
+                   [(which, tr(intro_choice.TITLES[which])) for which in intro_choice.IDS],
+                   {intro_choice.SETTING: intro_choice.chosen(current)})
         self.check(form, "show_flags", tr("Show the command-line options (--…) beside the fields' names"), current)
         self.replay = QPushButton(tr("Watch the intro again"))
         self.replay.clicked.connect(self.watch_intro)

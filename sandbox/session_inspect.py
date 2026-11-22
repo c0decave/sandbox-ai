@@ -47,6 +47,7 @@ show it as plain text). A file is named by its name in the listing, never by a f
 """
 import contextlib
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -1035,23 +1036,44 @@ def tar_info(name, info, kind=tarfile.REGTYPE):
     return member
 
 
+CANARY = "a decoy (canary) of this machine: never exported, the sandbox there gets its own"
+
+
 class Exporter:
     """One export: the members written into TAR, what was left out and why, the counts against the limits. A login,
     key or a file holding a placeholder of a secret is left out ("secret": true) unless INCLUDE_SECRETS."""
 
-    def __init__(self, tar, prefix, include_secrets=False):
+    def __init__(self, tar, prefix, include_secrets=False, never=()):
         self.tar, self.prefix, self.include_secrets = tar, prefix, include_secrets
         self.left_out, self.files, self.bytes, self.entries = [], 0, 0, 0
+        self.members = {}  # {member name: [size, sha256]} of every file written: the archive's manifest.json
+        self.never = set(never)  # HOME paths left out whatever is asked (the canaries planted there: decoys of here)
+        self.where = ""  # what is exported now ("" the HOME, "workspace/", ...): the paths of left_out are named so
 
     def leave(self, relative, why, secret=False):
         if len(self.left_out) < 5000:
-            self.left_out.append({"path": relative, "why": why, **({"secret": True} if secret else {})})
+            self.left_out.append({"path": self.where + relative, "why": why, **({"secret": True} if secret else {})})
         elif len(self.left_out) == 5000:
             self.left_out.append({"path": "…", "why": "further entries left out without a note"})
 
     def secret(self, relative):
         """Why RELATIVE is left out as a login or key by its path (secret_path), unless secrets are taken in."""
         return None if self.include_secrets else secret_path(relative)
+
+    def canary(self, relative):
+        """A canary planted in the HOME (NEVER): left out always (a decoy of this machine), said as such."""
+        if not self.where and relative in self.never:
+            self.leave(relative, CANARY)
+            return True
+        return False
+
+    def add_bytes(self, member_name, data, mode=0o600):
+        """DATA (bytes made here: a record of the export) as the file MEMBER_NAME."""
+        self.count(len(data))
+        member = tarfile.TarInfo(member_name)
+        member.size, member.mtime, member.mode = len(data), int(time.time()), mode
+        self.tar.addfile(member, io.BytesIO(data))
+        self.members[member_name] = [len(data), hashlib.sha256(data).hexdigest()]
 
     def count(self, size=0):
         self.entries += 1
@@ -1091,7 +1113,9 @@ class Exporter:
             self.count(info.st_size)
             member = tar_info(member_name, info)
             with os.fdopen(os.dup(fd), "rb") as stream:
-                self.tar.addfile(member, Bounded(stream, info.st_size))
+                bounded = Bounded(stream, info.st_size)
+                self.tar.addfile(member, bounded)
+            self.members[member_name] = [info.st_size, bounded.digest.hexdigest()]
             self.files += 1
         finally:
             os.close(fd)
@@ -1112,6 +1136,8 @@ class Exporter:
             try:
                 kind = entry.stat(follow_symlinks=False).st_mode
             except OSError:
+                continue
+            if self.canary(child):
                 continue
             if stat.S_ISLNK(kind):
                 self.leave(child, "a link: not followed")
@@ -1148,6 +1174,7 @@ class Bounded(io.RawIOBase):
     def __init__(self, stream, size):
         super().__init__()
         self.stream, self.left = stream, size
+        self.digest = hashlib.sha256()  # of the bytes written into the archive (the manifest's checksum)
 
     def readable(self):
         return True
@@ -1158,17 +1185,39 @@ class Bounded(io.RawIOBase):
         wanted = min(len(buffer), self.left)
         data = self.stream.read(wanted) or b"\0" * wanted
         buffer[:len(data)] = data
+        self.digest.update(data)
         self.left -= len(data)
         return len(data)
 
 
-def export(name, out, include_secrets=False):
+# The archive's own record of what it holds (written last): its schema and version, and every file with its size and
+# SHA-256, which `sandbox-ai session import` checks (session_state.py). Version 1: the export.json of 0.1.190 and before,
+# without a manifest.
+ARCHIVE_SCHEMA = "sandbox-ai-session-archive"
+ARCHIVE_VERSION = 2
+MANIFEST = "manifest.json"
+
+
+def canaries_of(home):
+    """The HOME paths of the canaries (decoy logins) planted in HOME (canary.py's record of it): never exported - the
+    sandbox at the other end gets its own."""
+    with contextlib.suppress(Exception):  # noqa: BLE001 - no record, a damaged one: nothing to leave out
+        record = json.loads(module("canary").home_state(home).read_text())
+        return {str(item["path"]) for item in record.get("canaries") or [] if isinstance(item, dict)
+                and isinstance(item.get("path"), str)}
+    return set()
+
+
+def export(name, out, include_secrets=False, extra=None):
     """Write session.json, exit.json, supervisor.log and the HOME of the kept start NAME into the new tar.gz OUT:
     {"name", "id", "agent", "state", "path", "files", "bytes", "left_out": [{"path", "why"(, "secret")}],
-    "secrets_left_out": [path], "include_secrets"}. Members are plain relative names below the start's id; links,
-    sockets and FIFOs are left out, and so are logins, keys and files holding a placeholder of a secret unless
-    INCLUDE_SECRETS (the human's choice, asked first by every caller). Written beside OUT first, then put in place
-    without replacing anything."""
+    "secrets_left_out": [path], "include_secrets", "parts"}. Members are plain relative names below the start's id;
+    links, sockets and FIFOs are left out, and so are logins, keys and files holding a placeholder of a secret unless
+    INCLUDE_SECRETS (the human's choice, asked first by every caller), and the canaries planted in the HOME always.
+    EXTRA(exporter, prefix, found): adds the further parts of a session's state (session_state.py: its memory,
+    checkpoints, workspace, network approvals, start plan) and returns what the manifest says of them ("parts").
+    The last member is manifest.json: ARCHIVE_SCHEMA, ARCHIVE_VERSION and every file's size and SHA-256. Written
+    beside OUT first, then put in place without replacing anything."""
     found = locate(name)
     shown = one_line(found["name"])
     if found["directory"] is None:
@@ -1178,10 +1227,10 @@ def export(name, out, include_secrets=False):
     prefix = re.sub(r"[^A-Za-z0-9_.-]", "_", str(found["id"]))[:48] or "start"
     temporary = path.with_name(f".{path.name}.partial-{os.getpid()}")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    exporter = None
+    exporter, parts = None, {}
     try:
         with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
-            exporter = Exporter(tar, prefix, include_secrets)
+            exporter = Exporter(tar, prefix, include_secrets, never=canaries_of(found["home"]) if found["home"] else ())
             directory = os.open(found["directory"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             try:
                 exporter.count()
@@ -1203,10 +1252,18 @@ def export(name, out, include_secrets=False):
                             os.close(home)
             finally:
                 os.close(directory)
+            if extra is not None:
+                parts = extra(exporter, prefix, found) or {}
+                exporter.where = ""
             report = {**header(found), "exported": iso(time.time()), "files": exporter.files,
                       "bytes": exporter.bytes, "left_out": exporter.left_out, "include_secrets": bool(include_secrets)}
-            data = json.dumps(report, indent=2).encode()
-            member = tarfile.TarInfo(f"{prefix}/export.json")
+            exporter.add_bytes(f"{prefix}/export.json", json.dumps(report, indent=2).encode())
+            manifest = {"schema": ARCHIVE_SCHEMA, "version": ARCHIVE_VERSION, "sandbox_ai": launcher_version(),
+                        "created": iso(time.time()), "prefix": prefix, **header(found),
+                        "workspace": found.get("workspace"), "include_secrets": bool(include_secrets),
+                        "parts": parts, "members": exporter.members}
+            data = json.dumps(manifest, indent=1).encode()
+            member = tarfile.TarInfo(f"{prefix}/{MANIFEST}")
             member.size, member.mtime, member.mode = len(data), int(time.time()), 0o600
             tar.addfile(member, io.BytesIO(data))
         os.link(temporary, path)  # (never over a file that came meanwhile)
@@ -1217,7 +1274,16 @@ def export(name, out, include_secrets=False):
             os.unlink(temporary)
     return {**header(found), "path": str(path), "files": exporter.files, "bytes": exporter.bytes,
             "left_out": exporter.left_out, "include_secrets": bool(include_secrets),
-            "secrets_left_out": [item["path"] for item in exporter.left_out if item.get("secret")]}
+            "secrets_left_out": [item["path"] for item in exporter.left_out if item.get("secret")], "parts": parts}
+
+
+def launcher_version():
+    """sandbox-ai's version, read from the launcher's source (not loaded for it)."""
+    with contextlib.suppress(OSError):
+        found = re.search(r'^__version__ = "([^"]+)"', (HERE / "agent_sandbox.py").read_text(), re.M)
+        if found:
+            return found.group(1)
+    return None
 
 
 def export_lines(result):
@@ -1433,18 +1499,28 @@ def add_parsers(commands):
     files.add_argument("--case", action="store_true", help="with --search or --text: letter case counts")
     files.add_argument("--json", action="store_true", help="as JSON")
     files.add_argument("--host", metavar="HOST", help="a start of this host of sandbox-ai hosts (over SSH)")
-    exported = commands.add_parser("export", help="A kept start's folder as one tar.gz: its records and HOME",
-                                   description="Write session.json, exit.json, supervisor.log and the kept HOME of a "
-                                               "start into a new tar.gz (never over a file that is there). Links, "
-                                               "sockets and FIFOs are left out; so are logins, keys and files with a "
-                                               "placeholder of a secret unless --include-secrets. What is left out is "
-                                               "listed by name (also in the archive's export.json).")
+    exported = commands.add_parser("export", help="A kept start with its state as one tar.gz (session import "
+                                                  "takes it)",
+                                   description="Write a kept start with its state into a new tar.gz (never over a "
+                                               "file that is there): session.json, exit.json, supervisor.log, its "
+                                               "HOME with the agent's session files, and for a session its "
+                                               "configuration, the project's agent memory, its checkpoints "
+                                               "(--no-checkpoints: not), its network approvals and with "
+                                               "--with-workspace its workspace's files; manifest.json lists every "
+                                               "file with its SHA-256 (sandbox-ai session import checks it). A "
+                                               "running session is paused for the moment. Links, sockets and FIFOs "
+                                               "are left out; so are logins, keys and files with a placeholder of a "
+                                               "secret unless --include-secrets, and the HOME's canaries always. What "
+                                               "is left out is listed by name (also in the archive's export.json).")
     exported.add_argument("name", help="a kept start (sandbox-ai list)")
     exported.add_argument("out", metavar="OUT", help="the archive to write (a new file; with --host, a path there)")
     exported.add_argument("--include-secrets", action="store_true",
                           help="take logins, keys and files with a placeholder of a secret into the archive too "
                                "(asked first; whoever has the archive can log in as you)")
     exported.add_argument("--yes", action="store_true", help="--include-secrets without asking (for scripts)")
+    exported.add_argument("--with-workspace", action="store_true",
+                          help="take the workspace's files into the archive too (default: the import maps it)")
+    exported.add_argument("--no-checkpoints", action="store_true", help="leave the workspace's checkpoints out")
     exported.add_argument("--json", action="store_true", help="what was written and left out, as JSON")
     exported.add_argument("--host", metavar="HOST", help="a start of this host of sandbox-ai hosts; OUT is written "
                                                          "there")

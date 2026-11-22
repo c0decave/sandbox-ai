@@ -1,0 +1,75 @@
+#!/bin/sh
+# android-emulator start|stop|status [--gui] [--name AVD] - the Android emulator of the image variant android-dev
+# (sandbox-ai). start makes the AVD once (the image's system image, in ~/.android/avd), starts the emulator
+# without a window (with --gui on the sandbox's screen) and waits until Android has booted. The emulator talks to
+# an adb server of its own in the sandbox, on port 5038: port 5037 is the host's adb server (the devices on USB).
+# Usage metrics stay off (-no-metrics; the preset opens none of Google's metrics hosts either).
+set -eu
+
+image="system-images;android-37.0;google_apis;x86_64"
+port=${ANDROID_EMULATOR_ADB_PORT:-5038}
+console=5554
+name=dev
+gui=""
+command=${1:-}
+[ $# -gt 0 ] && shift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --gui) gui=1 ;;
+        --name) [ $# -gt 1 ] || { echo "android-emulator: --name needs a name" >&2; exit 2; }; name=$2; shift ;;
+        *) echo "android-emulator: unknown option $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+serial="emulator-$console"
+adb_local() { ANDROID_ADB_SERVER_PORT=$port adb -P "$port" "$@"; }
+
+case "$command" in
+    start)
+        if [ ! -e /dev/kvm ]; then
+            echo "android-emulator: no /dev/kvm in this sandbox - the x86_64 emulator needs it. Start the sandbox" \
+                 "with --device /dev/kvm (the preset android-development's value kvm) on a host that has KVM." >&2
+            exit 1
+        fi
+        if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "android-emulator: /dev/kvm is here but not usable (read and write needed); on the host:" \
+                 "ls -l /dev/kvm - your user must be in its group (usually kvm)." >&2
+            exit 1
+        fi
+        avd_home=${ANDROID_AVD_HOME:-$HOME/.android/avd}
+        if [ ! -f "$avd_home/$name.ini" ]; then
+            echo "android-emulator: making the AVD $name ($image, Pixel 7) in $avd_home"
+            printf 'no\n' | avdmanager --silent create avd --name "$name" --package "$image" --device pixel_7
+        fi
+        mkdir -p "$HOME/.android"
+        log="$HOME/.android/emulator-$name.log"
+        window="-no-window"
+        [ -n "$gui" ] && window=""
+        echo "android-emulator: starting $name (log: $log)"
+        # shellcheck disable=SC2086  # ($window: empty or one word)
+        ANDROID_ADB_SERVER_PORT=$port nohup emulator -avd "$name" -port "$console" $window -no-audio -no-boot-anim \
+            -gpu swiftshader_indirect -no-snapshot-save -no-metrics >"$log" 2>&1 &
+        adb_local start-server >/dev/null
+        waited=0
+        until [ "$(adb_local -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            if [ "$waited" -ge "${ANDROID_EMULATOR_BOOT_TIMEOUT:-600}" ]; then
+                echo "android-emulator: Android did not finish booting in ${waited}s; see $log" >&2
+                exit 1
+            fi
+            sleep 5
+            waited=$((waited + 5))
+        done
+        echo "android-emulator: $serial is up. Its adb: adb -P $port -s $serial ... (or export" \
+             "ANDROID_ADB_SERVER_PORT=$port for adb and ./gradlew connectedDebugAndroidTest)"
+        ;;
+    stop)
+        adb_local -s "$serial" emu kill
+        ;;
+    status)
+        adb_local devices -l
+        ;;
+    *)
+        echo "usage: android-emulator start|stop|status [--gui] [--name AVD]" >&2
+        exit 2
+        ;;
+esac

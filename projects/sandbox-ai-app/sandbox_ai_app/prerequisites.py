@@ -16,7 +16,7 @@ import weakref
 from . import applog, board as B, preparing as P
 from .files import printable, printable_text
 from .i18n import tr
-from .widgets import background, confirm, warn
+from .widgets import ask_first, background, confirm, warn
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 
@@ -165,16 +165,17 @@ def start_mounts(argv, name, host=None):
     return mounts
 
 
-def mcp_add_args(argv, name, folders=(), entry=None, network=False, host=None):
+def mcp_add_args(argv, name, folders=(), entry=None, network=False, host=None, build=()):
     """`sandbox-ai mcp add NAME` for a server the start ARGV uses, with the folders the start gives it (--mcp-mount
     NAME:TARGET=HOST[:MODE]) and FOLDERS (TARGET=HOST, asked for: ask_mcp_folders) as its --mount: a catalog server
     that must have a folder (engram, memory, exiftool) is not added without one, and the start's is the one it
     asked for. ENTRY: the catalog entry a preset names for it (hub:binwalk), added as NAME. NETWORK: with the outside
-    network (--network full; a server whose entry lists the hosts it needs gets only those without it)."""
+    network (--network full; a server whose entry lists the hosts it needs gets only those without it). BUILD: its
+    build from source, asked for (build_args: an entry without a signed image yet)."""
     mounts = []
     for value in [*start_mounts(argv, name, host), *folders]:
         mounts += ["--mount", value]
-    return ("mcp", "add", entry or name, *mounts, *(["--network", "full"] if network else []))
+    return ("mcp", "add", entry or name, *mounts, *(["--network", "full"] if network else []), *build)
 
 
 def catalog_entry(entries, name):
@@ -221,6 +222,57 @@ def needed_hosts(entries, name):
     if entry is None or entry.get("network") != "allowlist":
         return []
     return [str(h) for h in entry.get("hosts") or [] if isinstance(h, str)][:20] or ["?"]
+
+
+def unpublished_entry(entries, name):
+    """The catalog entry NAME ("jadx", "mcp:jadx") of ENTRIES when its catalog has no image of it yet (pending:
+    reviewed, not published - `mcp add` refuses it, `mcp add --build` builds it from its source), else None. An entry
+    of a catalog whose signature does not verify is never one: nothing of that catalog is used."""
+    entry = catalog_entry(entries, name)
+    if not isinstance(entry, dict):
+        return None
+    if "published" in entry:  # (`mcp catalog --json`'s; catalog_entries' own entries: their digest)
+        published = entry["published"]
+    elif "_signature" in entry:
+        published = bool(entry.get("digest"))
+    else:
+        return None  # (a host that does not say: not offered - `mcp add` there says what it misses)
+    return None if published or entry_signature(entry) == "bad" else entry
+
+
+def entry_signature(entry):
+    """good, bad or none: the signature of ENTRY's catalog (`mcp catalog --json`'s, or catalog_entries' _signature)."""
+    if "signature" in entry and isinstance(entry.get("signature"), str):
+        return entry["signature"] if entry["signature"] in ("good", "bad") else "none"
+    state = (entry.get("_signature") or {}).get("state") if isinstance(entry.get("_signature"), dict) else None
+    return {"good": "good", "bad": "bad"}.get(state, "none")
+
+
+def build_plan_args(add_args, entry):
+    """`mcp add ... --build-plan` for the server `mcp add` ADD_ARGS (mcp_add_args) would add: what would be built,
+    nothing built (--unsigned where ENTRY's catalog is not signed: said in the question)."""
+    return (*add_args, "--build-plan", *(["--unsigned"] if entry_signature(entry) != "good" else []))
+
+
+def build_args(plan, entry):
+    """What `mcp add` gets after the human's yes to PLAN (`mcp add --build-plan`'s): that commit and source archive,
+    nothing else (--commit, --source-sha256), and --yes - the question was asked here."""
+    return ("--build", "--commit", str(plan["commit"]), "--source-sha256", str(plan["archive_sha256"]), "--yes",
+            *(["--unsigned"] if entry_signature(entry) != "good" else []))
+
+
+def checked_plan(text):
+    """`mcp add --build-plan`'s JSON: {entry, repository, commit, path, archive_sha256, catalog_label, signature}
+    checked (a host's answer is its text: every value one printable line), else ValueError."""
+    try:
+        plan = json.loads(text)
+    except (ValueError, RecursionError):
+        raise ValueError("not a build plan") from None
+    if not isinstance(plan, dict) or not re.fullmatch(r"[0-9a-f]{40}", str(plan.get("commit") or "")) or \
+            not re.fullmatch(r"[0-9a-f]{64}", str(plan.get("archive_sha256") or "")):
+        raise ValueError("not a build plan (no commit, no source archive's SHA-256)")
+    return {key: printable(str(plan.get(key) or ""))[:500] for key in
+            ("entry", "title", "repository", "commit", "path", "archive_sha256", "catalog_label", "signature")}
 
 
 def start_workspace(argv):
@@ -581,6 +633,7 @@ class Prerequisites:
         agent = agent or self.prerequisite_agent()
         argv = self.prerequisite_argv()  # (the folders the start gives its MCP servers: --mcp-mount)
         self.mcp_entries_chosen = {}  # (the catalog chosen for a server in several: for this preparation only)
+        self.mcp_builds = {}  # (the servers built from their source, asked: ask_mcp_builds)
         context = context if context is not None else self.prerequisite_context()
         busy = self.__dict__.setdefault("preparing_contexts", set())
         logins = list(missing.get(LOGIN, []))
@@ -688,13 +741,29 @@ class Prerequisites:
                 folders, dropped = self.ask_mcp_folders(host, left, argv, read)
                 networks, declined = self.ask_mcp_network(host, [n for n in left if n not in dropped], read)
                 dropped.update(declined)
-                self.provide_rest(identities, variants, to_build, tor_profiles,
-                                  [n for n in left if n not in dropped], folders,
-                                  problems + [(text, [(tr("Add MCP server"), again("--mcp", [name]))])
-                                              for name, text in dropped.items()]
-                                  + [(text, [(tr("Open the MCP servers page"), lambda: self.open_page("mcp"))])
-                                     for name, text in unknown.items()],
-                                  host, key, then, why, context, agent, argv, networks, images=images)
+
+                def go_on(builds, refused):
+                    """On, with the servers to build from source (BUILDS: {server: build_args}) and those not
+                    (REFUSED: {server: why})."""
+                    dropped.update(refused)
+                    self.mcp_builds = builds
+                    self.provide_rest(identities, variants, to_build, tor_profiles,
+                                      [n for n in left if n not in dropped], folders,
+                                      problems + [(text, [(tr("Add MCP server"), again("--mcp", [name]))])
+                                                  for name, text in dropped.items()]
+                                      + [(text, [(tr("Open the MCP servers page"), lambda: self.open_page("mcp"))])
+                                         for name, text in unknown.items()],
+                                      host, key, then, why, context, agent, argv, networks, images=images)
+                # One its catalog lists without a signed image yet (pending): built from its source on that host,
+                # after a question naming the commit and the archive's hash - else said, not tried (user report
+                # 2026-11-21: "warum werden die nicht automatisch gebaut oder gefragt ob sie direkt gebaut werden
+                # sollen???").
+                pending = [n for n in left if n not in dropped and read is not None
+                           and unpublished_entry(read, self.mcp_entry_of(n)) is not None]
+                if pending:
+                    self.ask_mcp_builds(host, pending, argv, read, folders, networks, context, why, go_on)
+                    return
+                go_on({}, {})
             self.__dict__.setdefault("preparing_stages", {})[context] = (
                 time.monotonic(), f"reading the MCP catalogs for the folders of {', '.join(servers)}")
             background(read_catalog, owner=self, timeout=200, done=catalog_read,
@@ -901,6 +970,77 @@ class Prerequisites:
                 applog.log("INFO", "board", f"MCP server {server}: {target} gets the folder {path}")
         return folders, dropped
 
+    def ask_mcp_builds(self, host, servers, argv, entries, folders, networks, context, why, then):
+        """SERVERS (each listed by its catalog of HOST, ENTRIES, without a signed image yet) offered to be built there
+        from their source: what would be built read first (`mcp add ... --build-plan` on HOST, in the background:
+        the catalog's repository at its exact commit, the source archive's SHA-256), then asked, each on its own - it
+        is built and added UNSIGNED. THEN({server: build_args}, {server: why it is not built}). Nothing is built
+        without a yes, and a yes builds that commit and archive only (--commit, --source-sha256)."""
+        named = {**self.prerequisite_mcp_entries(), **self.__dict__.get("mcp_entries_chosen", {})}
+
+        def read_plans():
+            plans = {}
+            for server in servers:
+                entry = unpublished_entry(entries, self.mcp_entry_of(server)) or {}
+                args = build_plan_args(mcp_add_args(argv, server, folders.get(server, ()), named.get(server),
+                                                    server in networks, host), entry)
+                status, out, err = self.sai.host_run(host, *args, timeout=600)
+                applog.log("INFO" if status == 0 else "WARNING", "prerequisites",
+                           f"{why}: what building {server} on {printable(host)} would build: exit {status}"
+                           + ("" if status == 0 else ": " + applog.redact((err or out or "").strip()[-2000:])))
+                if status != 0:
+                    plans[server] = ValueError((err or out or "").strip().splitlines()[-1:][0]
+                                               if (err or out or "").strip() else f"exit status {status}")
+                    continue
+                try:
+                    plans[server] = checked_plan(out)
+                except ValueError as exc:
+                    plans[server] = exc
+            return plans
+
+        def asked(plans, error):
+            builds, refused = {}, {}
+            if self.prerequisite_context() != context:
+                applog.log("INFO", "prerequisites", f"{why}: the page shows another start now - not built")
+                then({}, {server: tr("MCP server {name}: not built (another start is shown now).",
+                                     name=printable(server)) for server in servers})
+                return
+            for server in servers:
+                plan = (plans or {}).get(server, error)
+                entry = unpublished_entry(entries, self.mcp_entry_of(server)) or {}
+                if not isinstance(plan, dict):
+                    refused[server] = tr("MCP server {name}: its catalog has no signed image of it yet, and what "
+                                         "would be built from its source on {host} could not be read: {error}",
+                                         name=printable(server), host=printable(host),
+                                         error=printable_text(plan if plan is not None else "?")[:400])
+                    continue
+                signed = tr("signed: the entry was reviewed, its image is not published yet") \
+                    if entry_signature(entry) == "good" else tr("NOT signed: nobody vouched for the entry")
+                yes = ask_first(self, "mcp-build", tr("Build MCP server {name}?", name=printable(server)), tr(
+                    "{entry} has no signed image in its catalog yet. Build it {place} from its reviewed source and "
+                    "add it UNSIGNED?\n\nSource: {repository}, commit {commit}, {path}\nSource archive SHA-256: "
+                    "{sha256}\nCatalog: {catalog} ({signed})\n\nPodman builds it as the catalog's CI does (base images "
+                    "pinned by digest) and its smoke test checks it with sandbox-ai's own run line; that takes "
+                    "minutes, its output goes to the tab Preparing the start. Built here, not signed: nobody signed "
+                    "this image, and it is shown so wherever it appears.", entry=plan["entry"],
+                    place=tr("on this machine") if host == LOCAL else tr("on {host}", host=printable(host)),
+                    repository=plan["repository"], commit=plan["commit"], path=plan["path"],
+                    sha256=plan["archive_sha256"], catalog=plan["catalog_label"], signed=signed), tr("Build"))
+                applog.log("INFO", "prerequisites", f"{why}: build {server} on {printable(host)} from "
+                           f"{plan['repository']} at {plan['commit']} (archive {plan['archive_sha256']}): "
+                           + ("yes" if yes else "no"))
+                if yes:
+                    builds[server] = build_args(plan, entry)
+                else:
+                    refused[server] = tr("MCP server {name}: not built - its catalog has no signed image of it yet "
+                                         "(sandbox-ai mcp add {name} --build builds it from its reviewed source and "
+                                         "adds it unsigned, asked first).", name=printable(server))
+            then(builds, refused)
+        self.__dict__.setdefault("preparing_stages", {})[context] = (
+            time.monotonic(), f"reading what building {', '.join(servers)} on {host} would build")
+        background(read_plans, owner=self, timeout=900, done=asked,
+                   what=f"reading what building the MCP servers {', '.join(servers)} on {host} would build")
+
     def ask_mcp_network(self, host, servers, entries):
         """({servers added with the outside network}, {server: why it is not added}) for SERVERS: nothing is asked
         any more. A server whose catalog entry (of ENTRIES, None: not read) lists the hosts it needs is added with
@@ -941,7 +1081,9 @@ class Prerequisites:
                  *(tr("image variant {name} (made and built: some minutes)", name=n) for n in to_build),
                  *(tr("image variant {name}", name=n) for n in variants if n not in to_build),
                  *(tr("Tor profile {name}", name=n) for n in tor_profiles),
-                 *(tr("MCP server {name}", name=n) for n in servers),
+                 *(tr("MCP server {name}", name=n) + (tr(" (built from its source: minutes)")
+                                                       if n in (self.__dict__.get("mcp_builds") or {}) else "")
+                   for n in servers),
                  *(tr("service image {name} (built: a minute or two)", name=n) for n in images)]
         if not steps:  # nothing to make here (each part said above why): no "Preparing: ." whose end never came
             applog.log("INFO", "prerequisites", f"{why}: nothing is made (each part declined or not possible)")
@@ -951,6 +1093,8 @@ class Prerequisites:
             return
         # (a preset's hub:binwalk: never `mcp add binwalk`, in two catalogs; one chosen of several: resolve_mcp_entries)
         entries = {**self.prerequisite_mcp_entries(), **self.__dict__.get("mcp_entries_chosen", {})}
+        builds = dict(self.__dict__.get("mcp_builds") or {})  # (asked: ask_mcp_builds)
+        self.mcp_builds = {}
         stages[context] = (time.monotonic(), "making " + ", ".join(steps))
         applog.log("INFO", "prerequisites", f"{why} on {printable(host)}: making " + printable(", ".join(steps)))
         self.prerequisite_notice(tr("Preparing what the start needs: {list}.", list=printable(", ".join(steps))) + " "
@@ -958,9 +1102,10 @@ class Prerequisites:
         # The builds and MCP servers (minutes) in a terminal tab, seen as they go; the rest (seconds) here.
         slow = [("build", name, tr("building the image variant {name}", name=name),
                  ("build", "--variant", self.variant_target(name, agent))) for name in to_build] + \
-            [("mcp", name, tr("adding the MCP server {name} (its image is pulled)", name=name),
+            [("mcp", name, tr("building the MCP server {name} from its source (unsigned; minutes)", name=name)
+              if name in builds else tr("adding the MCP server {name} (its image is pulled)", name=name),
               mcp_add_args(argv, name, folders.get(name, ()), entries.get(name), name in networks,
-                           host))
+                           host, builds.get(name, ())))
              for name in servers] + \
             [("service", name, tr("building the service image {name} (sandbox-ai's own Containerfile)", name=name),
               ("images", "build-image", name, "--builtin", name)) for name in images]
@@ -1026,8 +1171,9 @@ class Prerequisites:
                 said.append(("vpn", name, status, text))
             for name in servers:
                 said.append(("mcp", name, *step("mcp", name, *mcp_add_args(argv, name, folders.get(name, ()),
-                                                                           entries.get(name), name in networks, host),
-                                                timeout=900)))
+                                                                           entries.get(name), name in networks, host,
+                                                                           builds.get(name, ())),
+                                                timeout=7200 if name in builds else 900)))
             for name in images:
                 said.append(("service", name, *step("service", name, "images", "build-image", name, "--builtin", name,
                                                     timeout=3600)))

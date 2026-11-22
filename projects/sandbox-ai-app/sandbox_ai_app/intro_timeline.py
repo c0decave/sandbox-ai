@@ -199,9 +199,10 @@ def approval_state(t):
             "out": ease_in_out_cubic(window(t, go + 0.25, go + 0.6))}
 
 
-def caption_state(t):
-    """The caption shown at T: (index, alpha, rise) with rise 0..1 (1: still below its place) or None."""
-    for index, start, end in CAPTIONS:
+def caption_state(t, captions=None):
+    """The caption shown at T (of CAPTIONS, default: this intro's): (index, alpha, rise) with rise 0..1 (1: still
+    below its place) or None."""
+    for index, start, end in CAPTIONS if captions is None else captions:
         if start <= t < end:
             fade_in = ease_out_cubic(window(t, start, start + 0.45))
             fade_out = 1 - ease_in_out_cubic(window(t, end - 0.25, end))
@@ -264,3 +265,43 @@ def static_scene(t):
 
 def duration(reduced=False):
     return STATIC_DURATION if reduced else DURATION
+
+
+# -- the ending the other intros share (intro_choice.py): the same title card, the mark drawing itself there --
+
+TITLE_START, OUT = 6.6, (8.2, 8.7)  # their "title" and "out" phases are this intro's
+RECEDE = (6.35, 6.8)
+
+
+def drawn_mark(t, start=6.45):
+    """The mark drawing itself at the title card's place from START (where this intro moves its mark there)."""
+    return {"square": ease_in_out_cubic(window(t, start, start + 0.6)),
+            "shield": ease_in_out_cubic(window(t, start + 0.25, start + 0.85)),
+            "tick": ease_out_cubic(window(t, start + 0.65, start + 0.95)),
+            "fill": ease_out_cubic(window(t, start + 0.8, start + 1.15)),
+            "glow": math.sin(math.pi * window(t, start + 0.6, start + 1.6)) if t < start + 1.6 else 0.0,
+            "ring": window(t, start + 0.9, start + 1.55), "sweep": window(t, 7.25, 8.0),
+            "x": MARK_TITLE[0], "y": MARK_TITLE[1], "size": MARK_TITLE[2], "header": 0.0}
+
+
+def shared(t, phases, captions, total):
+    """What every intro's scene has, for the drawing they share (intro.Renderer): the fades, the caption, the
+    title card and its mark, the Skip button and the progress line. PHASES and CAPTIONS are the intro's."""
+    out = window(t, *OUT)
+    phase = "done"
+    for name, _start, end in phases:
+        if t < end:
+            phase = name
+            break
+    return {"t": t, "phase": phase, "reduced": False, "enter": ease_out_cubic(window(t, 0.0, 0.3)),
+            "mark": drawn_mark(t), "caption": caption_state(t, captions),
+            "recede": ease_in_out_cubic(window(t, *RECEDE)), "title": title_state(t),
+            "skip": ease_out_cubic(window(t, 0.4, 0.9)) * (1 - out), "progress": clamp(t / total),
+            "fade": 1 - ease_in_out_cubic(out)}
+
+
+def shared_static(t):
+    """Reduced motion, for every intro: the same still title card (static_scene)."""
+    s = static_scene(t)
+    return {key: s[key] for key in ("t", "phase", "reduced", "enter", "mark", "caption", "recede", "title", "skip",
+                                    "progress", "fade")}
