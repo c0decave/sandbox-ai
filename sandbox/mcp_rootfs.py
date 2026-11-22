@@ -363,6 +363,22 @@ def bwrap_info(stream, limit=65536):
     return {}
 
 
+def slirp_target(pid):
+    """(slirp4netns's arguments naming the network namespace of the bwrap sandbox PID, the descriptors they name -
+    the caller closes them once slirp4netns has them). bwrap --unshare-user --uid U puts the server into a second,
+    nested user namespace; slirp4netns handed only PID joins that one, which has no right over the network
+    namespace ("setns(CLONE_NEWNET): Operation not permitted"). The network namespace and the user namespace that
+    owns it (NS_GET_USERNS, Linux 4.9) are handed over instead; without NS_GET_USERNS, PID as before."""
+    import fcntl
+    net = os.open(f"/proc/{int(pid)}/ns/net", os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        user = fcntl.ioctl(net, 0xB701)  # NS_GET_USERNS: a new descriptor of the owning user namespace
+    except OSError:
+        os.close(net)
+        return [str(int(pid))], ()
+    return ["--netns-type=path", f"--userns-path=/proc/self/fd/{user}", f"/proc/self/fd/{net}"], (net, user)
+
+
 def run(definition, environ=None):
     """One instance: bwrap with the arguments through --args; for a server with network, slirp4netns attached to its
     network namespace (the outside network, never the host's loopback) and its egress rules ("egress" of the checked
@@ -403,12 +419,19 @@ def run(definition, environ=None):
         with os.fdopen(info_r, "rb") as stream:
             info_r = None
             pid = int(bwrap_info(stream)["child-pid"])
-        slirp = subprocess.Popen(["slirp4netns", "--configure", "--disable-host-loopback", "--enable-sandbox",
-                                  "--enable-seccomp", "--mtu=65520", "--ready-fd", str(ready_w), str(pid), "tap0"],
-                                 pass_fds=(ready_w,), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        target, target_fds = slirp_target(pid)
+        try:
+            slirp = subprocess.Popen(["slirp4netns", "--configure", "--disable-host-loopback", "--enable-sandbox",
+                                      "--enable-seccomp", "--mtu=65520", "--ready-fd", str(ready_w), *target, "tap0"],
+                                     pass_fds=(ready_w, *target_fds), stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL)
+        finally:
+            for fd in target_fds:
+                os.close(fd)
         os.close(ready_w)
         ready_w = None
-        os.read(ready_r, 1)
+        if os.read(ready_r, 1) != b"1":  # it ended without a word: the server would run with no network at all
+            raise ValueError("slirp4netns did not attach to the server's network namespace (its error above)")
         egress.load_into_sandbox(pid, egress.rules_for(config, SLIRP_RESOLVER, pins=pins), config["kind"])
         os.write(gate_w, b"1")
         return child.wait()

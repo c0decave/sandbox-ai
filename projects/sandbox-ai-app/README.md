@@ -171,6 +171,10 @@ sandbox-ai*), each with its description under the heading; in German with sandbo
 descriptions. A preset that gives an MCP server a folder of its own (`coding-memory`'s brain, `research-memory`'s case)
 asks for it as a folder, and preparing the start adds that server with it (`sandbox-ai mcp add engram --mount
 /data=FOLDER:rw`).
+A preset that proposes a session bridge (`observer`, `pair-reviewer`, `docs-from-code`: its `"bridge"`) gets a
+Bridge part on its board with the preset's grant; its other session is chosen on the part (the running sessions are
+offered there, never asked in the form), a folder of that session's workspace it reads is a placeholder like the
+others, and the Board's own flow makes the bridge once the start runs, after the launcher's dry run and your yes.
 
 *Save as preset…* (on the Board, in its context menu, in the File menu and in the gallery) keeps the board as your own
 preset in `~/.config/sandbox-ai/app/presets.json` (0600), listed under *My presets*: a name, a description of several

@@ -2939,6 +2939,8 @@ IMAGE_GROUPS = {"in_use": N_("a container uses them"), "sandbox_used": N_("sandb
                 "other": N_("other software's (base images, yours)")}
 
 
+UPDATE_EVERY_SECONDS = 3600  # while the app runs: whether the update mode's daily check is due, asked this often
+UPDATE_ANNOUNCED = "update-announced"  # state.json: the newer release the app's notification has told already
 STORAGE_FIRST_SECONDS = 120  # the storage check at the app's start: after this long (the window comes first)
 STORAGE_EVERY_SECONDS = 3600  # then whether it is due is asked this often
 
@@ -3593,7 +3595,8 @@ class SandboxesPage(QWidget):
         from .bridges_view import BridgesBox
         self.bridges_box = BridgesBox(sai, self.bridge_sessions, self.bridge_selected,
                                       remote_of=self.bridge_remote_sessions,
-                                      hosts_of=lambda: list(getattr(self, "remote_names", None) or []))
+                                      hosts_of=lambda: list(getattr(self, "remote_names", None) or []),
+                                      loaded_of=lambda: bool(getattr(self, "loaded", True)))
         self.bridges_box.changed.connect(lambda: self.show_instances())
         supported = getattr(sai, "bridge_supported", None)
         self.bridges_box.setVisible(bool(callable(supported) and supported()))
@@ -9572,8 +9575,15 @@ class MainWindow(QMainWindow):
         self.update_check = AsyncCommand(timeout=60, parent=self)
         self.update_check.finished.connect(self.update_checked)
         self.make_update_notice()
+        # The update check: at the start, then every hour whether the day's check is due (an app that runs for days
+        # still sees a new release; the update mode's last check, shared with the command line, says when).
+        self.update_clock = time.time
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(UPDATE_EVERY_SECONDS * 1000)
+        self.update_timer.timeout.connect(self.start_update_check)
         if check_updates:
             QTimer.singleShot(1500, self.start_update_check)
+            self.update_timer.start()
         # The storage check (sandbox-ai gc --check, storage.py): at the start (after a while: the window first) and
         # then as Settings › Storage says - weekly by default, daily, or off; it applies the storage rules, records
         # each start's size (the Size column) and says above the threshold what could be freed (Optimize…). As the
@@ -12102,9 +12112,11 @@ class MainWindow(QMainWindow):
             return
         result = data.get("result") if isinstance(data.get("result"), dict) else {}
         if result.get("newer") and isinstance(result.get("available"), str):
-            self.update_checked(0, f"installed: {data.get('installed')}\navailable: {result['available']}\n", "")
+            # ("newer": signed by a trusted key - updates.py's verdict, as --check says it)
+            self.update_checked(0, f"installed: {data.get('installed')}\navailable: {result['available']}\n"
+                                   f"signature: good, by the trusted key {result.get('signer') or ''}\n", "")
         last = data.get("last_check")
-        if not isinstance(last, (int, float)) or not 0 <= time.time() - last < 86400:
+        if not isinstance(last, (int, float)) or not 0 <= self.update_clock() - last < 86400:
             self.check_updates()
 
     def check_updates(self):
@@ -12112,21 +12124,54 @@ class MainWindow(QMainWindow):
             self.show_update_text(tr("Checking for a newer sandbox-ai…"))
 
     def update_checked(self, status, out, err):
+        """What `sandbox-ai update --check` found: a newer release signed by a trusted key - the status line offers
+        it (Update now… where this copy replaces itself) and a notification tells it once per version; a newer one
+        that is not signed so - the status line says why it is not offered; why a check failed (offline, GitHub's
+        rate limit) - on the System page, quietly."""
         versions = backend.parse_update_check(status, out)
-        if versions is None:  # offline, or not an installation of install.sh: quietly nothing
-            self.show_update_text(tr("No update information (offline, or not installed with install.sh)."))
+        if versions is None:
+            self.show_update_text(tr("No update information: {why}", why=printable_text(
+                backend.update_check_error(status, out, err) or "")[:300]))
             return
         installed, available = versions
-        if backend.newer(available, installed):
+        signature = backend.update_check_signature(out)
+        if backend.newer(available, installed) and signature != "good":
+            why = {"bad": tr("its signature is BAD"), "none": tr("it is not signed")}.get(
+                signature, tr("it is not signed by a trusted key"))
+            text = tr("sandbox-ai {available} is there, but {why}: not offered", available=available, why=why)
+            if not self.update_running:
+                self.offer_update()
+            self.update_label.setText(text)
+            self.update_label.setToolTip(safe_tooltip(tr("Each update must be signed by a release key this copy "
+                                                         "trusts; update --check shows the details.")))
+            self.update_notice.setVisible(True)
+        elif backend.newer(available, installed):
             text = tr("sandbox-ai {available} is available (installed: {installed}); update with: sandbox-ai update",
                       available=available, installed=installed)
             route, where = backend.update_route(self.sai.directory)
             self.offer_update(installed, available, route, where, hint=text)
+            self.announce_update(installed, available)
         else:
             text = tr("sandbox-ai {installed} is up to date.", installed=installed)
             if not self.update_running:
                 self.offer_update()
         self.show_update_text(text)
+
+    def announce_update(self, installed, available):
+        """The notification of a newer signed release, once per version (state.json remembers it across starts):
+        with "Update now…" where this copy replaces itself, else the way it is updated."""
+        if self.state.get(UPDATE_ANNOUNCED, "", str) == available:
+            return
+        self.state.set(UPDATE_ANNOUNCED, available)
+        if self.update_offer is not None:
+            self.notify(tr("sandbox-ai {available} is available", available=available),
+                        tr("installed: {installed}; Update now… in the status line installs it, signed and checked",
+                           installed=installed),
+                        level="info", action=(tr("Update now…"), self.update_now))
+            return
+        way = getattr(self, "update_why", "") or tr("see Settings › Updates")
+        self.notify(tr("sandbox-ai {available} is available", available=available),
+                    tr("installed: {installed}; {way}", installed=installed, way=way), level="info")
 
     def make_update_notice(self):
         """In the status line, while a newer sandbox-ai is there: what the check found, and "Update now…" where this
@@ -12187,6 +12232,7 @@ class MainWindow(QMainWindow):
         if not text and self.updated_to is not None:
             text = tr("sandbox-ai updated to {version}: restart the app to use it", version=self.updated_to)
         self.update_label.setText(text)
+        self.update_why = why  # (plain: the notification says it too)
         self.update_label.setToolTip(safe_tooltip(why) if why else "")
         self.update_now_button.setVisible(offered)
         self.update_now_button.setEnabled(offered and not self.update_running)
@@ -12737,6 +12783,7 @@ class MainWindow(QMainWindow):
         self.sandboxes.timer.stop()
         self.sandboxes.remote_timer.stop()
         self.update_check.stop()
+        self.update_timer.stop()
         if getattr(self, "notifier", None) is not None:
             self.notifier.close_all()  # the popups are windows of their own
         if self.built("images") is not None:

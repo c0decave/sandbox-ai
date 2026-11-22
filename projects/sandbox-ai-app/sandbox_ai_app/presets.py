@@ -23,6 +23,7 @@ import re
 from . import applog
 from . import backend
 from . import board as B
+from . import bridges as BR
 from .files import printable
 from .i18n import N_, language as i18n_language, tr
 
@@ -97,6 +98,11 @@ class Preset:
     # sandbox-ai's presets: (name, catalog entry) of the servers it names by their catalog (hub:binwalk): the Board adds
     # the missing ones from exactly that entry (a name in two catalogs is refused by `mcp add NAME`).
     mcp_entries: tuple = ()
+    # sandbox-ai's presets: the session bridge it proposes (its "bridge": {direction, allow, both, ask,
+    # observer_actions, limits, until}, a path's value as the board's placeholder), {} for none. build() puts a Bridge
+    # part on the board for it, its other session left to choose: the Board's own flow makes it once the start runs,
+    # after you confirm its warnings.
+    bridge: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.name:
@@ -571,6 +577,8 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
         node.props.update(definition=json.loads(json.dumps(definition)), project=True)
     if preset.rules is not None:
         (board.first("approvals") or board.add("approvals")).props["rules"] = json.loads(json.dumps(preset.rules))
+    if preset.bridge:
+        board.add("bridge", **bridge_props(preset.bridge))
     if values is not None:
         B.fill(board, values, sai)
         left = {marker for marker, _ in B.placeholders(board)}
@@ -584,6 +592,57 @@ def build(sai, preset, directory=None, agent=None, values=None, grid=20, backend
         if isinstance(position, list) and len(position) == 2:
             node.x, node.y = float(position[0]), float(position[1])
     return board
+
+
+def bridge_props(bridge):
+    """The props of the Board's Bridge part for a preset's BRIDGE (Preset.bridge): its other session left to choose
+    (peer ""), the rest as the preset gives it."""
+    props = {"peer": "", "direction": bridge.get("direction", "out")}
+    for cap in bridge.get("allow") or ():
+        if cap in BR.CAPABILITIES:
+            props[cap] = True
+        elif cap.startswith(("files:ro:", "files:rw:")):
+            props.setdefault("read" if cap.startswith("files:ro:") else "write", []).append(cap[len("files:ro:"):])
+    if bridge.get("both"):
+        props["both"] = True
+    if bridge.get("until"):
+        props["until"] = bridge["until"]
+    props["ask_mode"] = bridge.get("ask") or "first"
+    if props.get("watch") and bridge.get("observer_actions") is not None:
+        props["actions"] = list(bridge["observer_actions"])
+    if bridge.get("limits"):
+        props["limits"] = dict(bridge["limits"])
+    return props
+
+
+def sai_bridge(document, fill):
+    """The bridge sandbox-ai's preset DOCUMENT proposes (its "bridge"), checked and bounded, its paths' values as the
+    board's placeholders (FILL); {} without one. ValueError for one this app cannot take."""
+    given = document.get("bridge")
+    if given is None:
+        return {}
+    if not isinstance(given, dict):
+        raise ValueError(tr("The preset proposes a bridge this app cannot take."))
+    caps, actions, limits, until = (given.get("allow"), given.get("observer_actions"), given.get("limits", {}),
+                                    given.get("until"))
+    limit_keys = [key for key, *_ in BR.LIMITS]
+    checks = (
+        given.get("direction", "out") in ("out", "in"),
+        isinstance(caps, list) and 0 < len(caps) <= 16 and all(
+            isinstance(cap, str) and (cap in BR.CAPABILITIES or re.fullmatch(r"files:(ro|rw):[^,\x00-\x1f]{1,300}",
+                                                                               cap)) for cap in caps),
+        isinstance(given.get("both", False), bool),
+        given.get("ask", "first") in dict(BR.ASK_MODES),
+        actions is None or (isinstance(actions, list) and all(action in BR.OBSERVER_ACTIONS for action in actions)),
+        isinstance(limits, dict) and all(key in limit_keys and not BR.limit_problem(key, value)
+                                         for key, value in limits.items()),
+        until is None or (isinstance(until, str) and len(until) <= 40 and not BR.until_problem(until)))
+    if not all(checks):
+        raise ValueError(tr("The preset proposes a bridge this app cannot take."))
+    return {"direction": given.get("direction", "out"), "allow": [fill(cap) for cap in caps],
+            "both": bool(given.get("both")), "ask": given.get("ask", "first"),
+            "observer_actions": [a for a in BR.OBSERVER_ACTIONS if a in actions] if actions is not None else None,
+            "limits": {key: str(value) for key, value in limits.items()}, "until": until or None}
 
 
 def score(sai, preset, policy=None):
@@ -884,6 +943,9 @@ def from_sandbox_ai(sai, document, host="local"):
     if not isinstance(document, dict):
         raise ValueError(tr("Not a preset of sandbox-ai."))
     values = document.get("values") if isinstance(document.get("values"), dict) else {}
+    # A value of kind session is the bridge's other session: chosen on the Bridge part (the running sessions offered
+    # there), not a placeholder.
+    values = {name: spec for name, spec in values.items() if (spec or {}).get("kind") != "session"}
     # The values that stand as a service's image (image={postgres} in a --service value; a value of kind image):
     # the name of one of your images, offered from your images.
     images = {name for name in values if (values[name] or {}).get("kind") == "image" or any(
@@ -940,7 +1002,7 @@ def from_sandbox_ai(sai, document, host="local"):
                                mcp_entries=tuple((server.split(":", 1)[1], server) for server in
                                                  map(str, document.get("mcp") or []) if MCP_ENTRY.fullmatch(server)),
                                group=sai_group(document), translations=sai_translations(document),
-                               experimental=experimental_of(document))
+                               experimental=experimental_of(document), bridge=sai_bridge(document, fill))
 
 
 def experimental_of(document):

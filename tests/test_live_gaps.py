@@ -8,10 +8,12 @@ a test starts is stopped and deleted at its end. Inputs from the script (all opt
 skipped and says what it needs): SAI_LIVE_TOKEN (a made-up token), SAI_LIVE_DEVICE, SAI_LIVE_HOST +
 SAI_LIVE_HOSTS_DIR, SAI_LIVE_LLM_ENDPOINT + SAI_LIVE_LLM_MODELS, SAI_LIVE_REAL_HOME."""
 import base64
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import signal
@@ -78,10 +80,10 @@ def once(request, backend, agent, work, options, args, env, timeout=240):
 class Session:
     """A kept session (sandbox-ai AGENT --session NAME ...) of this test, stopped and deleted at its end."""
 
-    def __init__(self, request, backend, tmp_path, agent="codex", options=(), env=None):
+    def __init__(self, request, backend, tmp_path, agent="codex", options=(), env=None, work=None):
         self.env = env or environment(tmp_path)
         self.name = "lc-" + uuid.uuid4().hex[:6]
-        self.work = tmp_path / "w"
+        self.work = work or tmp_path / "w"
         self.work.mkdir(exist_ok=True)
         self.command = [str(SAI), agent, "--backend", backend, "--workspace", str(self.work), "--no-auth",
                         "--session", self.name, *options]
@@ -549,6 +551,252 @@ def test_live_a_device_added_and_removed_while_it_runs(request, backend, tmp_pat
     if node:
         assert "ABSENT" in started.shell(probe).stdout, f"{device} still in the sandbox after devices remove"
     print(f"device {device}: added, seen, removed")
+
+
+# --- signed updates from the real GitHub (update-live) --------------------------------------------------------------
+
+GITHUB_RELEASES = "https://api.github.com/repos/c0decave/sandbox-ai/releases/latest"
+
+
+def github_get(url, limit=64 << 20):
+    """URL's bytes from GitHub, read-only and without a token (a public repository needs none)."""
+    import urllib.request
+    request = urllib.request.Request(url, headers={"User-Agent": "sandbox-ai-live-check",
+                                                   "Accept": "application/octet-stream" if "/download/" in url
+                                                   else "application/json"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.read(limit)
+
+
+def test_live_update_check_against_github(tmp_path):
+    """update-live: the newest release on GitHub is signed by a key of this checkout's sandbox/release-signers, lists
+    every kind's file in its signed SHA256SUMS (and the bundle has the SHA-256 listed there); this checkout's
+    `sandbox-ai update --check` finds it and offers it only when it is newer (never a downgrade); a copy of this
+    checkout one version older than the release is offered it, signed by that key. Nothing is installed."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    import release_kit as kit
+    assets = kit.assets
+    keys = kit.load(ROOT / "sandbox" / "release_keys.py", "release_keys_for_update_live")
+    document = json.loads(github_get(GITHUB_RELEASES))
+    latest = document["tag_name"].lstrip("v")
+    links = {asset["name"]: asset["browser_download_url"] for asset in document["assets"]}
+    assert {"SHA256SUMS", "SHA256SUMS.sig", assets.bundle(latest)} <= set(links), sorted(links)
+    sums, signature = github_get(links["SHA256SUMS"], 1 << 20), github_get(links["SHA256SUMS.sig"], 1 << 16)
+    trusted = keys.load(ROOT / "sandbox" / "release-signers")
+    verdict, signer = keys.verify(sums, signature, trusted)
+    assert verdict == "good", f"SHA256SUMS of {latest}: {signer}"
+    listed = assets.checksums(sums.decode())
+    assert assets.bundle_version(listed) == latest
+    for kind, machine in (("user", None), ("pip", None), ("pyz", None), ("appimage", "x86_64"),
+                          ("appimage", "aarch64"), ("macos-app", "arm64"), ("macos-app", "x86_64")):
+        name = assets.asset_for(kind, latest, machine)
+        assert name in links and name in listed, (kind, machine, name)
+    bundle = github_get(links[assets.bundle(latest)])
+    assert hashlib.sha256(bundle).hexdigest() == listed[assets.bundle(latest)], "the bundle is the one signed"
+    # this checkout: what `update --check` says, and update mode's verdict
+    env = environment(tmp_path)
+    env.pop("SANDBOX_AI_TOKEN", None)
+    done = sai(env, "update", "--check", timeout=300)
+    assert done.returncode == 0, said(done)
+    assert f"available: {latest} (https://github.com/c0decave/sandbox-ai)" in done.stdout, said(done)
+    assert f"signature: good, by the trusted key {signer}" in done.stdout, said(done)
+    status = json.loads(sai(env, "update", "mode", "--json").stdout)
+    installed = status["installed"]
+    newer = kit.load(ROOT / "sandbox" / "updates.py", "updates_for_update_live").newer(latest, installed)
+    assert status["result"]["newer"] is newer, status["result"]
+    # a copy one version before the release: offered it
+    major, minor, patch = (int(part) for part in re.match(r"(\d+)\.(\d+)\.(\d+)", latest).groups())
+    before = f"{major}.{minor}.{patch - 1}" if patch else f"{major}.{minor - 1}.999" if minor else "0.0.1"
+    tree = kit.tree_copy(tmp_path / "older", before, [])
+    shutil.copy2(ROOT / "sandbox" / "release-signers", tree / "sandbox" / "release-signers")
+    kit.commit(tree, "the release keys of this checkout")
+    older = subprocess.run([str(tree / "sandbox-ai"), "update", "--check"], capture_output=True, text=True,
+                           env=environment(tmp_path / "o"), timeout=300, stdin=subprocess.DEVNULL)
+    assert older.returncode == 0, said(older)
+    assert f"installed: {before}" in older.stdout and f"available: {latest} " in older.stdout, said(older)
+    assert f"signature: good, by the trusted key {signer}" in older.stdout, said(older)
+    print(f"GitHub's newest release: {latest}, signed by {signer}; this checkout {installed}: "
+          + ("offered" if newer else "up to date (not offered)") + f"; a copy of {before}: offered {latest}")
+
+
+# --- a bridge between two real sessions (the bridge check of 2026-11-22: "check in-depth if bridge is now working") ---
+
+BRIDGE_CLIENT = r"""
+import json, subprocess, sys
+server, calls = sys.argv[1], json.loads(sys.argv[2])
+bridge = subprocess.Popen(["python3", "-I", "/sandbox/runtime.py", "--internal-mcp-bridge",
+                           f"/run/sandbox-mcp/{server}/server.sock"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          text=True)
+def call(message):
+    bridge.stdin.write(json.dumps(message) + "\n"); bridge.stdin.flush()
+    return json.loads(bridge.stdout.readline()) if "id" in message else None
+call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+call({"jsonrpc": "2.0", "method": "notifications/initialized"})
+results = []
+for number, (tool, arguments) in enumerate(calls, 2):
+    reply = call({"jsonrpc": "2.0", "id": number, "method": "tools/call", "params": {"name": tool,
+                                                                                    "arguments": arguments}})
+    result = reply.get("result") or {}
+    results.append({"error": bool(result.get("isError")) or "error" in reply,
+                    "text": "".join(part.get("text", "") for part in result.get("content") or [])
+                    or json.dumps(reply.get("error"))})
+bridge.stdin.close(); bridge.wait(timeout=30)
+print("BRIDGE_RESULT " + json.dumps(results))
+"""
+
+
+def bridge_calls(started, server, *calls, timeout=300):
+    """CALLS ((tool, arguments) ...) made by an agent of STARTED through its bridge's real relay (bridge-PEER, as its
+    agent's configuration reaches it: /sandbox/runtime.py --internal-mcp-bridge in the sandbox); their results."""
+    done = started.python(BRIDGE_CLIENT, server, json.dumps([list(call) for call in calls]), timeout=timeout)
+    assert done.returncode == 0, said(done)
+    return answer(done.stdout, "BRIDGE_RESULT")
+
+
+def bridge_calls_later(started, server, *calls):
+    """bridge_calls in a process of its own (a write waits for the human): (process, read) - read() its results."""
+    command = [str(SAI), "shell", started.name, "-n", "--", "python3", "-I", "-c", BRIDGE_CLIENT, server,
+               json.dumps([list(call) for call in calls])]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               stdin=subprocess.DEVNULL, env=started.env)
+
+    def read(timeout=300):
+        out, err = process.communicate(timeout=timeout)
+        assert process.returncode == 0, f"exit {process.returncode}\n{out[-3000:]}\n{err[-3000:]}"
+        return answer(out, "BRIDGE_RESULT")
+    return process, read
+
+
+def bridge_question(env, ident, seconds=60):
+    """The id of the open question of bridge IDENT (`sandbox-ai approvals list --json`), once there is one."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        done = sai(env, "approvals", "list", "--json")
+        assert done.returncode == 0, said(done)
+        mine = [row for row in json.loads(done.stdout) if ident in json.dumps(row)]
+        if mine:
+            return mine[0]["id"]
+        time.sleep(0.5)
+    pytest.fail(f"no question of bridge {ident} within {seconds} s")
+
+
+def app_python():
+    """A Python with PySide6 for the app's part (SANDBOX_AI_APP_PYTHON, as sandbox-ai-app takes it, else this one),
+    or None."""
+    for python in (os.environ.get("SANDBOX_AI_APP_PYTHON"), sys.executable):
+        if python and subprocess.run([python, "-I", "-c", "import PySide6.QtWidgets"], capture_output=True,
+                                     timeout=60).returncode == 0:
+            return python
+    return None
+
+
+def two_sessions(request, backend, tmp_path, sessions):
+    """(env, A, B) - two sessions that run, A with BACKEND, B with the other backend when both are selected (one
+    Podman, one Bubblewrap); B's workspace has src/app.py and out/."""
+    selected = request.config.getoption("--agent-backend")
+    if selected == "both" and backend == "bwrap":
+        pytest.skip("the podman run bridges a Podman session with a Bubblewrap one")
+    other = "bwrap" if selected == "both" else backend
+    env = environment(tmp_path)
+    one, two = tmp_path / "wa", tmp_path / "wb"
+    for work in (one, two):
+        work.mkdir()
+    (two / "src").mkdir()
+    (two / "src" / "app.py").write_text("print('from b')\n")
+    (two / "out").mkdir()
+    a = session(sessions, request, backend, tmp_path, env=env, work=one, options=["--offline", *SLEEP])
+    b = session(sessions, request, other, tmp_path, env=env, work=two, options=["--offline", *SLEEP])
+    a.start()
+    b.start()
+    return env, a, b
+
+
+def test_live_a_bridge_between_two_real_sessions(request, backend, tmp_path, sessions):
+    """sandbox-ai bridge between two real sessions - with both backends, one of each (Podman and Bubblewrap): A
+    may message, ask, read src and write out of B, and watch it. Every call is made by A's or B's agent side
+    through its real relay in its sandbox; the write is asked and answered with `sandbox-ai approvals` (its diff
+    shown there); watch sees B's activity, changes and terminal; the observer alerts and hints; revoke ends it for
+    both."""
+    env, a, b = two_sessions(request, backend, tmp_path, sessions)
+    two = b.work
+    done = sai(env, "bridge", "add", a.name, b.name, "--allow", "message,ask,files:ro:src,files:rw:out,watch",
+               "--observer-actions", "alert,hint", "--ask", "never", "--json", timeout=240)
+    assert done.returncode == 0, said(done)
+    ident = json.loads(done.stdout)["id"]
+    shown = json.loads(sai(env, "bridge", "show", ident, "--json").stdout)
+    to_b, to_a = shown["a"]["server"], shown["b"]["server"]
+    assert shown["state"] == "active", shown
+    # message: A's agent sends, B's agent reads it.
+    sent, = bridge_calls(a, to_b, ("send_message", {"text": "hello from a"}))
+    assert not sent["error"], sent
+    inbox, = bridge_calls(b, to_a, ("inbox", {"wait_seconds": 10}))
+    assert "hello from a" in inbox["text"], inbox
+    # ask: A waits while B's agent answers.
+    asking, asked = bridge_calls_later(a, to_b, ("ask", {"question": "which port?", "timeout_seconds": 120}))
+    question = None
+    deadline = time.monotonic() + 90
+    while question is None and time.monotonic() < deadline:
+        seen, = bridge_calls(b, to_a, ("inbox", {"wait_seconds": 5}))
+        found = re.search(r"question ([0-9a-f]{8}) \(", seen["text"])
+        question = found.group(1) if found else None
+    assert question, "B's inbox showed A's question"
+    answered, = bridge_calls(b, to_a, ("answer", {"question_id": question, "text": "8080"}))
+    assert not answered["error"], answered
+    assert "8080" in asked()[0]["text"]
+    # files:ro below the grant only; files:rw asked, with its diff, answered with sandbox-ai approvals.
+    read, outside = bridge_calls(a, to_b, ("read_file", {"path": "src/app.py"}), ("read_file", {"path": "../wa"}))
+    assert "print('from b')" in read["text"] and outside["error"], (read, outside)
+    writing, wrote = bridge_calls_later(a, to_b, ("write_file", {"path": "out/live.txt", "content": "live\n"}))
+    number = bridge_question(env, ident)
+    detail = sai(env, "approvals", "show", number)
+    assert "+live" in detail.stdout, said(detail)
+    allowed = sai(env, "approvals", "allow", number)
+    assert allowed.returncode == 0, said(allowed)
+    assert not wrote()[0]["error"] and (two / "out" / "live.txt").read_text() == "live\n"
+    # watch, and the observer's alert and hint.
+    activity, changes, screen, alerted, hinted = bridge_calls(
+        a, to_b, ("watch_activity", {"limit": 50}), ("watch_changes", {}), ("watch_terminal", {"lines": 0}),
+        ("alert", {"message": "the live check's alert", "severity": "info"}), ("hint", {"text": "a live hint"}))
+    assert not activity["error"] and "live.txt" in changes["text"], (activity, changes)
+    assert not screen["error"] or "terminal" in screen["text"], screen
+    assert not alerted["error"] and not hinted["error"], (alerted, hinted)
+    assert "a live hint" in bridge_calls(b, to_a, ("inbox", {"wait_seconds": 5}))[0]["text"]
+    shown = json.loads(sai(env, "bridge", "show", ident, "--json").stdout)
+    assert any(x.get("text") == "the live check's alert" for x in shown.get("alerts") or []), shown
+    # revoke: both lose it at once.
+    revoked = sai(env, "bridge", "revoke", ident)
+    assert revoked.returncode == 0, said(revoked)
+    rows = json.loads(sai(env, "bridge", "list", "--all", "--json").stdout)
+    assert next(row for row in rows if row["id"] == ident)["state"] == "revoked"
+    gone = a.python(BRIDGE_CLIENT, to_b, json.dumps([["info", {}]]), timeout=120)
+    assert gone.returncode != 0 or "BRIDGE_RESULT" not in gone.stdout or '"error": true' in gone.stdout, said(gone)
+
+
+def test_live_the_apps_new_bridge_between_two_real_sessions(request, backend, tmp_path, sessions):
+    """The app's New bridge… between two real sessions (one Podman, one Bubblewrap when both are selected),
+    offscreen: tests/live_bridge_app_driver.py clicks it in the app's real window, fills in the dialog, the
+    launcher's real dry run is asked about in the real question and the bridge made; A's agent then messages B
+    through it. Needs a Python with PySide6 (SANDBOX_AI_APP_PYTHON, as sandbox-ai-app takes it, else this one)."""
+    python = app_python()
+    if python is None:
+        pytest.skip("needs a Python with PySide6 for the app (SANDBOX_AI_APP_PYTHON, or pip install "
+                    "PySide6-Essentials)")
+    env, a, b = two_sessions(request, backend, tmp_path, sessions)
+    driver = subprocess.run([python, "-I", str(ROOT / "tests" / "live_bridge_app_driver.py"), str(ROOT), a.name,
+                             b.name], capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL,
+                            env={**env, "QT_QPA_PLATFORM": "offscreen", "SANDBOX_AI_HOME": str(ROOT)})
+    result = answer(driver.stdout, "APP_RESULT") if "APP_RESULT " in driver.stdout else None
+    assert result and not result.get("problem"), said(driver)
+    assert result["opened"] and result["id"], result
+    rows = json.loads(sai(env, "bridge", "list", "--json").stdout)
+    assert any(row["id"] == result["id"] and row["state"] == "active" for row in rows), rows
+    shown = json.loads(sai(env, "bridge", "show", result["id"], "--json").stdout)
+    sent, = bridge_calls(a, shown["a"]["server"], ("send_message", {"text": "made by the app"}))
+    assert not sent["error"], sent
+    inbox, = bridge_calls(b, shown["b"]["server"], ("inbox", {"wait_seconds": 10}))
+    assert "made by the app" in inbox["text"], inbox
+    revoked = sai(env, "bridge", "revoke", result["id"])
+    assert revoked.returncode == 0, said(revoked)
 
 
 # --- remote MCP on a real host of sandbox-ai hosts (optional) --------------------------------------------------------

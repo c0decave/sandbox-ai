@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
+from . import applog
 from . import bridges as BR
 from . import widgets
 from .files import printable, printable_text
@@ -41,6 +42,11 @@ def alive(widget):
         return True
 
 
+def text_or_empty(value):
+    """VALUE when it is text, else "" (what another host lists is checked, never trusted to be of its type)."""
+    return value if isinstance(value, str) else ""
+
+
 def candidates(instances, remote=False):
     """[{name, run, agent, workspace, host}] of the agent sessions that run (what a bridge may join): no MCP server's
     sandbox, no helper, nothing paused or stopped. This machine's (host None); with REMOTE also those of the hosts of
@@ -58,10 +64,13 @@ def candidates(instances, remote=False):
                 record.get("kind") not in (None, "agent", "session", "run") or \
                 record.get("helper_of") or not BR.NAME.fullmatch(str(instance.name)):
             continue
+        # (a host's entry is what that host wrote: a value that is no text is taken as unknown - a workspace that
+        # was a JSON object made Choose folder… fail without a word)
         found.append({"name": instance.name if host == LOCAL else f"{host}:{instance.name}",
-                      "run": instance.run or record.get("run") or "", "host": None if host == LOCAL else host,
-                      "agent": instance.agent or record.get("agent") or "",
-                      "workspace": record.get("workspace") or instance.project or ""})
+                      "run": text_or_empty(instance.run) or text_or_empty(record.get("run")),
+                      "host": None if host == LOCAL else host,
+                      "agent": text_or_empty(instance.agent) or text_or_empty(record.get("agent")),
+                      "workspace": text_or_empty(record.get("workspace")) or text_or_empty(instance.project)})
     return sorted(found, key=lambda entry: (entry["host"] is not None, entry["name"]))
 
 
@@ -282,18 +291,24 @@ class BridgeDialog(QDialog):
         self.show_hosts()
 
     def host_listed(self, host, found, error):
-        """HOST's sessions that run (or why it did not answer): offered as HOST:NAME; those it no longer lists go."""
+        """HOST's sessions that run (or why it did not answer): offered as HOST:NAME; those it no longer lists go.
+        What cannot be read of its answer is said as its problem: the host is never shown as still asked."""
         self.asking.discard(host)
-        if error is not None:
-            self.host_problems[host] = printable_text(error)[:200]
-        else:
-            self.host_problems.pop(host, None)
-            fresh = {entry["name"]: entry for entry in candidates(
-                [i for i in found or () if getattr(i, "host", None) == host], remote=True)}
-            self.sessions = {**{name: entry for name, entry in self.sessions.items() if BR.peer_host(name) != host},
-                             **fresh}
-            self.fill_sessions()
-            self.update_state()
+        try:
+            if error is not None:
+                self.host_problems[host] = printable_text(error)[:200]
+            else:
+                fresh = {entry["name"]: entry for entry in candidates(
+                    [i for i in (found if isinstance(found, (list, tuple)) else ())
+                     if getattr(i, "host", None) == host], remote=True)}
+                self.host_problems.pop(host, None)
+                self.sessions = {**{name: entry for name, entry in self.sessions.items()
+                                    if BR.peer_host(name) != host}, **fresh}
+                self.fill_sessions()
+                self.update_state()
+        except Exception as exc:  # noqa: BLE001 - a host's answer the dialog cannot use: said, never only logged
+            applog.swallowed("bridges", f"BridgeDialog.host_listed: {host}'s answer", exc, level="WARNING")
+            self.host_problems[host] = printable_text(f"{type(exc).__name__}: {exc}")[:200]
         self.show_hosts()
 
     def show_hosts(self):
@@ -602,9 +617,13 @@ class BridgesBox(QGroupBox):
 
     HOSTS_EVERY = 30  # seconds between two reads of the hosts' bridges (each host asked over SSH)
 
-    def __init__(self, sai, sessions_of, selected_of=None, remote_of=None, hosts_of=None, clock=time.monotonic):
+    def __init__(self, sai, sessions_of, selected_of=None, remote_of=None, hosts_of=None, clock=time.monotonic,
+                 loaded_of=None):
         super().__init__(tr("Bridges"))
         self.sai, self.sessions_of, self.selected_of = sai, sessions_of, selected_of or (lambda: None)
+        # Whether the page has read what runs (its first read came back): before that a click on New bridge… waits
+        # for it (pending), said on the box, and then opens the dialog or says why not.
+        self.loaded_of, self.pending = loaded_of or (lambda: True), None
         # The sessions of the user's hosts the page has seen (HOST:NAME), and the names of those hosts: New bridge…
         # offers them at once and asks each host afresh in the background.
         self.remote_of, self.hosts_of = remote_of or (lambda: []), hosts_of or (lambda: [])
@@ -636,12 +655,23 @@ class BridgesBox(QGroupBox):
             button = QPushButton(text)
             button.setToolTip(safe_tooltip(tip))
             button.setAccessibleName(text.rstrip("…"))
-            button.clicked.connect(lambda _=False, s=slot: s())
+            button.clicked.connect(lambda _=False, s=slot, t=text.rstrip("…"): self.guarded(s, t))
             self.buttons[key] = button
         self.buttons["revoke"].setProperty("role", "danger")
         layout.addWidget(flow(*self.buttons.values()))
+        # What a click started and still runs (the sessions read, the launcher's check, the add), on the box itself:
+        # the dialog is closed by then, and a button that is only greyed out said nothing.
+        self.status = plain_label(role="secondary")
+        self.status.setAccessibleName(tr("What the bridges do now"))
+        self.status.setVisible(False)
+        layout.addWidget(self.status)
         # A right click on a bridge: the buttons' commands, enabled as they are (a disabled one with its reason).
         widgets.list_menu(self.table, lambda: list(self.buttons.values()))
+        # With no bridge the list is hidden: a right click on the line that says so offers New bridge… all the same.
+        self.empty.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.empty.customContextMenuRequested.connect(
+            lambda point: widgets.exec_dropped(widgets.context_menu(self.empty, [self.buttons["new"]]),
+                                               self.empty.mapToGlobal(point)))
         self.show_rows()
 
     # -- reading --
@@ -719,11 +749,35 @@ class BridgesBox(QGroupBox):
         keys = widgets.selected_keys(self.table)
         return next((row for row in self.rows if keys and BR.qualified(row) == keys[0]), None)
 
+    def guarded(self, slot, title):
+        """SLOT() of a button; an error in it is said in a message (it was only logged: the click did nothing)."""
+        try:
+            slot()
+        except Exception as exc:  # noqa: BLE001 - shown, and logged with its traceback
+            applog.write(applog.entry(type(exc), exc, exc.__traceback__, delivered=f"the Bridges box's {title}"))
+            self.say(None)
+            warn(self, title, tr("This did not work: {error}",
+                                 error=printable_text(f"{type(exc).__name__}: {exc}")[:600]))
+
+    def say(self, text):
+        """TEXT on the box below its buttons (None: nothing)."""
+        self.status.setText(text or "")
+        self.status.setVisible(bool(text))
+
     def update_buttons(self):
         row = self.selected()
         none = tr("Select a bridge first.")
         sessions = self.sessions_of()
-        set_enabled(self.buttons["new"], self.may_bridge(sessions), self.why_not(sessions))
+        # New bridge… is always offered: with too few sessions its click says why (disabled, a click on it did
+        # nothing - the user's "nothing happens"); while a check or an add it started runs, it waits (held).
+        if not widgets.held(self.buttons["new"]):
+            set_enabled(self.buttons["new"], True)
+        if self.pending is not None and self.loaded_of():
+            first, second = self.pending
+            self.pending = None
+            self.say(None)
+            QTimer.singleShot(0, lambda: alive(self) and self.guarded(lambda: self.new_bridge(first, second),
+                                                                      tr("New bridge")))
         set_enabled(self.buttons["show"], row is not None, none)
         set_enabled(self.buttons["revoke"], row is not None, none)
         set_enabled(self.buttons["resume"], row is not None and row.get("state") == "suspended",
@@ -745,6 +799,10 @@ class BridgesBox(QGroupBox):
     def new_bridge(self, first=None, second=None):
         """The dialog, then the launcher's dry run in the background, then the question with its warnings, then the
         add in the background."""
+        if not self.loaded_of():
+            self.pending = (first, second)
+            self.say(tr("The sessions that run are being read: New bridge… opens once they are."))
+            return
         sessions = self.sessions_of()
         if not self.may_bridge(sessions):
             inform(self, tr("New bridge"), self.why_not(sessions))
@@ -772,10 +830,13 @@ class BridgesBox(QGroupBox):
     def check(self, values, args, then=None):
         """The dry run of ARGS in the background; its plan is asked about (bridge-add), then the bridge is made.
         THEN(result or None, error or None) once it is made or refused (the Board's Bridge part)."""
+        self.say(tr("Checking the bridge {a} → {b} (sandbox-ai bridge add --dry-run)…", a=printable(values["a"]),
+                    b=printable(values["b"])))
         background(self.sai.bridge_plan, args, owner=self, source=self.buttons["new"], timeout=120,
                    done=lambda plan, error: self.planned(values, args, plan, error, then))
 
     def planned(self, values, args, plan, error, then=None):
+        self.say(None)
         if error is not None:
             warn(self, tr("Not bridged"), printable_text(error))
             if then is not None:
@@ -783,10 +844,13 @@ class BridgesBox(QGroupBox):
             return
 
         def made(result, error):
+            self.say(None)
             self.refresh(hosts_now=bool(BR.peer_host(values["a"]) and BR.peer_host(values["b"])))
             if then is not None:
                 then(result, error)
-        create(self, self.sai, values, args, plan, made, source=self.buttons["new"])
+        if create(self, self.sai, values, args, plan, made, source=self.buttons["new"]):  # (asked first)
+            self.say(tr("Making the bridge {a} → {b} (sandbox-ai bridge add)…", a=printable(values["a"]),
+                        b=printable(values["b"])))
 
     def show_bridge(self):
         row = self.selected()

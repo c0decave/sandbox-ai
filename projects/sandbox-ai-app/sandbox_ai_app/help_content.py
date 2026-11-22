@@ -511,7 +511,9 @@ SECTIONS = (
          "picker, watch with the "
          "observer's actions each on its own), both directions, until, the ask mode and, under Advanced, the limits. "
          "The launcher checks it first and says its warnings (`bridge add --dry-run`) - data that can flow from the "
-         "more restricted session to the less restricted one above all - and you confirm. Show, Revoke… and "
+         "more restricted session to the less restricted one above all - and you confirm; the check and the add "
+         "are said on the box while they run. With fewer than two sessions (and no host) New bridge… says how many "
+         "run; before the page has read what runs it says so and opens the dialog once it has. Show, Revoke… and "
          "Resume… (a suspended one) act on the bridge selected.\n\n"
          "A launcher that has not registered can only be ended in its own terminal. Connections already open "
          "stay open after a revoke (a cut closes them).",
@@ -673,8 +675,10 @@ SECTIONS = (
          "Ordnerauswahl, watch mit den Aktionen des Beobachters je für sich), beide Richtungen, bis wann, wann "
          "gefragt wird und unter Erweitert die Grenzen. Der Starter prüft sie zuerst und nennt seine Warnungen "
          "(`bridge add --dry-run`) - vor allem Daten, die von der stärker eingeschränkten Sitzung zur weniger "
-         "eingeschränkten fließen können -, und Sie bestätigen. Zeigen, Zurücknehmen… und Fortsetzen… (eine "
-         "ausgesetzte) wirken auf die gewählte Brücke.\n\n"
+         "eingeschränkten fließen können -, und Sie bestätigen; Prüfung und Anlegen stehen im Kasten, solange sie "
+         "laufen. Mit weniger als zwei Sitzungen (und ohne Host) sagt Neue Brücke…, wie viele laufen; solange die "
+         "Seite noch liest, was läuft, sagt sie das und öffnet den Dialog, sobald es gelesen ist. Zeigen, "
+         "Zurücknehmen… und Fortsetzen… (eine ausgesetzte) wirken auf die gewählte Brücke.\n\n"
          "Ein nicht angemeldeter Launcher lässt sich nur in seinem eigenen Terminal beenden. Schon offene "
          "Verbindungen bleiben nach dem Zurücknehmen offen (eine Kappung schließt sie)."),
         cli=("sandbox-ai list", "sandbox-ai list --all", "sandbox-ai list --history NAME", "sandbox-ai rename OLD NEW",
@@ -5785,8 +5789,9 @@ SECTIONS = (
          "both sessions still run the same runs (the list says \"reconnecting\" meanwhile; sandbox-ai 0.1.99 or "
          "later on both, else it ends); a session that ended or was started again ends it.\n\n"
          "In the app: Sandboxes & sessions › Bridges (New bridge…, Show, Revoke…, Resume…), the Board's Bridge part "
-         "(made once the board's session runs), the Observer preset, the Approvals page for the questions and "
-         "Activity for its events.",
+         "(made once the board's session runs), the presets that propose one (Observer, Pair reviewer, Docs from "
+         "code: their board gets a Bridge part, the other session chosen there), the Approvals page for the "
+         "questions and Activity for its events.",
          "Eine Sitzungsbrücke lässt eine laufende Agenten-Sitzung eine andere über einen Vermittler auf dem Host "
          "erreichen - nie ein Weg zwischen den Sandboxen. Jede Seite bekommt einen MCP-Server `bridge-PEER`, an ihre "
          "laufende Sandbox gehängt (wie `mcp attach --live` einen anhängt): Jeder Aufruf geht durch das Relay des "
@@ -5816,8 +5821,9 @@ SECTIONS = (
          "sobald beide Sitzungen noch dieselben Läufe haben (die Liste sagt solange „verbindet neu“; sandbox-ai "
          "0.1.99 oder neuer auf beiden, sonst endet sie); eine beendete oder neu gestartete Sitzung beendet sie.\n\n"
          "In der App: Sandboxen & Sitzungen › Brücken (Neue Brücke…, Zeigen, Zurücknehmen…, Fortsetzen…), das "
-         "Board-Teil Brücke (angelegt, sobald die Sitzung des Boards läuft), die Vorlage Beobachter, die Seite "
-         "Freigaben für die Fragen und Aktivität für ihre Ereignisse."),
+         "Board-Teil Brücke (angelegt, sobald die Sitzung des Boards läuft), die Vorlagen, die eine vorschlagen "
+         "(Beobachter, Begleitender Reviewer, Doku aus dem Code: ihr Board bekommt einen Teil Brücke, die andere "
+         "Sitzung wird dort gewählt), die Seite Freigaben für die Fragen und Aktivität für ihre Ereignisse."),
         cli=("sandbox-ai bridge add A B --allow CAP[,CAP...]", "--both", "--until", "--ask each|first|never",
              "--observer-actions alert,hint,net-cut,pause", "--limit KEY=VALUE", "--dry-run",
              "sandbox-ai bridge list [--hosts]", "sandbox-ai bridge show [HOST:]ID",
@@ -6338,8 +6344,11 @@ SECTIONS = (
          "once before it takes the old one's place. A copy in a folder you cannot write says the command that "
          "can (`sudo -H … update`).\n\n"
          "In the app, System > Check for updates runs `sandbox-ai update --check`, and Update sandbox-ai runs "
-         "`sandbox-ai update`. When a newer release is found, the status line offers Update now… (also Help > "
-         "Update sandbox-ai…): asked first, it runs `sandbox-ai update` in a terminal - for an installation for "
+         "`sandbox-ai update`. When a newer release signed by a trusted key is found, the status line offers "
+         "Update now… (also Help > Update sandbox-ai…) and a notification tells it once per version; one whose "
+         "signature is bad or missing is not offered, and the status line says why. The app asks every hour whether "
+         "the day's check is due, so it sees a new release while it runs. Update now…, asked first, runs "
+         "`sandbox-ai update` in a terminal - for an installation for "
          "every user `sudo sandbox-ai update`, sudo asking for the password there, never the app - and afterwards "
          "Restart the app starts the new version. Settings > Updates > Install now… does the same without a "
          "terminal for every copy that replaces itself (`sandbox-ai update --install`): the newest signed release "
@@ -6386,8 +6395,12 @@ SECTIONS = (
          "bevor es den Platz des alten einnimmt. Eine Kopie in einem Ordner, den Sie nicht schreiben dürfen, nennt "
          "den Befehl, der es kann (`sudo -H … update`).\n\n"
          "In der App führt System > Auf Updates prüfen `sandbox-ai update --check` aus und sandbox-ai "
-         "aktualisieren `sandbox-ai update`. Findet die Prüfung ein neueres Release, bietet die Statuszeile Jetzt "
-         "aktualisieren… an (auch Hilfe > sandbox-ai aktualisieren…): Nach einer Rückfrage läuft `sandbox-ai "
+         "aktualisieren `sandbox-ai update`. Findet die Prüfung ein neueres Release, das ein vertrauter "
+         "Schlüssel signiert hat, bietet die Statuszeile Jetzt aktualisieren… an (auch Hilfe > sandbox-ai "
+         "aktualisieren…), und eine Benachrichtigung meldet es einmal pro Version; eines mit ungültiger oder fehlender Signatur wird nicht "
+         "angeboten, und die Statuszeile sagt warum. Die App fragt jede Stunde, ob die Prüfung des Tages fällig ist, "
+         "so sieht sie ein neues Release auch, während sie läuft. Jetzt aktualisieren…: Nach einer Rückfrage "
+         "läuft `sandbox-ai "
          "update` in einem Terminal - bei einer Installation für alle Benutzer `sudo sandbox-ai update`, wobei sudo "
          "dort nach dem Passwort fragt, nie die App - und danach startet App neu starten die neue Version. "
          "Einstellungen > Updates > Jetzt installieren… tut dasselbe ohne Terminal für jede Kopie, die sich selbst "

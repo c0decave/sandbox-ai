@@ -293,7 +293,7 @@ starten**.
 | `sandbox-ai.app` (macOS) | die App oder `/Applications/sandbox-ai.app/Contents/MacOS/sandbox-ai update` | `sandbox-ai-arm64.dmg` oder `sandbox-ai-x86_64.dmg` (die App darin ersetzt `sandbox-ai.app`) | dasselbe |
 | pip, pipx | `sandbox-ai update` (auch die App) | `sandbox_ai_app-X.Y.Z-py3-none-any.whl`, installiert mit dem pip der Umgebung | `update --rollback` installiert das Release davor erneut |
 | ein anderer Host | `sandbox-ai hosts update NAME` startet das eigene Update dieses Hosts | was seine Art lädt | auf dem Host |
-| ein Git-Checkout (nicht installiert) | `git pull` | nichts | git |
+| ein Git-Checkout (nicht installiert) | `git pull` (`./sandbox-ai update --check` zeigt das neueste Release) | nichts | git |
 
 `sandbox-ai update --check` schaut nur; `--version X.Y.Z` nimmt dieses Release; `--install` ist, was Jetzt
 installieren… in der App ausführt (laden, prüfen, installieren - nie, solange eine Sandbox oder Sitzung läuft, außer
@@ -426,7 +426,7 @@ Updates; die Weboberfläche: die Seite Doctor; ein anderer Rechner: `sandbox-ai 
 | Modus | Tut |
 |---|---|
 | `off` | nichts wird geprüft, außer auf Wunsch (`sandbox-ai update --check`, Auf Updates prüfen in der App) |
-| `notify` (Voreinstellung) | einmal am Tag eine Prüfung; ein neueres Release, das ein vertrauter Schlüssel signiert hat, wird gemeldet: eine Desktop-Benachrichtigung, die Statuszeile der App, eine Zeile auf der Kommandozeile (höchstens einmal am Tag, auf der Standardfehlerausgabe, nie mit `--json` oder in einer Pipe) und das Ereignis `update` der Benachrichtigungskanäle |
+| `notify` (Voreinstellung) | einmal am Tag eine Prüfung; ein neueres Release, das ein vertrauter Schlüssel signiert hat, wird gemeldet: eine Desktop-Benachrichtigung, die Statuszeile der App (mit Jetzt aktualisieren…, wo sich die Kopie selbst ersetzt) und eine Benachrichtigung in der App pro Version, eine Zeile auf der Kommandozeile (höchstens einmal am Tag, auf der Standardfehlerausgabe, nie mit `--json` oder in einer Pipe) und das Ereignis `update` der Benachrichtigungskanäle. Die App fragt jede Stunde, ob die Prüfung des Tages fällig ist, so sieht auch eine, die tagelang läuft, ein neues Release. Ein neueres Release, dessen `SHA256SUMS` kein vertrauter Schlüssel signiert hat, wird nicht angeboten, und die Statuszeile der App sagt warum (seine Signatur ist ungültig, es ist nicht signiert); eine fehlgeschlagene Prüfung sagt auf der Seite System und in Einstellungen > Updates, warum (offline, GitHubs Anfragegrenze) |
 | `download` | lädt es auch und prüft es ganz (`SHA256SUMS` und ihre Signatur durch einen vertrauten Schlüssel; `install.sh --fetch`): `sandbox-ai update --apply` oder Jetzt installieren in der App installiert es, vorher wird nichts umgestellt |
 | `auto` | installiert es auch, in seinem Zeitfenster (`--at HH:MM[-HH:MM]`, Voreinstellung `03:00-05:00` Ortszeit) und nur, solange keine Sandbox, Sitzung, kein MCP-Server und kein geplanter Lauf dieser Installation läuft oder in der nächsten Stunde fällig ist (eine pausierte oder behaltene ist in Ordnung); sonst wartet es auf das nächste Zeitfenster und sagt das. Danach nennt eine Benachrichtigung die alte und die neue Version und die Release-Notes |
 
@@ -1729,7 +1729,7 @@ ihre Abschnitte, Titel und Beschreibung jedes Presets auch auf Deutsch):
 
 | Kategorie | Presets |
 |---|---|
-| Entwicklung | `development` (Python und JavaScript), `coding-memory`, `rust`, `go`, `jvm` (Java, Kotlin), `dotnet`, `database-services` (PostgreSQL und Redis neben dem Agenten), `web-frontend` (Playwright), `infrastructure` (Terraform, OpenTofu), `dependency-upgrade`, `data-ml`, `android-development` (Android-Apps mit Kotlin, Jetpack Compose, dem NDK und CMake: die Image-Variante `android-dev`, die Hosts von Gradle und Googles Maven, der adb-Server des Rechners oder ein USB-Gerät, `/dev/kvm` für den Emulator), `axross-mcp-server` (die Datei-Werkzeuge von axross auf einem Ordner von Ihnen und auf den in axross gespeicherten SFTP-Verbindungen, als MCP-Server axross; Schreiben wird vorher gefragt) |
+| Entwicklung | `development` (Python und JavaScript), `coding-memory`, `rust`, `go`, `jvm` (Java, Kotlin), `dotnet`, `database-services` (PostgreSQL und Redis neben dem Agenten), `web-frontend` (Playwright), `infrastructure` (Terraform, OpenTofu), `dependency-upgrade`, `data-ml`, `android-development` (Android-Apps mit Kotlin, Jetpack Compose, dem NDK und CMake: die Image-Variante `android-dev`, die Hosts von Gradle und Googles Maven, der adb-Server des Rechners oder ein USB-Gerät, `/dev/kvm` für den Emulator), `axross-mcp-server` (die Datei-Werkzeuge von axross auf einem Ordner von Ihnen und auf den in axross gespeicherten SFTP-Verbindungen, als MCP-Server axross; Schreiben wird vorher gefragt), `pair-reviewer` (ein Reviewer neben einer laufenden Coding-Sitzung: liest deren Code nur lesend und fragt ihren Agenten über eine Sitzungsbrücke, sein Review schreibt er in den eigenen Arbeitsordner) |
 | Recherche & Web | `research-memory` |
 | Lokale LLMs | `local-api` für jeden OpenAI-kompatiblen Server, `ollama`, `lm-studio`, `llama-cpp`, `vllm`, `cairn-local-llm` (Cairns Brett, seine Worker Claude Code mit Ihrem Modell) (`--llm NAME[:MODELL] --no-provider-defaults`; Claude Code nur mit einem Server, der die Anthropic-Messages-API hat) |
 | Sicherheitsanalyse | `code-audit` (nur lesende Prüfung), `observer` (beobachtet eine andere laufende Sitzung über eine Sitzungsbrücke und alarmiert Sie), `pentest-lab` (eine Maschine von Ihnen, genau ihre Ports), `cairn-pentest-board` (Cairns Brett mit Claude Code und Codex als Worker, eine Maschine von Ihnen), `android-debugging` (eine APK auseinandernehmen und beim Laufen beobachten: jadx, CFR, smali und Frida als MCP-Server, die Image-Variante `android` mit adb, apktool, smali, jadx und Frida, der adb-Server Ihres Rechners) |
@@ -1737,7 +1737,7 @@ ihre Abschnitte, Titel und Beschreibung jedes Presets auch auf Deutsch):
 | Hardware & Geräte | `hardware-analysis`, `firmware-iot`, `mobile-android` (die APK einer App und ein Gerät über den adb-Server des Rechners), `android-debugging` (unter Sicherheitsanalyse: das vollständige Android-Setup), `android-development` (unter Entwicklung: Apps bauen, der Emulator) |
 | Netzwerk | `network-analysis` |
 | Datenschutz & Anonymität | `tor` (alles durch ein Tor-Profil von `sandbox-ai vpn add NAME --tor`, `--dns` für `.onion`-Namen), `paranoid` (der Modus paranoid, kein Gedächtnis, keine Kits oder Plugins, jeder Köder) |
-| Schreiben & Dokumentation | `docs-writer`, `docs-lie-detector`, `onboarding-buddy` |
+| Schreiben & Dokumentation | `docs-writer`, `docs-lie-detector`, `onboarding-buddy`, `docs-from-code` (dokumentiert den Code einer laufenden Sitzung, den er über eine Sitzungsbrücke nur lesend liest; darf ihr eine Notiz schicken) |
 | Lernen, Spiele & Demos | `time-capsule`, `mini-ctf`, `archivist-1995`, `radio-sandbox-ai`, `agent-race`, `pixel-art-factory`, `sand-chess`; die Schaufenster `showcase` (Ordner, ein lokaler Port, eine entfernte Adresse, ein Web-Host), `showcase-full-stack` (PostgreSQL und nginx als Dienste, Django und JavaScript), `showcase-vpn` (ein VPN-Profil und der Notschalter), `showcase-local-llm` (ein eigenes Modell mit seinen Sampling-Parametern und dem Schleifenschutz), `showcase-second-opinion` (ein anderer Agent als Helfer) |
 | sandbox-ai testen | `sandbox-ai-tests` (die eigenen Testsuiten), `commit-censor`, `chaos-monkey`, `canary-course`, `network-maze`, `memory-hog` |
 
@@ -1745,6 +1745,41 @@ Ein eigenes Preset nennt eine dieser IDs als `"category"` (die älteren
 `simple`, `analysis` und `media` gelten weiter, aufgeführt unter Weitere,
 Sicherheitsanalyse und Lernen); `"translations": {"de": {"title": ...,
 "description": ...}}` gibt Titel und Beschreibung auf Deutsch.
+
+**Presets mit einer Brücke.** Ein Preset kann eine [Sitzungsbrücke](#eine-brücke-zwischen-zwei-laufenden-sitzungen)
+zwischen seinem Start und einer anderen laufenden Sitzung vorschlagen: `observer` (watch, nur Alarme),
+`pair-reviewer` (ask, und Lesen unter einem Ordner des anderen Arbeitsordners: `--preset-value code=src`, ohne
+Angabe alles) und `docs-from-code` (message, und Lesen ebenso). Jedes ist für Claude Code, den einen Agenten, der
+einen MCP-Server übernimmt, während er läuft (einem anderen Agenten eines eigenen Presets wird gesagt, dass er die
+Brücke nicht sähe). Das Preset schlägt nur vor: Nichts wird angelegt, bevor sein eigener Start läuft, und dann nur
+auf Ihr Ja. Ein Sitzungsstart fragt in seinem Terminal, sobald die Sitzung bereit ist und bevor er sich verbindet -
+welcher laufenden Sitzung sie beitreten soll (eine Liste der Sitzungen dieses Rechners, oder `HOST:NAME`; oder
+vorher mit `--preset-value peer=NAME` angegeben), mit dem, wovor `bridge add --dry-run` warnt (vor allem Daten, die
+zu einer weniger eingeschränkten Sitzung fließen) -, und Ihr Ja führt `bridge add` selbst aus. Ohne Terminal (ein
+Skript, ein Zeitplan) oder bei einem Start im Vordergrund (`--no-tmux`) nennt der Start stattdessen den genauen
+Befehl (`sandbox-ai bridge add rev web --allow ask,files:ro:src --ask first`). Ein Neustart oder Fortsetzen schlägt
+sie nie wieder vor, und eine Projektdatei kann keine enthalten. `presets show` nennt den Brückenteil, `presets check`
+den Befehl; das Board der App bekommt dafür einen Brücken-Teil (die andere Sitzung wird dort gewählt, angelegt vom
+Ablauf des Boards, sobald der Start läuft), und das Startformular der Weboberfläche bietet die laufenden Sitzungen
+des Hosts dafür an.
+
+```bash
+sandbox-ai claude --preset pair-reviewer --preset-value coder=web --preset-value code=src
+# sobald er läuft: "bridge this start (rev) to web with ask,files:ro:src? [y/N]"
+```
+
+In einem eigenen Preset (`~/.config/sandbox-ai/presets`), mit jedem Teil, den `bridge add` kennt:
+
+```json
+"values": {"peer": {"label": "The session to watch", "kind": "session", "optional": true}},
+"bridge": {"peer": "{peer}", "allow": ["watch", "files:ro:src"], "direction": "out", "both": false,
+           "ask": "first", "observer_actions": ["alert", "pause"], "limits": {"rate": 30}, "until": "8h"}
+```
+
+`peer` ist ein Wert der Art `session`, nie in der Datei festgelegt (kein Standardwert); `direction` `out` (dieser
+Start erreicht die Gegenseite, der Standard) oder `in` (die Gegenseite erreicht ihn); Pfade sind relativ zum
+Arbeitsordner der Gegenseite (ein `{Wert}` der Art text darf in einem stehen), nie `..` oder `.git`; `until` ist eine
+Dauer oder `HH:MM`, nie ein Datum; `"ask": "never"` nur in einem eigenen Preset.
 
 **Schaufenster.** Jedes `showcase-*`-Preset zeigt eine Sache, die ein Start
 verbinden kann, und lässt den Agenten sie prüfen und einen kurzen Bericht in den
@@ -5584,6 +5619,18 @@ listet auch die Brücken aller Hosts, jede einmal (HOST:ID für eine, die auf ei
 `bridge show|revoke|resume HOST:ID` wirken dort. Der Kasten Brücken der App und ihr Board-Teil Brücke (die andere
 Sitzung nach Hosts gruppiert und so benannt, wie der Host des Boards sie sieht: `NAME` auf diesem Host, `local:NAME`
 die dieses Rechners, `HOST:NAME` die eines anderen) sowie die Seite Brücken der Weboberfläche tun dasselbe.
+
+In der App öffnet Sandboxen & Sitzungen › Brücken › Neue Brücke… den Dialog, sobald hier zwei Sitzungen laufen oder
+Sie Hosts haben; mit weniger sagt sie, wie viele laufen und was eine Brücke braucht; solange die Seite noch liest, was
+läuft, sagt sie das und öffnet den Dialog, sobald es gelesen ist; ein Fehler sagt, was schiefging. Die Prüfung
+des Launchers (`bridge add --dry-run`) und das Anlegen stehen im Kasten, solange sie laufen ("Die Brücke A → B wird
+geprüft…", "Die Brücke A → B wird gebaut…"), dann werden ihre Warnungen erfragt und das Ergebnis gesagt. Die
+Live-Prüfung `bridge-live` ([docs/LIVE_CHECK.md](docs/LIVE_CHECK.md)) verbindet zwei echte Sitzungen auf Ihrem Rechner
+und legt dieselbe Brücke über die App an.
+
+**Aus einem Preset.** Ein Preset kann für seinen Start eine Brücke vorschlagen (`observer`, `pair-reviewer`,
+`docs-from-code`): Sobald der Start läuft, fragt sein Terminal, mit diesen Warnungen, und Ihr Ja führt `bridge add`
+aus; ohne Terminal wird der Befehl genannt ([Presets mit einer Brücke](#presets)).
 
 ### Server aus einem MCP-Katalog
 

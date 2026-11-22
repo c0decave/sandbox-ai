@@ -473,6 +473,7 @@ pip installation replace themselves with their file of the release (checked the 
 
 Options:
   --check            Show the installed and the newest version and its signature; change nothing
+                     (every copy, a git checkout too)
   --apply            Install the release update mode download fetched (checked again first)
   --install          Download the newest signed release now, check it and install it (what the app's
                      Install now does; nothing runs in a terminal)
@@ -743,9 +744,13 @@ def main(argv):
                 page += f"\n\nThis copy ({package or 'a pip installation'}): {self_update_way()}"
             elif checkout:
                 page += ("\n\nThis copy was not installed by install.sh: it is a git checkout; update it with git "
-                         "(git pull), then ./install.sh --from .")
+                         "(git pull), then ./install.sh --from . (--check shows the newest release all the same)")
             show_help(page + "\n\nRun 'sandbox-ai --help' for all commands.")
             return 0
+        if checkout and not package and "--check" in rest and "--uninstall" not in rest:
+            # (only a look: what the release source has, signed by a key of this checkout's - kept as the last check,
+            # which the app's check shows; the update itself is git's)
+            return logged_command(command, rest, lambda: module("updates").package_main(rest))
         if checkout and not package:
             say("sandbox-ai update: this copy was not installed by install.sh: it is a git checkout; update it with "
                 "git (git pull), then install it: ./install.sh --from .")

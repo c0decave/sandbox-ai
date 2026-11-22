@@ -194,6 +194,8 @@ def sample_values(preset, root, dev, agent, full):
             values[name] = str(dev / ("kvm" if name == "kvm" else "ttyACM0"))
         elif kind == "vpn":
             values[name] = "anon" if preset["id"] == "tor" else "home"
+        elif kind == "session":
+            values[name] = "coder"  # (the session a preset's bridge joins: proposed once the start runs, never here)
         elif kind == "llm":
             server = LLM_PRESETS.get(preset["id"], "ollama")
             if agent == "claude" and server not in ANTHROPIC:

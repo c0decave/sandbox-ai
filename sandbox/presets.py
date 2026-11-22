@@ -31,6 +31,14 @@ options that copy a login in are refused. Format (JSON):
    "values": {"samples": {"label": "Folder with the samples", "kind": "folder"}},
    "prompt": "...", "notes": ["..."], "translations": {"de": {"title": "...", "description": "..."}}}
 
+A preset may propose a session bridge between its start and another running session (`sandbox-ai bridge add`):
+  "values": {"coder": {"label": "The session to review", "kind": "session", "optional": true}},
+  "bridge": {"peer": "{coder}", "allow": ["ask", "files:ro:src"], "direction": "out", "both": false, "ask": "first",
+             "observer_actions": ["alert"], "limits": {"rate": 30}, "until": "8h"}
+The peer is a value of kind session you pick (NAME, or HOST:NAME of a host of yours), never fixed in the file;
+paths are relative to the peer's workspace. Nothing is made by the preset itself: once its start runs, on a terminal,
+you are asked (with bridge add's warnings) and your yes runs bridge add; without a terminal the command is said.
+
 The categories (CATEGORY_INFO) are listed by `sandbox-ai presets categories`; "translations" gives the title and
 description in German for the app. A server a preset gives a folder of its own for the start (--mcp-mount
 NAME:TARGET={folder}:rw, e.g. Engram's brain) is named by `presets check` with the exact `sandbox-ai mcp add` it needs.
@@ -56,7 +64,26 @@ LIMIT = 256 << 10
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 VALUE_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,31})\}")
-KINDS = ("text", "folder", "file", "port", "device", "host", "secret", "llm", "vpn", "number")
+KINDS = ("text", "folder", "file", "port", "device", "host", "secret", "llm", "vpn", "number", "session")
+# A preset's "bridge" (optional): a session bridge it PROPOSES between its start and another running session, the
+# value of kind session the human picks (never fixed in the file). Made only once the preset's own start runs, after
+# the human confirmed it on a terminal with what `bridge add --dry-run` warns about (propose_bridge), by bridge add's
+# own code; without a terminal the exact command is said. Its parts are bridge add's: --allow, --both, --ask,
+# --observer-actions, --limit, --until, and which side reaches which ("out": this start reaches the peer).
+BRIDGE_KEYS = ("peer", "direction", "allow", "both", "ask", "observer_actions", "limits", "until")
+BRIDGE_CAPS = ("message", "ask", "watch")  # and files:ro:PATH, files:rw:PATH (PATH relative to the peer's workspace)
+BRIDGE_ACTIONS = ("alert", "hint", "net-cut", "pause")  # bridge.OBSERVER_ACTIONS
+BRIDGE_ASK = ("each", "first", "never")  # bridge.ASK_POLICIES; never only in a preset of yours
+BRIDGE_LIMITS = {"rate": (1, 600), "size": (256, 256 << 10), "ask-timeout": (5, 1800),
+                 "daily": (64 << 10, 1 << 34)}  # bridge.LIMIT_RANGES
+BRIDGE_DIRECTIONS = ("out", "in")
+# --until in a preset: a duration (at least a minute) or HH:MM - never a date, which a preset passed on would outlive.
+BRIDGE_UNTIL = re.compile(r"([0-9]{1,6})([smhd])|(?:[01]?[0-9]|2[0-3]):[0-5][0-9]")
+UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# A session as `bridge add` takes it: NAME of this machine or HOST:NAME of a host of `sandbox-ai hosts`.
+SESSION = re.compile(r"(?:[a-z0-9][a-z0-9_-]{0,31}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+# Agents that take an MCP server while they run (bridge.py's warning; the others read theirs only when they start).
+LIVE_MCP_AGENTS = ("claude",)
 # The categories of presets, in the order they are listed (sandbox-ai presets list and categories, the app's gallery):
 # the one place they are defined. Each has a title and a short description in English and German; a preset's
 # "category" is one of these ids, or one of LEGACY_CATEGORIES (presets written before, yours and those of an extra
@@ -125,7 +152,7 @@ DEFAULT_CATEGORY = "other"
 LEGACY_CATEGORIES = {"simple": "other", "analysis": "security", "media": "fun"}
 AGENTS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 KEYS = {"format", "version", "id", "title", "description", "category", "agents", "options", "mcp", "rules",
-        "values", "prompt", "notes", "needs", "translations"}
+        "values", "prompt", "notes", "needs", "translations", "bridge"}
 # The languages a preset may give its title and description in besides English ("translations": {"de": {"title":
 # ..., "description": ...}}): the app shows them in its language. Options, values and notes stay English.
 TRANSLATED = ("de",)
@@ -192,7 +219,7 @@ CHECKS = {"port": re.compile(r"[1-9][0-9]{0,4}"), "number": re.compile(r"[0-9]+(
           # qwen2.5-coder:7b, org/Model-GGUF).
           "llm": re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}(?::[\w.:/@+-]{1,200}(?:,[\w.:/@+-]{1,200}){0,49})?",
                             re.ASCII),
-          "vpn": re.compile(r"[A-Za-z0-9_.-]{1,64}")}
+          "vpn": re.compile(r"[A-Za-z0-9_.-]{1,64}"), "session": SESSION}
 
 
 def config_home():
@@ -374,6 +401,7 @@ def problems(document, where="preset", origin=None):
         found.append(f"{where}: rules names a JSON file beside the preset (no path)")
     if document.get("prompt") is not None and not isinstance(document.get("prompt"), str):
         found.append(f"{where}: prompt is a text")
+    found += bridge_problems(document, where, origin)
     translations = document.get("translations", {})
     if not isinstance(translations, dict) or set(translations) - set(TRANSLATED) or not all(
             isinstance(texts, dict) and texts and not set(texts) - set(TRANSLATED_KEYS)
@@ -382,6 +410,267 @@ def problems(document, where="preset", origin=None):
         found.append(f"{where}: translations is {{LANGUAGE: {{title, description}}}} (languages: "
                      f"{', '.join(TRANSLATED)}), each a non-empty text")
     return found
+
+
+def session_values(document):
+    """The names of DOCUMENT's values of kind session (the bridge's peer)."""
+    values = document.get("values") if isinstance(document.get("values"), dict) else {}
+    return [name for name, spec in values.items() if isinstance(spec, dict) and spec.get("kind") == "session"]
+
+
+def bridge_path_problem(path):
+    """Why PATH (of files:MODE:PATH) is not a path of the peer's workspace that a bridge takes; None when it is."""
+    if not isinstance(path, str) or len(path) > 4096 or any(c < " " or "\x7f" <= c <= "\x9f" for c in path):
+        return "a path has no control characters and at most 4096 characters"
+    if path.startswith(("/", "~")):
+        return f"{path}: a path is relative to the peer's workspace (. for all of it)"
+    parts = [part for part in path.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        return f"{path}: '..' is never followed"
+    if ".git" in parts:
+        return f"{path}: .git is never reached through a bridge"
+    return None
+
+
+def limit_number(key, value):
+    """The number a bridge's --limit KEY=VALUE names (bytes for size and daily: 16k, 64m), None when it is none."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip() if isinstance(value, str) else ""
+    if key in ("rate", "ask-timeout"):
+        return int(text) if re.fullmatch(r"[0-9]{1,7}", text) else None
+    match = re.fullmatch(r"([0-9]{1,12})([kKmMgG]?)", text)
+    return int(match.group(1)) << {"": 0, "k": 10, "m": 20, "g": 30}[match.group(2).lower()] if match else None
+
+
+def until_ok(text):
+    """TEXT is a --until a preset may give: a duration of at least a minute (30m, 2h, 1d) or HH:MM."""
+    match = BRIDGE_UNTIL.fullmatch(text) if isinstance(text, str) else None
+    return bool(match) and (match.group(1) is None or int(match.group(1)) * UNIT_SECONDS[match.group(2)] >= 60)
+
+
+def bridge_problems(document, where="preset", origin=None):
+    """Why DOCUMENT's "bridge" (and its values of kind session) is not usable ([] when it is, or when it has none)."""
+    found = []
+    values = document.get("values") if isinstance(document.get("values"), dict) else {}
+    sessions = session_values(document)
+    bridge = document.get("bridge")
+    caps = bridge.get("allow") if isinstance(bridge, dict) and isinstance(bridge.get("allow"), list) else []
+    texts = [*(document.get("options") if isinstance(document.get("options"), list) else []),
+             *(document.get("mcp") if isinstance(document.get("mcp"), list) else []), document.get("prompt"), *caps]
+    used = {name for text in texts if isinstance(text, str) for name in PLACEHOLDER.findall(text)}
+    for name in sessions:
+        if name in used or bridge is None:
+            found.append(f"{where}: value {name!r}: a value of kind session is the bridge's peer only (\"bridge\": "
+                         f"{{\"peer\": \"{{{name}}}\", ...}}), never an option, a server, a path or the task's text")
+        if "default" in values[name]:
+            found.append(f"{where}: value {name!r}: a session never has a default (you pick it at the start)")
+    if bridge is None:
+        return found
+    if not isinstance(bridge, dict):
+        return found + [f"{where}: bridge is an object ({', '.join(BRIDGE_KEYS)})"]
+    unknown = set(bridge) - set(BRIDGE_KEYS)
+    if unknown:
+        found.append(f"{where}: bridge: unknown keys {sorted(unknown)}")
+    peer = bridge.get("peer")
+    match = PLACEHOLDER.fullmatch(peer) if isinstance(peer, str) else None
+    if not match or match.group(1) not in sessions:
+        found.append(f"{where}: bridge: peer is a value of kind session, as {{NAME}} (you pick the session at the "
+                     "start; it is never fixed in the file)")
+    if bridge.get("direction", "out") not in BRIDGE_DIRECTIONS:
+        found.append(f"{where}: bridge: direction is out (this start reaches the peer) or in (the peer reaches it)")
+    allow = bridge.get("allow")
+    if not isinstance(allow, list) or not allow or not all(isinstance(cap, str) for cap in allow):
+        found.append(f"{where}: bridge: allow is a non-empty list of message, ask, watch, files:ro:PATH, "
+                     "files:rw:PATH")
+        allow = []
+    for cap in allow:
+        if cap in BRIDGE_CAPS:
+            continue
+        files = re.fullmatch(r"files:(ro|rw):([^,]+)", cap, re.S)
+        if not files:
+            found.append(f"{where}: bridge: no capability {cap!r} (message, ask, watch, files:ro:PATH, "
+                         "files:rw:PATH)")
+            continue
+        for name in PLACEHOLDER.findall(files.group(2)):
+            if name not in values:
+                found.append(f"{where}: bridge: {{{name}}} is used but not declared in values")
+            elif name not in sessions and values[name].get("kind", "text") != "text":
+                found.append(f"{where}: bridge: {{{name}}} in a path is a value of kind text (a folder relative to "
+                             "the peer's workspace)")
+        why = bridge_path_problem(PLACEHOLDER.sub("x", files.group(2)))
+        if why:
+            found.append(f"{where}: bridge: {why}")
+    if not isinstance(bridge.get("both", False), bool):
+        found.append(f"{where}: bridge: both is true or false (the peer gets the same over this start)")
+    ask = bridge.get("ask", "first")
+    if ask not in BRIDGE_ASK:
+        found.append(f"{where}: bridge: ask is each, first or never (what is asked to you about the calls that move "
+                     "content across)")
+    elif ask == "never" and origin != "yours":
+        found.append(f"{where}: bridge: ask never is not allowed in a preset that is not yours: only you choose to "
+                     "be asked nothing about what crosses a bridge")
+    actions = bridge.get("observer_actions")
+    if actions is not None and (not isinstance(actions, list) or not all(action in BRIDGE_ACTIONS
+                                                                          for action in actions)):
+        found.append(f"{where}: bridge: observer_actions is a list of {', '.join(BRIDGE_ACTIONS)}")
+    elif actions and "watch" not in allow:
+        found.append(f"{where}: bridge: observer_actions go with watch (an observer's actions)")
+    limits = bridge.get("limits", {})
+    if not isinstance(limits, dict) or set(limits) - set(BRIDGE_LIMITS):
+        found.append(f"{where}: bridge: limits are {{{', '.join(BRIDGE_LIMITS)}}} (bridge add --limit KEY=VALUE)")
+        limits = {}
+    for key, value in limits.items():
+        low, high = BRIDGE_LIMITS[key]
+        number = limit_number(key, value)
+        if number is None or not low <= number <= high:
+            found.append(f"{where}: bridge: limits: {key}: from {low} to {high}")
+    until = bridge.get("until")
+    if until is not None and not until_ok(until):
+        found.append(f"{where}: bridge: until is a duration of at least a minute (30m, 2h, 1d) or HH:MM (never a "
+                     "date)")
+    return found
+
+
+def bridge_proposal(preset, given=None):
+    """The bridge PRESET proposes with the values GIVEN (--preset-value; its defaults filled in): {preset, peer (None:
+    picked at the start), direction, allow, both, ask, observer_actions, limits [[KEY, VALUE]], until, agent_sees
+    (whether this start's agent gets a tool of it: it reaches the peer, or is sent messages, questions or hints)};
+    None without a bridge. ValueError for a path a value fills in that a bridge would refuse."""
+    bridge = preset.get("bridge")
+    if not isinstance(bridge, dict):
+        return None
+    values = checked_values(preset, given or {})[0]
+    allow = []
+    for cap in bridge["allow"]:
+        filled = PLACEHOLDER.sub(lambda m: values.get(m.group(1), ""), cap)
+        if filled.startswith("files:"):
+            mode, path = filled[len("files:"):].split(":", 1)
+            path = path.strip() or "."
+            why = bridge_path_problem(path) or ("a comma cannot be in a bridge's path" if "," in path else None)
+            if why:
+                raise ValueError(f"preset {preset['id']}: bridge: {why}")
+            filled = f"files:{mode}:{path}"
+        allow.append(filled)
+    direction = bridge.get("direction", "out")
+    actions = [action for action in BRIDGE_ACTIONS if action in (bridge.get("observer_actions") or [])] \
+        if "watch" in allow and bridge.get("observer_actions") else None
+    sees = direction == "out" or bool({"message", "ask"} & set(allow) or "hint" in (actions or [])
+                                      or bridge.get("both"))
+    return {"preset": preset["id"], "peer": values.get(PLACEHOLDER.fullmatch(bridge["peer"]).group(1)) or None,
+            "direction": direction, "allow": allow, "both": bool(bridge.get("both")),
+            "ask": bridge.get("ask", "first"), "observer_actions": actions,
+            "limits": [[key, str(value)] for key, value in (bridge.get("limits") or {}).items()],
+            "until": bridge.get("until") or None, "agent_sees": sees}
+
+
+def bridge_argv(proposal, start, peer=None):
+    """`sandbox-ai bridge add` (its arguments after "bridge") for PROPOSAL between the start START and PEER (else the
+    proposal's own peer, else PEER - to fill in)."""
+    peer = peer or proposal.get("peer") or "PEER"
+    a, b = (start, peer) if proposal.get("direction", "out") == "out" else (peer, start)
+    argv = ["add", a, b, "--allow", ",".join(proposal["allow"]), *(["--both"] if proposal.get("both") else []),
+            "--ask", proposal.get("ask") or "first"]
+    if proposal.get("observer_actions"):
+        argv += ["--observer-actions", ",".join(proposal["observer_actions"])]
+    for key, value in proposal.get("limits") or []:
+        argv += ["--limit", f"{key}={value}"]
+    if proposal.get("until"):
+        argv += ["--until", proposal["until"]]
+    return argv
+
+
+def bridge_command(proposal, start, peer=None):
+    return "sandbox-ai bridge " + shlex.join(bridge_argv(proposal, start, peer))
+
+
+def bridge_what(proposal):
+    """What PROPOSAL allows, in words: its capabilities, both ways, the observer's actions."""
+    text = ",".join(proposal["allow"])
+    if proposal.get("observer_actions"):
+        text += f" (observer actions: {','.join(proposal['observer_actions'])})"
+    return text + (", both ways" if proposal.get("both") else "")
+
+
+def bridge_agent_note(proposal, agent):
+    """What a start of AGENT says about PROPOSAL when its agent reads its MCP servers only when it starts and its side
+    gets a tool of the bridge (bridge add warns so too; the Board's bridge_problems): None otherwise."""
+    if not proposal or not agent or agent in LIVE_MCP_AGENTS or not proposal.get("agent_sees"):
+        return None
+    return (f"{agent} reads its MCP servers only when it starts, so it does not see the bridge the preset "
+            f"{proposal['preset']} proposes, made once it runs (Claude Code does)")
+
+
+def running_sessions(starts, start):
+    """[(name, agent)] of the agent sessions of this machine that run, but START (what a bridge may join)."""
+    found = []
+    for entry in starts.start_entries(prune=False).values():
+        name = str(entry.get("name") or "")
+        if entry.get("state") == "running" and entry.get("kind") in ("session", "run") and name != start \
+                and SESSION.fullmatch(name):
+            found.append((name, str(entry.get("agent") or "?")))
+    return sorted(found)
+
+
+def _reply(answer, question):
+    try:
+        return str(answer(question)).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def propose_bridge(proposal, start, out=None, tty=None, answer=None, bridge=None, starts=None):
+    """A preset's bridge, once its start START runs: on a terminal (TTY) the peer is picked (from the running sessions,
+    unless a value named it), `bridge add --dry-run` says its warnings, and the human's yes runs `bridge add` itself
+    (bridge.main, the very code of the command); anything else makes nothing and says the command. Without a terminal
+    only the command is said. True when the bridge was made. ANSWER(question): input; BRIDGE, STARTS: the modules."""
+    say = out or (lambda line: print(f"agent-sandbox: {printable(line)}", file=sys.stderr))
+    tty = (sys.stdin.isatty() and sys.stdout.isatty()) if tty is None else tty
+    ident = proposal["preset"]
+    if not tty:
+        say(f"note: the preset {ident} proposes a bridge, made only once you confirm it: "
+            f"{bridge_command(proposal, start)}")
+        return False
+    answer = answer or input
+    bridge = bridge or _module("bridge")
+    sides = f"this start ({start}) -> {proposal.get('peer') or 'a session you pick'}" \
+        if proposal["direction"] == "out" else f"{proposal.get('peer') or 'a session you pick'} -> this start ({start})"
+    say(f"the preset {ident} proposes a bridge, made only when you confirm it: {sides}: {bridge_what(proposal)}")
+    peer = proposal.get("peer")
+    if not peer:
+        found = running_sessions(starts or _module("starts"), start)
+        say("running sessions to bridge with: " + "  ".join(f"{number}) {name} ({agent})" for number, (name, agent)
+                                                             in enumerate(found, 1)) if found else
+            "no other session runs on this machine (one of your hosts' is HOST:NAME)")
+        reply = _reply(answer, "agent-sandbox: bridge this start to which session? (its number or name, HOST:NAME for "
+                               "one of your hosts; empty: none) ")
+        if not reply:
+            say(f"no bridge made; to make it later: {bridge_command(proposal, start)}")
+            return False
+        if reply.isdigit() and 1 <= int(reply) <= len(found):
+            peer = found[int(reply) - 1][0]
+        elif SESSION.fullmatch(reply):
+            peer = reply
+        else:
+            say(f"{reply!r} is not a session (NAME, or HOST:NAME); no bridge made; to make it later: "
+                f"{bridge_command(proposal, start)}")
+            return False
+    argv = bridge_argv(proposal, start, peer)
+    if bridge.main([*argv, "--dry-run"], out=say) != 0:
+        say(f"not bridged; once it can be: {bridge_command(proposal, start, peer)}")
+        return False
+    question = f"bridge this start ({start}) to {peer}" if proposal["direction"] == "out" else \
+        f"bridge {peer} to this start ({start})"
+    reply = _reply(answer, f"agent-sandbox: {question} with {bridge_what(proposal)}? [y/N] ")
+    if (reply or "").lower() not in ("y", "yes", "j", "ja"):
+        say(f"no bridge made; to make it later: {bridge_command(proposal, start, peer)}")
+        return False
+    if bridge.main(argv, out=say) != 0:
+        say(f"not bridged; once it can be: {bridge_command(proposal, start, peer)}")
+        return False
+    return True
 
 
 def translated(preset, key, language="en"):
@@ -511,7 +800,7 @@ def checked_values(preset, given, notes=None):
     for name, spec in declared.items():
         value = given.get(name, spec.get("default"))
         if value is None or value == "":
-            if not spec.get("optional"):
+            if not spec.get("optional") and spec.get("kind") != "session":  # (a session: picked once the start runs)
                 unset.append(name)
             continue
         value = str(value)
@@ -678,6 +967,17 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
                          + "".join(f" --mount {mount}" for mount in server_mounts(preset, values or {}, name)))
     if values is None:
         return found
+    try:
+        proposal = bridge_proposal(preset, given)
+    except ValueError as exc:
+        found.append(str(exc))
+        proposal = None
+    if proposal and notes is not None:
+        notes.append(f"it proposes a bridge, made once the start runs and only when you confirm it: "
+                     f"{bridge_command(proposal, 'START')}")
+        why = bridge_agent_note(proposal, agent)
+        if why:
+            notes.append(why)
     # The image variant it starts (--image-variant): made once from its recipe (android-development: android-dev).
     for variant, _ in option_values(preset, values, "--image-variant"):
         found += variant_missing(variant, agent)
@@ -905,13 +1205,16 @@ def vpn_bypasses(options, given=()):
     return found
 
 
-def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, private=None, code_env=None):
+def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, private=None, code_env=None,
+          bridges=None):
     """ARGV (the launcher's: AGENT options... [-- agent args]) with --preset NAME and --preset-value KEY=VALUE
     replaced by the preset's options, placed right after the agent so that the command line wins; and its first
     task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset. What
     the preset leaves out (a default folder that is not there) goes to NOTES. PRIVATE(flag, path): why a host path
     a --copy or --mount names is private (the launcher's private_source), else None. CODE_ENV(options, given): the
-    --mcp-env values among OPTIONS that change what code runs in an MCP server's sandbox (mcp.code_env_in)."""
+    --mcp-env values among OPTIONS that change what code runs in an MCP server's sandbox (mcp.code_env_in). BRIDGES
+    (a list): the bridge the preset proposes is added to it (bridge_proposal), made only once the start runs, after
+    the human confirmed it (propose_bridge)."""
     if not argv or not any(token == "--preset" or token.startswith("--preset=") for token in argv):
         return (argv, None) if with_mode else argv
     head, tail = list(argv), []
@@ -993,6 +1296,9 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, pr
     check_vpn_types(preset, resolved_values(preset, given))
     check_effective_vpn(preset, resolved_values(preset, given), canonical([*options, *rest]) if canonical
                         else [*options, *rest])
+    proposal = bridge_proposal(preset, given)
+    if proposal and bridges is not None:
+        bridges.append(proposal)
     agent_args = tail if tail else prompt_args(preset, agent, resolved_values(preset, given))
     result = [agent, *options, *rest, *(["--", *agent_args] if agent_args or "--" in argv else [])]
     return (result, mode) if with_mode else result
@@ -1030,6 +1336,18 @@ def describe(preset, out=print):
         optional = " (optional)" if spec.get("optional") else ""
         hint = f"; {spec['hint']}" if spec.get("hint") else ""
         out(f"  value {name}: {spec.get('label', name)} [{spec.get('kind', 'text')}]{default}{optional}{hint}")
+    bridge = preset.get("bridge")
+    if isinstance(bridge, dict):
+        peer = bridge.get("peer")
+        sides = f"this start -> {peer}" if bridge.get("direction", "out") == "out" else f"{peer} -> this start"
+        parts = [",".join(bridge.get("allow") or [])] + (["both ways"] if bridge.get("both") else [])
+        parts += [f"observer actions {','.join(bridge['observer_actions'])}"] if bridge.get("observer_actions") else []
+        parts.append(f"--ask {bridge.get('ask', 'first')}")
+        if bridge.get("limits"):
+            parts.append("limits " + ",".join(f"{key}={value}" for key, value in bridge["limits"].items()))
+        if bridge.get("until"):
+            parts.append(f"until {bridge['until']}")
+        out(f"  bridge: proposed once the start runs, made only when you confirm it: {sides} ({'; '.join(parts)})")
     for need in preset.get("needs", []):
         out(f"  needs: {need}")
     for note in preset.get("notes", []):

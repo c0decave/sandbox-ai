@@ -445,7 +445,8 @@ def test_new_bridge_needs_two_running_sessions(window, env, monkeypatch, wait):
     page = window.sandboxes
     read_now(page)
     box = page.bridges_box
-    assert not box.buttons["new"].isEnabled() and "1 run now" in box.buttons["new"].toolTip()
+    # Offered all the same: its click says why (disabled, a click did nothing - test_bridge_clicks_app).
+    assert box.buttons["new"].isEnabled()
     widgets.SHOWN.clear()
     box.new_bridge()
     assert widgets.SHOWN and "1 run now" in widgets.SHOWN[-1][1]

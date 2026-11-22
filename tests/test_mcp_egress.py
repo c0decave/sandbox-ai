@@ -572,10 +572,12 @@ class FakeBwrap:
     """bwrap and slirp4netns as Popen sees them: bwrap says its child's PID on --info-fd and keeps a copy of its
     --block-fd (the gate: has it been opened?); slirp4netns says it is ready."""
 
-    def __init__(self, monkeypatch, fail_load=None):
+    def __init__(self, monkeypatch, fail_load=None, slirp_ready=True):
         self.events, self.gate, self.loaded = [], None, None
         self.killed = False
         fake = self
+        # (PID 4242 does not exist: slirp4netns is handed it as before, the namespace lookup is tested on its own)
+        monkeypatch.setattr(rootfs, "slirp_target", lambda pid: ([str(pid)], ()))
 
         class Process:
             def __init__(self, argv):
@@ -608,7 +610,8 @@ class FakeBwrap:
                 fake.events.append("bwrap")
             else:
                 assert argv[0] == "slirp4netns" and "4242" in argv
-                os.write(int(argv[argv.index("--ready-fd") + 1]), b"1")
+                if slirp_ready:
+                    os.write(int(argv[argv.index("--ready-fd") + 1]), b"1")
                 fake.events.append("slirp4netns")
             return Process(argv)
 
@@ -909,5 +912,43 @@ def test_the_egress_helper_enters_the_user_namespace_that_owns_the_network_one(t
         eg.enter_namespaces(os.getpid(), libc)
         user = os.readlink(f"/proc/{os.getpid()}/ns/user")
         assert libc.calls == [("ioctl", 0xB701), ("setns", user, 0x10000000), ("setns", net, 0x40000000)]
+    finally:
+        os.close(owner)
+
+
+def test_a_bwrap_server_whose_network_never_comes_up_never_runs(tmp_path, monkeypatch, capsys, fakes):
+    """Catalog CI 45011158325: slirp4netns failed ("setns(CLONE_NEWNET): Operation not permitted", "child failed(1)")
+    and the server ran all the same, with no network - its readiness was read and never checked. A slirp4netns that
+    does not say it is ready stops the start now."""
+    fake = FakeBwrap(monkeypatch, slirp_ready=False)
+    fakes.append(fake)
+    assert rootfs.run(rootfs_definition(tmp_path), {}) == 125
+    assert "rules" not in fake.events and not fake.opened() and fake.killed
+    assert "slirp4netns" in capsys.readouterr().err
+
+
+def test_slirp4netns_joins_the_user_namespace_that_owns_the_servers_network(tmp_path, monkeypatch):
+    """slirp4netns handed only the server's PID joins that process's user namespace - bwrap's nested one, which has
+    no right over the network namespace (the CI's "setns(CLONE_NEWNET): Operation not permitted"). It is handed the
+    network namespace and its owner instead (NS_GET_USERNS), by descriptor; without NS_GET_USERNS, the PID as before."""
+    import errno
+    import fcntl
+    owner = os.open(tmp_path, os.O_RDONLY)
+    try:
+        monkeypatch.setattr(fcntl, "ioctl", lambda fd, request, *rest: os.dup(owner) if request == 0xB701 else 0)
+        args, fds = rootfs.slirp_target(os.getpid())
+        try:
+            net, user = fds
+            assert os.readlink(f"/proc/self/fd/{net}") == os.readlink(f"/proc/{os.getpid()}/ns/net")
+            assert os.readlink(f"/proc/self/fd/{user}") == str(tmp_path)
+            assert args == ["--netns-type=path", f"--userns-path=/proc/self/fd/{user}", f"/proc/self/fd/{net}"]
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+        def old_kernel(fd, request, *rest):
+            raise OSError(errno.ENOTTY, "no NS_GET_USERNS")
+        monkeypatch.setattr(fcntl, "ioctl", old_kernel)
+        assert rootfs.slirp_target(os.getpid()) == ([str(os.getpid())], ())
     finally:
         os.close(owner)

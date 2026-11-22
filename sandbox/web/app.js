@@ -171,8 +171,10 @@ function hostPath(suffix, host) { return `/api/hosts/${encodeURIComponent(host |
 // GET /vpn: the profiles), so a profile or secret added or removed shows the next time. Any other name typed stays
 // possible; a host that cannot list them (an older one) leaves the field typed in. The answer fills that host's list
 // only, so a late one never reaches another host's field.
-const NAME_LISTS = { secret: ["/secrets", (x) => x && x.name], vpn: ["/vpn", (x) => x && x.profile] };
-const NAME_PATTERNS = { secret: /^[A-Za-z_][A-Za-z0-9_]{0,63}$/, vpn: /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/ };
+// session: the running agent sessions of that host (a preset's bridge joins one; bridgeSessions' choice)
+const NAME_LISTS = { secret: ["/secrets", (x) => x && x.name], vpn: ["/vpn", (x) => x && x.profile],
+  session: ["/starts", (x) => x && x.state === "running" && (x.kind === "session" || x.kind === "run") && !x.helper_of && x.name] };
+const NAME_PATTERNS = { secret: /^[A-Za-z_][A-Za-z0-9_]{0,63}$/, vpn: /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/, session: /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/ };
 function offerNames(input, kind, host) {
   host = host || state.host;
   const id = `names-${kind}-${String(host).replace(/[^A-Za-z0-9_.-]/g, "_")}`;
@@ -2737,6 +2739,18 @@ function experimentalBadge(p) {
 // Whether a preset's VPN value must name a Tor profile (the tor preset's: its name or label says Tor).
 function torValue(key, spec) { return key === "tor" || /\bTor\b/.test(String((spec && spec.label) || "")); }
 
+// What a preset's bridge (presets show --json: "bridge") proposes, in words: made only in the start's terminal, once it
+// runs, on the human's yes (sandbox-ai asks there, with bridge add's warnings); "" for a preset without one.
+function presetBridgeText(bridge) {
+  if (!bridge || typeof bridge !== "object" || !Array.isArray(bridge.allow)) return "";
+  const what = bridge.allow.filter(x => typeof x === "string").join(", ")
+    + (Array.isArray(bridge.observer_actions) && bridge.observer_actions.length ? ` (${t("observer actions: {actions}", { actions: bridge.observer_actions.join(", ") })})` : "")
+    + (bridge.both === true ? `, ${t("both ways")}` : "");
+  return (bridge.direction === "in" ? t("It proposes a bridge: the session you choose may reach this start ({what}).", { what })
+    : t("It proposes a bridge: this start may reach the session you choose ({what}).", { what }))
+    + " " + t("Nothing is made by itself: once the start runs, its terminal asks you, with the warnings of bridge add, and makes it only on your yes.");
+}
+
 // What `presets check` says is missing ({ok, output}: one "missing: ..." line each), as a list of texts.
 function presetProblems(r) {
   const lines = String((r && r.output) || "").split("\n").map(x => x.trim()).filter(Boolean);
@@ -2894,9 +2908,11 @@ async function drawStartForm(card, heading, host) {
     } else if (kind === "port" || kind === "number") {
       input = el("input", { id, type: "number", min: kind === "port" ? 1 : 0, max: kind === "port" ? 65535 : null, placeholder: spec.default !== undefined ? String(spec.default) : "" });
     } else {
-      input = el("input", { id, class: ["folder", "file", "device", "host", "secret"].includes(kind) ? "mono" : null,
-        placeholder: spec.default !== undefined ? String(spec.default) : kind === "folder" ? t("{path} (on that host)", { path: "/home/you/samples" }) : kind === "device" ? "/dev/ttyUSB0" : "" });
+      input = el("input", { id, class: ["folder", "file", "device", "host", "secret", "session"].includes(kind) ? "mono" : null,
+        placeholder: spec.default !== undefined ? String(spec.default) : kind === "folder" ? t("{path} (on that host)", { path: "/home/you/samples" }) : kind === "device" ? "/dev/ttyUSB0"
+          : kind === "session" ? t("a running session (empty: chosen in the terminal once the start runs)") : "" });
       if (kind === "secret") offerNames(input, "secret", host);  // that host's secrets to choose from (names only)
+      if (kind === "session") offerNames(input, "session", host);  // that host's running sessions (a preset's bridge)
     }
     f.input = input;
     f.value = () => String(input.value || "").trim();
@@ -2925,6 +2941,8 @@ async function drawStartForm(card, heading, host) {
         there ? t("added on {host}", { host }) : t("not added on {host} yet: {command}", { host, command: `sandbox-ai mcp add ${server}` }),
         there ? null : el("button", { class: "small", onclick: () => { state.host = host; show("mcp"); } }, t("Open MCP servers")));
     })));
+    const proposed = presetBridgeText(chosen.bridge);
+    if (proposed) presetMcp.append(el("p", { class: "hint status-warn", id: "preset-bridge" }, proposed));
     for (const note of (Array.isArray(chosen.notes) ? chosen.notes : []).slice(0, 3)) presetMcp.append(el("p", { class: "hint" }, String(note)));
     drawModels();
   };

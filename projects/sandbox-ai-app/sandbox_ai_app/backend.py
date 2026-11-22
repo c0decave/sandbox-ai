@@ -7768,6 +7768,30 @@ def parse_update_check(status, out):
     return installed[1], available[1]
 
 
+def update_check_signature(out):
+    """What `sandbox-ai update --check` said of the newest release's signature (its line "signature: ..."): "good"
+    (by a trusted key), "bad", "none" (no SHA256SUMS.sig), "unchecked" (no key is trusted), or None (no such line)."""
+    found = re.search(r"^signature:\s*(.*)$", out or "", re.M)
+    if not found:
+        return None
+    said = found[1]
+    return "good" if said.startswith("good") else "bad" if said.startswith("BAD") else \
+        "none" if said.startswith("none") else "unchecked"
+
+
+def update_check_error(status, out, err):
+    """Why `sandbox-ai update --check` found nothing (offline, GitHub's rate limit, ...): its last line, without the
+    "sandbox-ai update: " or "install.sh: " in front; None when it worked."""
+    if status == 0 and parse_update_check(status, out) is not None:
+        return None
+    lines = [line.strip() for line in (err or "").splitlines() if line.strip()] or \
+        [line.strip() for line in (out or "").splitlines() if line.strip() and
+         not re.match(r"(installed|available):", line.strip())]
+    why = lines[-1] if lines else ""
+    why = re.sub(r"^(sandbox-ai update|install\.sh):\s*(error:\s*)?", "", why)
+    return why or f"exit status {status}"
+
+
 UPDATE_PACKAGES = ("pyz", "appimage", "macos-app")  # sandbox/main.py's PACKAGES: updated by a new download
 SYSTEM_HOMES = ("/home/", "/root/", "/Users/", "/var/home/")  # sandbox/main.py's HOMES: never a system installation
 

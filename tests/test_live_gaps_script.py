@@ -45,8 +45,8 @@ def test_list_through_the_entry_point_names_each_check_with_what_it_proves_needs
 def test_the_brief_s_gaps_each_have_a_check():
     names = set(LG.BY_NAME)
     assert {"release-gates", "firejail-hides-control", "firewall-login-hosts", "git-login-give", "hide-workspace-add",
-            "untrusted-home", "kits-attach", "plugins-attach", "devices-scan", "devices-live", "remote-mcp",
-            "local-llm"} <= names
+            "untrusted-home", "kits-attach", "plugins-attach", "bridge-live", "devices-scan", "devices-live",
+            "remote-mcp", "local-llm"} <= names
     gates = LG.BY_NAME["release-gates"]
     assert gates.tests == ("tests/test_agent_sandbox_live.py",)
     assert gates.keyword == "isolation or strict_mode_starts or relays"
@@ -280,13 +280,14 @@ def test_the_environment_has_folders_of_its_own_and_never_the_users_settings(tmp
     (fake / "podman").chmod(0o755)
     base = {"HOME": "/home/alice", "PATH": f"{fake}:/usr/bin:/bin", "XDG_RUNTIME_DIR": "/run/user/1000",
             "SANDBOX_AI_RUN": "work", "SANDBOX_AI_PODMAN_URL": "unix:///x.sock", "SANDBOX_AI_SECRETS": "keyring",
-            "LANG": "C.UTF-8"}
+            "SANDBOX_AI_APP_PYTHON": "/opt/app-env/bin/python3", "LANG": "C.UTF-8"}
     env = LG.isolated_environment(tmp_path / "e", base)
     for name, folder in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
                          ("XDG_STATE_HOME", "state"), ("XDG_CACHE_HOME", "cache"), ("XDG_RUNTIME_DIR", "run")):
         assert env[name] == str(tmp_path / "e" / folder) and Path(env[name]).is_dir()
         assert (Path(env[name]).stat().st_mode & 0o777) == 0o700
     assert "SANDBOX_AI_RUN" not in env and env["SANDBOX_AI_PODMAN_URL"] == "unix:///x.sock"
+    assert env["SANDBOX_AI_APP_PYTHON"] == "/opt/app-env/bin/python3", "bridge-live's app part takes it"
     assert env["SANDBOX_AI_SECRETS"] == "file" and env["SANDBOX_AI_SECRETS_PLAIN"] == "1"
     assert env["PATH"].split(":")[0] == str(tmp_path / "e" / "bin") and env["LANG"] == "C.UTF-8"
     # Podman, through the wrapper, sees the user's HOME and runtime folder; XDG folders the user had none of: unset.

@@ -121,6 +121,16 @@ CHECKS = (
           "the plugin store and enables it in a running Claude Code sandbox; plugins detach turns it off",
           ("sandbox", "image:claude"), (f"{GAPS}::test_live_plugins_attach_enables_a_plugin_in_a_running_claude",),
           timeout=2400, source="runtime-kits"),
+    Check("bridge-live",
+          "sandbox-ai bridge between two real sessions (one Podman, one Bubblewrap when both work here): message, "
+          "ask (answered), files:ro:src and files:rw:out (the write asked, its diff shown and allowed with "
+          "sandbox-ai approvals), watch (activity, changes, terminal) with the observer's alert and hint - each call "
+          "made by the session's agent side through its real relay - and revoke; then, with a Python that has "
+          "PySide6 (SANDBOX_AI_APP_PYTHON), the app's New bridge… between the same two sessions offscreen",
+          ("sandbox", "image:codex"), (f"{GAPS}::test_live_a_bridge_between_two_real_sessions",
+                                        f"{GAPS}::test_live_the_apps_new_bridge_between_two_real_sessions"),
+          timeout=1800,
+          source="the user, 2026-11-21/22: New bridge in the app did nothing; check in depth that bridges work"),
     Check("devices-scan",
           "sandbox-ai devices scan on this machine's real hardware: valid JSON, every listed node exists, every "
           "refusal has a reason; the text form works too",
@@ -131,6 +141,15 @@ CHECKS = (
           "says so, and is gone after devices remove",
           ("sandbox", "image:codex", "linux", "device"),
           (f"{GAPS}::test_live_a_device_added_and_removed_while_it_runs",), source="board-devices"),
+    Check("update-live",
+          "Signed updates from the real GitHub: the newest release's SHA256SUMS is signed by a key of this "
+          "checkout's sandbox/release-signers and lists every kind's file (the bundle's SHA-256 checked); this "
+          "checkout's `sandbox-ai update --check` finds it and offers it only when it is newer (never a downgrade); "
+          "a copy one version older is offered it. Nothing is installed",
+          (), (f"{GAPS}::test_live_update_check_against_github",), timeout=900,
+          network="HTTPS to api.github.com (the releases API, read-only, no token) and github.com's release "
+                  "downloads (SHA256SUMS, SHA256SUMS.sig and the bundle, about 16 MB)",
+          source="user 2026-11-22: \"check if auto update signed code from github is now working\""),
     Check("remote-mcp",
           "A real host of sandbox-ai hosts: hosts test, its MCP servers listed over SSH, its demo server started "
           "and stopped there (only when no instance of it runs)",
@@ -191,7 +210,7 @@ LLM_MODELS = ("qwen3.8-flash-next", "ornith-1.5-35b-a3b-mlx", "ornith-1.5-122b-m
 IMAGES = ("codex", "claude", "opencode")
 DEVICE_KINDS = ("serial", "video", "render", "kvm")  # devices-live's own pick, in this order
 # Variables of the user's environment that never reach the checks (their sandbox-ai settings and runs).
-KEPT_SANDBOX_AI = ("SANDBOX_AI_PODMAN_URL",)
+KEPT_SANDBOX_AI = ("SANDBOX_AI_PODMAN_URL", "SANDBOX_AI_APP_PYTHON")  # (no secret: paths)
 # The folders of the check's own; Podman (the wrapper) gets the user's back.
 XDG = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")
 

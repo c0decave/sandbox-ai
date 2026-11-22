@@ -601,7 +601,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.199"
+__version__ = "0.1.201"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -1049,7 +1049,8 @@ def build_parser(agent=None):
                         "there are memory, so each at most half of it)")
     p.add_argument("--preset", metavar="NAME",
                    help="Start from the preset NAME (sandbox-ai presets list): its options, MCP servers, ruleset and "
-                        "first task; the command line wins over it")
+                        "first task; the command line wins over it. A bridge it proposes is asked about once the "
+                        "start runs (said as a command without a terminal)")
     p.add_argument("--preset-value", action="append", default=[], metavar="KEY=VALUE",
                    help="A value the preset asks for (sandbox-ai presets show NAME); repeatable")
     p.add_argument("--profile", action="append", default=[], choices=PROFILES, metavar="NAME",
@@ -14489,6 +14490,31 @@ def check_experimental_agents(a):
             print(f"agent-sandbox: note: {note}", file=sys.stderr)
 
 
+def preset_bridge_notes(a):
+    """What the start says of the bridge its preset proposes (a.preset_bridge): an agent that would not see it; and,
+    for a start in the foreground of this terminal (no session to ask about it once it is up), the command to make
+    it once it runs. A session asks once it is up (propose_preset_bridge)."""
+    proposal = getattr(a, "preset_bridge", None)
+    if not proposal or a.dry_run or a.probe:
+        return []
+    presets = load_presets_module()
+    found = [f"note: {why}" for why in [presets.bridge_agent_note(proposal, a.agent)] if why]
+    if not detachable(a):
+        found.append(f"note: the preset {proposal['preset']} proposes a bridge, made only once you confirm it; this "
+                     "start runs in the foreground of this terminal, so it is not asked here - once it runs, in "
+                     f"another terminal: {presets.bridge_command(proposal, a.start_name)}")
+    return found
+
+
+def propose_preset_bridge(a, name):
+    """The bridge a.preset_bridge, proposed once the new session NAME is up (sessions.start): asked on a terminal and
+    made by bridge add's own code on the human's yes, said as a command otherwise. Never fails the start."""
+    try:
+        load_presets_module().propose_bridge(a.preset_bridge, name)
+    except Exception as exc:  # noqa: BLE001 - the session runs; the bridge can be made by hand
+        print(f"agent-sandbox: the preset's bridge was not proposed: {printable(exc)}", file=sys.stderr)
+
+
 _presets_module = None
 
 
@@ -14506,17 +14532,19 @@ def load_presets_module():
     return _presets_module
 
 
-def launch(argv, floor_by=None):
+def launch(argv, floor_by=None, preset_bridge=None):
     # FLOOR_BY: the floor that chose the mode of this start (the launch below), for MODES.check (--ask allow).
     # --preset NAME: its options right after the agent (the command line wins), its first task as the agent's
-    # arguments; then everything is checked as if typed.
+    # arguments; then everything is checked as if typed. PRESET_BRIDGE: the bridge the preset proposes (the launch
+    # below: its options are the preset's already), made only once the start runs and the human confirms it.
     import uuid
-    preset_notes = []
+    preset_notes, bridges = [], []
     argv, preset_mode = load_presets_module().apply(canonical_options(list(argv)), canonical=canonical_options,
                                                     with_mode=True, notes=preset_notes,
                                                     credential=copies_credential, private=private_source,
                                                     code_env=lambda options, given: load_mcp_module().code_env_in(
-                                                        options, given))
+                                                        options, given), bridges=bridges)
+    preset_bridge = bridges[0] if bridges else preset_bridge
     for note in preset_notes:
         print(f"agent-sandbox: note: {printable(note)}", file=sys.stderr)
     argv = canonical_options(argv)
@@ -14544,8 +14572,10 @@ def launch(argv, floor_by=None):
             elif not token.startswith("--mode-at-least="):
                 rest.append(token)
         return launch([argv[0], "--mode", floor, *rest],
-                      floor_by=f"the preset's mode {floor}" if preset_mode == floor else f"--mode-at-least {floor}")
+                      floor_by=f"the preset's mode {floor}" if preset_mode == floor else f"--mode-at-least {floor}",
+                      preset_bridge=preset_bridge)
     a.mode_floor = floor_by  # a mode a floor chose is not the human's own choice (MODES.check: --ask allow)
+    a.preset_bridge = preset_bridge  # (never from a project file, a kept start or a session's saved options)
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
     if not a.dry_run and not a.probe and not a.mcp_socket_dir and a.session is None:
@@ -14607,7 +14637,7 @@ def launch(argv, floor_by=None):
         print(f"agent-sandbox: note: {load_dsh_module().note(a, dsh_session_browser(a))}", file=sys.stderr)
     if not a.dry_run:
         remember_exposed(a)
-    for note in remembered + notes + ask_allow_notes(a):
+    for note in remembered + notes + ask_allow_notes(a) + preset_bridge_notes(a):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     a.run_id = getattr(a, "run_id", None) or (a.pod_name[len("agent-"):] if a.pod_name
                                               else f"{a.agent}-{uuid.uuid4().hex[:8]}")
@@ -14697,6 +14727,8 @@ def launch(argv, floor_by=None):
                           "log_dir": str(a.log_dir.expanduser().resolve()) if a.log_dir else None,
                           "gui": gui_config(a), "audio": getattr(a, "audio", None), "gui_wayland": a.gui_wayland,
                           "tmux": a.tmux, "session": a.session,
+                          # the bridge its preset proposes (made only once it runs, after you confirm it)
+                          "preset_bridge": getattr(a, "preset_bridge", None),
                           "name": a.start_name, "project_name": project_label(a), "detachable": detachable(a),
                           "keep": a.keep_home,
                           "allow_tcp": [f"{addr}:{port}" for addr, port in tcp_targets(a)],

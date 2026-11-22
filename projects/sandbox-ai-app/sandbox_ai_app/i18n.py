@@ -54,6 +54,22 @@ def tr(key, **values):
 
 
 TEXTS = {
+    # == The bridge check of 2026-11-22: every click on New bridge… shows something ==
+    'The sessions that run are being read: New bridge… opens once they are.': {
+        'en': 'The sessions that run are being read: New bridge… opens once they are.',
+        'de': 'Die laufenden Sitzungen werden gelesen: Neue Brücke… öffnet sich, sobald sie gelesen sind.'},
+    'Checking the bridge {a} → {b} (sandbox-ai bridge add --dry-run)…': {
+        'en': 'Checking the bridge {a} → {b} (sandbox-ai bridge add --dry-run)…',
+        'de': 'Die Brücke {a} → {b} wird geprüft (sandbox-ai bridge add --dry-run)…'},
+    'Making the bridge {a} → {b} (sandbox-ai bridge add)…': {
+        'en': 'Making the bridge {a} → {b} (sandbox-ai bridge add)…',
+        'de': 'Die Brücke {a} → {b} wird gebaut (sandbox-ai bridge add)…'},
+    'This did not work: {error}': {
+        'en': 'This did not work: {error}',
+        'de': 'Das hat nicht geklappt: {error}'},
+    'What the bridges do now': {
+        'en': 'What the bridges do now',
+        'de': 'Was die Brücken gerade tun'},
     # == The app's audit before the 2026-11-21 release ==
     'Select a schedule first.': {
         'en': 'Select a schedule first.',
@@ -2396,6 +2412,9 @@ TEXTS = {
     'Not a preset of sandbox-ai.': {
         'en': 'Not a preset of sandbox-ai.',
         'de': 'Keine Vorlage von sandbox-ai.'},
+    'The preset proposes a bridge this app cannot take.': {
+        'en': 'The preset proposes a bridge this app cannot take.',
+        'de': 'Die Vorlage schlägt eine Brücke vor, die diese App nicht übernehmen kann.'},
     'Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset {name} there brings it.': {
         'en': 'Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset {name} there brings it.',
         'de': 'Sein Regelwerk {file} ist eine Datei auf {host}: Es ist nicht auf diesem Board; ein Start mit --preset {name} dort bringt es mit.'},
@@ -6099,9 +6118,6 @@ TEXTS = {
     'Checking for a newer sandbox-ai…': {
         'en': 'Checking for a newer sandbox-ai…',
         'de': 'Es wird nach einem neueren sandbox-ai gesucht…'},
-    'No update information (offline, or not installed with install.sh).': {
-        'en': 'No update information (offline, or not installed with install.sh).',
-        'de': 'Keine Update-Information (offline oder nicht mit install.sh installiert).'},
     'No terminal': {
         'en': 'No terminal',
         'de': 'Kein Terminal'},
@@ -19699,6 +19715,47 @@ TEXTS = {
     'Update checks are off (Settings › Updates).': {
         'en': 'Update checks are off (Settings › Updates).',
         'de': 'Update-Prüfungen sind aus (Einstellungen › Updates).'},
+    'No update information: {why}': {
+        'en': 'No update information: {why}',
+        'de': 'Keine Update-Information: {why}'},
+    'its signature is BAD': {
+        'en': 'its signature is BAD',
+        'de': 'seine Signatur ist UNGÜLTIG'},
+    'it is not signed': {
+        'en': 'it is not signed',
+        'de': 'es ist nicht signiert'},
+    'it is not signed by a trusted key': {
+        'en': 'it is not signed by a trusted key',
+        'de': 'es ist nicht von einem vertrauten Schlüssel signiert'},
+    'sandbox-ai {available} is there, but {why}: not offered': {
+        'en': 'sandbox-ai {available} is there, but {why}: not offered',
+        'de': 'sandbox-ai {available} ist da, aber {why}: nicht angeboten'},
+    'Each update must be signed by a release key this copy trusts; update --check shows the details.': {
+        'en': 'Each update must be signed by a release key this copy trusts; update --check shows the details.',
+        'de': ('Jedes Update muss von einem Release-Schlüssel signiert sein, dem diese Kopie vertraut; update -'
+              '-check zeigt die Einzelheiten.')},
+    'sandbox-ai {available} is available': {
+        'en': 'sandbox-ai {available} is available',
+        'de': 'sandbox-ai {available} ist verfügbar'},
+    'installed: {installed}; Update now… in the status line installs it, signed and checked': {
+        'en': 'installed: {installed}; Update now… in the status line installs it, signed and checked',
+        'de': ('installiert: {installed}; Jetzt aktualisieren… in der Statuszeile installiert es, signiert und '
+              'geprüft')},
+    'installed: {installed}; {way}': {
+        'en': 'installed: {installed}; {way}',
+        'de': 'installiert: {installed}; {way}'},
+    'see Settings › Updates': {
+        'en': 'see Settings › Updates',
+        'de': 'siehe Einstellungen › Updates'},
+    '{available} is there, but its signature is BAD: not offered': {
+        'en': '{available} is there, but its signature is BAD: not offered',
+        'de': '{available} ist da, aber seine Signatur ist UNGÜLTIG: nicht angeboten'},
+    '{available} is there, but it is not signed (no SHA256SUMS.sig): not offered': {
+        'en': '{available} is there, but it is not signed (no SHA256SUMS.sig): not offered',
+        'de': '{available} ist da, aber nicht signiert (keine SHA256SUMS.sig): nicht angeboten'},
+    'up to date ({installed}; the newest release is {available})': {
+        'en': 'up to date ({installed}; the newest release is {available})',
+        'de': 'aktuell ({installed}; das neueste Release ist {available})'},
     "What the agents on this machine have set up themselves, read only: skills, commands, prompts, subagents, memory and instructions files, auto memory - and their hooks, plugins, marketplaces and MCP servers, shown only. Select parts (Ctrl, Shift for several) and import them into a kit of yours or into a project's memory; nothing is imported otherwise.": {
         'en': "What the agents on this machine have set up themselves, read only: skills, commands, prompts, subagents, memory and instructions files, auto memory - and their hooks, plugins, marketplaces and MCP servers, shown only. Select parts (Ctrl, Shift for several) and import them into a kit of yours or into a project's memory; nothing is imported otherwise.",
         'de': 'Was die Agenten auf diesem Rechner selbst eingerichtet haben, nur gelesen: Skills, Befehle, Prompts, Subagenten, Gedächtnis- und Anweisungsdateien, Auto-Memory - und ihre Hooks, Plugins, Marktplätze und MCP-Server, nur angezeigt. Wählen Sie Teile aus (Strg, Umschalt für mehrere) und importieren Sie sie in ein eigenes Kit oder ins Gedächtnis eines Projekts; sonst wird nichts importiert.'},

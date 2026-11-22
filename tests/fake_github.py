@@ -345,6 +345,13 @@ class FakeGitHub:
             self.add_file(release, name, content)
         return release
 
+    def publish_recorded(self, document, files):
+        """A release as GitHub's releases API answered it (DOCUMENT, a recorded copy, served as it is for
+        releases/latest and releases/tags/TAG) with FILES ({name: bytes or a path}) behind its download links."""
+        release = self.publish(str(document["tag_name"]).lstrip("v"), files)
+        release["recorded"] = document
+        return release
+
     def newest(self):
         published = [release for release in self.releases.values() if not release["draft"] and
                      not release["prerelease"]]
@@ -365,6 +372,8 @@ class FakeGitHub:
                                         f"{release['tag']}/{name}"}
 
     def document(self, release):
+        if release.get("recorded") is not None:
+            return release["recorded"]
         return {"id": release["id"], "tag_name": release["tag"], "name": f"sandbox-ai {release['tag'].lstrip('v')}",
                 "draft": release["draft"], "prerelease": release["prerelease"], "body": release["body"],
                 "html_url": f"https://github.com/{self.owner}/{self.repo}/releases/tag/{release['tag']}",

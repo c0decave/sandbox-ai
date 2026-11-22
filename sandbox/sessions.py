@@ -1396,6 +1396,10 @@ def start(a, argv):
         if created and not (session_dir(key) / "session.json").exists():
             shutil.rmtree(session_dir(key), ignore_errors=True)
         raise
+    if created and not result and getattr(a, "preset_bridge", None):
+        # The bridge its preset proposes: the new session is up, before this terminal attaches to it (asked here, made
+        # on the human's yes; said as a command without a terminal). Never for a session that was there already.
+        launcher().propose_preset_bridge(a, load(key).get("name") or key)
     # Attached after the lock is released: stop/pause from another terminal must work meanwhile.
     return result if result else attach_if_terminal(key)
 

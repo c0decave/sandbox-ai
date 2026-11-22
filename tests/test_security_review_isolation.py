@@ -366,6 +366,8 @@ def test_the_proxy_drops_every_capability_set_and_is_held_to_it(monkeypatch):
         monkeypatch.setattr(rt.os, name, lambda *args, n=name: calls.append(n))
     libc = Mock()
     libc.prctl.side_effect = lambda *args: calls.append(("prctl", args[0], args[1])) or 0
+    libc.capget.return_value = 0
+    libc.capset.side_effect = lambda *args: calls.append("capset") or 0
     monkeypatch.setattr(rt.ctypes, "CDLL", lambda *a, **kw: libc)
     confined = []
     monkeypatch.setattr(rt, "proxy_confined", confined.append)
@@ -375,7 +377,10 @@ def test_the_proxy_drops_every_capability_set_and_is_held_to_it(monkeypatch):
     dropped = [call[2] for call in calls if isinstance(call, tuple) and call[1] == 24]
     assert dropped == list(range(64))  # PR_CAPBSET_DROP for every capability there can be
     rest = calls[64:]
-    assert rest == ["setgroups", "setresgid", "setresuid", ("prctl", 4, 0), ("prctl", 38, 1)]
+    # the ambient and inheritable sets emptied before the user (setresuid leaves the inheritable one: bubblewrap 0.13
+    # hands it over full - live check 2026-11-22)
+    assert rest == [("prctl", 47, 4), "capset", "setgroups", "setresgid", "setresuid", ("prctl", 4, 0),
+                    ("prctl", 38, 1)]
     assert confined == [settings]
     # a loaded file (the launcher, a test) is never confined
     monkeypatch.setattr(rt, "SANDBOX_PROCESS", False)

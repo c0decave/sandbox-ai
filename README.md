@@ -286,7 +286,7 @@ checked and installed in the background), Roll back…, then **Restart the app**
 | `sandbox-ai.app` (macOS) | the app, or `/Applications/sandbox-ai.app/Contents/MacOS/sandbox-ai update` | `sandbox-ai-arm64.dmg` or `sandbox-ai-x86_64.dmg` (the app in it replaces `sandbox-ai.app`) | the same |
 | pip, pipx | `sandbox-ai update` (the app too) | `sandbox_ai_app-X.Y.Z-py3-none-any.whl`, installed with the environment's own pip | `update --rollback` installs the release before again |
 | another host | `sandbox-ai hosts update NAME` runs that host's own update | what its kind downloads | on the host |
-| a git checkout (not installed) | `git pull` | nothing | git |
+| a git checkout (not installed) | `git pull` (`./sandbox-ai update --check` shows the newest release) | nothing | git |
 
 `sandbox-ai update --check` only looks; `--version X.Y.Z` takes that release; `--install` is what the app's Install
 now… runs (download, check, install - never while a sandbox or session runs, unless `--while-running`). A new
@@ -409,7 +409,7 @@ Updates; the web interface: the Doctor page; another host: `sandbox-ai hosts upd
 | Mode | Does |
 |---|---|
 | `off` | nothing is checked unless asked (`sandbox-ai update --check`, the app's Check for updates) |
-| `notify` (the default) | a check once a day; a newer release signed by a trusted key is announced: a desktop notification, the app's status line, one line on the command line (at most once a day, on standard error, never with `--json` or in a pipe) and the notify channels' event `update` |
+| `notify` (the default) | a check once a day; a newer release signed by a trusted key is announced: a desktop notification, the app's status line (with Update now… where the copy replaces itself) and one notification in the app per version, one line on the command line (at most once a day, on standard error, never with `--json` or in a pipe) and the notify channels' event `update`. The app asks every hour whether the day's check is due, so one that runs for days sees a new release too. A newer release whose `SHA256SUMS` no trusted key signed is not offered, and the app's status line says why (its signature is bad, it is not signed); a check that failed says why on the System page and in Settings > Updates (offline, GitHub's rate limit) |
 | `download` | also downloads it and checks it in full (`SHA256SUMS` and its signature by a trusted key; `install.sh --fetch`): `sandbox-ai update --apply` or the app's Install now installs it, nothing is switched before |
 | `auto` | also installs it, in its window (`--at HH:MM[-HH:MM]`, default `03:00-05:00` local time) and only while no sandbox, session, MCP server or scheduled run of this installation runs or is due within the hour (a paused or kept one is fine); otherwise it waits for the next window and says so. Afterwards a notification names the old and the new version and the release notes |
 
@@ -1639,7 +1639,7 @@ sections, each preset's title and description in German too):
 
 | Category | Presets |
 |---|---|
-| Development | `development` (Python and JavaScript), `coding-memory`, `rust`, `go`, `jvm` (Java, Kotlin), `dotnet`, `database-services` (PostgreSQL and Redis beside the agent), `web-frontend` (Playwright), `infrastructure` (Terraform, OpenTofu), `dependency-upgrade`, `data-ml`, `android-development` (Android apps with Kotlin, Jetpack Compose, the NDK and CMake: the image variant `android-dev`, the Gradle and Google Maven hosts, the host's adb server or a USB device, `/dev/kvm` for the emulator), `axross-mcp-server` (axross's file tools on a folder of yours and on the SFTP connections saved in axross, as the MCP server axross; writes asked first) |
+| Development | `development` (Python and JavaScript), `coding-memory`, `rust`, `go`, `jvm` (Java, Kotlin), `dotnet`, `database-services` (PostgreSQL and Redis beside the agent), `web-frontend` (Playwright), `infrastructure` (Terraform, OpenTofu), `dependency-upgrade`, `data-ml`, `android-development` (Android apps with Kotlin, Jetpack Compose, the NDK and CMake: the image variant `android-dev`, the Gradle and Google Maven hosts, the host's adb server or a USB device, `/dev/kvm` for the emulator), `axross-mcp-server` (axross's file tools on a folder of yours and on the SFTP connections saved in axross, as the MCP server axross; writes asked first), `pair-reviewer` (a reviewer beside a running coding session: reads its code read-only and asks its agent through a session bridge, writes its review into its own workspace) |
 | Research & web | `research-memory` |
 | Local LLMs | `local-api` for any OpenAI-compatible server, `ollama`, `lm-studio`, `llama-cpp`, `vllm`, `cairn-local-llm` (Cairn's board, its workers Claude Code on your model) (`--llm NAME[:MODEL] --no-provider-defaults`; Claude Code only with a server that has the Anthropic Messages API) |
 | Security analysis | `code-audit` (read-only review), `observer` (watches another running session through a session bridge and alerts you), `pentest-lab` (one machine of yours, exactly its ports), `cairn-pentest-board` (Cairn's board with Claude Code and Codex as its workers, one machine of yours), `android-debugging` (an APK taken apart and watched while it runs: jadx, CFR, smali and Frida as MCP servers, the image variant `android` with adb, apktool, smali, jadx and Frida, the adb server of your host) |
@@ -1647,7 +1647,7 @@ sections, each preset's title and description in German too):
 | Hardware & devices | `hardware-analysis`, `firmware-iot`, `mobile-android` (an app's APK and a device through the host's adb server), `android-debugging` (listed under Security analysis: the full Android setup), `android-development` (listed under Development: building apps, the emulator) |
 | Network | `network-analysis` |
 | Privacy & anonymity | `tor` (everything through a Tor profile of `sandbox-ai vpn add NAME --tor`, `--dns` for `.onion` names), `paranoid` (the mode paranoid, no memory, kits or plugins, every decoy) |
-| Writing & docs | `docs-writer`, `docs-lie-detector`, `onboarding-buddy` |
+| Writing & docs | `docs-writer`, `docs-lie-detector`, `onboarding-buddy`, `docs-from-code` (documents the code of a running session it reads read-only through a session bridge; may send it a note) |
 | Learning, games & demos | `time-capsule`, `mini-ctf`, `archivist-1995`, `radio-sandbox-ai`, `agent-race`, `pixel-art-factory`, `sand-chess`; the showcases `showcase` (folders, a local port, one remote address, a web host), `showcase-full-stack` (PostgreSQL and nginx as services, Django and JavaScript), `showcase-vpn` (a VPN profile and the kill switch), `showcase-local-llm` (a model of yours with its sampling and the loop guard), `showcase-second-opinion` (another agent as a helper) |
 | Testing sandbox-ai | `sandbox-ai-tests` (its own test suites), `commit-censor`, `chaos-monkey`, `canary-course`, `network-maze`, `memory-hog` |
 
@@ -1655,6 +1655,39 @@ A preset of yours names one of these ids as its `"category"` (the older
 `simple`, `analysis` and `media` are still taken, listed under Other, Security
 analysis and Learning); `"translations": {"de": {"title": ..., "description":
 ...}}` gives its title and description in German.
+
+**Presets with a bridge.** A preset may propose a [session bridge](#a-bridge-between-two-running-sessions)
+between its start and another running session: `observer` (watch, alerts only), `pair-reviewer` (ask, and read
+below a folder of the other workspace: `--preset-value code=src`, default all of it) and `docs-from-code`
+(message, and read the same way). Each is for Claude Code, the one agent that takes an MCP server while it runs
+(another agent of a preset of yours is told it would not see the bridge). The preset only proposes: nothing is
+made until its own start runs, and then only on your yes. A session start asks in its terminal once the session is
+up, before it attaches - which running session to join (a list of this machine's, or `HOST:NAME`; or given before
+with `--preset-value peer=NAME`), with what `bridge add --dry-run` warns about (data flowing to a less restricted
+session above all) - and your yes runs `bridge add` itself. Without a terminal (a script, a schedule), or for a
+start in the foreground (`--no-tmux`), the start says the exact command instead
+(`sandbox-ai bridge add rev web --allow ask,files:ro:src --ask first`). A restart or resume never proposes it again,
+and a project file cannot carry one. `presets show` lists the bridge part, `presets check` the command; the app's
+Board gets a Bridge part for it (its other session chosen there, made by the Board's own flow once the start runs),
+and the web interface's start form offers the host's running sessions for it.
+
+```bash
+sandbox-ai claude --preset pair-reviewer --preset-value coder=web --preset-value code=src
+# once it is up: "bridge this start (rev) to web with ask,files:ro:src? [y/N]"
+```
+
+In a preset of yours (`~/.config/sandbox-ai/presets`), with every part `bridge add` takes:
+
+```json
+"values": {"peer": {"label": "The session to watch", "kind": "session", "optional": true}},
+"bridge": {"peer": "{peer}", "allow": ["watch", "files:ro:src"], "direction": "out", "both": false,
+           "ask": "first", "observer_actions": ["alert", "pause"], "limits": {"rate": 30}, "until": "8h"}
+```
+
+`peer` is a value of kind `session`, never fixed in the file (no default); `direction` `out` (this start reaches
+the peer, the default) or `in` (the peer reaches it); paths are relative to the peer's workspace (a `{value}` of kind
+text may stand in one), never `..` or `.git`; `until` is a duration or `HH:MM`, never a date; `"ask": "never"`
+only in a preset of yours.
 
 **Showcases.** Each `showcase-*` preset shows one thing a start can combine and
 has the agent check it and write a short report into the workspace
@@ -5190,6 +5223,17 @@ half ends it. It ends when this machine shuts down; both hosts need sandbox-ai 0
 (HOST:ID for one made on another host); `bridge show|revoke|resume HOST:ID` act there. The app's Bridges box and its
 Board's Bridge part (the other session grouped by host, named as the board's host sees it: `NAME` on that host,
 `local:NAME` this machine's, `HOST:NAME` another's) and the web interface's Bridges page do the same.
+
+In the app, Sandboxes & sessions › Bridges › New bridge… opens the dialog whenever two sessions run here or you have
+hosts; with fewer it says how many run and what a bridge needs; before the page has read what runs it says so and opens
+the dialog once it has; an error says what failed. The launcher's check (`bridge add --dry-run`) and the add are
+said on the box while they run ("Checking the bridge A → B…", "Making the bridge A → B…"), then its warnings are
+asked about and the outcome said. The live check `bridge-live` ([docs/LIVE_CHECK.md](docs/LIVE_CHECK.md)) bridges two
+real sessions on your machine and makes the same bridge through the app.
+
+**From a preset.** A preset may propose a bridge for its start (`observer`, `pair-reviewer`, `docs-from-code`):
+once the start runs, its terminal asks, with these warnings, and your yes runs `bridge add`; without a terminal the
+command is said ([Presets with a bridge](#presets)).
 
 ### Servers from an MCP catalog
 

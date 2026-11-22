@@ -1802,13 +1802,14 @@ def test_open_project_folder_reviews_before_it_trusts(window, env, monkeypatch):
 
 
 def test_update_notice(window, wait):
-    window.update_checked(0, "installed: 0.9.0 (/x)\navailable: 0.10.1 (https://example.org)\n", "")
+    window.update_checked(0, "installed: 0.9.0 (/x)\navailable: 0.10.1 (https://example.org)\nsignature: good, by "
+                             "the trusted key SHA256:x\n", "")
     assert "0.10.1 is available" in window.system.update_text.text() and "0.10.1" in window.update_label.text()
     assert not window.update_notice.isHidden()  # in the status line (Update now… where the copy can: test_self_update)
     window.update_checked(0, "installed: 0.10.1 (/x)\navailable: 0.10.1 (https://example.org)\n", "")
     assert "up to date" in window.system.update_text.text() and window.update_notice.isHidden()
     window.update_checked(1, "", "sandbox-ai update: this copy was not installed by install.sh")
-    assert "No update information" in window.system.update_text.text()
+    assert window.system.update_text.text() == "No update information: this copy was not installed by install.sh"
     # The real command, asynchronously: the window is not blocked while it runs.
     began = time.monotonic()
     window.check_updates()

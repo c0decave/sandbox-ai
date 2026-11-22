@@ -44,9 +44,17 @@ def result_text(result):
     if result.get("newer"):
         return tr("{available} is available (installed: {installed}), signed by a trusted key",
                   available=printable(result.get("available")), installed=printable(result.get("installed")))
+    available = printable(result.get("available"))
     if backend.newer(result.get("available"), result.get("installed")):
-        return tr("{available} is there, but not signed by a trusted key: not offered",
-                  available=printable(result.get("available")))
+        if result.get("signature") == "bad":
+            return tr("{available} is there, but its signature is BAD: not offered", available=available)
+        if result.get("signature") == "none":
+            return tr("{available} is there, but it is not signed (no SHA256SUMS.sig): not offered",
+                      available=available)
+        return tr("{available} is there, but not signed by a trusted key: not offered", available=available)
+    if result.get("available"):
+        return tr("up to date ({installed}; the newest release is {available})",
+                  installed=printable(result.get("installed")), available=available)
     return tr("up to date ({installed})", installed=printable(result.get("installed")))
 
 
@@ -209,6 +217,8 @@ class UpdatesPanel(QWidget):
         status, out, err = result if error is None else (1, "", printable_text(error))
         self.status.setText(tr("Checked.") if status == 0 else
                             printable_text(((err or out).strip().splitlines() or [tr("Failed.")])[-1])[-300:])
+        if error is None and self.main_window is not None and hasattr(self.main_window, "update_checked"):
+            self.main_window.update_checked(status, out, err)  # (the window's status line follows: Update now…)
         self.refresh()
 
     def install_now(self):

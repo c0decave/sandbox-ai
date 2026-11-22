@@ -198,6 +198,37 @@ def test_the_refusal_names_what_runs():
     assert backend.update_busy_reasons(1, BUSY) == [] and backend.update_busy_reasons(3, "other") == []
 
 
+def test_check_now_shows_what_it_found_here_and_in_the_windows_status_line(qapp, wait):
+    """Check now in Settings › Updates: its state says it, and the window's status line follows at once (Update
+    now… there) - not only at the app's next start."""
+    found = []
+    window = SimpleNamespace(update_checked=lambda status, out, err: found.append((status, out, err)))
+    sai = FakeSai(status(last_check=None, result=None))
+    panel = updates_view.UpdatesPanel(sai, window=window)
+    assert wait(lambda: panel.data is not None)
+    panel.check_now()
+    assert wait(lambda: found == [(0, "installed: 1.0.0\navailable: 9.9.9\n", "")])
+    assert sai.calls == [("check",)] and panel.status.text() == "Checked."
+
+
+@pytest.mark.parametrize("result, said", [
+    ({"available": "9.9.9", "installed": "1.0.0", "signature": "good", "newer": True},
+     "9.9.9 is available (installed: 1.0.0), signed by a trusted key"),
+    ({"available": "9.9.9", "installed": "1.0.0", "signature": "bad", "newer": False},
+     "9.9.9 is there, but its signature is BAD: not offered"),
+    ({"available": "9.9.9", "installed": "1.0.0", "signature": "none", "newer": False},
+     "9.9.9 is there, but it is not signed (no SHA256SUMS.sig): not offered"),
+    ({"available": "9.9.9", "installed": "1.0.0", "signature": "unchecked", "newer": False},
+     "9.9.9 is there, but not signed by a trusted key: not offered"),
+    ({"available": "0.1.188", "installed": "0.1.198", "signature": "good", "newer": False},
+     "up to date (0.1.198; the newest release is 0.1.188)"),
+    ({"error": "api.github.com limits the requests to its API (HTTP 403); try again after 10:15"},
+     "failed: api.github.com limits the requests to its API (HTTP 403); try again after 10:15"),
+])
+def test_the_last_check_in_words(result, said):
+    assert updates_view.result_text(result) == said
+
+
 def test_the_settings_have_an_updates_tab(qapp, monkeypatch):
     from sandbox_ai_app import help_texts, settings
     monkeypatch.setattr(updates_view.UpdatesPanel, "refresh", lambda self: None)

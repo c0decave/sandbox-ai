@@ -1237,10 +1237,11 @@ def signature_line(result, trusted):
 
 
 def package_check(info, source, out):
-    """`sandbox-ai update --check` of a package or a pip installation: the lines install.sh --check prints, and what
-    it found kept as the last check (update mode, the app, the command line's hint)."""
+    """`sandbox-ai update --check` of a package, a pip installation or a git checkout: the lines install.sh --check
+    prints, and what it found kept as the last check (update mode, the app, the command line's hint)."""
     installed = own_version()
-    where = packages().target(info)[0] or WHAT.get(flavour(info), info["kind"])
+    where = f"a git checkout, {info['tree']}" if info["kind"] == "checkout" else \
+        packages().target(info)[0] or WHAT.get(flavour(info), info["kind"])
     out(f"installed: {installed} ({where})")
     found = packages().check(source)
     result = {"time": now(), "installed": installed, "source": source, **found,

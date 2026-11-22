@@ -14,7 +14,8 @@ from sandbox_ai_app import backend, widgets  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
-NEWER = "installed: 0.9.0 (/x)\navailable: 0.10.1 (https://example.org)\n"
+# (`update --check` says the signature too: only a release signed by a trusted key is offered)
+NEWER = "installed: 0.9.0 (/x)\navailable: 0.10.1 (https://example.org)\nsignature: good, by the trusted key SHA256:x\n"
 
 
 def installation(root, version="0.9.0"):
@@ -254,6 +255,8 @@ def test_update_now_asks_and_runs_in_a_terminal(window, monkeypatch):
     monkeypatch.setattr(window, "in_terminal", lambda argv, title, ended=None: runs.append((argv, title, ended)) or True)
     route(monkeypatch, "user")
     window.update_checked(0, NEWER, "")
+    assert [told[0] for told in window.notified] == ["sandbox-ai 0.10.1 is available"]  # (told once)
+    window.notified.clear()
     widgets.AUTO_ANSWER = False  # Cancel: nothing runs
     window.update_now()
     assert runs == [] and "from 0.9.0 to 0.10.1" in widgets.SHOWN[-1][1]
@@ -345,3 +348,98 @@ def test_restart_quits_the_usual_way_then_starts_the_app_again(window, monkeypat
     assert window.started == [["/data/current/sandbox-ai-app", f"--wait-for-pid={os.getpid()}"]]
     window.start_again()
     assert len(window.started) == 1
+
+
+# -- that a newer release is there: seen (user 2026-11-22: "i get info in app that there is an update") ---------------
+
+KEY = "SHA256:4Of0GsID4w0KNilg2VbymVRcyopNJbbq7K1P1qXg+Ug"
+# What `sandbox-ai update --check` printed for a .pyz of 0.1.180 against the real GitHub release 0.1.188 (2026-11-22).
+OLDER_CHECK = ("installed: 0.1.180 (/home/u/bin/sandbox-ai.pyz)\n"
+               "available: 0.1.188 (https://github.com/c0decave/sandbox-ai)\n"
+               f"signature: good, by the trusted key {KEY}\n"
+               f"trusted keys: {KEY} (this copy's sandbox/release-signers)\n"
+               "update: sandbox-ai update (it replaces this copy; the version before is kept: sandbox-ai update "
+               "--rollback)\n")
+CURRENT_CHECK = OLDER_CHECK.replace("installed: 0.1.180", "installed: 0.1.188")
+
+
+def test_a_newer_signed_release_is_in_the_status_line_and_notified_once(window, monkeypatch):
+    route(monkeypatch, "self", "/home/u/bin/sandbox-ai.pyz")
+    window.update_checked(0, OLDER_CHECK, "")
+    assert window.update_label.text() == "sandbox-ai 0.1.188 is available (installed: 0.1.180)"
+    assert not window.update_notice.isHidden() and not window.update_now_button.isHidden()
+    (title, text, level, action), = window.notified
+    assert title == "sandbox-ai 0.1.188 is available" and "installed: 0.1.180" in text and level == "info"
+    assert action == ("Update now…", window.update_now)
+    window.update_checked(0, OLDER_CHECK, "")  # the next check (the next day, the next start): not told again
+    assert len(window.notified) == 1 and not window.update_now_button.isHidden()
+    window.update_checked(0, CURRENT_CHECK, "")
+    assert window.update_notice.isHidden() and "sandbox-ai 0.1.188 is up to date" in window.update_said
+    assert len(window.notified) == 1, "nothing told when it is up to date"
+
+
+def test_a_newer_release_for_a_copy_that_cannot_replace_itself_is_told_with_the_way(window, monkeypatch):
+    route(monkeypatch, "checkout", "/home/u/src/sandbox-ai")
+    window.update_checked(0, OLDER_CHECK, "")
+    assert window.update_now_button.isHidden() and "0.1.188 is available" in window.update_label.text()
+    (title, text, level, action), = window.notified
+    assert "0.1.188 is available" in title and "git pull" in text and action is None
+    assert "<p" not in text, "plain text, not the tooltip's markup"
+
+
+@pytest.mark.parametrize("line, said", [
+    ("signature: BAD: the signature does not match SHA256SUMS (Signature verification failed: incorrect signature)",
+     "its signature is BAD"),
+    ("signature: BAD: not signed by a trusted release key", "its signature is BAD"),
+    ("signature: none (the release has no SHA256SUMS.sig)", "it is not signed"),
+    ("signature: not checked: no release key is trusted yet", "it is not signed by a trusted key"),
+])
+def test_a_newer_release_that_is_not_signed_by_a_trusted_key_is_never_offered(line, said, window, monkeypatch):
+    """What `update --check` found for a release whose SHA256SUMS was changed or has no signature (a local fake of
+    the real 0.1.188, 2026-11-22): the status line says why it is not offered; no Update now…, no notification."""
+    route(monkeypatch, "self", "/home/u/bin/sandbox-ai.pyz")
+    window.update_checked(0, OLDER_CHECK.replace(f"signature: good, by the trusted key {KEY}", line), "")
+    assert window.update_now_button.isHidden() and not window.actions["self-update"].isEnabled()
+    assert window.update_label.text() == f"sandbox-ai 0.1.188 is there, but {said}: not offered"
+    assert not window.update_notice.isHidden() and window.notified == []
+    unsigned = NEWER.replace("signature: good, by the trusted key SHA256:x\n", "")
+    window.update_checked(0, unsigned, "")  # (a check without a signature line - an older sandbox-ai's: not offered)
+    assert window.update_now_button.isHidden()
+
+
+@pytest.mark.parametrize("err, said", [
+    ("sandbox-ai update: api.github.com limits the requests to its API (HTTP 403); try again after 10:15; GitHub "
+     "allows 60 API requests an hour per address without a token: SANDBOX_AI_TOKEN with any token (no scopes needed "
+     "for a public repository) raises that to 5000",
+     "No update information: api.github.com limits the requests to its API (HTTP 403)"),
+    ("sandbox-ai update: cannot reach api.github.com: [Errno 111] Connection refused",
+     "No update information: cannot reach api.github.com: [Errno 111] Connection refused"),
+    ("install.sh: cannot reach api.github.com: [Errno -3] Temporary failure in name resolution",
+     "No update information: cannot reach api.github.com"),
+])
+def test_a_check_that_failed_says_why(err, said, window, monkeypatch):
+    route(monkeypatch, "self", "/home/u/bin/sandbox-ai.pyz")
+    window.update_checked(1, "installed: 0.1.180 (/home/u/bin/sandbox-ai.pyz)\n", err)
+    assert window.update_said.startswith(said) and window.notified == []
+
+
+def test_the_check_is_asked_again_while_the_app_runs(window, monkeypatch):
+    """notify's check once a day also when the app runs for days: the window asks every hour whether it is due (the
+    update mode's last check), as at its start."""
+    from sandbox_ai_app import ui
+    assert ui.UPDATE_EVERY_SECONDS == 3600
+    asked, checks = [], []
+    monkeypatch.setattr(window, "start_update_check", lambda: asked.append(1))
+    window.update_timer.timeout.emit()
+    assert asked == [1]
+    monkeypatch.setattr(window, "check_updates", lambda: checks.append(1))
+    day = 1_800_000_000
+    data = {"mode": "notify", "installed": "0.1.180", "last_check": day, "result": {
+        "installed": "0.1.180", "available": "0.1.188", "signature": "good", "signer": KEY, "newer": True}}
+    window.update_clock = lambda: day + 3600
+    window.update_mode_read(data, None)
+    assert checks == [] and "0.1.188 is available" in window.update_label.text()
+    assert len(window.notified) == 1, "the last check's newer release is told (once)"
+    window.update_clock = lambda: day + 86400 + 60
+    window.update_mode_read(data, None)
+    assert checks == [1] and len(window.notified) == 1

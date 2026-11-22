@@ -8,7 +8,7 @@ they are carried out, what a hostile agent on either side must not be able to do
 Status: the same-host core is built (`sandbox/bridge.py`, `sandbox-ai bridge add|list|show|revoke|resume`), and so
 is the bridge across hosts (section 9: `sandbox/bridge_remote.py`, `sandbox-ai bridge-stub`), the observer's
 terminal snapshot (section 5.5) and the app's part (the Bridges box and New bridge… on the Sandboxes page, with the
-sessions of the user's hosts as HOST:NAME; a Board part; an observer preset). Since 0.1.98 both sessions may run on
+sessions of the user's hosts as HOST:NAME; a Board part; presets that propose a bridge, section 11). Since 0.1.98 both sessions may run on
 other hosts (section 9.7): two of one host are bridged there, two of two other hosts each get their half on their own
 host and this machine relays the frames between them; the web interface lists, makes, revokes and resumes bridges
 too.
@@ -427,7 +427,25 @@ that crosses passes through this machine's memory (never its disk); this machine
 over the same SSH connections, so that exposes nothing new. Hops: a relayed bridge is one bridge (the relay carries
 no run); exposure crosses as in 9.5, the runs named by their hosts' identities.
 
-## 10. CLI
+## 10. How it is tested
+
+- `tests/test_bridge.py`, `test_bridge_remote.py`, `test_bridge_relay.py`: the grant, the walker, limits, hostile
+  agents and hostile halves, with registered runs (real supervisor control sockets and MCP relays) and brokers in
+  threads.
+- `tests/test_bridge_e2e_processes.py`: the same runs, everything else in processes of its own - the broker
+  `bridge add` starts, each agent's MCP client (`runtime.py --internal-mcp-bridge` on its relay), the human's
+  `sandbox-ai approvals` and `bridge list|show`, and across hosts the other hosts' halves (`bridge-stub`) reached
+  through a stand-in `ssh` (each host this machine with its own state): message, ask (answered and timed out), files:ro and
+  files:rw (asked, the diff shown, allowed and denied), watch and the observer's actions, the limits, a kill switch and
+  a canary suspending it until `resume`, a session's end, `--until`, both directions, revoke; made on the other host
+  and relayed between two.
+- The live check `bridge-live` (`scripts/live_check.sh`, docs/LIVE_CHECK.md): two real sessions (Podman and
+  Bubblewrap), each call made inside the sandbox through its real relay, and the app's New bridge… between them.
+- The app: `projects/sandbox-ai-app/tests/test_bridge_clicks_app.py` clicks New bridge… in the real window in every
+  state of the Sandboxes page (no session, one, two, only on hosts, a slow host, a host that answers garbage, still
+  reading, an error, German, after a page switch, the right click) and goes through the real dialog and question.
+
+## 11. CLI
 
 ```
 sandbox-ai bridge add A B --allow CAP[,CAP...] [--both] [--until T] [--ask each|first|never]
@@ -443,3 +461,33 @@ sandbox-ai bridge-stub ID            the other host's half of a bridge across ho
 `--until`: `30m`, `2h`, `1d`, `HH:MM` (today, or tomorrow when passed) or an ISO time. `--limit`: `rate=N` (calls
 per minute and side), `size=BYTES` (one message, question or answer), `ask-timeout=S`, `daily=BYTES` (volume per
 day), sizes with k/m suffixes.
+
+## 11. Presets that propose a bridge
+
+A preset may carry a `"bridge"` section (`sandbox/presets.py`: `bridge_problems`, `bridge_proposal`,
+`propose_bridge`): the parts of `bridge add` (`allow`, `both`, `ask`, `observer_actions`, `limits`, `until`, and
+`direction`: `out`, the start reaches the peer, or `in`) and a `peer` that must be a value of kind `session`. The
+built-in ones: `observer` (watch, alert), `pair-reviewer` (ask, files:ro below a folder the human gives) and
+`docs-from-code` (message, files:ro). What holds:
+
+- **A preset only proposes.** Nothing is made from the preset file: the proposal reaches the start
+  (`a.preset_bridge`, from `presets.apply` on the command line's `--preset`; never from a project file, a kept start,
+  a session's saved options or a restart), and a new session asks once it is up, before its terminal attaches
+  (`sessions.start` -> `propose_preset_bridge`): the peer (given with `--preset-value`, else picked from the running
+  sessions), then `bridge add --dry-run`'s warnings, then "[y/N]"; the yes runs `bridge.main(["add", ...])`, the very
+  code of the command, with every check of section 6. Anything else, an error or the end of input makes nothing and
+  says the command. Without a terminal, and for a start in the foreground (no session to ask once it is up), only the
+  exact command is said; `--yes` does not answer it.
+- **The peer is never fixed in the file**: a session value has no default and is the peer only (never an option, a
+  server, a path or the task's text); the human names it or picks it.
+- **Shape checks like the rest of a preset**: unknown keys refused, capabilities from the known set, paths relative to
+  the peer's workspace (no `..`, `.git`, control characters or commas; a `{value}` of kind text may stand in one and is
+  checked again once filled in), the limits' ranges and actions are bridge.py's own (a test keeps them equal),
+  `until` a duration or HH:MM (never a date a passed-on preset would outlive), `"ask": "never"` only in a preset of
+  the user's own.
+- **Agents**: only Claude Code takes an MCP server while it runs, so the built-in ones are for it; a start of another
+  agent whose side would get a tool of the bridge says so (`bridge_agent_note`), as the Board's `bridge_problems`.
+- **The app** turns the section into a Bridge part of the preset's board (peer left to choose; a path's value a
+  placeholder of the board), made by the Board's own flow once the start runs (its dry run and question). **The web
+  interface** starts with `--preset` in a terminal: the launcher asks there; the form offers the host's running
+  sessions for the value and says what is proposed.
