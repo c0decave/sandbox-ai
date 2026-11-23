@@ -269,7 +269,7 @@ def test_mcp_attach_live_named_codex_for_the_newer_agents(agent):
     title = tb.s.UNSWITCHABLE_TELEMETRY.get(agent) or {"hermes": "Hermes"}[agent]
     entry = m.live_agent(agent)
     for key in ("attach", "detach"):
-        text = entry[key].format(name="demo", start="web")
+        text = entry[key].format(name="demo", start="web", restart=m.restart_text({}, agent, "web"))
         assert title in text and "Codex" not in text and "sandbox-ai resume web --restart" in text, text
     assert entry["restart"] == "required"
     assert m.live_agent("claude") is m.LIVE_AGENTS["claude"] and m.live_agent("codex") is m.LIVE_AGENTS["codex"]

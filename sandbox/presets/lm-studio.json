@@ -32,7 +32,7 @@
   "notes": [
     "Register it once: sandbox-ai llm add lmstudio --kind lmstudio --url http://127.0.0.1:1234 (another address, --api-key-secret SECRET for a key, --vpn PROFILE for a server behind a VPN).",
     "Start its server: the Developer tab (Start Server), or lms server start (port 1234); load a model with tool calls and a context of 32k tokens or more.",
-    "OpenCode works with any LM Studio; Codex needs LM Studio 0.3.29 or later (Responses API), Claude Code 0.4.1 or later (Anthropic Messages API).",
+    "OpenCode needs the server's chat completions API (/v1/chat/completions); Codex needs LM Studio 0.3.29 or later (Responses API), Claude Code 0.4.1 or later (Anthropic Messages API).",
     "NAME:MODEL picks a model (sandbox-ai llm models NAME lists them); without it the server's default (llm add --model) or its only one. sandbox-ai llm check NAME --agent AGENT asks the server whether it has the API that agent needs.",
     "On this host's loopback (http://127.0.0.1:PORT) only with Podman: sandbox-ai opens that one port for the sandbox, and the server must listen on 127.0.0.1. In your LAN or tailnet: a private address, or https.",
     "The agent reaches nothing but the server (--no-provider-defaults): no cloud provider, its login is not copied in; the server's key stays with the connection proxy."

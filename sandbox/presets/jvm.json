@@ -3,11 +3,11 @@
   "version": 1,
   "id": "jvm",
   "title": "Java and Kotlin",
-  "description": "JVM projects with Maven or Gradle: Maven Central, the Gradle plugin portal and distributions, and GitHub open, everything else closed.",
+  "description": "JVM projects with Maven or Gradle: the JDK with Maven, Gradle and Kotlin mounted in; Maven Central, the Gradle plugin portal and distributions, and GitHub open, everything else closed.",
   "translations": {
     "de": {
       "title": "Java und Kotlin",
-      "description": "JVM-Projekte mit Maven oder Gradle: Maven Central, das Gradle-Plugin-Portal und die Gradle-Distributionen und GitHub offen, alles andere zu."
+      "description": "JVM-Projekte mit Maven oder Gradle: das JDK mit Maven, Gradle und Kotlin eingehängt; Maven Central, das Gradle-Plugin-Portal und die Gradle-Distributionen und GitHub offen, alles andere zu."
     }
   },
   "category": "development",
@@ -17,6 +17,8 @@
     "opencode"
   ],
   "options": [
+    "--toolchain",
+    "jdk",
     "--allow-github",
     "--allow-host",
     "repo.maven.apache.org",
@@ -34,8 +36,8 @@
     "12g"
   ],
   "notes": [
-    "The JDK with Maven, Gradle and Kotlin: from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox): sandbox-ai toolchain add jdk once, then --toolchain jdk on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN jdk. Its registries are the ones this preset opens.",
-    "Without it: the JDK and Maven in an image variant: sandbox-ai images new jvm --from claude, sandbox-ai images extend jvm --add-apt default-jdk-headless --add-apt maven, sandbox-ai build --variant jvm, then --image-variant jvm. Gradle comes from the project's wrapper (services.gradle.org).",
+    "The JDK (Java 21) with Maven, Gradle and Kotlin comes with the preset (--toolchain jdk): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add it (sandbox-ai toolchain add jdk: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "A project's Gradle wrapper fetches its own Gradle (services.gradle.org is open); another JDK: --toolchain jdk@VERSION of the store on the command line instead.",
     "Another repository (your company's, Google's for Android) needs its host: --allow-host NAME on the command line.",
     "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
   ]

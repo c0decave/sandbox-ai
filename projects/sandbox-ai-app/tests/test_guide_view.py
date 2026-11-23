@@ -286,7 +286,8 @@ def test_a_read_that_failed_is_read_again_and_a_build_for_another_board_starts_n
     while board.__dict__.get("preparing_contexts") and time.monotonic() < deadline:
         QtWidgets.QApplication.processEvents()
         time.sleep(0.01)
-    assert ran == [] and started == []
+    # (what the start lacks as its host's sandbox-ai says it, --fix-plan, is read with the rest: a read, nothing made)
+    assert [args for args in ran if args[-1:] != ("--fix-plan",)] == [] and started == []
 
 
 def test_a_preset_that_needs_only_what_is_made_elsewhere_prepares_nothing(window, monkeypatch):  # noqa: F811

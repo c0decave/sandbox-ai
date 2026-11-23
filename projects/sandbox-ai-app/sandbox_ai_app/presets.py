@@ -45,7 +45,9 @@ ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 REFUSED = ("--copy-auth", "--auth-file", "--auth-from-session", "--import-codex-auth", "--git-credentials", "--workspace",
            "--workspace-name", "--config", "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name",
            "--mcp-socket-dir", "--mcp-approvals-dir", "--start-id", "--helper-of", "--vpn-lent-by",
-           "--workspaces-as-given")
+           "--workspaces-as-given",
+           # (what a start lacks is fixed unasked only where the human said so: never by a preset passed on)
+           "--fix", "--fix-only", "--fix-plan")
 
 
 @dataclass(frozen=True)
@@ -92,9 +94,6 @@ class Preset:
     # and its title and description in other languages ({"de": {"title", "description"}}).
     group: str = ""
     translations: dict = field(default_factory=dict)
-    # sandbox-ai's presets that start something not live-tested yet: {"names"} (its launcher's one list,
-    # EXPERIMENTAL_PARTS, as `presets list --json` says it: "experimental"); empty for the rest. A badge only.
-    experimental: dict = field(default_factory=dict)
     # sandbox-ai's presets: (name, catalog entry) of the servers it names by their catalog (hub:binwalk): the Board adds
     # the missing ones from exactly that entry (a name in two catalogs is refused by `mcp add NAME`).
     mcp_entries: tuple = ()
@@ -103,6 +102,9 @@ class Preset:
     # part on the board for it, its other session left to choose: the Board's own flow makes it once the start runs,
     # after you confirm its warnings.
     bridge: dict = field(default_factory=dict)
+    # sandbox-ai's built-in presets: their last live result (sandbox-ai's presets.live_light: the live check's
+    # imported evidence, {light green|red, date, version, why, ...}), {} without one - then nothing is shown.
+    live: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.name:
@@ -508,9 +510,7 @@ def local_documents(sai):
         applog.swallowed("presets", "local_documents: an older sandbox-ai: no presets of its own", _exc)
         return [], []
     problems = []
-    badge = getattr(module, "experimental", None)  # (an older sandbox-ai: no badges)
-    return [{**document, **({"experimental": badge(document)} if badge and badge(document) else {})}
-            for document in module.catalog(problems).values()], problems
+    return list(module.catalog(problems).values()), problems
 
 
 def host_documents(sai, host):
@@ -971,6 +971,7 @@ def from_sandbox_ai(sai, document, host="local"):
                          name=str(document.get("id", ""))[:60])]
     origin = document.get("_origin") or document.get("origin")
     folder = document.get("_dir") or document.get("directory")
+    passed_on = passed_on_warnings(sai, document, origin, fill) if origin == "extra" else []
     converted = {
         "format": FORMAT, "version": 1, "id": "sai-" + str(document.get("id", ""))[:60],
         "title": str(document.get("title", ""))[:80], "description": str(document.get("description", ""))[:400],
@@ -988,7 +989,7 @@ def from_sandbox_ai(sai, document, host="local"):
                          for name, spec in values.items()],
         "notes": [str(note)[:1000] for note in (document.get("notes") or []) + (document.get("needs") or [])]
                  + ([tr("From the preset directory {path}", path=str(folder)[:900])]
-                    if origin == "extra" and isinstance(folder, str) else []) + rules_note}
+                    if origin == "extra" and isinstance(folder, str) else []) + passed_on + rules_note}
     checked = from_document(sai, converted)  # the task is checked with the arguments, then kept apart
     if origin != "yours":
         # The board starts its options as typed, without `--preset`: what sandbox-ai's --preset refuses in a preset
@@ -1002,25 +1003,59 @@ def from_sandbox_ai(sai, document, host="local"):
                                mcp_entries=tuple((server.split(":", 1)[1], server) for server in
                                                  map(str, document.get("mcp") or []) if MCP_ENTRY.fullmatch(server)),
                                group=sai_group(document), translations=sai_translations(document),
-                               experimental=experimental_of(document), bridge=sai_bridge(document, fill))
+                               bridge=sai_bridge(document, fill), live=sai_live(sai, document))
 
 
-def experimental_of(document):
-    """The badge of sandbox-ai's preset DOCUMENT ({"names"}: its "experimental", which that host's launcher derives
-    from its one list of what has not passed its live test yet), its names checked and bounded; {} for the rest."""
-    given = document.get("experimental")
-    if not isinstance(given, dict) or not isinstance(given.get("names"), list):
+def passed_on_warnings(sai, document, origin, fill):
+    """The notes of a preset of an extra directory (sandbox-ai's preset_warnings): it takes the place of a built-in
+    preset, and each secret of yours its options hand on, and where to. From `presets list --json` of another host
+    ("shadows", "secrets_handed_on"), this machine's from its module; none from a sandbox-ai that does not say them."""
+    notes, name = [], str(document.get("id", ""))[:60]
+    if (document.get("_shadows") or document.get("shadows")) == "built-in":
+        notes.append(tr("It takes the place of the built-in preset {name}: --preset {name} starts this one.",
+                        name=name))
+    handed = document.get("secrets_handed_on")
+    if handed is None and origin == "extra":
+        try:
+            handed = sai.module("presets").secret_destinations(document.get("options") or [])
+        except Exception as _exc:  # noqa: BLE001 - an older sandbox-ai: it says none
+            applog.swallowed("presets", "passed_on_warnings: an older sandbox-ai says none", _exc)
+            handed = []
+    for entry in handed if isinstance(handed, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("secret"), str) and isinstance(entry.get("option"), str):
+            notes.append(tr("Your secret {secret} is handed on by this preset ({option} {target}): whoever wrote it "
+                            "chose where.", secret=fill(entry["secret"])[:80], option=entry["option"][:40],
+                            target=fill(str(entry.get("target") or ""))[:200]))
+    return notes
+
+
+def sai_live(sai, document):
+    """The live light of sandbox-ai's preset DOCUMENT: "live" of `presets list --json` (another host), else this
+    machine's sandbox-ai's presets.live_light (an older one has none); {} for none, or for anything malformed."""
+    found = document.get("live", ...)
+    if found is ...:
+        try:
+            module = sai.module("presets") if sai is not None else None
+            found = module.live_light(document) if module is not None and hasattr(module, "live_light") else None
+        except Exception as _exc:  # noqa: BLE001 - an older or damaged evidence file: no light, nothing refused
+            applog.swallowed("presets", "sai_live: no live light", _exc)
+            found = None
+    if not isinstance(found, dict) or found.get("light") not in ("green", "red"):
         return {}
-    word = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
-    names = [name for name in given["names"] if isinstance(name, str) and word.fullmatch(name)][:10]
-    return {"names": names} if names else {}
+    return {key: printable(str(found.get(key) or ""))[:300] for key in ("light", "date", "version", "why")}
 
 
-def experimental_text(badge):
-    """BADGE (Preset.experimental) in the app's words: what has not passed its live test yet. A badge only."""
-    if not badge:
-        return ""
-    return tr("Not live-tested yet: {names}.", names=", ".join(badge["names"]))
+def live_text(preset):
+    """PRESET's live light in the app's words: "✓ Live check passed on 2026-11-23 (sandbox-ai 0.1.212)", "✗ Live
+    check failed on ... : REASON"; "" without one (no data yet: nothing is said)."""
+    live = getattr(preset, "live", None) or {}
+    if live.get("light") == "green":
+        return "✓ " + tr("Live check passed on {date} (sandbox-ai {version})", date=live["date"],
+                         version=live["version"])
+    if live.get("light") == "red":
+        return "✗ " + tr("Live check failed on {date} (sandbox-ai {version}): {why}", date=live["date"],
+                         version=live["version"], why=live["why"])
+    return ""
 
 
 # sandbox-ai's categories of earlier versions, and where they are listed now (its presets.LEGACY_CATEGORIES).

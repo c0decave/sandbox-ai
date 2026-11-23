@@ -396,16 +396,20 @@ def test_allow_dns_opens_port_53_of_the_nameservers_only(sandbox):
     status, lines = run_net(["allow", "--dns"])
     assert status == 0, lines
     rules = sandbox["applied"][-1]
+    mark = f"meta mark {net.launcher().RUNTIME.DNS_STUB_MARK:#x}"
     for server in net.launcher().DEFAULT_NAMESERVERS:
-        assert f"ip daddr {server} udp dport 53 accept" in rules and f"ip daddr {server} tcp dport 53 accept" in rules
+        # Only the DNS stub's questions (its mark) reach them: the agent asking them directly passes neither the
+        # stub's log nor its canary search.
+        assert f"{mark} ip daddr {server} udp dport 53 accept" in rules and f"tcp dport 53" not in rules
+        assert f"runtime ip daddr {server} udp dport 53" not in rules
     assert "dport 443" not in rules, "names resolve; their addresses stay closed"
     allow = json.loads(sandbox["allow"].read_text())
-    assert ["1.1.1.1", 53] in allow["tcp"], "DNS over TCP passes the proxy to them"
+    assert ["1.1.1.1", 53] not in allow["tcp"], "the agent's own DNS over TCP goes past the stub: not through the proxy"
     assert "--dns" in lines[-1] and "DNS (port 53)" in "\n".join(lines)
     status, lines = run_net(["show", "--json"])
     assert json.loads("\n".join(lines))["dns"] == sorted(net.launcher().DEFAULT_NAMESERVERS)
     assert run_net(["allow", "--nameserver", "9.9.9.9", "--nameserver", "2620:fe::fe"])[0] == 0
-    assert "ip6 daddr 2620:fe::fe udp dport 53 accept" in sandbox["applied"][-1]
+    assert f"{mark} ip6 daddr 2620:fe::fe udp dport 53 accept" in sandbox["applied"][-1]
     assert run_net(["revoke", "--dns"])[0] == 0
     rules = sandbox["applied"][-1]
     assert "1.1.1.1" not in rules and "9.9.9.9 udp dport 53" in rules
@@ -726,7 +730,7 @@ def test_a_git_login_given_during_the_run_wins_over_the_one_the_run_was_started_
                                      "token": started}]}
     sent = lambda: base64.b64decode(server.git_token(  # noqa: E731
         "https", "github.com", {"destination": "140.82.121.4:443"}, "POST", "/o/r.git/git-receive-pack",
-        "/o/r.git/git-receive-pack", []))
+        "/o/r.git/git-receive-pack", [["Content-Type", "application/x-git-receive-pack-request"]]))
     assert sent() == f"x-access-token:{started}".encode()
     assert run_net(["allow", "--git-token-env", "https://github.com=GH_PUSH"])[0] == 0
     assert sent() == f"x-access-token:{pushed}".encode(), "the login given during the run"

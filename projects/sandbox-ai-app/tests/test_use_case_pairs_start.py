@@ -117,7 +117,7 @@ def test_the_start_page_s_pair_sets_agent_and_model_and_says_another_agent(launc
     choose(launch.use_case_choice, "untrusted-input")
     pairs = launch.pair_list
     select(pairs, MID)
-    assert f"{MID} is measured best in OpenCode; in Claude Code: not tested" in pairs.note.text()
+    assert f"{MID} is measured best in OpenCode; in Claude Code: no data yet" in pairs.note.text()
     pairs.use_button.click()
     assert launch.agent.currentText() == "opencode"
     values = launch.form.values()

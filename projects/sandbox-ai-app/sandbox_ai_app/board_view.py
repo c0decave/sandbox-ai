@@ -319,11 +319,22 @@ CLIP_LIMIT = 256 * 1024  # bytes of copied parts read back at most (the clipboar
 BYPASS_OFFER = re.compile(r"--vpn-bypass-tcp ((?:\d{1,3}\.){3}\d{1,3}:\d{1,5})")
 
 class Snapshot(QUndoCommand):
-    """One change of the board: the state before and after it (redo restores after, undo before)."""
+    """One change of the board: the state before and after it (redo restores after, undo before). GESTURE (a number,
+    BoardPage.take_start): the steps of one gesture - a value typed letter by letter into a field or the command line
+    of the Expert view - are one step of Undo (Qt merges a step into the one before it with the same id)."""
 
-    def __init__(self, page, text, before, after):
+    def __init__(self, page, text, before, after, gesture=-1):
         super().__init__(text)
-        self.page, self.before, self.after = page, before, after
+        self.page, self.before, self.after, self.gesture = page, before, after, gesture
+
+    def id(self):
+        return self.gesture
+
+    def mergeWith(self, other):  # noqa: N802
+        if not isinstance(other, Snapshot) or other.gesture != self.gesture or self.gesture == -1:
+            return False
+        self.after = other.after
+        return True
 
     def before_state(self):
         return self.before
@@ -1299,6 +1310,10 @@ def summary(node, agent=None):
         parts += [part for value in list(props.get("--allow-domain", []))[:3]
                   for part in (B._domain(value), "*." + B._domain(value))]
         return ", ".join(parts) or tr("the agent's provider only")
+    if node.kind == "other":  # the options themselves, as the command line has them
+        import shlex
+        tokens = [str(token) for token in props.get("tokens") or []]
+        return printable(elide(shlex.join(tokens), 120)) if tokens else tr("none")
     shown = [f"{option} {value if not isinstance(value, (list, bool)) else ''}".strip()
              for option, value in props.items() if option.startswith("--") and value not in (None, "", [], False)]
     return printable(", ".join(shown)) if shown else tr("defaults")
@@ -1436,19 +1451,13 @@ class RulesEdit(QWidget):
 
 
 def fill_agent_combo(combo, sai, current="claude"):
-    """COMBO with sandbox-ai's agents, each with its name as data; one that has not passed its live test there (its
-    launcher's one list: sai.experimental_agent) is listed as “NAME (not live-tested yet)”, a badge only. CURRENT
-    chosen (choose_agent); read the choice with combo_agent."""
-    from . import presets as PR
+    """COMBO with sandbox-ai's agents, each with its name as data; CURRENT chosen (choose_agent); read the choice
+    with combo_agent."""
     combo.blockSignals(True)
     try:
         combo.clear()
         for agent in sai.agents:
-            badge = sai.experimental_agent(agent)
-            combo.addItem(tr("{agent} (not live-tested yet)", agent=agent) if badge else agent, agent)
-            if badge:
-                combo.setItemData(combo.count() - 1, safe_tooltip(PR.experimental_text(badge)),
-                                  Qt.ItemDataRole.ToolTipRole)
+            combo.addItem(agent, agent)
     finally:
         combo.blockSignals(False)
     choose_agent(combo, current)
@@ -1463,15 +1472,9 @@ def choose_agent(combo, agent):
 
 
 def combo_agent(combo):
-    """The agent chosen in COMBO (fill_agent_combo: its data, never the shown text with its badge)."""
+    """The agent chosen in COMBO (fill_agent_combo: its data)."""
     data = combo.currentData()
     return data if isinstance(data, str) and data else combo.currentText()
-
-
-def experimental_note(sai, agent):
-    """The words under an agent choice for AGENT: not live-tested yet in this sandbox-ai; "" for the rest."""
-    from . import presets as PR
-    return PR.experimental_text(sai.experimental_agent(agent))
 
 
 class HostCombo(QComboBox):
@@ -1533,6 +1536,12 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
     server_defaults = Signal(str, str, object)
     images_wanted = Signal()  # a start refused for a service's image: the Images page, Your images
     team_wanted = Signal(str, str)  # a Team part's "Open on the Teams page": the team's name and the board's host
+    # The board shown changed (a part, a setting, Undo, another project's board, another host): the Expert view of the
+    # Start page shows the same start (start_link.py); and what is wrong with it was worked out again (the board's own
+    # findings, then the launcher's verdict).
+    board_changed = Signal()
+    findings_changed = Signal()
+    noticed = Signal(str, str)  # a note about the board (show_notice): its text and role, "" when it is taken back
 
     def __init__(self, sai, terminal, settings=None):
         super().__init__()
@@ -1677,6 +1686,12 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.cli_button.setText(tr("CLI command"))
         self.cli_button.setToolTip(tr("Show the sandbox-ai command this board starts (to copy it into a terminal)"))
         self.cli_button.toggled.connect(lambda on: self.show_cli(on))
+        # Copy command: the board's start as a command line on the clipboard (the Expert view shows and edits it).
+        self.copy_button = QToolButton()
+        self.copy_button.setText(tr("Copy command"))
+        self.copy_button.setToolTip(tr("Copy the command line of this board's start (to run it in a terminal); the "
+                                       "Expert view shows it and takes a line typed or pasted"))
+        self.copy_button.clicked.connect(lambda _=False: self.copy_command())
         # The project and its folder are named at the top of the window (its project chooser): not again here, the
         # row keeps its room for the buttons. (self.folder is still the board's record of its folder.)
         # What belongs together wraps together (user 2026-11-18): Undo with Redo, the zoom buttons, and Arrange beside
@@ -1684,7 +1699,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         layout.addWidget(flow(open_button, new_button, save, save_preset, export_button, import_button, wizard_button,
                               self.change_folder_button, widgets.together(undo, redo),
                               widgets.together(zoom_out, zoom_in), widgets.together(arrange, fit), self.cli_button,
-                              self.score_button))
+                              self.copy_button, self.score_button))
         # The board's notes (a project file not trusted yet, placeholders to fill in, restored changes) go to the
         # window's log window, one place for every message; the last one is kept here (not shown).
         # (Not in a layout, so given the page as their parent: a widget of no parent whose signal holds the page
@@ -1868,6 +1883,24 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         save.activated.connect(lambda: self.save_board())
         self.edit_node, self.edit_index = None, 0  # the part whose properties are open, and Undo's index then
 
+    def command_text(self):
+        """The command line of the board's start, as Copy command copies it: a team's `sandbox-ai team start ...` with a
+        Team part, else the start of its sandbox (B.start_argv) - on another host as this machine's shell starts it
+        there (sandbox-ai hosts run HOST -- ...)."""
+        from . import start_link
+        if B.team_node(self.board) is not None:
+            return B.command_line(self.sai, self.board)
+        agent, argv, agent_args = B.start_argv(self.sai, self.board)
+        return start_link.command_text(agent, argv, agent_args, self.host())
+
+    def copy_command(self):
+        """Copy command: the board's command line onto the clipboard, said in a short notice."""
+        self.commit_edits()
+        text = self.command_text()
+        QApplication.clipboard().setText(text)
+        short_notice(self, tr("Command line"), tr("Copied: {command}", command=printable(text)[:300]))
+        return text
+
     def show_cli(self, shown):
         """CLI command: the command line of the board under it (SHOWN) or not; kept in the app's state."""
         self.preview.setVisible(bool(shown))
@@ -1941,7 +1974,26 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.undo.clear()
         self.show_notice("")
         self.discard_button.hide()
+        # Every board that arrives here - new, from a preset, a file, a project, another host - is arranged and centred
+        # first (the user 2026-11-23: "wenn man aufs Board wechselt oder ein neues Board lädt, egal woher, immer erst
+        # anordnen und zentrieren"): laid out on the grid, no step of the Undo history, not a change to apply.
+        self.board.layout(self.grid())
         self.rebuild()
+        self.centre_soon()
+
+    def centre_soon(self):
+        """The whole board in view once the view has its size (now, if it is shown; else when it is)."""
+        if self.isVisible():
+            QTimer.singleShot(0, self, self.fit)  # (with the page as its context: not run once it went)
+        else:
+            self.fitted = False
+
+    def arrange_quietly(self):
+        """Arrange and centre without a step of the Undo history and without a change to apply: what showing the
+        Board does (arrange() is the human's, which Undo takes back)."""
+        self.board.layout(self.grid())
+        self.rebuild()
+        self.centre_soon()
 
     def dirty(self):
         """True while the board has changes that are not applied (written to .sandbox-ai.json)."""
@@ -2047,6 +2099,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             level = {"notice-error": "ERROR", "notice-warn": "WARNING"}.get(role, "INFO")
             applog.log(level, "board", text)
         self.logged_notice = text
+        self.noticed.emit(text, role)
 
     def restore(self, state):
         """The board as STATE says (a step of Undo or Redo): its parts updated where they are when only their
@@ -2075,8 +2128,8 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.refresh()
         self.inspect_timer.start()
 
-    def change(self, text, function):
-        """Apply FUNCTION to the model as one undo step."""
+    def change(self, text, function, gesture=-1):
+        """Apply FUNCTION to the model as one undo step (GESTURE: Snapshot)."""
         before = self.board.state()
         try:
             function()
@@ -2085,7 +2138,70 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             return
         after = self.board.state()
         if after != before:
-            self.undo.push(Snapshot(self, text, before, after))
+            self.undo.push(Snapshot(self, text, before, after, gesture))
+
+    # -- one start, two views: what the Expert view (or a command line) says, put onto this board --
+
+    GESTURE_SECONDS = 1.5  # edits of one field no further apart are one step of Undo
+
+    def gesture(self, source):
+        """The number of the gesture an edit from SOURCE (a field's name, "line") belongs to: the one before it when
+        that was from the same source a moment ago and is still the last step of Undo, else a new one."""
+        now = time.monotonic()
+        last = self.__dict__.get("last_gesture")
+        if source and last is not None and last[0] == source and last[3] is self.undo and \
+                last[4] == self.undo.index() and now - last[2] <= self.GESTURE_SECONDS:
+            number = last[1]
+        else:
+            number = self.__dict__["gesture_serial"] = self.__dict__.get("gesture_serial", 0) + 1
+        self.last_gesture = [source, number, now, self.undo, self.undo.index()]
+        return number
+
+    def seed_start(self, directory, agent, argv, agent_args=()):
+        """The board of the project DIRECTORY as the start AGENT ARGV -- AGENT_ARGS (what a session of the project that
+        runs was started with), when the board shown is that project's and has nothing of its own: no project file it
+        was read from, no change, no draft. Its base, not a change (nothing to undo or to apply). True if taken."""
+        key = self.key_of(directory)
+        source = self.sources.get(key) or {}
+        if not key or key != self.key_of(self.directory) or self.undo.count() or not self.undo.isClean() \
+                or source.get("digest") is not None or self.untrusted.get(key) or agent not in self.sai.agents:
+            return False
+        try:
+            board = B.from_argv(self.sai, agent, list(argv), list(agent_args), workspaces=[str(directory)])
+            B.Board.checked(board.state(), self.sai, self.policy())
+        except Exception as exc:  # noqa: BLE001 - a session's record this app cannot show: the board stays
+            applog.log("INFO", "board", f"the options a session of {printable(directory)} was started with are not "
+                                        f"shown: {applog.error_text(exc)}")
+            return False
+        if B.start_argv(self.sai, board) == B.start_argv(self.sai, self.board):
+            return False
+        board.layout(self.grid())
+        board.place(B.read_layout(directory))
+        notice = (self.notice.text(), self.notice.property("role"))
+        self.set_board(board, directory)
+        self.fit()
+        self.show_notice(notice[0], notice[1] or "secondary")
+        return True
+
+    def take_start(self, agent, argv, agent_args=(), source=None):
+        """The start AGENT ARGV -- AGENT_ARGS on this board (B.with_start: every part that is there stays where it
+        is), as one step of Undo - edits of one SOURCE in a row as one. True if the board changed."""
+        board = B.with_start(self.sai, self.board, agent, list(argv), list(agent_args))
+        state = board.state()
+        if state == self.board.state():
+            return False
+        for node in board.nodes:  # (parts made for the line: on the grid, as parts added by hand are)
+            if self.board.node(node.id) is None:
+                node.x, node.y = B.snap(node.x, self.grid()), B.snap(node.y, self.grid())
+        state = board.state()
+        number = self.gesture(source) if source else -1
+
+        def put():
+            self.board = B.Board.from_state(state)
+        self.change(tr("Change the start"), put, number)
+        if source and self.__dict__.get("last_gesture"):
+            self.last_gesture[4] = self.undo.index()
+        return True
 
     def changeEvent(self, event):  # noqa: N802
         """A new theme: nodes, edges and the canvas are drawn again in its colours - once, however many
@@ -2168,6 +2284,8 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             props = {"--browser": "chromium"}  # on the board: a browser (for you, until you choose otherwise)
         if kind == "cairn" and not props:
             props = {"--cairn": True}  # on the board: Cairn's board, the session's agents its workers
+        if kind == "artex" and not props:
+            props = {"--artex": True}  # on the board: ARTEX beside the agent, its console on this computer
         if kind == "team" and not props:  # the board's agent leads, one more member beside it (the least of a team)
             agent = self.board.first("agent")
             lead = agent.props.get("agent", "claude") if agent is not None else "claude"
@@ -2487,13 +2605,17 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.fit()
 
     def showEvent(self, event):  # noqa: N802
-        """Shown the first time: the whole board in view (it is laid out before the view has a size). The hosts are
-        read again (one added on the Hosts page meanwhile)."""
+        """Shown (switched to): arranged and centred (arrange_quietly); the window only coming back from the taskbar
+        keeps where its parts are. The hosts are read again (one added on the Hosts page meanwhile)."""
         self.host_choice.reload()
         super().showEvent(event)
+        self.look_at_agent_image()
         if getattr(self, "restyle_pending", False):
             self.restyle()
-        if not getattr(self, "fitted", False):
+        if not event.spontaneous():  # switched to (not the window coming back from the taskbar): arranged and centred
+            self.fitted = True
+            self.arrange_quietly()
+        elif not getattr(self, "fitted", False):
             self.fitted = True
             QTimer.singleShot(0, self, self.fit)  # (with the page as its context: not run once it went)
 
@@ -2869,6 +2991,9 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.problems = problems
         self.verdict.setText(tr("The launcher checks the options…"))
         self.check_timer.start(self.check_delay())
+        self.look_at_agent_image()  # (its agent's image, in the background: Start only reads the answer)
+        self.board_changed.emit()
+        self.findings_changed.emit()
 
     def fill_findings(self):
         """The board's findings (B.problems, the badges) and what the launcher's last check of this very board refused
@@ -2974,6 +3099,12 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         if plan is None and error is None and not found and (message or "").strip():
             last = [line.strip() for line in str(message).splitlines() if line.strip()][-1]
             refusal = printable(re.sub(r"^(?:agent-sandbox|sandbox-ai): ", "", last))[:800]
+        # Another host whose sandbox-ai does not know an option yet (the user 2026-11-23: "unrecognized arguments:
+        # --toolchain rust" from an older host): said as the update to do, never argparse's usage.
+        too_old = self.too_old(host if host is not None else self.host(), message) if plan is None and error is None \
+            else None
+        if too_old:
+            refusal = too_old
         if silent:  # (Start says it, after one more try - not a terminal tab that only shows ssh failing)
             refusal = tr("{host} does not answer: {message}", host=printable(host),
                          message=printable_text(" ".join((message or "").split()))[-600:])
@@ -3006,6 +3137,9 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                                  whole=tr("{host} does not answer: {message}", host=printable(host),
                                           message=whole[-20000:]))
             self.verdict.setProperty("role", "notice-error")
+        elif too_old:
+            self.verdict.setText(too_old, whole=too_old + "\n\n" + printable_text((message or "").strip())[-20000:])
+            self.verdict.setProperty("role", "notice-error")
         else:
             # One line here (cut to the room it has); its lines whole in the tooltip and the window of the whole text.
             whole = printable_text((message or "").strip())
@@ -3033,6 +3167,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.verdict.style().unpolish(self.verdict)
         self.verdict.style().polish(self.verdict)
         self.launcher_ok = plan is not None
+        self.findings_changed.emit()
         then, self.after_check = getattr(self, "after_check", None), None
         if then is not None:  # a Start that waited for this verdict (start: checked again first)
             then()
@@ -3215,8 +3350,10 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             self.inspector_request()
 
     def veil_also(self):
-        """What a dialog of the Board veils besides the page: its panels (in docks of the window)."""
-        return [self.parts_panel, self.side, self.findings_panel]
+        """What a dialog of the Board veils besides the page: its panels (in docks of the window), and the Expert view
+        of the same start (other_view: the Start page's other view, start_link.StartLink)."""
+        other = self.__dict__.get("other_view")
+        return [self.parts_panel, self.side, self.findings_panel, *([other] if other is not None else [])]
 
     def fold_inspector(self):
         """Esc or a click on the empty canvas: the inspector's panel folds to its strip if it is docked and unfolded
@@ -3452,21 +3589,15 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             agent = QComboBox()
             agent.setAccessibleName(tr("Agent"))
             fill_agent_combo(agent, self.sai, node.props.get("agent", "claude"))
-            # An agent not live-tested yet says so below the choice (a badge only: it starts like any other).
-            experimental = plain_label(experimental_note(self.sai, combo_agent(agent)), role="secondary")
 
-            def agent_chosen(_index, combo=agent, note=experimental):
+            def agent_chosen(_index, combo=agent):
                 chosen = combo_agent(combo)
-                note.setText(experimental_note(self.sai, chosen))
-                note.setVisible(bool(note.text()))
                 node_ = self.board.node(node_id)
                 if node_ is not None and node_.props.get("agent") != chosen:
                     # (what only the agent before took goes along: one step of Undo)
                     self.change(tr("Change {name}", name=tr("Agent")), lambda: B.switch_agent(node_.props, chosen))
             agent.currentIndexChanged.connect(agent_chosen)
             self.inspector.addRow(tr("Agent"), agent)
-            self.inspector.addRow("", experimental)
-            experimental.setVisible(bool(experimental.text()))  # (in its place first: never a window of its own)
             self.llm_server_row(node)
             self.use_case_row()
             self.model_row(node)
@@ -3536,6 +3667,8 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             self.kit_rows(node)
         elif kind == "home":
             self.login_rows(node)
+        elif kind == "other":
+            self.other_rows(node)
         elif kind == "approvals" and isinstance(node.props.get("rules"), dict):
             rules = QPlainTextEdit(json.dumps(node.props["rules"], indent=1))
             rules.setReadOnly(True)
@@ -3650,17 +3783,16 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         combo.setAccessibleName(tr("Login from"))
         for key, title in B.LOGIN_CHOICES:
             combo.addItem(tr(title), key)
-        model = combo.model()
         if central is False:  # nothing stored: the automatic choice is this computer's own
-            model.item(combo.findData("central")).setEnabled(False)
-            model.item(combo.findData("central")).setToolTip(safe_tooltip(tr(
+            widgets.set_row_enabled(combo, combo.findData("central"), False)
+            widgets.set_row_tip(combo, combo.findData("central"), tr(
                 "No central {agent} login is stored on this host: sandbox-ai login {agent} (Credentials page, Agent "
-                "logins) keeps one", agent=agent)))
+                "logins) keeps one", agent=agent))
         elif central is True:  # a stored one is what the automatic choice takes
-            model.item(combo.findData("host")).setEnabled(False)
-            model.item(combo.findData("host")).setToolTip(safe_tooltip(tr(
+            widgets.set_row_enabled(combo, combo.findData("host"), False)
+            widgets.set_row_tip(combo, combo.findData("host"), tr(
                 "A central {agent} login is stored: sandboxes get it instead of this computer's own (sandbox-ai login "
-                "{agent} --logout forgets it)", agent=agent)))
+                "{agent} --logout forgets it)", agent=agent))
         combo.setCurrentIndex(max(0, combo.findData(choice)))
 
         def chosen(_index):
@@ -3846,7 +3978,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             if host == (None if board_host == LOCAL else board_host):
                 title += " " + tr("(the board's host)")
             peer.addItem(title)
-            peer.model().item(peer.count() - 1).setEnabled(False)  # (a heading, not a choice)
+            widgets.set_row_enabled(peer, peer.count() - 1, False)  # (a heading, not a choice)
             for value, entry in entries:
                 peer.addItem(f"  {printable(value)} ({printable(entry.get('agent') or '?')})", value)
         asking = sorted(h for h in self.host_sessions_asking if h)
@@ -4540,7 +4672,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
 
         def note(words, tooltip=None):
             combo.addItem(words, None)
-            combo.model().item(combo.count() - 1).setEnabled(False)
+            widgets.set_row_enabled(combo, combo.count() - 1, False)
             if tooltip:
                 combo.setItemData(combo.count() - 1, safe_tooltip(tooltip), Qt.ItemDataRole.ToolTipRole)
         rows = getattr(self, "user_images", None)
@@ -5541,6 +5673,54 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.inspector.addRow("", note)
         return note
 
+    def other_rows(self, node):
+        """The part Other options: its options in one field, as a shell reads them (quotes around a value with
+        spaces). Taken when the field is left or Enter is pressed - whole, or not at all with the reason below it; an
+        option another part owns moves to that part (the board's start is put together again from its command line)."""
+        import shlex
+        edit = QLineEdit(shlex.join(str(token) for token in node.props.get("tokens") or []))
+        edit.setFont(MONO)
+        edit.setAccessibleName(tr("Other options"))
+        edit.setPlaceholderText(tr("e.g. --mode high --name night"))
+        edit.setToolTip(safe_tooltip(tr("Options of the start that no other part shows, as on the command line. An "
+                                        "option another part owns moves to that part.")))
+        said = plain_label(role="notice-error", selectable=True)
+        said.setAccessibleName(tr("Why the options are not taken"))
+        said.hide()
+        self.other_edit, self.other_said = edit, said
+        self.inspector.addRow(tr("Options"), edit)
+        self.inspector.addRow("", said)
+
+        def take():
+            problem = self.set_other(edit.text())
+            said.setText(problem or "")
+            said.setVisible(bool(problem))
+        edit.editingFinished.connect(take)
+        self.inspector.addRow("", explanation(tr(
+            "The Expert view of this page has a field for every option, and the whole command line.")))
+
+    def set_other(self, text):
+        """The options TEXT (one line, as a shell reads it) as the board's other options: the whole start is read
+        again with them, so each lands where it belongs. None when taken (or nothing changed), else why not - nothing
+        is taken then."""
+        import shlex
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            return tr("The options cannot be read: a quotation mark is not closed")
+        if tokens == [str(token) for token in self.board.extra]:
+            return None
+        if "--" in tokens:
+            return tr("-- ends the options: the agent's own arguments belong to the part Agent")
+        agent, argv, agent_args = B.start_argv(self.sai, self.board)
+        kept = argv[:len(argv) - len(backend.without_retired(self.board.extra))] if self.board.extra else argv
+        try:
+            B.parse_command(self.sai, shlex.join([agent, *kept, *tokens]), known=self.board.extra)
+        except ValueError as exc:
+            return printable_text(exc)
+        self.take_start(agent, kept + tokens, agent_args)
+        return None
+
     def text_row(self, node, key, label, placeholder):
         edit = QLineEdit(str(node.props.get(key, "") or ""))
         edit.setPlaceholderText(placeholder)
@@ -5570,7 +5750,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                                                                                else str(option.default)))
             for index, item in enumerate(items):
                 if item and item in self.forbidden.get(long, set()):
-                    widget.model().item(index).setEnabled(False)
+                    widgets.set_row_enabled(widget, index, False)
             if long == "--ask":  # the value, not the words shown
                 widget.currentIndexChanged.connect(lambda _i, box=widget: self.set_prop(
                     node_id, long, "" if box.currentText() == str(option.default) else box.currentText()))
@@ -5639,6 +5819,10 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             if long in backend.LIST_OPTIONS:  # (the option's own help, with how several are given)
                 widget.setToolTip(safe_tooltip(f"{option.help}\n{tr('One or more per line, separated by commas or spaces')}"))
             widget.changed.connect(lambda values: self.set_prop(node_id, long, values))
+        elif long == "--cairn-workers":  # each harness with its traffic light as Cairn's worker (cairn_workers.py)
+            from .cairn_workers_view import CairnWorkersField
+            widget = CairnWorkersField(self.sai, "" if value is None else str(value), placeholder=option.metavar or "")
+            widget.changed.connect(lambda text: self.set_prop(node_id, long, text.strip()))
         elif long in VALUE_NAMES:  # what that host has to choose from (its VPN profiles, variants ...), any other typed
             widget = NameField(VALUE_NAMES[long], self.sai, self.host(), placeholder=option.metavar or "")
             widget.setText("" if value is None else str(value))
@@ -5716,9 +5900,22 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             return self.toolchain_suggestions
         return None
 
+    def too_old(self, host, message):
+        """The update to do when HOST (another machine) refused the start's options as an older sandbox-ai does
+        (argparse: "unrecognized arguments: --toolchain rust"), naming the options it does not know; else None."""
+        if host in (None, "local"):
+            return None
+        match = re.search(r"unrecognized arguments: (.*)", str(message or ""))
+        if not match:
+            return None
+        options = [word for word in match.group(1).split() if word.startswith("-")]
+        agent = B.values(self.board)[0] if self.board is not None else "AGENT"
+        return str(backend.HostTooOld(host, (agent,), options or [match.group(1).strip()[:80]]))
+
     def toolchain_suggestions(self, fill):
-        """FILL with the toolchains of the board's host: those in its store (sandbox-ai toolchain list there), then
-        the signed catalog's others (a start needs them added first: said with each)."""
+        """FILL with the toolchains of the board's host, every version: those in its store (sandbox-ai toolchain list
+        there), then the signed catalog's others (a start needs them added first: said with each). The value is what
+        --toolchain takes for it (jdk, jdk@17)."""
         host = self.host()
 
         def read():
@@ -5730,12 +5927,12 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             if error is not None:
                 fill([], tr("Could not be read: {error}", error=printable_text(str(error))[-200:]))
                 return
-            items = [(tr("{name} {version} (in the store)", name=row["name"], version=row["version"]), row["name"])
-                     for row in result["installed"]]
-            have = {row["name"] for row in result["installed"]}
-            items += [(tr("{name} {version} (add it first: sandbox-ai toolchain add {name})", name=row["name"],
-                          version=row["version"]), row["name"])
-                      for row in result["catalog"] if row["name"] not in have]
+            # every version: those in the store, then the catalog's others (jdk 17.0.21+9 as jdk@17)
+            items = [(tr("{name} {version} (in the store)", name=choice["name"], version=choice["version"])
+                      if choice["stored"] else
+                      tr("{name} {version} (add it first: sandbox-ai toolchain add {value})", name=choice["name"],
+                         version=choice["version"], value=choice["value"]), choice["value"])
+                     for choice in backend.toolchain_choices(result)]
             fill(items, None if items else tr("No toolchain in the store or the catalog ({problem})",
                                               problem=result.get("problem") or tr("the catalog is empty")))
         background(read, owner=self, timeout=90, done=found)
@@ -7132,6 +7329,34 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
     def prerequisite_own_servers(self):
         return set(B.project_servers(self.board))
 
+    def prerequisite_apply_options(self, add, remove):
+        """A way to start chosen in the prerequisites' question (the launcher's plan: an agent beside the lead for
+        --with claude, the Cairn part's workers for --cairn-workers): the board's start line changed so and put
+        onto the board's own parts (take_start: an agent part made, the Cairn part's workers set - one step of
+        Undo), as an edit of its Expert line would. False with a Team part (the members' options are the team's) or
+        when the board does not take the line as asked; the ways are then said instead."""
+        from .prerequisites import changed_options
+        if B.team_node(self.board) is not None:
+            return False
+        try:
+            agent, argv, agent_args = B.start_argv(self.sai, self.board)
+            wanted = changed_options(argv, add, remove)
+            serial = self.board.serial
+            if self.take_start(agent, wanted, agent_args):
+                # (the same start, changed as chosen: what it is about stays - its preparation goes on with it)
+                self.board.serial = serial
+            now = B.start_argv(self.sai, self.board)[1]
+        except Exception as exc:  # noqa: BLE001 - not applied: the ways are said
+            applog.log("WARNING", "board", f"the chosen way to start ({' '.join(add)}) was not put onto the board: "
+                                           f"{applog.error_text(exc)}")
+            return False
+        words = [piece for word in map(str, now) for part in (word.split("=", 1) if word.startswith("--") else [word])
+                 for piece in ([part] if part.startswith("--") else part.split(","))]  # (--with a,b: each its word)
+        applied = all(word in words for word in add) and (bool(add) or not any(word in words for word in remove))
+        applog.log("INFO", "board", f"the chosen way to start put onto the board: {' '.join(add) or '-'}"
+                   + ("" if applied else " - not as asked: the ways are said"))
+        return applied
+
     def prerequisite_workspace(self, host, argv):
         """The start's workspace when it is a folder of HOST: on another host not this machine's project folder (the
         board of a project here with that host chosen), which is no folder there to offer an MCP server."""
@@ -7437,13 +7662,15 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             return
         short_notice(self, tr("Project configuration"), tr("Written and trusted: {path}", path=printable(result)))
 
-    def dry_run(self):
+    def dry_run(self, also=None):
+        """The launcher's plan of the board (a dry run on its host), shown when it is there. ALSO: another button that
+        asked for it (the Expert view's Dry run: the same check of the same start), waiting with the board's own."""
         agent, _, _ = B.values(self.board)
         self.read_host_options(self.host(), agent, now=True)  # on demand, also after a failed read
         asked = self.dry_run_asked()
         background(self.sai.host_dry_run, self.host(), agent,
                    B.check_argv(self.sai, self.board, local=self.host() == LOCAL), owner=self,
-                   source=self.dry_button, timeout=120,
+                   source=[self.dry_button, *([also] if also is not None else [])], timeout=120,
                    done=lambda result, error: self.dry_run_done(result, error, asked))
 
     def dry_run_asked(self):
@@ -7765,10 +7992,11 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                       for widening in PT.option_warnings(self.sai, self.board.extra)]
         return lines
 
-    def run_start(self, options, embedded, session):
+    def run_start(self, options, embedded, session, rechecked=False):
         """Run the start in a terminal; a failure to start it is a message, never an exception in a slot. The Bridge
         parts are made once it runs (here or on the board's host): it is named for them (its session's name, the
-        board's --name, or one given here)."""
+        board's --name, or one given here). Options the host's launcher did not take when it was last read are asked
+        of it once more first (RECHECKED: that was done): it may have been updated since."""
         try:
             agent, _, agent_args = B.values(self.board, self.sai)
             host = self.host()
@@ -7788,6 +8016,21 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                 if not known:  # not read yet, or the read failed: asked again now, for the next start and the verdict
                     self.read_host_options(host, agent, now=True)
                 unknown = backend.unknown_options(self.sai.options(), options, known) if known else []
+                if unknown and not rechecked:
+                    # What was read may be from before an update there (user report 2026-11-23: coding-101 just
+                    # updated, --toolchain refused): asked once more, then the start goes on - or is refused.
+                    self.host_known.pop((host, agent), None)
+                    self.host_reading.add((host, agent))
+
+                    def again(found, error):
+                        self.host_options_read(host, agent, found, error)
+                        self.run_start(options, embedded, session, rechecked=True)
+                    self.show_notice(tr("Asking {host} once more which options it takes…", host=printable(host)))
+                    getattr(self.sai, "forget_host_options", lambda name: None)(host)  # (kept by the backend too)
+                    background(self.sai.host_launch_options, host, agent, timeout=90,
+                               what=f"reading again which options the sandbox-ai on {host} takes for {agent}",
+                               done=again)
+                    return True
                 if unknown:
                     warn(self, tr("Not started"), tr("The sandbox-ai on {host} does not know these options: {list}. "
                                                      "Take them off the board, or update sandbox-ai there.",

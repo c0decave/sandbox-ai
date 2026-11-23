@@ -8,9 +8,26 @@
   --radius: 8px; --font: Inter, Cantarell, "Noto Sans", "Segoe UI", Ubuntu, "DejaVu Sans", sans-serif;
   --size: 14px; --mono: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
 }
+/* The fonts that come with sandbox-ai (web/fonts, the same as the desktop app's; fonts.json says where from): the
+   help's text in Atkinson Hyperlegible Next and its commands in Atkinson Hyperlegible Mono, and the reading fonts
+   the header's Fonts panel offers for the whole page. Served from this page only. */
+@font-face { font-family: "Atkinson Hyperlegible Next"; font-weight: 400; font-style: normal; font-display: swap;
+  src: url("fonts/AtkinsonHyperlegibleNext-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Atkinson Hyperlegible Next"; font-weight: 700; font-style: normal; font-display: swap;
+  src: url("fonts/AtkinsonHyperlegibleNext-Bold.woff2") format("woff2"); }
+@font-face { font-family: "Atkinson Hyperlegible Mono"; font-weight: 400; font-style: normal; font-display: swap;
+  src: url("fonts/AtkinsonHyperlegibleMono-Regular.woff2") format("woff2"); }
+@font-face { font-family: "OpenDyslexic"; font-weight: 400; font-style: normal; font-display: swap;
+  src: url("fonts/OpenDyslexic-Regular.woff2") format("woff2"); }
+@font-face { font-family: "OpenDyslexic"; font-weight: 700; font-style: normal; font-display: swap;
+  src: url("fonts/OpenDyslexic-Bold.woff2") format("woff2"); }
+@font-face { font-family: "Lexend"; font-weight: 400; font-style: normal; font-display: swap;
+  src: url("fonts/Lexend-Regular.woff2") format("woff2"); }
+@font-face { font-family: "Lexend"; font-weight: 700; font-style: normal; font-display: swap;
+  src: url("fonts/Lexend-Bold.woff2") format("woff2"); }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
-body { background: var(--window); color: var(--text); font: var(--size)/1.45 var(--font); }
+body { background: var(--window); color: var(--text); font: var(--size)/1.45 var(--reading-all, var(--font)); }
 a { color: var(--accent); }
 button, input, select, textarea {
   font: inherit; color: var(--text); background: var(--button); border: 1px solid var(--border);
@@ -173,7 +190,6 @@ pre.inspect-text { max-height: 36em; margin: 0; overflow-wrap: anywhere; }
 tr.stale td { opacity: .6; }
 tr.stale .stale-note { font-weight: 400; }
 .badge.asking { background: var(--warn); color: var(--on-warn, var(--base)); border: 0; border-radius: 9px; padding: 0 7px; }
-.badge.experimental { background: var(--warn); color: var(--on-warn, var(--base)); border-radius: 9px; padding: 0 7px; font-size: 0.85em; }
 .badge.allows-all { background: var(--danger); color: var(--base); border-radius: 9px; padding: 0 7px; font-size: 0.85em; }
 .first-run ol { margin: 0; padding-left: 20px; }
 .first-run li { margin: 6px 0; }
@@ -258,6 +274,21 @@ h1.with-help { display: inline-block; margin-right: 8px; }
 .help-section summary { cursor: pointer; }
 .help-section summary h2 { display: inline; font-size: 1.1em; }
 .help-section code { font-family: var(--mono); }
+/* A section's text: a readable font (the reading font chosen, else Atkinson Hyperlegible Next), 16 px, lines 1.5
+   apart, at most about 75 characters a line; its commands in blocks to copy, its details folded. */
+.help-text { font-family: var(--reading, "Atkinson Hyperlegible Next"), var(--font); font-size: 16px;
+  line-height: 1.5; max-width: 42em; }
+.help-text code, .help-command code { font-family: "Atkinson Hyperlegible Mono", var(--mono); }
+.help-text .help-lead { font-size: 1.12em; margin: 6px 0 12px; }
+.help-text h3 { font-size: 1.2em; margin: 18px 0 6px; }
+.help-text h4 { font-size: 1em; margin: 12px 0 2px; }
+.help-text ol { margin: 0 0 6px; padding-left: 1.6em; }
+.help-command { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between;
+  background: color-mix(in srgb, var(--text) 7%, var(--base)); border-radius: var(--radius); padding: 8px 10px;
+  margin: 4px 0 10px; }
+.help-command code { white-space: pre-wrap; word-break: break-word; }
+.help-fold { margin: 4px 0; }
+.help-fold > summary { cursor: pointer; font-weight: 600; color: var(--accent); }
 /* the Approvals page: one table, its tabs (Open, Allowed, Refused, Timed out, All) with their counts */
 .approval-tabs, .tabs[role=tablist] { display: flex; gap: 4px; margin: 8px 0; flex-wrap: wrap; }
 .tabs[role=tablist] button.active { background: var(--accent); color: var(--accent_text); }
@@ -322,3 +353,9 @@ details.support > summary { cursor: pointer; white-space: nowrap; }
 .icon-button .button-text { display: none; }
 body.button-texts .icon-button .button-text { display: inline; }
 .files-search input[type=search] { min-width: 10em; }
+
+/* What a start lacks (the start form's question before its terminal opens): one line per fix, what is unsigned or
+   security-relevant marked. */
+ul.fix-plan { list-style: none; margin: 6px 0; padding: 0; }
+ul.fix-plan li.fix { margin: 4px 0; white-space: normal; }
+ul.fix-plan li.fix.marked { border-left: 3px solid var(--warn, #b26a00); padding-left: 6px; }

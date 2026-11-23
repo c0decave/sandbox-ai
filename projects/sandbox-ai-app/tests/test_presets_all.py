@@ -54,8 +54,53 @@ def registered(tmp_path_factory):
     for command in commands:
         status, out, err = sai.call(*command)
         assert status == 0, out + err
+    # The toolchains the language presets bring (--toolchain), in the store as `sandbox-ai toolchain add` puts them:
+    # stand-ins, from a catalog nobody signed (the launcher's dry run refuses a toolchain that is not there).
+    catalog = toolchain_catalog(root / "toolchain-catalog")
+    for name in TOOLCHAINS:
+        status, out, err = sai.call("toolchain", "add", name, "--catalog", catalog, "--unsigned")
+        assert status == 0, out + err
     yield sai, root
     patch.undo()
+    for folder, dirs, _ in os.walk(root):  # (unpacked read-only: writable again, to be removed)
+        for name in dirs:
+            if not os.path.islink(os.path.join(folder, name)):
+                os.chmod(os.path.join(folder, name), 0o700)
+
+
+# The toolchains of sandbox-ai-mcp's catalog, as stand-ins: {name: (commands, the toolchains it requires)}.
+TOOLCHAINS = {"zig": (["zig"], []), "cc": (["cc", "c++"], ["zig"]), "rust": (["cargo", "rustc"], ["cc"]),
+              "go": (["go"], []), "jdk": (["java", "mvn"], []), "dotnet": (["dotnet"], []), "node": (["node", "npm"], []),
+              "python": (["python3", "uv"], [])}
+
+
+def toolchain_catalog(folder):
+    """A toolchains.json in FOLDER with an archive of empty commands for each of TOOLCHAINS; its path."""
+    import hashlib
+    import io
+    import platform
+    import tarfile
+    folder.mkdir(parents=True)
+    entries = []
+    for name, (commands, requires) in TOOLCHAINS.items():
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:xz") as tar:
+            for command in commands:
+                data = b"#!/bin/sh\n"
+                info = tarfile.TarInfo(f"bin/{command}")
+                info.size, info.mode = len(data), 0o755
+                tar.addfile(info, io.BytesIO(data))
+        (folder / f"{name}.tar.xz").write_bytes(buffer.getvalue())
+        machine = {"amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine().lower(), platform.machine().lower())
+        entries.append({"name": name, "version": "1.0", "arch": machine, "url": str(folder / f"{name}.tar.xz"),
+                        "sha256": hashlib.sha256(buffer.getvalue()).hexdigest(), "size": len(buffer.getvalue()),
+                        "unpacked": 4096, "title": name, "description": f"a stand-in of {name}", "license": "MIT",
+                        "homepage": "https://example.org", "commands": {c: f"bin/{c}" for c in commands}, "env": {},
+                        "caches": {}, "hosts": [], "allow": [], "needs": {"glibc": None, "libraries": []},
+                        "requires": requires, "sources": []})
+    path = folder / "toolchains.json"
+    path.write_text(json.dumps({"schema": "sandbox-ai-toolchains", "version": 1, "toolchains": entries}))
+    return str(path)
 
 
 def every_preset():

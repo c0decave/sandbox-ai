@@ -100,7 +100,7 @@ def test_the_start_form_picks_by_use_case_and_starts_with_it(tmp_path):
     assert result["asked"] == [["GET", "/api/hosts/ct1/llm-recommend", "1"]]
     assert result["options"] == [["", "none: choose the agent and the model yourself"],
                                  ["coding", "Coding and debugging — measured on this use case's tasks"],
-                                 ["code-review", "Code review — not tested yet"]]
+                                 ["code-review", "Code review — no data yet"]]
     assert result["agent"] == "opencode" and result["model"] == f"studio:{MID}"
     hint = result["hint"]
     assert hint.startswith(f"Choice: studio:{MID} in OpenCode (rank 1) · solved it 2 of 2 in OpenCode")
@@ -112,7 +112,7 @@ def test_the_start_form_picks_by_use_case_and_starts_with_it(tmp_path):
     assert options[options.index("--use-case") + 1] == "coding" and result["started"]["agent"] == "opencode"
     other = json.loads(result["other"]["options"])
     assert other[other.index("--llm") + 1] == f"studio:{QCN}" and "--use-case" in other
-    assert result["untested"].startswith("Not tested yet") or result["untested"].startswith("Choice: ")
+    assert result["untested"].startswith("No data yet") or result["untested"].startswith("Choice: ")
     assert "? reviews: not tested before round 5" in result["untestedKnown"]
     assert result["refused"][0] == 0 and "A use case chooses among the models of a server of yours" in \
         result["refused"][1]
@@ -123,7 +123,7 @@ def test_the_use_case_field_in_german(tmp_path):
     result = drive(tmp_path, "de")
     options = dict(result["options"])
     assert options["coding"] == "Programmieren und Fehlersuche — an den Aufgaben dieses Einsatzzwecks gemessen"
-    assert options["code-review"] == "Code-Review — noch nicht getestet"
+    assert options["code-review"] == "Code-Review — noch keine Daten"
     assert result["hint"].startswith(f"Wahl: studio:{MID} in OpenCode (Rang 1)")
     assert "Ein Einsatzzweck wählt unter den Modellen" in result["refused"][1]
 

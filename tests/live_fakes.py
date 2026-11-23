@@ -1026,7 +1026,9 @@ class Host:
                         FAKE_PODMAN_STOP_AT=str(self.stop_path), FAKE_TMUX_LOG=str(self.directory / "tmux.log"),
                         FAKE_SSH_LOG=str(self.directory / "ssh.log"), FAKE_TOR_FAKES=str(self.bin),
                         FAKE_TOR_DIR=str(self.directory / "tor-container"),
-                        SANDBOX_AI_BUILD_NO_DNS_CHECK="1", LC_ALL="C.UTF-8", TERM="dumb")
+                        SANDBOX_AI_BUILD_NO_DNS_CHECK="1", LC_ALL="C.UTF-8", TERM="dumb",
+                        # (the fake Podman has its init binary, whatever this machine has; =none: a host without)
+                        SANDBOX_AI_INIT_BINARY="/usr/libexec/podman/catatonit")
         if self.shimmed:
             self.env["FAKE_PYTHON"] = str(self.bin / "python3")
         else:

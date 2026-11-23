@@ -107,7 +107,25 @@ function errorNotice(e, prefix) {
   const detail = errorDetail(e);
   const box = notice(`${prefix ? `${prefix}: ` : ""}${errorText(e)}`, "error");
   if (detail) box.append(el("div", { class: "hint mono error-detail", lang: "en" }, detail));
+  const offer = updateOffer(e);
+  if (offer) box.append(offer);
   return box;
+}
+
+// A refusal because a host's sandbox-ai is too old for what was asked (host-too-old): its update offered right here
+// (sandbox-ai hosts update HOST: its own signed update, as the page Hosts' Update), the outcome below it - then the
+// same action again. Not for this machine (it updates itself with sandbox-ai update).
+function updateOffer(e) {
+  const host = e instanceof ApiError && e.code === "host-too-old" && e.params ? String(e.params.host || "") : "";
+  if (!host || host === "local") return null;
+  const out = el("div", { class: "update-offer" });
+  out.append(el("button", { class: "primary", title: `sandbox-ai hosts update ${host}`,
+    onclick: (ev) => busy(ev.target, async () => {
+      out.append(notice(t("Updating {host}…", { host })));
+      try { await updateHost(host, out, undefined, "", false); } catch (err) { out.append(errorNotice(err)); return; }
+      out.append(notice(t("Then do it again: the host knows it now."), "ok"));
+    }) }, t("Update {host} now", { host })));
+  return out;
 }
 
 // OPTIONS.background: a request of the page's own polls (X-Background: 1), which does not count as the user's
@@ -257,6 +275,60 @@ function focusCancel(node) {
 // is, with the service's own reason; Yes sends it again, confirmed (RETRY).
 function confirmable(e) {
   return e instanceof ApiError && e.status === 400 && typeof e.confirm === "string" && e.confirm && needsConfirm(e.confirm) ? e.confirm : null;
+}
+
+// One fix of a start's plan in words: what is missing, what is done (its command, how long), UNSIGNED and what is
+// security-relevant always named; for one that is not offered, why.
+function fixLine(fix) {
+  if (fix.verdict !== "offered") return t("{missing} — not done for you: {why}", { missing: fix.missing, why: [fix.why, fix.command].filter(Boolean).join(" — ") });
+  if (fix.choice) return t("{missing} → one way: {title}{marks} — {command}", { missing: fix.missing, title: fix.title, marks: fix.security ? t("; security: {text}", { text: fix.security }) : "", command: fix.start || fix.command });
+  const marks = (fix.unsigned ? t(", UNSIGNED") : "") + (fix.security ? t("; security: {text}", { text: fix.security }) : "");
+  return t("{missing} → {title}{marks}: {command}", { missing: fix.missing, title: fix.title, marks, command: fix.command }) + (fix.duration ? ` (${fix.duration})` : "");
+}
+
+// What a new start (QUERY: the terminal's) lacks on HOST and what would fix each (POST .../fix-plan), asked in
+// CONTAINER: the ids of the fixes to do ([]: nothing is missing, or the host has no plan - its terminal says what is
+// wrong), or null when the human cancelled. With the host's default "all": everything listed, then Fix all, Choose…
+// (a tick per fix) or Cancel; with "each": a tick per fix at once. What is unsigned or security-relevant is marked;
+// what the start goes on without (a login) is not ticked; what is not offered is listed with its command.
+async function askFixPlan(container, host, query) {
+  let plan = null;
+  try { plan = await api("POST", hostPath("/fix-plan", host), { agent: query.agent, name: query.name, workspace: query.workspace, options: JSON.parse(query.options) }); }
+  catch (e) { return []; }
+  const fixes = plan && Array.isArray(plan.fixes) ? plan.fixes : [];
+  const offered = fixes.filter(f => f.verdict === "offered" && !(f.terminal && !f.needed));
+  if (!offered.some(f => f.needed)) return [];
+  return new Promise((resolve) => {
+    const boxes = new Map();
+    // a choice between ways to start (the answers share "choice"): one of them ticked at most, none beforehand -
+    // it is yours to make; with one in the plan the ticks show at once
+    const choices = offered.some(f => f.choice);
+    const rows = fixes.filter(f => f.needed || offered.includes(f)).map((fix) => {
+      const can = offered.includes(fix);
+      const box = el("input", { type: "checkbox", disabled: !can, "aria-label": fix.missing });
+      box.checked = Boolean(can && fix.needed && !fix.choice);
+      if (can) boxes.set(fix.id, box);
+      if (can && fix.choice) box.addEventListener("change", () => {
+        if (box.checked) for (const other of offered) if (other.choice === fix.choice && other.id !== fix.id) boxes.get(other.id).checked = false;
+      });
+      return el("li", { class: fix.unsigned || fix.security ? "fix marked" : "fix" }, el("label", {}, box, " ", fixLine(fix)));
+    });
+    const list = el("ul", { class: "fix-plan" }, rows);
+    const each = plan.questions === "each" || choices;
+    const panel = el("div", { class: "confirm", role: "group", "aria-label": t("What the start lacks") });
+    const close = (answer) => { if (panel.parentNode) panel.parentNode.removeChild(panel); resolve(answer); };
+    const ticked = () => [...boxes].filter(([, box]) => box.checked).map(([id]) => id);
+    const all = el("button", { class: "primary", onclick: () => close(offered.filter(f => f.needed).map(f => f.id)) }, t("Fix all and start"));
+    const chosen = el("button", { onclick: () => close(ticked()) }, t("Do the ticked ones and start"));
+    const choose = el("button", { onclick: () => { for (const box of boxes.values()) box.hidden = false; choose.hidden = true; chosen.hidden = false; } }, t("Choose…"));
+    const cancel = el("button", { onclick: () => close(null) }, t("Cancel"));
+    if (!each) { for (const box of boxes.values()) box.hidden = true; chosen.hidden = true; } else { all.hidden = true; choose.hidden = true; }
+    panel.append(el("p", {}, t("This start needs what is not there yet on {host}. Its terminal does what you choose, then starts:", { host })), list,
+      el("div", { class: "row" }, all, choose, chosen, cancel));
+    container.append(panel);
+    say(t("What the start lacks"));
+    if (typeof cancel.focus === "function") cancel.focus();
+  });
 }
 
 function askRefused(container, e, retry, options) {
@@ -712,7 +784,13 @@ function terminalTheme() {
 
 // --- fonts: the app's lists (themes.json "fonts"), chosen in this browser; nothing is downloaded -----------
 
-state.fonts = { ui: localStorage.getItem("sandbox-ai-font-ui") || "", mono: localStorage.getItem("sandbox-ai-font-mono") || "" };
+state.fonts = { ui: localStorage.getItem("sandbox-ai-font-ui") || "", mono: localStorage.getItem("sandbox-ai-font-mono") || "",
+  reading: localStorage.getItem("sandbox-ai-font-reading") || "" };
+// The reading fonts that come with sandbox-ai (web/fonts, app.css's @font-face; the desktop app's setting
+// reading_font): for the whole page and its help, never the terminals and code. "" is the theme's font.
+const READING_FONTS = [["", N_("The theme's font")], ["atkinson", N_("Atkinson Hyperlegible Next (easy to tell apart)")],
+  ["opendyslexic", N_("OpenDyslexic (for dyslexia)")], ["lexend", N_("Lexend (wide spacing, calm reading)")]];
+const READING_FAMILIES = { atkinson: "Atkinson Hyperlegible Next", opendyslexic: "OpenDyslexic", lexend: "Lexend" };
 state.fontLists = state.fontLists || {};
 const GENERIC_FONTS = new Set(["serif", "sans-serif", "monospace", "system-ui", "ui-monospace", "ui-sans-serif"]);
 
@@ -752,6 +830,11 @@ function applyFonts() {
   const families = (theme.font && theme.font.families) || [];
   const ui = chosenFont("ui"), mono = chosenFont("mono");
   if (families.length || ui) root.setProperty("--font", cssFamilies([ui, ...families, "sans-serif"]));
+  const reading = READING_FAMILIES[state.fonts.reading] || "";
+  if (reading) {
+    root.setProperty("--reading", cssFamilies([reading]));
+    root.setProperty("--reading-all", cssFamilies([reading, ui, ...families, "sans-serif"]));
+  } else { root.removeProperty("--reading"); root.removeProperty("--reading-all"); }
   root.removeProperty("--mono");
   const fallback = (getComputedStyle(document.documentElement).getPropertyValue("--mono") || "").trim() || "monospace";
   const stack = mono ? `${cssFamilies([mono])}, ${fallback}` : fallback;
@@ -784,8 +867,10 @@ function fontPicker() {
   showHint();
   return el("details", { class: "fonts" }, el("summary", {}, t("Fonts")),
     el("div", { class: "font-panel" },
+      el("label", {}, t("Reading font"), el("select", { "aria-label": t("Reading font"), onchange: (e) => chooseFont("reading", e.target.value) },
+        READING_FONTS.map(([value, label]) => el("option", { value, selected: (state.fonts.reading || "") === value }, t(label))))),
       select("ui", t("Interface font")), select("mono", t("Monospace font (terminal, code, logs)")),
-      el("p", { class: "hint" }, t("Nothing is downloaded: install a font on this computer to use it.")), hint));
+      el("p", { class: "hint" }, t("Nothing is downloaded: the reading fonts come with sandbox-ai; install another font on this computer to use it.")), hint));
 }
 
 function howToGet(kind, name) {
@@ -2720,22 +2805,6 @@ function presetTitle(p) {
   return String((own && own.title) || (p && p.title) || "");
 }
 
-// A preset that starts something not live-tested yet (presets list --json "experimental", from the launcher's one
-// list EXPERIMENTAL_PARTS): {names}, else null. A badge only: listed and started like any other.
-function presetExperimental(p) {
-  const badge = p && p.experimental && typeof p.experimental === "object" ? p.experimental : null;
-  return badge && Array.isArray(badge.names) ? badge : null;
-}
-
-function experimentalText(badge) {
-  return t("Not live-tested yet: {names}", { names: badge.names.filter(n => typeof n === "string").join(", ") });
-}
-
-function experimentalBadge(p) {
-  const badge = presetExperimental(p);
-  return badge ? el("span", { class: "badge experimental", title: experimentalText(badge) }, t("not live-tested yet")) : null;
-}
-
 // Whether a preset's VPN value must name a Tor profile (the tor preset's: its name or label says Tor).
 function torValue(key, spec) { return key === "tor" || /\bTor\b/.test(String((spec && spec.label) || "")); }
 
@@ -2837,8 +2906,8 @@ async function drawStartForm(card, heading, host) {
         const about = (server.about || {})[m] || {};
         const extra = [about.loaded === true ? t("loaded") : null, wholeNumber(about.size) ? gbText(about.size) : null].filter(Boolean);
         const light = supportOf(about.support);  // the research's traffic light, in words (a select has no colours)
-        model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || (light ? lightSummary(light) : null) },
-          `${server.name}:${m}${extra.length ? `  (${extra.join(", ")})` : ""}${lightSuffix(light)}`));
+        model.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: why || (light ? agentLightSummary(light, agentOf()) : null) },
+          `${server.name}:${m}${extra.length ? `  (${extra.join(", ")})` : ""}${agentLightSuffix(light, agentOf())}`));
       }
     }
     const still = [...model.querySelectorAll("option")].find(o => o.value === was && !o.disabled);
@@ -2873,7 +2942,7 @@ async function drawStartForm(card, heading, host) {
     const { of, groups } = presetGroups(presetCategories, usable);
     for (const [key, label] of groups) {
       const group = usable.filter(p => of(p) === key).sort((a, b) => String(a.id).localeCompare(String(b.id)));
-      if (group.length) preset.append(el("optgroup", { label }, group.map(p => el("option", { value: p.id, title: presetExperimental(p) ? experimentalText(presetExperimental(p)) : null }, `${p.id}: ${presetTitle(p)}${presetExperimental(p) ? ` (${t("not live-tested yet")})` : ""}`))));
+      if (group.length) preset.append(el("optgroup", { label }, group.map(p => el("option", { value: p.id }, `${p.id}: ${presetTitle(p)}`))));
     }
     const still = usable.some(p => p.id === was);
     preset.value = still ? was : "";
@@ -2896,7 +2965,7 @@ async function drawStartForm(card, heading, host) {
           input.append(el("option", { value: server.name, disabled: Boolean(why), title: why || null }, `${server.name}${why ? ` — ${why}` : ""}`));
           for (const m of server.models || []) {
             const light = supportOf(((server.about || {})[m] || {}).support);
-            input.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: light ? lightSummary(light) : null }, `${server.name}:${m}${lightSuffix(light)}`));
+            input.append(el("option", { value: `${server.name}:${m}`, disabled: Boolean(why), title: light ? agentLightSummary(light, agentOf()) : null }, `${server.name}:${m}${agentLightSuffix(light, agentOf())}`));
           }
         } else for (const p of profiles.filter(x => !torValue(key, spec) || x.type === "tor")) input.append(el("option", { value: p.profile }, `${p.profile} (${p.type || "?"})`));
         const still = [...input.children].find(o => o.value === was && !o.disabled);
@@ -2962,16 +3031,15 @@ async function drawStartForm(card, heading, host) {
     return supportOf(about && about.support);
   };
   // what is known of PAIR's model in AGENTNAME, as the app says it: the use case table's rank of it there (llm
-  // recommend --json's in_agents: "rank 3, from other tasks"), else the profile's status (llm models --json's support,
-  // else in_agents' own), else untested
+  // recommend --json's in_agents: "rank 3, from other tasks"), else that agent's own measured status (llm models
+  // --json's support, else in_agents' own), else no data yet - never the family's status for an agent not run
   const statusIn = (pair, agentName) => {
     const known = pair.in_agents && typeof pair.in_agents === "object" ? pair.in_agents[agentName] : null;
     const rank = known && Number.isInteger(known.rank) && known.rank > 0 ? known.rank : null;
     if (rank) return known.measured ? t("rank {rank}, measured", { rank }) : t("rank {rank}, from other tasks", { rank });
     const s = supportFor(pair);
     const own = s && Array.isArray(s.harnesses) ? s.harnesses.find(h => h && h.agent === agentName) : null;
-    const status = own ? own.status : s && textList(s.untested).includes(agentName) && s.status ? s.status
-      : known && typeof known.status === "string" && known.status ? known.status : "untested";
+    const status = own ? own.status : known && typeof known.status === "string" && known.status ? known.status : "untested";
     return STATUS_WORDS[status] ? t(STATUS_WORDS[status]) : String(status);
   };
   // the agent's name as that host's sandbox-ai says it (support's "names", else the use case's harness_names), else
@@ -3117,7 +3185,13 @@ async function drawStartForm(card, heading, host) {
     if (server && agentOf() === "claude" && claudeTools.value) list = withOption(list, ["--llm-tools", claudeTools.value]);
     if (useCase.value) list = withOption(list, ["--use-case", useCase.value]);
     if (chosenCloud || (effort.value && !effort.disabled)) list = withCloudModel(list, chosenCloud, effort.disabled ? "" : effort.value);
-    openTerminal({ kind: "start", host, agent: agentOf(), name: textOf(name), workspace: textOf(workspace), options: JSON.stringify(list) }, textOf(name) || t("new {agent}", { agent: agentOf() }));
+    const query = { kind: "start", host, agent: agentOf(), name: textOf(name), workspace: textOf(workspace), options: JSON.stringify(list) };
+    const title = textOf(name) || t("new {agent}", { agent: agentOf() });
+    // what the start lacks on that host (its image, an MCP server, a toolchain ...): asked here first, all at once or
+    // each (the host's default fix_questions); its terminal then does what was chosen before it starts
+    const fixes = await askFixPlan(startStatus, host, query);
+    if (fixes === null) { startStatus.append(notice(t("Nothing was started."), "info")); return; }
+    openTerminal(fixes.length ? { ...query, fix: JSON.stringify(fixes) } : query, title);
   }) }, t("Start in a terminal"));
   card.append(el("div", { class: "form" },
     el("label", { for: "start-host" }, t("Host")), hostChoice,
@@ -3145,16 +3219,16 @@ async function drawStartForm(card, heading, host) {
 
 // The use cases' statuses (llm recommend --json: model_usecases.STATUS_TEXT) and the table's labels, in the page's
 // language; a label the table has that is not here is shown as it comes.
-const USE_CASE_STATUS = { measured: N_("measured on this use case's tasks"), indirect: N_("from other tasks than this use case's own"), "not tested": N_("not tested yet") };
+const USE_CASE_STATUS = { measured: N_("measured on this use case's tasks"), indirect: N_("from other tasks than this use case's own"), "not tested": N_("no data yet") };
 const USE_CASE_LABELS = [N_("Coding and debugging"), N_("Sandbox behaviour"), N_("Untrusted input"), N_("Web research"), N_("Code review"),
   N_("Security and reverse engineering"), N_("Large codebase"), N_("Building from a spec"), N_("Ops: containers, CI, shell"),
   N_("Small fast jobs"), N_("Vision"), N_("Teams and helpers"), N_("Recovery: compaction and resume")];
 
 // What FOUND (one use case of llm recommend --json) chose and why, in one text: the choice, its rank or where it comes
-// from, why, the evidence and what fits; or that nothing was found (not tested yet, or nothing of its table there).
+// from, why, the evidence and what fits; or that nothing was found (no data yet, or nothing of its table there).
 function useCaseText(found) {
   const c = found.choice;
-  if (!c) return found.status === "not tested" ? t("Not tested yet, and no model of this host's servers to go by: choose the model yourself.") : t("Nothing of this use case's table is on this host's servers: choose the model yourself.");
+  if (!c) return found.status === "not tested" ? t("No data yet, and no model of this host's servers to go by: choose the model yourself.") : t("Nothing of this use case's table is on this host's servers: choose the model yourself.");
   const where = c.rank ? t("rank {rank}", { rank: c.rank }) : c.related ? t("nearest: the choice for {use_case}", { use_case: c.related }) : t("nearest: by the traffic light, nothing measured for it");
   const parts = [t("Choice: {model} in {harness} ({where})", { model: `${c.server}:${c.model}`, harness: c.harness_name || c.harness, where }), String(c.why || "")];
   if (c.evidence) parts.push(t("Measured: {evidence}", { evidence: [c.evidence, c.date].filter(Boolean).join(", ") }));
@@ -3827,8 +3901,12 @@ function resourcesCard(main, s) {
         const r = await api("POST", hostPath(`/starts/${encodeURIComponent(name)}/mcp-live`, host), Object.assign({}, body, { confirm: true }));
         toast(r && r.attached === "already" ? "warning" : "success", t("{server} → {where}", { server: shownServer(body), where }), (r && r.message) || "");
         mcpResult.append(el("p", { class: "hint" }, String((r && r.message) || "")));
-        if (r && (r.agent_restart === "required" || r.agent_restart === "maybe"))  // a restart needs a kept start (resume --restart)
-          mcpResult.append(s.keep ? restartAgent() : el("p", { class: "hint" }, t("{name} keeps nothing to start again with: the agent sees it after a new start.", { name })));
+        // A restart needs a kept start: inside its sandbox where that gives the agent the server (restart_in_place:
+        // kits restart-agent - the sandbox goes on), else the new start that keeps its session (resume --restart: its
+        // message says so first). Reported live: a Codex session's sandbox ended (exit status 143) on resume --restart.
+        if (r && (r.agent_restart === "required" || r.agent_restart === "maybe"))
+          mcpResult.append(!s.keep ? el("p", { class: "hint" }, t("{name} keeps nothing to start again with: the agent sees it after a new start.", { name }))
+            : r.restart_in_place === true ? restartInside() : restartAgent());
         loadMcp();
       } catch (e) { failed(t("Could not add {server} to {where}", { server: shownServer(body), where }))(e); }
     }, { kind: "primary", trigger: addMcp });
@@ -3956,7 +4034,7 @@ function resourcesCard(main, s) {
       const lines = [];
       lines.push(el("p", {}, plan.how === "catalog" ? t("{server}: added from its catalog here (the same pinned image), never copied as it is.", { server: String(plan.server) })
         : t("{server}: its definition is checked here as an own server's is.", { server: String(plan.server) })));
-      for (const text of [...(plan.copied || []), ...(plan.changes || []).map(c => t("changed: {what}", { what: c })), ...(plan.notes || [])])
+      for (const text of [...(plan.copied || []), ...(plan.changes || []).map(c => t("changed: {what}", { what: c })), ...(plan.capped || []).map(c => t("capped: {what}", { what: c })), ...(plan.notes || [])])
         lines.push(el("p", { class: "hint", lang: "en" }, String(text)));
       for (const text of plan.warnings || []) lines.push(notice(String(text), "warn"));
       const secrets = plan.secrets && Array.isArray(plan.secrets.missing) ? plan.secrets.missing : [];
@@ -3967,12 +4045,17 @@ function resourcesCard(main, s) {
         const old = String(path.path || "");
         if (!old) continue;
         const kept = pathFields.get(old);
-        const input = el("input", { class: "mono", placeholder: t("a folder of {host}", { host }), value: kept ? kept.input.value : (path.to || ""), "aria-label": t("Folder of {host} for {path}", { host, path: old }) });
-        const drop = el("input", { type: "checkbox", "aria-label": t("leave out {path}", { path: old }) });
-        drop.checked = kept ? kept.drop.checked : !!path.dropped;
+        // a folder default of the other host (the start's workspace, a folder of the server's own) is that default
+        // here: the box ticked, never the definition's word ("@workspace", "default") as a folder of this host
+        const byDefault = path.kind === "mount" && !path.dropped && (path.to === "@workspace" || path.to === "default");
+        const input = el("input", { class: "mono", placeholder: t("a folder of {host}", { host }), value: kept ? kept.input.value : (path.dropped || byDefault ? "" : (path.to || "")), "aria-label": t("Folder of {host} for {path}", { host, path: old }) });
+        // ticked: a container folder gets the server's default folder here (a path of the other host means nothing
+        // here: mcp copy --drop-path); a command server's option naming it is left out
+        const drop = el("input", { type: "checkbox", "aria-label": path.kind === "mount" ? t("its default folder here instead of {path}", { path: old }) : t("leave out {path}", { path: old }) });
+        drop.checked = kept ? kept.drop.checked : (!!path.dropped || byDefault);
         pathFields.set(old, { input, drop });
-        const label = path.kind === "mount" ? t("{target} in the container (on {from}: {path})", { target: String(path.target || ""), from: String(result.from || ""), path: old }) : t("{path} (on {from})", { path: old, from: String(result.from || "") });
-        copyPaths.append(el("div", { class: "form" }, el("label", {}, label), input, el("label", {}, drop, " ", t("leave out"))));
+        const label = path.kind === "mount" ? t("{target} in the container (on {from}: {path})", { target: String(path.target || ""), from: String(result.from || ""), path: old === "@workspace" ? t("the start's workspace") : old }) : t("{path} (on {from})", { path: old, from: String(result.from || "") });
+        copyPaths.append(el("div", { class: "form" }, el("label", {}, label), input, el("label", {}, drop, " ", path.kind === "mount" ? t("its default folder here") : t("leave out"))));
       }
     }
     if (copyPaths.children.length) copyPlan.append(el("p", { class: "hint" }, t("A folder of the other host is never mounted here unasked: give each one a folder of {host} (the same path keeps it), or leave it out; then check again.", { host })));
@@ -4040,7 +4123,9 @@ function resourcesCard(main, s) {
     showDetected();
   };
   // build toolchains: given at the start (they stay) or attached (Remove); attaching asks first. Only what that
-  // host's store has is offered (sandbox-ai toolchain add NAME there adds one from the signed catalog).
+  // host's store has is offered (sandbox-ai toolchain add NAME there adds one from the signed catalog), every
+  // version of a toolchain not attached (one version per sandbox), by what `toolchain attach` takes for it: its
+  // "toolchain" (jdk the newest, jdk@17 an older line); from a sandbox-ai before versions NAME or NAME@VERSION.
   const tcBody = el("tbody"), tcStatus = el("div"), tcNote = el("p", { class: "hint" }), tcActions = el("div", { class: "row" });
   const tcTable = el("table", {}, el("caption", { class: "sr-only" }, t("Toolchains of {where}", { where })), head([t("Toolchain"), t("Version"), t("Given"), t("Commands"), ""]), tcBody);
   const tcChoice = el("select", { id: "tc-choice" });
@@ -4063,10 +4148,18 @@ function resourcesCard(main, s) {
   const toolchainRow = (d) => el("tr", {}, el("td", { class: "mono" }, d.name), el("td", { class: "mono" }, d.version || ""),
     el("td", {}, d.source === "start" ? t("at the start") : t("during the run")), el("td", { class: "mono" }, (d.commands || []).slice(0, 8).join(", ")),
     el("td", { class: "actions" }, d.source === "added" ? el("button", { onclick: (event) => detachToolchain(d.name, false)(event) }, t("Remove")) : null));
+  const tcNumbers = (version) => (String(version).match(/[0-9]+/g) || []).slice(0, 8).map(Number);
+  const tcNewer = (a, b) => { const x = tcNumbers(a), y = tcNumbers(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] ?? -1) !== (y[i] ?? -1)) return (x[i] ?? -1) - (y[i] ?? -1); } return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0; };
+  const tcValue = (d) => {
+    if (typeof d.toolchain === "string" && d.toolchain.split("@")[0] === d.name) return d.toolchain;
+    const newest = (tcStore || []).filter(o => o.name === d.name).map(o => o.version).sort(tcNewer).pop();
+    return d.version === newest ? d.name : `${d.name}@${d.version}`;
+  };
   const showStore = () => {
     clear(tcChoice);
-    const held = new Set(tcHeld.map(d => d.name)), offered = (tcStore || []).filter(d => !held.has(d.name));
-    tcChoice.append(el("option", { value: "" }, t("Choose a toolchain…")), ...offered.map(d => el("option", { value: d.name, title: (d.hosts || []).join(", ") }, `${d.name} ${d.version} (${(d.commands || []).slice(0, 6).join(", ")})`)));
+    const held = new Set(tcHeld.map(d => d.name));
+    const offered = (tcStore || []).filter(d => !held.has(d.name)).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : tcNewer(b.version, a.version));
+    tcChoice.append(el("option", { value: "" }, t("Choose a toolchain…")), ...offered.map(d => el("option", { value: tcValue(d), title: (d.hosts || []).join(", ") }, `${d.name} ${d.version} (${(d.commands || []).slice(0, 6).join(", ")})`)));
     tcChoice.hidden = !offered.length;
     tcNote.textContent = tcStore === null ? "" : offered.length ? "" : (tcStore.length ? t("Every toolchain of the store is attached to it already.")
       : t("No toolchain is in the store of {host}. In a terminal there: sandbox-ai toolchain catalog, then sandbox-ai toolchain add NAME.", { host }));
@@ -4097,10 +4190,10 @@ function resourcesCard(main, s) {
     tcButtons();
   });
   const tcButtons = () => clear(tcActions).append(el("button", { class: "primary", onclick: () => {
-    const tc = tcChoice.value, entry = (tcStore || []).find(d => d.name === tc);
+    const tc = tcChoice.value, entry = (tcStore || []).find(d => tcValue(d) === tc);
     if (!tc || !entry) { toast("warning", t("Which toolchain?"), t("Choose one of the store of {host}.", { host })); return; }
     const opens = [...(entry.hosts || []), ...(entry.allow || []).map(p => `--allow-${p}`)].join(", ");
-    clear(tcActions).append(...ask(t("Mount {toolchain} read-only into {name} at /opt/toolchains/{toolchain}? Its commands are on the agent's PATH from then on.", { toolchain: tc, name })
+    clear(tcActions).append(...ask(t("Mount {toolchain} {version} read-only into {name} at /opt/toolchains/{toolchain}? Its commands are on the agent's PATH from then on.", { toolchain: entry.name, version: entry.version, name })
       + (opens ? " " + t("Its registries are opened for the run: {hosts} (not in the security modes high and paranoid).", { hosts: opens }) : ""),
       t("Yes, mount it"), attachToolchain(tc), () => { tcButtons(); focusFirst(tcActions); }));
     focusCancel(tcActions);
@@ -4956,6 +5049,31 @@ pages.doctor = async (main) => {
 const UPDATE_MODES = [["off", N_("off - nothing is checked unless asked")], ["notify", N_("notify - a newer signed release is announced")],
   ["download", N_("download - also fetched and checked, installed when you say")], ["auto", N_("auto - also installed in the window while nothing runs")]];
 
+// What the last check found, in words (updates.py's result_text): a newer release offered only when a trusted key
+// signed it, one that is not says why, an installation newer than the newest release has nothing to update.
+function updateFound(result, data) {
+  if (!result) return t("not checked yet");
+  if (result.error) return t("failed: {error}", { error: String(result.error) });
+  const available = String(result.available || ""), installed = String(result.installed || (data || {}).installed || "");
+  if (result.newer) return t("{available} is available (installed: {installed})", { available, installed });
+  if (newerVersion(available, installed)) {
+    if (result.signature === "bad") return t("{available} is there, but its signature is BAD: not offered", { available });
+    if (result.signature === "none") return t("{available} is there, but it is not signed (no SHA256SUMS.sig): not offered", { available });
+    return t("{available} is there, but not signed by a trusted key: not offered", { available });
+  }
+  if (newerVersion(installed, available)) return t("{installed} is newer than the newest release {available}: nothing to update", { installed, available });
+  return t("up to date ({installed})", { installed });
+}
+
+// Whether version A is newer than B (X.Y.Z; a pre-release before its release), as updates.py's version_key.
+function newerVersion(a, b) {
+  const key = (v) => { const m = /^([0-9]+)\.([0-9]+)\.([0-9]+)(.*)$/.exec(String(v || "")); return m ? [+m[1], +m[2], +m[3], m[4] === "" ? 1 : 0] : null; };
+  const x = key(a), y = key(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 4; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+}
+
 async function updatesSection(main, host, live) {
   const box = el("div", { class: "card", id: "updates" });
   main.append(el("h2", {}, t("Updates on {host}", { host })), box);
@@ -4964,9 +5082,7 @@ async function updatesSection(main, host, live) {
   if (!live() || !data || typeof data !== "object") return;
   const result = data.result && typeof data.result === "object" ? data.result : null;
   const when = (seconds) => typeof seconds === "number" ? new Date(seconds * 1000).toLocaleString() : t("never");
-  const found = !result ? t("not checked yet") : result.error ? t("failed: {error}", { error: String(result.error) })
-    : result.newer ? t("{available} is available (installed: {installed})", { available: String(result.available), installed: String(result.installed) })
-    : t("up to date ({installed})", { installed: String(result.installed || data.installed || "") });
+  const found = updateFound(result, data);
   const lines = [[t("Mode"), String(data.mode) + (data.chosen ? "" : " " + t("(the default)"))],
     [t("Last check"), `${when(data.last_check)}: ${found}`],
     [t("Next check"), data.mode === "off" ? t("none") : when(data.next_check)]];
@@ -5332,16 +5448,18 @@ function llmBodyOf(view, changes) {
 
 // The traffic light of the local-model research (llm models --json's and wizard models --json's "support": sandbox-ai's
 // model_profiles.support, read from model_profiles.json on that host at run time): per model and agent green
-// (verified), yellow (partly working: partial or smoke test only), red (failing or known not to work), grey (not
-// tested); the model's colour is its best agent's. Colour, a symbol of its own and words: never the colour alone.
+// (verified), yellow (partly working: partial or smoke test only), red (failing or known not to work), grey (no data
+// yet); only an agent with its own measured runs has a colour, and the model's colour is its best measured agent's
+// (never a family's status for agents it was not run in). Colour, a symbol of its own and words: never the colour
+// alone.
 // The details: per agent what worked (✓) and what failed (✗), the recommended settings, the speed, the round and its
 // date; "no data yet" when nothing is known. The app's words (model_profile.py).
 const LIGHTS = ["green", "yellow", "red", "grey"];
-const LIGHT_WORDS = { green: N_("verified"), yellow: N_("partly working"), red: N_("does not work"), grey: N_("not tested") };
+const LIGHT_WORDS = { green: N_("verified"), yellow: N_("partly working"), red: N_("does not work"), grey: N_("no data yet") };
 const LIGHT_SYMBOLS = { green: "✓", yellow: "~", red: "✗", grey: "?" };
 const LIGHT_CLASSES = { green: "light light-green", yellow: "light light-yellow", red: "light light-red", grey: "light light-grey" };
 const STATUS_WORDS = { verified: N_("verified"), "smoke-only": N_("smoke test only"), partial: N_("partly working"), failing: N_("failing"),
-  "known-bad": N_("known not to work"), untested: N_("this pair untested") };
+  "known-bad": N_("known not to work"), untested: N_("no data yet") };
 const supportOf = (s) => (s && typeof s === "object" && LIGHTS.includes(s.light) ? s : null);
 const textList = (v) => (Array.isArray(v) ? v.filter(x => typeof x === "string") : []);
 // an agent's name as the host's sandbox-ai names it (support's "names"), else its id
@@ -5351,9 +5469,7 @@ function namesIn(s, agents) { const names = namesOf(s); return textList(agents).
 function lightSummary(s) {
   const parts = ["green", "yellow", "red"].filter(c => agentsOf(s, c).length)
     .map(c => t("{words} in {agents}", { words: t(LIGHT_WORDS[c]), agents: agentsOf(s, c).join(", ") }));
-  if ((s.status === "failing" || s.status === "known-bad") && textList(s.untested).length)
-    parts.push((Array.isArray(s.harnesses) && s.harnesses.length ? t("{words} in every other agent", { words: t(LIGHT_WORDS.red) }) : t("{words} in every agent", { words: t(LIGHT_WORDS.red) })));
-  return parts.join("; ") || t("not tested: no data yet");
+  return parts.join("; ") || t("no data yet");
 }
 function lightLabel(s) {
   const agents = agentsOf(s, s.light), words = t(LIGHT_WORDS[s.light]);
@@ -5374,7 +5490,6 @@ function supportDetails(s) {
   if (!s.family) return box.append(el("p", {}, t("No data yet: no model family of sandbox-ai's research matches this name."))), box;
   const line = (text) => el("li", {}, text);
   box.append(el("p", {}, t("Model family: {label}", { label: String(s.label || s.family) })));
-  if ((s.status === "failing" || s.status === "known-bad") && s.reason) box.append(el("p", { class: "status-bad" }, t("Known not to work: {reason}", { reason: String(s.reason) })));
   if (s.speed) box.append(el("p", {}, t("Measured speed: {speed}", { speed: String(s.speed) })));
   if (s.settings_text) box.append(el("p", {}, t("Recommended for every agent: {settings}", { settings: String(s.settings_text) })));
   for (const pair of Array.isArray(s.harnesses) ? s.harnesses.filter(x => x && typeof x === "object") : []) {
@@ -5391,7 +5506,7 @@ function supportDetails(s) {
     box.append(el("h4", {}, el("span", { class: LIGHT_CLASSES[colour], "aria-hidden": "true" }, LIGHT_SYMBOLS[colour]), " ",
       `${namesIn(s, [pair.agent])[0] || ""}: ${STATUS_WORDS[pair.status] ? t(STATUS_WORDS[pair.status]) : String(pair.status || "")}${measuredText(pair.measured_counts)}`), el("ul", {}, items));
   }
-  if (textList(s.untested).length) box.append(el("p", { class: "hint" }, t("Not tested in: {agents}", { agents: namesIn(s, s.untested).join(", ") })));
+  if (textList(s.untested).length) box.append(el("p", { class: "hint" }, t("No data yet in: {agents}", { agents: namesIn(s, s.untested).join(", ") })));
   return box;
 }
 // a model's light in a table's cell: the symbol in its colour and the words; a click opens the details below it
@@ -5404,6 +5519,19 @@ function supportCell(s, model) {
 }
 // an <option>'s words for a model's light (a select has no colours): " — ✓ verified: OpenCode, …", and its title
 const lightSuffix = (s) => (s ? `  — ${lightLabel(s)}` : "");
+// a start's model select, its agent chosen: that agent's own measured light - grey (no data yet) for an agent the
+// model was never run in, whatever the others say (the user 2026-11-22: "it says opencode verifiziert") - then the rest
+function agentColour(s, agentName) {
+  const own = Array.isArray(s.harnesses) ? s.harnesses.find(h => h && h.agent === agentName) : null;
+  return own && LIGHTS.includes(own.light) ? own.light : "grey";
+}
+function agentLightWords(s, agentName) {
+  const colour = agentColour(s, agentName);
+  return `${LIGHT_SYMBOLS[colour]} ${t("In {agent}: {words}", { agent: namesIn(s, [agentName])[0] || agentName, words: t(LIGHT_WORDS[colour]) })}`;
+}
+const agentLightSuffix = (s, agentName) => (s ? `  — ${agentName ? agentLightWords(s, agentName) : lightLabel(s)}` : "");
+const agentLightSummary = (s, agentName) => (!agentName ? lightSummary(s)
+  : Array.isArray(s.harnesses) && s.harnesses.length ? `${agentLightWords(s, agentName).slice(2)}. ${lightSummary(s)}` : agentLightWords(s, agentName).slice(2));
 
 // llm models --json: [{name, size, loaded, details, type?, arch?, parameters?, quantization?, context?}] as a table:
 // only the columns some model has a value for; loaded first, then by name; a long name cut (the whole one in its
@@ -5508,6 +5636,37 @@ function llmStatusDetail(s) {
   return lines.join("\n");
 }
 
+// For all hosts (sandbox-ai llm share): llm list --json says per server "shared" (null, or {key_to, hosts: [{host,
+// copied, in_sync, key, keys_missing, reachable, reach_error, error, ...}]}) and, for a copy another machine shares,
+// "shared_from". The words are the app's (llm_share_view.py).
+function llmShared(e) {
+  const s = e && e.shared && typeof e.shared === "object" ? e.shared : null;
+  if (!s) return null;
+  return { key_to: (Array.isArray(s.key_to) ? s.key_to : []).filter(h => typeof h === "string"),
+    hosts: (Array.isArray(s.hosts) ? s.hosts : []).filter(h => h && typeof h.host === "string") };
+}
+function llmKeyNames(e) {
+  const headers = e && e.headers && typeof e.headers === "object" ? e.headers : {};
+  return [...new Set([e && e.api_key_secret, ...Object.keys(headers).sort().map(k => headers[k])].filter(n => typeof n === "string" && n))];
+}
+function llmShareCell(e) {
+  if (e && typeof e.shared_from === "string" && e.shared_from) return t("from {host}", { host: e.shared_from });
+  const s = llmShared(e);
+  if (!s) return "";
+  if (!s.hosts.length) return t("yes (no host yet)");
+  return t("yes: {synced} of {count} hosts ready", { synced: s.hosts.filter(h => h.in_sync && h.reachable !== false).length, count: s.hosts.length });
+}
+function llmShareHostText(h, names) {
+  if (!h.copied) return h.error ? t("not copied yet: {error}", { error: String(h.error) }) : t("not copied yet");
+  const parts = [h.in_sync ? t("copied, in sync") : h.error ? t("copied, not in sync: {error}", { error: String(h.error) }) : t("copied, not in sync")];
+  const secrets = names.join(", ");
+  parts.push({ none: t("no key needed"), sent: t("key {names} sent", { names: secrets }), there: t("key {names} there (its own)", { names: secrets }),
+    missing: t("key missing there"), locked: t("its secret store is locked") }[h.key] || t("key not asked yet"));
+  if (h.reachable === true) parts.push(t("reachable from there"));
+  else if (h.reachable === false) parts.push(h.reach_error ? t("NOT reachable from there: {error}", { error: String(h.reach_error) }) : t("NOT reachable from there"));
+  return parts.join(", ");
+}
+
 pages.llm = async (main) => {
   main.append(el("h1", {}, t("LLM servers on {host}", { host: state.host })));
   const live = pageLive();
@@ -5552,7 +5711,12 @@ pages.llm = async (main) => {
     const rows = servers.map(e => {
       const agent = el("select", { "aria-label": t("Agent for the check of {name} on {host}", { name: e.name, host }) }, el("option", { value: "" }, t("every agent")), AGENTS.map(a => el("option", { value: a }, a)));
       const actions = el("td", { class: "actions" });
-      const row = el("tr", {}, el("td", { class: "mono" }, e.name), el("td", {}, e.kind), el("td", { class: "mono" }, e.url), el("td", { class: "mono" }, e.model || ""), actions);
+      const shareTitle = typeof e.shared_from === "string" && e.shared_from ? [t("Managed from {host} (shared from there): a change here is replaced by its next change there; to keep one of your own, add it under another name.", { host: e.shared_from }),
+        e.key_here === "missing" ? t("Its key is not kept on this host: keep it as the secret {name} here (Secrets), or tick this host for the key on {host}.", { name: llmKeyNames(e).join(", "), host: e.shared_from })
+          : e.key_here === "locked" ? t("Its key: this host's secret store is locked.") : null].filter(Boolean).join("\n")
+        : llmShared(e) ? llmShared(e).hosts.map(h => `${h.host}: ${llmShareHostText(h, llmKeyNames(e))}`).join("\n") || t("yes (no host yet)") : null;
+      const row = el("tr", {}, el("td", { class: "mono" }, e.name), el("td", {}, e.kind), el("td", { class: "mono" }, e.url), el("td", { class: "mono" }, e.model || ""),
+        el("td", { class: "llm-shared", "data-server": e.name, title: shareTitle }, llmShareCell(e)), actions);
       const remove = rowButton(t("Remove"), e.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Remove the LLM server {name} on {host}? Starts with {option} cannot start until it is added again.", { name: e.name, host, option: `--llm ${e.name}` }), t("Yes, remove it"), async () => {
         try { await api("DELETE", path(e.name), { confirm: true }); show("llm"); } catch (err) { failed(t("Could not remove {name} on {host}", { name: e.name, host }))(err); }
       }, { trigger: remove }) });
@@ -5569,11 +5733,57 @@ pages.llm = async (main) => {
           catch (err) { output.append(errorNotice(err)); }
         }) }),
         rowButton(t("Edit…"), e.name, host, { onclick: (ev) => busy(ev.target, () => editServer(e.name)) }),
+        ...(typeof e.shared_from === "string" && e.shared_from ? [] : [rowButton(t("For all hosts…"), e.name, host, { onclick: () => shareServer(e) })]),
         remove);
       return row;
     });
-    clear(listBox).append(table([t("Name"), t("Kind"), "URL", t("Model"), ""], rows, t("No LLM server yet.")));
+    clear(listBox).append(table([t("Name"), t("Kind"), "URL", t("Model"), t("For all hosts"), ""], rows, t("No LLM server yet.")));
     drawStatus();
+  };
+  // For all hosts…: the server's sharing (the flag, one key tick per host, each host's state); Save runs llm share
+  // NAME --key-to ... or llm unshare NAME there. A key newly sent to a host, and unsharing, are asked first.
+  const shareServer = (e) => {
+    clear(output);
+    const shared = llmShared(e), names = llmKeyNames(e);
+    const states = Object.fromEntries((shared ? shared.hosts : []).map(h => [h.host, h]));
+    // the hosts it goes to: those llm list named, else (this machine) the hosts of the service's list
+    const targets = shared && shared.hosts.length ? shared.hosts.map(h => h.host)
+      : host === "local" ? state.hosts.filter(h => h.kind === "ssh" && typeof h.name === "string").map(h => h.name) : [];
+    const flag = el("input", { type: "checkbox", id: "llm-share-flag" });
+    flag.checked = !!shared;
+    const ticks = targets.map(name => {
+      const box = el("input", { type: "checkbox", id: `llm-share-key-${name}`, "data-host": name, "aria-label": t("Send the key to {host}", { host: name }) });
+      box.checked = !!shared && shared.key_to.includes(name);
+      return [name, box];
+    });
+    const sync = () => { for (const [, box] of ticks) box.disabled = !flag.checked || !names.length; };
+    flag.addEventListener("change", sync);
+    sync();
+    const save = el("button", { class: "primary", id: "llm-share-save" }, t("Save"));
+    const asks = el("div", { class: "wide" });
+    const card = el("div", { class: "card", id: "llm-share" }, el("h3", {}, t("For all hosts: {name} on {host}", { name: e.name, host })),
+      el("p", { class: "hint" }, t("For all hosts copies this server's entry to every host of sandbox-ai hosts and keeps it in sync: a session there reaches the server directly, and each host checks that it can. Nothing secret is copied; its key goes only to the hosts ticked, into their own secret stores.")),
+      el("label", { for: "llm-share-flag" }, flag, " ", t("For all hosts")),
+      targets.length ? table([t("Host"), t("its key"), t("State")], ticks.map(([name, box]) => el("tr", { "data-host": name }, el("td", { class: "mono" }, name), el("td", {}, box),
+        el("td", { class: "hint" }, states[name] ? llmShareHostText(states[name], names) : shared ? t("not copied yet") : t("gets the copy when it is shared")))), "")
+        : el("p", { class: "hint" }, t("No host in sandbox-ai hosts yet: a host added later gets the copy (and its key once it is ticked here).")),
+      el("div", { class: "actions" }, save), asks);
+    const send = async (want, keyTo, confirm) => {
+      try {
+        const r = await api("POST", path(e.name, "/share"), Object.assign({ shared: want }, want ? { key_to: keyTo } : {}, confirm ? { confirm: true } : {}));
+        clear(output).append(notice(r.ok ? (want ? t("{name} is for all hosts", { name: e.name }) : t("{name} is not shared any more", { name: e.name })) : t("Not every host has it yet: tried again at the next command"), r.ok ? "ok" : "error"), el("pre", {}, r.output || ""));
+        await refreshList();
+      } catch (err) { output.append(errorNotice(err)); }
+    };
+    save.addEventListener("click", () => {
+      const want = flag.checked, keyTo = want && names.length ? ticks.filter(([, box]) => box.checked).map(([name]) => name) : [];
+      if (!want && !shared) { say(t("{name}: nothing changed.", { name: e.name })); return; }
+      if (!want) return confirmIn(asks, t("Take {name} away from every host it is shared with? Its copies there are removed, with the keys sent; sessions there cannot start with it any more.", { name: e.name }), t("Unshare"), () => send(false, [], true), { trigger: save });
+      const fresh = keyTo.filter(name => !(shared ? shared.key_to : []).includes(name));
+      if (fresh.length) return confirmIn(asks, t("Send the key of {name} ({names}) to {hosts}? It is kept in their secret stores from then on: whoever controls those hosts can use it.", { name: e.name, names: names.join(", "), hosts: fresh.join(", ") }), t("Send the key"), () => send(true, keyTo, true), { kind: "primary", trigger: save });
+      return busy(save, () => send(true, keyTo, false));
+    });
+    output.append(card);
   };
   // What each server has loaded and uses now (llm status --json on that host): read after the list and every
   // LLM_STATUS_SECONDS while the page is shown (a poll of the page's own: not the user's activity); a host whose
@@ -7163,7 +7373,8 @@ pages.settings = async (main) => {
     ["subnet", N_("Network of the starts (IPv4)"), "10.89.0.0/24"], ["subnet6", N_("Network of the starts (IPv6)"), "fd00:89::/64"],
     ["name_style", N_("Names of new starts: codename or project (empty: codename)"), "project"],
     ["ask_timeout", N_("Seconds a request waits for the answer to its question, 5-3600 (empty: 60); unanswered, the question stays open"), "120"],
-    ["package_min_age_days", N_("Days a package version must be old before the package guard lets it through without asking, 0-3650 (empty: 14; 0: no age check)"), "14"]];
+    ["package_min_age_days", N_("Days a package version must be old before the package guard lets it through without asking, 0-3650 (empty: 14; 0: no age check)"), "14"],
+    ["fix_questions", N_("What a start lacks (an image not built, an MCP server not added): all - one question for everything - or each - one per fix (empty: all)"), "each"]];
   const asking = el("div", { class: "row" });
   const fields = more.map(([key, label, example]) => {
     const now = values[key];
@@ -7485,15 +7696,127 @@ pages.secrets = async (main) => {
   el("p", { class: "hint", id: "secret-hint" }, t("Shown here only while you type it (Show value hides it). Stored on that host for good, until you delete it: sent to its sandbox-ai on its standard input, never logged or sent back; a value already stored is never shown."))));
 };
 
+// The kind of an installation in words (hosts list's installations: user, system, pip, ...).
+function kindText(kind) {
+  return { user: t("user"), system: t("system"), pip: "pip", pipx: "pipx", package: t("package"), checkout: t("checkout") }[kind] || t("unknown");
+}
+
+// A host's installations (hosts list: the user's own, a system one, pip, ...); [] when not read.
+function installationsOf(s) {
+  return s && Array.isArray(s.installations) ? s.installations.filter(i => i && typeof i === "object") : [];
+}
+
+// The other installations beside the one the host's commands run ("; system 0.1.236"), and a warning when a terminal
+// there runs another one than this service's commands (user report 2026-11-23, coding-101).
+function othersText(s) {
+  const items = installationsOf(s);
+  let text = items.filter(i => !i.commands).map(i => `; ${t("{kind} {version}", { kind: kindText(i.kind), version: i.version || "?" })}`).join("");
+  if (s && s.differ) {
+    const terminal = items.find(i => i.terminal) || {}, commands = items.find(i => i.commands) || {};
+    text += `; ${t("a terminal there runs {terminal}, the app's commands {commands}", {
+      terminal: t("{kind} {version}", { kind: kindText(terminal.kind), version: terminal.version || "?" }),
+      commands: t("{kind} {version}", { kind: kindText(commands.kind), version: commands.version || s.version || "?" }) })}`;
+  }
+  return text;
+}
+
 // The version of a host's sandbox-ai and whether an update is there (hosts list's status; null: not asked yet).
 function versionText(s) {
   if (!s) return "…";
-  if (!s.version) return s.error ? (sandboxMissing(s) ? t("not installed") : t("unreachable")) : "?";
+  const others = othersText(s);
+  if (!s.version) return (s.missing || (s.error && sandboxMissing(s)) ? t("not installed") + others : s.error ? t("unreachable") : "?");
   // its own update mode (sandbox-ai update mode; 0.1.122 on): changed on the Doctor page of that host
   const mode = typeof s.update_mode === "string" ? `; ${t("updates: {mode}", { mode: s.update_mode })}` : "";
-  if (["checkout", "pip", "package"].includes(s.kind)) return `${s.version} (${s.kind})${mode}`;
-  if (s.update) return t("{version} → {available} available", { version: s.version, available: s.available }) + mode;
-  return (s.update === false ? t("{version}, up to date", { version: s.version }) : s.version) + mode;
+  if (["checkout", "pip", "package"].includes(s.kind)) return `${s.version} (${s.kind})${mode}${others}`;
+  const version = others && ["user", "system"].includes(s.kind) ? `${s.version} (${kindText(s.kind)})` : s.version;
+  if (s.update) return t("{version} → {available} available", { version, available: s.available }) + mode + others;
+  if (s.ahead) return t("{version}, newer than the newest release {available}", { version, available: s.available }) + mode + others;
+  return (s.update === false ? t("{version}, up to date", { version }) : version) + mode + others;
+}
+
+// Uninstall… of a host: which installation (when it has both), --purge and the rest, the host's own table of what
+// goes (its uninstall --dry-run, asked again at each change), then asked once more; the host stays in the list unless
+// ticked. A sudo that wants a password is asked in a terminal tab.
+function uninstallCard(main, h, status, onDone) {
+  const old = document.getElementById("host-uninstall-card");
+  if (old) old.remove();
+  const items = installationsOf(status).filter(i => i.executable && ["user", "system"].includes(i.kind));
+  const which = el("select", { id: "uninstall-which" },
+    items.length > 1 ? el("option", { value: "", selected: true }, t("choose one")) : null,
+    ...items.map(i => el("option", { value: i.kind, selected: items.length === 1 }, t("{kind} installation {version} ({path})", { kind: kindText(i.kind), version: i.version || "?", path: i.path || "?" }) + (i.terminal ? ` - ${t("a terminal there runs it")}` : ""))),
+    items.length ? null : el("option", { value: "", selected: true }, t("the one there")));
+  const box = (id, text) => el("label", { class: "check" }, el("input", { id, type: "checkbox" }), " ", text);
+  const purge = box("uninstall-purge", t("Also the SSH user's sandbox-ai data there (kept starts, logs, kits, settings, caches, its Podman images)"));
+  const secrets = box("uninstall-secrets", t("With it, also the secrets and logins there - they cannot be recovered"));
+  const mcp = box("uninstall-mcp-data", t("With it, also the MCP servers' own folders there"));
+  const remove = box("uninstall-remove", t("Remove {host} from the list afterwards", { host: h.name }));
+  const input = (label) => label.querySelector("input");
+  const plan = el("pre", { class: "mono", id: "uninstall-plan" }, "…");
+  const result = el("div", { class: "wide" });
+  const buttons = el("div", { class: "row" });
+  let asked = 0;
+  const choice = () => ({ installation: which.value || null, purge: input(purge).checked, secrets: input(purge).checked && input(secrets).checked,
+    mcp_data: input(purge).checked && input(mcp).checked });
+  const query = () => {
+    const c = choice(), q = new URLSearchParams();
+    if (c.installation) q.set("installation", c.installation);
+    for (const key of ["purge", "secrets", "mcp_data"]) if (c[key]) q.set(key, "1");
+    return q;
+  };
+  const ask = async () => {
+    input(secrets).disabled = input(mcp).disabled = !input(purge).checked;
+    go.disabled = true;
+    if (items.length > 1 && !which.value) { plan.textContent = t("Choose the installation to remove."); return; }
+    const mine = ++asked;
+    plan.textContent = t("Asking {host} what its uninstall would remove…", { host: h.name });
+    let r;
+    try { r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}/uninstall-plan`, choice()); }
+    catch (e) { if (mine === asked) plan.textContent = e.message; return; }
+    if (mine !== asked) return;
+    plan.textContent = [r.plan || "", r.error || "", r.sudo ? t("(with sudo there: the installation is root's)") : ""].filter(Boolean).join("\n\n");
+    go.disabled = Boolean(r.error);
+  };
+  const go = el("button", { class: "danger", disabled: true, onclick: () => {
+    const body = Object.assign(choice(), { remove: input(remove).checked });
+    const chosen = items.find(i => i.kind === body.installation);
+    const what = chosen ? t("{kind} installation {version}", { kind: kindText(chosen.kind), version: chosen.version || "?" }) : t("its installation");
+    confirmIn(buttons, t("Remove the {what} on {host}?", { what, host: h.name }) + (body.purge ? ` ${t("Also the SSH user's sandbox-ai data there.")}` : "") + (body.secrets ? ` ${t("With the secrets and logins there - they cannot be recovered.")}` : ""),
+      t("Yes, uninstall it"), async () => {
+        clear(result).append(notice(t("Uninstalling sandbox-ai on {host}…", { host: h.name })));
+        let r;
+        try { r = await api("POST", `/api/hosts/${encodeURIComponent(h.name)}/uninstall`, Object.assign({}, body, { confirm: true })); }
+        catch (e) { clear(result).append(errorNotice(e)); return; }
+        clear(result);
+        if (r.error) {
+          result.append(notice(t("{host}: not removed: {error}", { host: h.name, error: r.error }), "error"));
+          if (r.needs_password) {
+            const q = query(); q.set("confirm", "1");
+            if (terminalsHere()) result.append(el("button", { class: "primary", onclick: () => openTerminal(Object.assign({ host: h.name, kind: "uninstall" }, Object.fromEntries(q)), t("uninstall on {host}", { host: h.name })) }, t("Uninstall in a terminal (sudo asks there)")));
+            result.append(passwordHelp(h.name, ["sandbox-ai", "hosts", "uninstall", h.name, ...(body.installation ? ["--installation", body.installation] : [])]));
+          }
+        } else {
+          result.append(notice(t("{host}: removed the {what}", { host: h.name, what }), "ok"));
+          const left = (r.remaining || []).map(i => t("{kind} {version}", { kind: kindText(i.kind), version: i.version || "?" })).join(", ");
+          if (r.removed_from_list) result.append(notice(t("{host} is no longer in the list", { host: h.name })));
+          else if (Array.isArray(r.remaining)) result.append(notice(left ? t("there now: {left}", { left }) : t("no sandbox-ai is left there (install it again: Install…)")));
+          toast("success", t("sandbox-ai removed on {host}", { host: h.name }), what);
+        }
+        for (const note of r.notes || []) result.append(notice(`${h.name}: ${note}`, "warn"));
+        if (r.output) result.append(el("details", {}, el("summary", {}, t("What it said")), el("pre", {}, String(r.output))));
+        if (onDone) onDone(r);
+      }, { trigger: go });
+  } }, t("Uninstall"));
+  for (const control of [which, input(purge), input(secrets), input(mcp)]) control.addEventListener("change", ask);
+  buttons.append(go, el("button", { onclick: () => card.remove() }, t("Close")));
+  const card = el("div", { class: "card", id: "host-uninstall-card" }, el("h2", {}, t("Uninstall sandbox-ai on {host}", { host: h.name })),
+    el("p", { class: "hint" }, t("Its own sandbox-ai uninstall runs there, for the installation chosen: the user's own (a system one is left and runs from then on) or the system one (with sudo). Your workspaces there are never touched.")),
+    el("div", { class: "form" }, el("label", { for: "uninstall-which" }, t("Which")), which,
+      el("span"), purge, el("span"), secrets, el("span"), mcp, el("span"), remove,
+      el("label", { for: "uninstall-plan" }, t("What goes")), plan, result, el("span"), buttons));
+  main.append(card);
+  focusFirst(card);
+  ask();
+  return card;
 }
 
 // Whether a host answers over SSH but has no sandbox-ai (the shell found none: exit status 127, "not found").
@@ -7527,18 +7850,19 @@ function fromHereButton(name, output, sudo) {
 }
 
 // One host's update: its own signed sandbox-ai update; a sudo that wants a password is asked in a terminal tab.
-async function updateHost(name, output, sudo, version, fromHere) {
-  const body = Object.assign(sudo === undefined ? {} : { sudo }, version ? { version } : {}, fromHere ? { from_here: true, confirm: true } : {});
+async function updateHost(name, output, sudo, version, fromHere, installation) {
+  const body = Object.assign(sudo === undefined ? {} : { sudo }, version ? { version } : {}, fromHere ? { from_here: true, confirm: true } : {}, installation ? { installation } : {});
   const r = await api("POST", `/api/hosts/${encodeURIComponent(name)}/update`, body);
   output.append(...keyNotices(r));
-  if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}`, "ok"));
+  const which = r.installation && ["user", "system"].includes(r.installation.kind) ? ` (${t("{kind} installation", { kind: kindText(r.installation.kind) })})` : "";
+  if (r.changed) output.append(notice(`${name}: ${r.before || "?"} → ${r.after}${r.sudo ? " (sudo)" : ""}${which}`, "ok"));
   else if (r.error && !r.after) {
     say(t("{host}: not updated: {error}", { host: name, error: r.error }));
     output.append(el("div", { class: "notice error" }, t("{host}: not updated: {error}", { host: name, error: r.error }),
       r.needs_password && terminalsHere() ? el("button", { onclick: () => openTerminal(fromHere
         ? Object.assign({ host: name, kind: "install" }, installQuery(Object.assign({ mode: r.mode || "user", prefix: r.prefix, source: "here" }, r.mode === "system" ? { sudo: true } : {})))
-        : { host: name, kind: "update" }, t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
-      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true, "", fromHere).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null,
+        : Object.assign({ host: name, kind: "update" }, installation ? { installation } : {}), t("update {host}", { host: name })) }, t("Update in a terminal (sudo asks there)")) : null,
+      r.needs_sudo ? el("button", { onclick: (ev) => busy(ev.target, () => updateHost(name, output, true, "", fromHere, installation).catch(failed(t("Could not update {host}", { host: name })))) }, t("Update with sudo")) : null,
       !fromHere && /no published release/.test(r.error) ? fromHereButton(name, output, sudo) : null));
     if (r.needs_password) output.append(passwordHelp(name, ["sandbox-ai", "hosts", "update", name, "--sudo", ...(fromHere ? ["--from-here"] : [])]));
   } else output.append(notice(`${name}: ${t("{version}, up to date", { version: r.after || r.before })}${r.error ? ` (${r.error})` : ""}`, r.error ? "warn" : "ok"));
@@ -7794,6 +8118,15 @@ pages.hosts = async (main) => {
     for (const [name, cell] of Object.entries(versionCells)) {
       const v = versions[name];
       clear(cell).append(versionText(v));
+      const items = installationsOf(v).filter(i => i.executable && ["user", "system"].includes(i.kind));
+      const select = updateWhich[name];
+      if (select) {
+        const kept = select.value;
+        clear(select).append(el("option", { value: "" }, t("the one its commands run")),
+          ...items.map(i => el("option", { value: i.kind }, t("{kind} installation {version}", { kind: kindText(i.kind), version: i.version || "?" }))));
+        select.value = items.some(i => i.kind === kept) ? kept : "";
+        select.hidden = items.length < 2;
+      }
       if (v && !v.version && v.error) {
         cell.setAttribute("title", String(v.error));
         cell.append(" ", el("button", { class: "small primary", "aria-label": t("Install sandbox-ai on {host}", { host: name }), disabled: Boolean(state.installing[name]),
@@ -7826,6 +8159,8 @@ pages.hosts = async (main) => {
   const updateSudo = Object.fromEntries(remote.map(h => [h.name, el("select", { class: "small", "aria-label": t("sudo for the update of {host}", { host: h.name }) },
     el("option", { value: "" }, h.update_sudo ? t("as set: with sudo") : t("as set: without sudo")),
     el("option", { value: "sudo" }, t("with sudo")), el("option", { value: "none" }, t("without sudo")))]));
+  // which installation the update takes when a host has the user's own and a system one (hosts update --installation)
+  const updateWhich = Object.fromEntries(remote.map(h => [h.name, el("select", { class: "small", hidden: true, "aria-label": t("installation for the update of {host}", { host: h.name }) })]));
   // a release other than the newest (hosts update --version X.Y.Z)
   const updateVersion = Object.fromEntries(remote.map(h => [h.name, el("input", { class: "small mono", size: 8, placeholder: t("newest"), pattern: "[0-9]+\\.[0-9]+\\.[0-9]+", "aria-label": t("version for the update of {host}", { host: h.name }) })]));
   const rows = state.hosts.map(h => {
@@ -7850,14 +8185,16 @@ pages.hosts = async (main) => {
         }) }, t("Version")),
         h.kind === "local" ? null : updateSudo[h.name],
         h.kind === "local" ? null : updateVersion[h.name],
+        h.kind === "local" ? null : updateWhich[h.name],
         h.kind === "local" ? null : el("button", { "aria-label": t("Update {host}", { host: h.name }), onclick: (ev) => busy(ev.target, async () => {
           clear(output);
           output.append(notice(t("Updating {host}…", { host: h.name })));
-          try { await updateHost(h.name, output, sudoChoice(updateSudo[h.name]), updateVersion[h.name].value.trim()); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
+          try { await updateHost(h.name, output, sudoChoice(updateSudo[h.name]), updateVersion[h.name].value.trim(), false, updateWhich[h.name].value || undefined); } catch (e) { output.append(notice(`${h.name}: ${e.message}`, "error")); }
           loadVersions(false);
         }) }, t("Update")),
         h.kind === "local" ? null : fromHereButton(h.name, output, () => sudoChoice(updateSudo[h.name])),
         h.kind === "local" ? null : el("button", { "aria-label": t("Install sandbox-ai on {host}", { host: h.name }), onclick: () => installCard(main, h, afterInstall) }, t("Install…")),
+        h.kind === "local" ? null : el("button", { "aria-label": t("Uninstall sandbox-ai on {host}", { host: h.name }), onclick: () => uninstallCard(main, h, versions[h.name], (r) => { if (r && r.removed_from_list) render(); else afterInstall(); }) }, t("Uninstall…")),
         h.kind === "local" ? null : el("button", { onclick: () => hostEditCard(main, h) }, t("Edit…")),
         h.kind === "local" ? null : el("button", { class: "danger", onclick: (ev) => confirmIn(ev.target.parentNode, t("Remove {host} ({ssh}) from the list? Nothing changes on it; this service no longer manages it.", { host: h.name, ssh: h.ssh }), t("Yes, remove it"), async () => {
           try { await api("DELETE", `/api/hosts/${encodeURIComponent(h.name)}`, { confirm: true }); render(); } catch (e) { failed(t("Could not remove {value}", { value: h.name }))(e); }
@@ -8254,6 +8591,34 @@ function mcpNetworkCell(x) {
   return cell;
 }
 
+// What the page shows of a server's "newer" (mcp.newer_pin): {change: "image OLD12 -> NEW12", signed}, or null.
+function mcpNewer(x) {
+  const newer = x && typeof x.newer === "object" && x.newer;
+  if (!newer) return null;
+  const short = (value) => { const text = String(value); const at = text.lastIndexOf("@sha256:"); return (at >= 0 ? text.slice(at + 8) : text).slice(0, 12); };
+  const parts = ["image", "rootfs"].filter(key => Array.isArray(newer[key]) && newer[key].length === 2)
+    .map(key => `${key} ${short(newer[key][0])} → ${short(newer[key][1])}`);
+  return parts.length ? { change: parts.join(", "), signed: newer.signed === true } : null;
+}
+
+function mcpUpdateQuestion(names, host, unsigned) {
+  const text = names.length
+    ? t("Update {names} on {host} to the newer image its catalog pins? The catalog is read again and its signature checked; folders, variables, limits and network stay; a running one runs on with its old image until it is stopped.", { names: names.join(", "), host })
+    : t("Update every MCP server of yours on {host} whose catalog pins a newer image? Each catalog is read again and its signature checked; folders, variables, limits and network stay.", { host });
+  return unsigned.length ? `${text} ${t("The catalog of {names} is not signed: nobody vouched for its new image.", { names: unsigned.join(", ") })}` : text;
+}
+
+async function mcpUpdate(names, host, unsigned) {
+  try {
+    const r = await api("POST", hostPath("/mcp-update", host), { names, unsigned, confirm: true });
+    const updated = (r && Array.isArray(r.updated) ? r.updated : []).filter(n => typeof n === "string");
+    const refused = (r && Array.isArray(r.servers) ? r.servers : []).filter(s => s && s.state === "refused")
+      .map(s => `${String(s.server)}: ${String(s.why || "")}`);
+    toast(updated.length ? "success" : "info", updated.length ? t("Updated: {names}.", { names: updated.join(", ") }) : t("Nothing to update: each runs the image its catalog pins."), refused.join("; "));
+    show("mcp");
+  } catch (e) { failed(t("Could not update {names} on {host}", { names: names.join(", ") || t("every server of yours"), host }))(e); }
+}
+
 pages.mcp = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("MCP servers on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
@@ -8290,8 +8655,22 @@ pages.mcp = async (main) => {
       try { await api("POST", hostPath(`/mcp/${encodeURIComponent(x.name)}/stop`, host), { confirm: true }); show("mcp"); } catch (e) { failed(t("Could not stop {name} on {host}", { name: x.name, host }))(e); }
     }, { trigger: stop }) });
     actions.append(rowButton(t("Start…"), x.name, host, { onclick: () => startForm(x.name) }), stop);
-    return el("tr", {}, el("td", { class: "mono" }, x.name), statusCell(x.status), mcpNetworkCell(x), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), actions);
+    // A newer image its catalog pins (mcp list's "newer", as the catalog was last read there): Update takes it.
+    const newer = mcpNewer(x);
+    const stateCell = statusCell(x.status);
+    if (newer) {
+      stateCell.append(el("div", { class: "hint status-warn" }, t("a newer image"), " ", el("span", { class: "mono" }, newer.change)));
+      const update = rowButton(t("Update"), x.name, host, { onclick: () => confirmIn(actions, mcpUpdateQuestion([x.name], host, newer.signed ? [] : [x.name]), t("Yes, update it"), () => mcpUpdate([x.name], host, !newer.signed), { kind: "primary", trigger: update }) });
+      actions.append(update);
+    }
+    return el("tr", {}, el("td", { class: "mono" }, x.name), stateCell, mcpNetworkCell(x), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), actions);
   }), t("No MCP servers on this host yet: add one from a catalog below.")), startBox);
+  if (servers.some(x => mcpNewer(x) && mcpNewer(x).signed)) {
+    const row = el("div", { class: "row" });
+    const all = el("button", { onclick: () => confirmIn(row, mcpUpdateQuestion([], host, []), t("Yes, update them"), () => mcpUpdate([], host, false), { kind: "primary", trigger: all }) }, t("Update all"));
+    row.append(all);
+    main.append(row);
+  }
 
   // the catalogs, and adding an entry with its options
   const catalogs = el("input", { id: "mcp-catalogs", class: "mono", placeholder: t("default catalogs (or files and https URLs)") });
@@ -8299,6 +8678,22 @@ pages.mcp = async (main) => {
   const entry = el("input", { id: "mcp-entry", class: "mono", placeholder: "hub:binwalk" });
   const as = el("input", { id: "mcp-as", class: "mono", placeholder: t("the entry's name") });
   const mounts = el("textarea", { id: "mcp-mounts", rows: 2, class: "mono", placeholder: "/mnt/samples=/home/you/samples:ro" });
+  // its folders (Add…): each "Folder on HOST for the container's TARGET", filled in as TARGET=default where that host's
+  // sandbox-ai says the default (the start's workspace for /work, a folder of the server's own for the others)
+  const mountsHelp = el("div", { id: "mcp-mounts-help", class: "hint" });
+  const showFolders = (folders) => {
+    clear(mountsHelp);
+    mountsHelp.append(t("One per line: TARGET=FOLDER - TARGET the folder in the server's container, FOLDER the folder on {host} (:rw writable); FOLDER default: its default.", { host }));
+    const list = Array.isArray(folders) ? folders.filter(m => m && typeof m.target === "string") : [];
+    mounts.value = list.filter(m => m.default === "workspace" || m.default === "own").map(m => `${m.target}=default:${m.mode === "rw" ? "rw" : "ro"}`).join("\n");
+    if (!list.length) return;
+    mountsHelp.append(el("ul", {}, list.map(m => el("li", {}, t("Folder on {host} for the container's {target}", { host, target: m.target }),
+      m.default === "workspace" || m.default === "own"
+        ? `: ${t("default")} - ${m.default === "workspace" ? t("the start's workspace") : t("its own folder, made by sandbox-ai")} (${m.mode === "rw" ? t("writable") : t("read-only")})`
+        : (m.required ? ` (${t("required")})` : ""),
+      m.description ? ` - ${m.description}` : ""))));
+  };
+  showFolders([]);
   // its variables as `mcp add --env` takes them, one per line; the catalog's descriptions of the entry's (Add…)
   const env = el("textarea", { id: "mcp-env", rows: 3, class: "mono", placeholder: t("NAME, NAME=VALUE or NAME@SECRET") });
   const envHelp = el("div", { id: "mcp-env-help", class: "hint" });
@@ -8332,7 +8727,7 @@ pages.mcp = async (main) => {
       el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, x.network), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
         el("td", {}, typeof x.catalog === "string" ? x.catalog : ""),
         el("td", { class: x.signature === "good" ? "status-ok" : "status-fail" }, t(SIGNED[x.signature] || N_("unsigned"))),
-        el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; env.value = ""; showVariables(x.env); entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
+        el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; env.value = ""; showVariables(x.env); showFolders(x.mounts); entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
   });
   const add = (event) => {
     clear(addStatus);
@@ -8375,7 +8770,7 @@ pages.mcp = async (main) => {
         await send(true);
       }, { kind: "primary", onCancel: () => { clear(addStatus).append(errorNotice(e)); } });
     };
-    const writable = body.mounts.filter(m => m.mode === "rw").map(m => m.host);
+    const writable = body.mounts.filter(m => m.mode === "rw" && m.host !== "default").map(m => m.host);
     const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null,
       body.network === "lan" ? t("reaching your local network and this host (internet + LAN)") : null].filter(Boolean);
     if (!what.length) { busy(event.target, () => send(false)); return; }
@@ -8386,7 +8781,7 @@ pages.mcp = async (main) => {
     el("span"), el("button", { onclick: showCatalog }, t("Show the catalog"))), catalogBox),
   el("h2", {}, t("Add a server")), el("div", { class: "card" }, el("div", { class: "form" },
     el("label", { for: "mcp-entry" }, t("Catalog entry")), entry, el("label", { for: "mcp-as" }, t("Name for --mcp")), as,
-    el("label", { for: "mcp-mounts" }, t("Mounts (one per line)")), mounts, el("label", { for: "mcp-env" }, t("Variables (one per line)")), el("div", {}, env, envHelp),
+    el("label", { for: "mcp-mounts" }, t("Folders (one per line)")), el("div", {}, mounts, mountsHelp), el("label", { for: "mcp-env" }, t("Variables (one per line)")), el("div", {}, env, envHelp),
     el("label", { for: "mcp-network" }, t("Network")), network, el("label", { for: "mcp-memory" }, t("Memory")), memory, el("label", { for: "mcp-pids" }, t("Processes")), pids,
     el("label", { for: "mcp-add-backend" }, t("Backend")), backend, el("label", { for: "mcp-add-vpn" }, t("VPN profile")), vpn,
     el("label", { for: "mcp-no-pull" }, t("The image is there already")), noPull, el("label", { for: "mcp-unsigned" }, t("Also from an unsigned catalog")), unsigned,
@@ -8783,6 +9178,18 @@ function gitTokenName(address) {
 }
 
 // Presets (sandbox-ai presets): what each sets, what is missing before it starts, and the extra directories.
+// a built-in preset's live light (presets list --json's "live": the live check's imported result, sandbox-ai's
+// presets.live_light): green with its date and version when it passed, red with the reason when it failed, nothing
+// without one (no data yet: no light, no words)
+function presetLive(p) {
+  const live = p && p.live && typeof p.live === "object" && ["green", "red"].includes(p.live.light) ? p.live : null;
+  if (!live) return "";
+  const date = String(live.date || ""), version = String(live.version || "");
+  const words = live.light === "green" ? t("live check passed on {date}, sandbox-ai {version}", { date, version })
+    : t("live check failed on {date}, sandbox-ai {version}: {why}", { date, version, why: String(live.why || "") });
+  return el("span", { class: live.light === "green" ? "status-ok" : "status-bad", title: words },
+    el("span", { class: LIGHT_CLASSES[live.light], "aria-hidden": "true" }, LIGHT_SYMBOLS[live.light]), " ", words);
+}
 pages.presets = async (main) => {
   const host = state.host;
   main.append(el("h1", {}, t("Presets on {host}", { host })), el("p", { class: "hint" }, t("Loading…")));
@@ -8800,9 +9207,8 @@ pages.presets = async (main) => {
     const inputs = Object.entries(values).map(([key, spec]) => [key, el("input", { id: `preset-value-${key}`, class: "mono", placeholder: spec && spec.default !== undefined ? String(spec.default) : "" }), spec]);
     const agent = el("select", { id: "preset-agent" }, el("option", { value: "" }, t("any agent")), AGENTS.map(a => el("option", { value: a }, a)));
     const result = el("div", { class: "wide" });
-    const badge = presetExperimental(found) || presetExperimental(p);
     clear(detail).append(el("div", { class: "card" }, el("h2", {}, `${found.id || p.id}: ${found.title || ""}`), el("p", {}, found.description || ""),
-      badge ? el("p", { class: "hint" }, experimentalText(badge)) : null,
+      presetLive(found) ? el("p", {}, presetLive(found)) : null,
       el("pre", {}, JSON.stringify(found, null, 2)),
       el("div", { class: "form" }, inputs.map(([key, input, spec]) => [el("label", { for: input.id }, (spec && spec.label) || key), input]),
         el("label", { for: "preset-agent" }, t("Agent")), agent,
@@ -8812,8 +9218,8 @@ pages.presets = async (main) => {
         }) }, t("Check what is missing")), result)));
   };
   if (list instanceof Error) main.append(errorNotice(list));
-  else main.append(table([t("Preset"), t("Title"), t("Origin"), ""], (Array.isArray(list) ? list : []).filter(p => p && p.id).map(p =>
-    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, presetTitle(p), experimentalBadge(p) ? " " : null, experimentalBadge(p)), el("td", {}, p.origin || ""), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
+  else main.append(table([t("Preset"), t("Title"), t("Origin"), t("Live check"), ""], (Array.isArray(list) ? list : []).filter(p => p && p.id).map(p =>
+    el("tr", {}, el("td", { class: "mono" }, p.id), el("td", {}, presetTitle(p)), el("td", {}, p.origin || ""), el("td", {}, presetLive(p)), el("td", { class: "actions" }, rowButton(t("Show"), p.id, host, { onclick: () => open(p) })))), t("No presets on this host.")), detail);
   // the extra preset directories (defaults.json preset_dirs)
   const dirsBox = el("div");
   main.append(el("h2", {}, t("Preset directories")), dirsBox);
@@ -9018,7 +9424,7 @@ pages.teams = async (main) => {
 
 // Images and tools: the images (sandbox-ai images) with their extensions and variants (packages, files, a
 // Containerfile fragment; checked, changed, removed), a build in a terminal, the demo device.
-const BUILD_TARGETS = ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi", "all", "team", "cairn", "vpn", "tor", "browser"];
+const BUILD_TARGETS = ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi", "all", "team", "cairn", "artex", "vpn", "tor", "browser"];
 const IMAGE_STATES = { current: N_("current"), outdated: N_("extension changed: rebuild"), "base-changed": N_("base rebuilt: rebuild"),
   invalid: N_("extension has errors"), "not-built": N_("not built") };
 const IMAGE_TARGET = /^[a-z0-9][a-z0-9_.-]{0,29}$/;
@@ -9275,11 +9681,67 @@ function helpBody(text) {
     const lines = paragraph.split("\n"), nodes = [];
     let list = null;
     for (const line of lines) {
+      if (!line.trim()) continue;
       if (line.startsWith("- ")) { if (!list) { list = el("ul"); nodes.push(list); } list.append(el("li", {}, inline(line.slice(2)))); }
       else { list = null; nodes.push(el("p", {}, inline(line))); }
     }
     return nodes;
   }).flat();
+}
+
+// The folds of a help text: [heading, text] - a line "## Heading" starts one (the app's help_content.folds).
+function helpFolds(text) {
+  const found = [];
+  let heading = "", lines = [];
+  for (const line of String(text).split("\n")) {
+    if (line.startsWith("## ")) {
+      if (lines.join("\n").trim()) found.push([heading, lines.join("\n").trim()]);
+      heading = line.slice(3).trim(); lines = [];
+    } else lines.push(line);
+  }
+  if (lines.join("\n").trim() || !found.length) found.push([heading, lines.join("\n").trim()]);
+  return found;
+}
+
+// A command as a block with a button that copies it.
+function helpCommand(command) {
+  const button = el("button", { class: "small", onclick: async () => {
+    let copied = false;
+    try { if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") { await navigator.clipboard.writeText(command); copied = true; } } catch (e) { copied = false; }
+    button.textContent = copied ? t("Copied") : t("Could not copy");
+  } }, t("Copy"));
+  return el("div", { class: "help-command" }, el("code", {}, command), button);
+}
+
+// A section in the app's pattern: one sentence, "How do I…" in short steps (a step "$ ..." is a command to copy),
+// the details folded away (one fold per "## Heading"), the commands and options.
+function helpSection(x) {
+  const nodes = [];
+  if (x.summary) nodes.push(el("p", { class: "help-lead" }, inLanguage(x.summary)));
+  const tasks = Array.isArray(x.tasks) ? x.tasks : [];
+  if (tasks.length) nodes.push(el("h3", {}, t("How do I…")));
+  for (const task of tasks) {
+    nodes.push(el("h4", {}, inLanguage(task.title)));
+    let list = null, number = 1;
+    for (const step of (Array.isArray(task.steps) ? task.steps : [])) {
+      const text = inLanguage(step);
+      if (text.startsWith("$ ")) { list = null; nodes.push(helpCommand(text.slice(2))); continue; }
+      if (!list) { list = el("ol", { start: String(number) }); nodes.push(list); }
+      list.append(el("li", {}, text));
+      number += 1;
+    }
+  }
+  const folds = helpFolds(inLanguage(x.body));
+  if (folds.length || (x.cli || []).length) nodes.push(el("h3", {}, t("Details")));
+  folds.forEach(([heading, text]) => nodes.push(el("details", { class: "help-fold" },
+    el("summary", {}, heading || (folds.length > 1 ? t("Overview") : t("More about this"))), helpBody(text))));
+  const cli = (x.cli || []).map(String);
+  if (cli.length) {
+    nodes.push(el("details", { class: "help-fold" }, el("summary", {}, t("Command line")),
+      cli.filter(c => c.startsWith("sandbox-ai")).map(helpCommand),
+      cli.filter(c => !c.startsWith("sandbox-ai")).length ? el("p", {}, cli.filter(c => !c.startsWith("sandbox-ai")).map((c, i) => [i ? ", " : "", el("code", {}, c)])) : null));
+  }
+  return nodes;
 }
 
 // The (?) beside a page's heading (after it, not in it: the heading stays the page's name): Help with that page's
@@ -9308,13 +9770,13 @@ pages.help = async (main) => {
   const open = (id) => { const box = boxes.get(id); if (!box) return; box.setAttribute("open", ""); revealCard(box); };
   clear(main).append(el("h1", {}, t("Help")),
     el("p", { class: "hint" }, from ? t("What the page {page} is about first; below it, everything else about sandbox-ai.", { page: t(label) }) : t("What sandbox-ai does, and what each option and command means. The same help as in the desktop app.")),
-    from ? el("div", { class: "row" }, el("button", { onclick: () => show(from) }, t("Back to {page}", { page: t(label) })), el("button", { onclick: () => { state.helpFor = null; show("help"); } }, t("All sections"))) : null);
+    // (no null for append: a browser would show it as the word "null")
+    ...(from ? [el("div", { class: "row" }, el("button", { onclick: () => show(from) }, t("Back to {page}", { page: t(label) })), el("button", { onclick: () => { state.helpFor = null; show("help"); } }, t("All sections")))] : []));
   for (const x of ordered) {
     const box = el("details", { class: "card help-section", id: `help-${x.id}`, open: wanted.includes(x.id) },
       el("summary", {}, el("h2", { class: "help-title" }, inLanguage(x.title))),
-      helpBody(inLanguage(x.body)),
-      (x.cli || []).length ? el("p", { class: "hint" }, t("Commands and options:"), " ", (x.cli || []).map((c, i) => [i ? ", " : "", el("code", {}, String(c))])) : null,
-      (x.see || []).filter(id => byId.has(id)).length ? el("p", { class: "hint" }, t("See also:"), " ", x.see.filter(id => byId.has(id)).map(id => el("button", { class: "small", onclick: () => open(id) }, inLanguage(byId.get(id).title)))) : null);
+      el("div", { class: "help-text" }, helpSection(x),
+      (x.see || []).filter(id => byId.has(id)).length ? el("p", { class: "hint" }, t("See also:"), " ", x.see.filter(id => byId.has(id)).map(id => el("button", { class: "small", onclick: () => open(id) }, inLanguage(byId.get(id).title)))) : null));
     boxes.set(x.id, box);
     main.append(box);
   }

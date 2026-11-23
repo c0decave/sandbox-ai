@@ -198,7 +198,7 @@ def test_files_environment_and_plan():
     assert env["QWEN_CODE_SYNCHRONIZED_OUTPUT"] == "1"
     assert qwen.environment(ns("qwen", *qwen.FEATURES))["QWEN_CODE_SYNCHRONIZED_OUTPUT"] == "1"
     plan = qwen.plan(ns("qwen", "updates"))
-    assert plan["version"] == qwen.VERSION and plan["experimental"] and plan["telemetry"]["switchable"] is False
+    assert plan["version"] == qwen.VERSION and "experimental" not in plan and plan["telemetry"]["switchable"] is False
     assert plan["enabled"] == [{"feature": "updates", "hosts": ["registry.npmjs.org"]}]
     assert plan["off"] == ["model-catalog", "extensions", "extension-hooks"]
 

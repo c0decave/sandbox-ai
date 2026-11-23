@@ -29,9 +29,9 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "approvals": ("approvals.py",), "packages": ("packages.py",), "secret-guard": ("secret_guard.py",), "canaries": ("canary.py",), "safeguards": ("safeguards.py",), "secrets": ("secret_store.py",), "llm": ("llm.py",), "vpn": ("vpn.py",), "hosts": ("hosts.py",), "web": ("webui.py",), "defaults": ("defaults_cmd.py",), "team": ("team.py",), "presets": ("presets.py",), "demo-device": ("demo_device.py",), "git-logins": ("git_logins.py",), "publish-logins": ("publish_logins.py",), "identities": ("identities.py",), "completion": ("completion.py",), "__complete": ("completion.py", "__complete"),
                    "images": ("images.py",), "devices": ("devices.py",), "limits": ("devices.py", "--limits"),
                    "workspace": ("workspaces.py",), "toolchain": ("toolchains.py",), "usage": ("usage.py",),
-                   "rules": ("rules_cmd.py",),
+                   "rules": ("rules_cmd.py",), "cairn": ("cairn_workers.py",),
                    "top": ("monitor.py", "top"), "stats": ("monitor.py", "stats"),
-                   "report": ("report.py",), "scan": ("lint.py",), "schedule": ("schedule.py",), "spend": ("spend.py",), "models": ("cloud_models.py",),
+                   "report": ("report.py",), "scan": ("lint.py",), "schedule": ("schedule.py",), "spend": ("spend.py",), "models": ("cloud_models.py",), "artex": ("artex.py",),
                    "uninstall": ("uninstall.py",)}
 
 
@@ -68,8 +68,10 @@ HELP = (
         ("build", "Build the agent images and the others a start needs"))),
     ("Management Commands", (
         ("approvals", "Answer what running sandboxes ask"),
+        ("artex", "ARTEX's console (--artex): its address and password"),
         ("board", "A board or session as one file; take one in"),
         ("bridge", "Let one running session reach another"),
+        ("cairn", "Cairn's board: how each harness fares as its worker"),
         ("canaries", "Decoy files of the runs, and what happened to them"),
         ("checkpoint", "The workspaces as they were; undo what an agent did"),
         ("defaults", "Your defaults for every start (defaults.json)"),
@@ -590,11 +592,11 @@ def build_split(args):
     return options, None, []
 
 
-BUILD_PLAIN_TARGETS = ("team", "cairn", "browser", "vpn", "tor")
+BUILD_PLAIN_TARGETS = ("team", "cairn", "artex", "browser", "vpn", "tor")
 
 
 def build_several(args):
-    """The targets of `sandbox-ai build claude codex team ...` when there are two or more (agents, team, cairn,
+    """The targets of `sandbox-ai build claude codex team ...` when there are two or more (agents, team, cairn, artex,
     browser, vpn, tor: each a build of its own, the README's way to rebuild some images), else None."""
     options, target, extra = build_split(args)
     if target not in (*AGENT_IMAGES, *BUILD_PLAIN_TARGETS):
@@ -611,8 +613,8 @@ def build_all_wanted(args):
 
 
 def build_all(args, run=None, out=None):
-    """`sandbox-ai build all`: every image sandbox-ai builds - the twelve agents, the team image, Cairn (its own
-    image), the browser, the VPN and Tor images, and every variant of yours (sandbox-ai images) - each a build of its
+    """`sandbox-ai build all`: every image sandbox-ai builds - the twelve agents, the team image, Cairn and ARTEX (their
+    own images), the browser, the VPN and Tor images, and every variant of yours (sandbox-ai images) - each a build of its
     own, so one that fails stops none of the others; at the end what was built and what failed. 0 when all were.
     `sandbox-ai build claude codex team` (build_several) is the same for the targets named, in that order."""
     import subprocess
@@ -630,7 +632,8 @@ def build_all(args, run=None, out=None):
                "team": {"--podman-url", "--uv", "--node"}, "plain": {"--podman-url"}, "browser": set(),
                "variant": {"--podman-url", "--extension-only"}}
     plan = [(agent, [agent], "agent") for agent in AGENT_IMAGES]
-    plan += [("team", ["team"], "team"), ("cairn", ["cairn"], "plain"), ("browser", ["browser"], "browser"),
+    plan += [("team", ["team"], "team"), ("cairn", ["cairn"], "plain"), ("artex", ["artex"], "plain"),
+             ("browser", ["browser"], "browser"),
              ("vpn", ["vpn"], "plain"), ("tor", ["tor"], "plain")]
     if several:
         plan = [entry for name in several for entry in plan if entry[0] == name]

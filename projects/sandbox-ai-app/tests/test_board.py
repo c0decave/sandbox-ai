@@ -2,6 +2,7 @@
 badges, the administrator's policy, templates checked by the real launcher, the layout file."""
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -68,10 +69,11 @@ def test_nodes_own_their_options_and_unknown_tokens_are_kept(sai):
                                           "--allow-host", "x.example", "--memory", "4g", "--bogus-option"],
                         ["--model", "local/qwen", "--verbose"])
     kinds = sorted(n.kind for n in board.nodes)
-    assert kinds == ["agent", "limits", "mcp", "mount", "network", "proxy", "workspace", "workspace"]
+    # (what no part owns is on the part Other options: Board.extra is that part's tokens)
+    assert kinds == ["agent", "limits", "mcp", "mount", "network", "other", "proxy", "workspace", "workspace"]
     assert board.first("agent").props["model"] == "local/qwen" and board.first("agent").props["arguments"] == "--verbose"
     assert board.first("network").props == {"--allow-host": ["x.example"]}
-    assert "--bogus-option" in board.extra
+    assert "--bogus-option" in board.extra and board.first("other").props == {"tokens": ["--bogus-option"]}
     agent, _, agent_args = B.values(board)
     assert agent == "opencode" and agent_args == ["--model", "local/qwen", "--verbose"]
     assert B.command_line(sai, board).startswith("sandbox-ai opencode ")
@@ -294,11 +296,13 @@ def test_an_open_board_scores_low_with_the_reasons(sai):
 
 
 def test_a_project_board_scores_high_and_the_panels_say_why(sai, tmp_path):
-    project = tmp_path / "project"
+    # In the session's HOME (conftest moves it to a temporary folder): a project there is an ordinary one wherever
+    # TMPDIR points. Under TMPDIR=/root/... tmp_path lay outside HOME below /root, rightly "a system directory" (-8).
+    project = Path.home() / f"project-{tmp_path.name}"
     project.mkdir()
     board = B.from_argv(sai, "claude", ["--allow-pypi"], workspaces=[str(project)])
-    score, _ = B.badges(board, launcher=sai.launcher)
-    assert score >= 95
+    score, why = B.badges(board, launcher=sai.launcher)
+    assert score >= 95, [b.text for b in why]  # what lowered it, if it fails
     panels = B.panels(board, sai.launcher)
     assert [p.level for p in panels["read"]] == ["info"] and str(project) in panels["read"][0].text
     assert any("pypi" in p.text for p in panels["reach"]) and panels["secrets"] == []

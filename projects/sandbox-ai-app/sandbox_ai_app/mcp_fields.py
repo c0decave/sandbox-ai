@@ -207,6 +207,52 @@ class LimitsFields(QWidget):
         return False
 
 
+def folder_label(target, host="local"):
+    """"Folder on this machine for the container's /work": the label of a folder field - which side is which, so that
+    the container's folder is never typed as the one of the machine (user 2026-11-22: "--mount /work=/app:rw ... es
+    geht doch um container und nicht die maschine???")."""
+    if host == "local":
+        return tr("Folder on this machine for the container's {target}", target=printable(str(target)))
+    return tr("Folder on {host} for the container's {target}", host=printable(host), target=printable(str(target)))
+
+
+def folder_defaults(mcp, entry, host="local"):
+    """{target: {"default": "workspace"|"own", "mode": "ro"|"rw"}} of catalog ENTRY's folders: on this machine as its
+    sandbox-ai (MCP module MCP) makes them, on another host as its `mcp catalog --json` said them; {} where they are
+    not known (another host older than 0.1.212, a sandbox-ai that does not load)."""
+    found = {}
+    for mount in entry.get("mounts", []) if isinstance(entry.get("mounts"), list) else []:
+        if not isinstance(mount, dict) or not isinstance(mount.get("target"), str):
+            continue
+        target = mount["target"]
+        if host == "local" and mcp is not None and hasattr(mcp, "declared_mode"):
+            try:
+                found[target] = {"default": "workspace" if target == mcp.WORKSPACE_TARGET else "own",
+                                 "mode": mcp.declared_mode(entry, mount)}
+            except Exception as _exc:  # noqa: BLE001 - an entry it cannot read: no default shown for it
+                applog.swallowed("mcp_fields", "folder_defaults", _exc)
+        elif host != "local" and mount.get("default") in ("workspace", "own"):
+            found[target] = {"default": mount["default"], "mode": "rw" if mount.get("mode") == "rw" else "ro"}
+    return found
+
+
+def default_text(mcp, declared, name, target, host="local"):
+    """What an empty folder field of server NAME's TARGET shows: its default (DECLARED: folder_defaults' for it), "" for
+    none."""
+    if not declared:
+        return ""
+    if declared.get("default") == "workspace":
+        return tr("default: the start's workspace (the first workspace of the start that uses it)")
+    if host == "local" and mcp is not None and hasattr(mcp, "own_folder") and name:
+        try:
+            return tr("default: its own folder {path}", path=printable(str(mcp.own_folder(name, target))))
+        except Exception as _exc:  # noqa: BLE001 - a name it does not take: said without the path
+            applog.swallowed("mcp_fields", "default_text", _exc)
+    if host == "local":
+        return tr("default: its own folder, made by sandbox-ai")
+    return tr("default: its own folder on {host}, made there by sandbox-ai", host=printable(host))
+
+
 def mount_reason(mcp, target, host, mode):
     """Why the folder HOST (of this machine) cannot be the server's TARGET with MODE (mcp.mount_host: a read-only one
     must be there, a writable one is created at OK), or None. Nothing to check without that rule."""
@@ -530,11 +576,18 @@ class ServerPropertiesDialog(QDialog):
         given = {m.get("target"): m for m in definition.get("mounts", []) if isinstance(m, dict)}
         targets = [m.get("target") for m in (entry or {}).get("mounts", []) if isinstance(m, dict)] or list(given)
         required = {m.get("target") for m in (entry or {}).get("mounts", []) if isinstance(m, dict) and m.get("required")}
+        # A folder that is its default (the start's workspace, the server's own folder: `mcp list --json`'s "folders")
+        # is an empty field that shows it; emptied, a field goes back to its default (TARGET=default).
+        defaults = {f.get("target"): f.get("default") for f in info.get("folders") or [] if isinstance(f, dict)
+                    and f.get("default") in ("workspace", "own")}
+        self.declared = {target: {"default": "workspace" if target == "/work" else "own"} for target in targets} \
+            if "folders" in info else {}
         for target in targets:
-            edit = QLineEdit(str((given.get(target) or {}).get("host", "")))
-            edit.setPlaceholderText(tr("a folder on this machine") if host == "local" else
-                                    tr("a folder on {host}", host=printable(host)))
-            edit.setAccessibleName(tr("Folder for {target}", target=target))
+            edit = QLineEdit("" if target in defaults else str((given.get(target) or {}).get("host", "")))
+            edit.setPlaceholderText(default_text(self.mcp, self.declared.get(target), name, target, host)
+                                    or (tr("a folder on this machine") if host == "local" else
+                                        tr("a folder on {host}", host=printable(host))))
+            edit.setAccessibleName(folder_label(target, host))
             writable = QCheckBox(tr("writable"))
             writable.setChecked((given.get(target) or {}).get("mode") == "rw")
             reason = plain_label(role="notice-error")
@@ -544,8 +597,7 @@ class ServerPropertiesDialog(QDialog):
             row.addWidget(writable)
             holder = QWidget()
             holder.setLayout(row)
-            label = tr("{target} in the container", target=target) + (f" ({tr('required')})" if target in required
-                                                                      else "")
+            label = folder_label(target, host) + (f" ({tr('required')})" if target in required else "")
             form.addRow(label, holder)
             form.addRow("", reason)
             edit.textChanged.connect(lambda _t, t=target: self.check_mount(t))
@@ -586,6 +638,7 @@ class ServerPropertiesDialog(QDialog):
         self.buttons.accepted.connect(self.try_accept)
         self.buttons.rejected.connect(self.reject)
         form.addRow(self.buttons)
+        self.mounts_before = self.mount_state()  # (what the folder fields show now: a change of them is sent)
         if not own:
             for widget in (self.limits, self.network, self.vpn, self.env, *[w for pair in self.mounts.values()
                                                                              for w in pair]):
@@ -595,6 +648,13 @@ class ServerPropertiesDialog(QDialog):
         if values and values.get("limits"):
             self.limits.set_values({**self.limits.values(), **values["limits"]})
         self.update_state()
+
+    def mount_state(self):
+        """[(target, host folder or "default", mode)] of the folder fields: an empty one is its default where it has
+        one, else left out."""
+        return [(target, edit.text().strip() or backend.MCP_DEFAULT_FOLDER, "rw" if writable.isChecked() else "ro")
+                for target, (edit, writable) in self.mounts.items()
+                if edit.text().strip() or target in self.declared]
 
     def check_mount(self, target):
         edit, writable = self.mounts[target]
@@ -640,12 +700,15 @@ class ServerPropertiesDialog(QDialog):
             vpn = self.vpn.text().strip()
             if vpn != (definition.get("vpn") or ""):
                 changes["vpn"] = vpn or None
-            mounts = [(target, edit.text().strip(), "rw" if writable.isChecked() else "ro")
-                      for target, (edit, writable) in self.mounts.items() if edit.text().strip()]
-            before = [(m.get("target"), m.get("host"), m.get("mode", "ro")) for m in definition.get("mounts", [])
-                      if isinstance(m, dict)]
-            if sorted(mounts) != sorted(before):
-                changes["mounts"] = mounts
+            mounts = self.mount_state()
+            if self.declared:  # (with defaults: what the fields showed at first is what the definition is)
+                if sorted(mounts) != sorted(self.mounts_before):
+                    changes["mounts"] = mounts
+            else:
+                before = [(m.get("target"), m.get("host"), m.get("mode", "ro")) for m in definition.get("mounts", [])
+                          if isinstance(m, dict)]
+                if sorted(mounts) != sorted(before):
+                    changes["mounts"] = mounts
             env = self.env.specs()
             if sorted(env) != definition_specs(definition):
                 changes["env"] = env

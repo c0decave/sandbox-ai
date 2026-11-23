@@ -2,7 +2,7 @@
 
 sandbox-ai keeps per use case (coding, sandbox behaviour, web research, code review ...) the ranked model x harness
 choices with their settings, why, known failures and evidence (its model_usecases.py and model_usecases.json; round 5
-of the research fills in what is "not tested" yet). This module asks this machine's sandbox-ai (sai.module) to pick
+of the research fills in what has "no data yet"). This module asks this machine's sandbox-ai (sai.module) to pick
 from the models the board's host's servers have - the Board read them already (backend.host_llm_servers: names, sizes,
 what is loaded, what reads images) - and their memory (`llm set NAME --memory GB`; a server on this machine's loopback
 has this machine's), and says it in the app's words: the choice and why, and the "What we know" box of the use case.
@@ -26,7 +26,7 @@ from . import applog
 OPTION = "--use-case"
 STATUS = {"measured": N_("measured on this use case's tasks"),
           "indirect": N_("from other tasks than this use case's own"),
-          "not tested": N_("not tested yet")}
+          "not tested": N_("no data yet")}  # (the status id "not tested": no measured or indirect choice)
 # The table's labels in the app's language (a label the table has that is not here is shown as it comes).
 LABELS = (N_("Coding and debugging"), N_("Sandbox behaviour"), N_("Untrusted input"), N_("Web research"),
           N_("Code review"),
@@ -120,7 +120,7 @@ def choice_text(found):
     evidence, the settings over the model profile, what fits, the note; or why there is none."""
     choice = found.get("choice")
     if not choice:
-        return tr("Not tested yet, and no model of this host's servers to go by: choose the model yourself.") \
+        return tr("No data yet, and no model of this host's servers to go by: choose the model yourself.") \
             if found.get("status") == "not tested" else \
             tr("Nothing of this use case's table is on this host's servers: choose the model yourself.")
     where = tr("rank {rank}", rank=choice["rank"]) if choice.get("rank") else \
@@ -179,8 +179,8 @@ def with_use_case(sai, profile, model, agent, name):
 
 # What a pair's status in another agent is called (model_profiles.STATUSES); "rank 3, measured" and the like stay.
 AGENT_STATUS = {"verified": N_("verified"), "smoke-only": N_("smoke test only"), "partial": N_("partial"),
-                "failing": N_("failing"), "known-bad": N_("known bad"), "untested": N_("not tested"),
-                "not tested": N_("not tested")}
+                "failing": N_("failing"), "known-bad": N_("known bad"), "untested": N_("no data yet"),
+                "not tested": N_("no data yet"), "no data yet": N_("no data yet")}  # (an older sandbox-ai: "not tested")
 
 
 def pairs_of(found, server=None):
@@ -210,7 +210,7 @@ def agent_note(pair):
     partial" ("" when it is)."""
     if not pair.get("agent"):
         return ""
-    status = str(pair.get("agent_status") or "not tested")
+    status = str(pair.get("agent_status") or "no data yet")
     status = tr(AGENT_STATUS[status]) if status in AGENT_STATUS else printable(status)
     agent = printable(str(pair.get("agent_name") or pair["agent"]))
     if pair.get("source") == "not measured":

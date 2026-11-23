@@ -1,0 +1,106 @@
+sandbox-ai's patch 3 of 4 to ARTEX v0.3.15: enrich/ - asset enrichment resolves names through the
+system's resolvers (/etc/resolv.conf: the sandbox's DNS), never dnsx's built-in public resolvers; with its test
+
+diff --git a/enrich/enrich.go b/enrich/enrich.go
+index 7c8fc13..2a3d446 100644
+--- a/enrich/enrich.go
++++ b/enrich/enrich.go
+@@ -64,12 +64,19 @@ func New(as *db.AssetStore, proxy func() string, workers int) *Engine {
+ 	if workers <= 0 {
+ 		workers = 4
+ 	}
+-	resolv, err := dnsx.New(dnsx.Options{
+-		BaseResolvers: dnsx.DefaultResolvers,
+-		MaxRetries:    3,
+-		QuestionTypes: []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeCNAME},
+-		Timeout:       4 * time.Second,
+-	})
++	// sandbox-ai: the system's resolvers (/etc/resolv.conf: in sandbox-ai, the sandbox's own DNS with
++	// its allow-list), never dnsx's built-in public ones (Cloudflare, Google, Quad9, OpenDNS), which would
++	// learn every target name; none there: DNS enrichment stays off.
++	var resolv *dnsx.DNSX
++	err := errNoResolvers
++	if resolvers := systemResolvers(resolvConf); len(resolvers) > 0 {
++		resolv, err = dnsx.New(dnsx.Options{
++			BaseResolvers: resolvers,
++			MaxRetries:    3,
++			QuestionTypes: []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeCNAME},
++			Timeout:       4 * time.Second,
++		})
++	}
+ 	if err != nil {
+ 		log.Printf("[enrich] dnsx 初始化失败，DNS 解析停用：%v", err)
+ 		resolv = nil
+diff --git a/enrich/resolvers.go b/enrich/resolvers.go
+new file mode 100644
+index 0000000..e1f9253
+--- /dev/null
++++ b/enrich/resolvers.go
+@@ -0,0 +1,36 @@
++package enrich
++
++// sandbox-ai: asset enrichment asks the system's resolvers, never dnsx's public ones.
++
++import (
++	"bufio"
++	"errors"
++	"net"
++	"os"
++	"strings"
++)
++
++const resolvConf = "/etc/resolv.conf"
++
++var errNoResolvers = errors.New("no nameserver in " + resolvConf)
++
++// systemResolvers: the nameservers of PATH (resolv.conf) as dnsx takes them ("udp:IP:53").
++func systemResolvers(path string) []string {
++	f, err := os.Open(path)
++	if err != nil {
++		return nil
++	}
++	defer f.Close()
++	var found []string
++	scanner := bufio.NewScanner(f)
++	for scanner.Scan() {
++		fields := strings.Fields(scanner.Text())
++		if len(fields) < 2 || fields[0] != "nameserver" {
++			continue
++		}
++		if ip := net.ParseIP(fields[1]); ip != nil {
++			found = append(found, "udp:"+net.JoinHostPort(ip.String(), "53"))
++		}
++	}
++	return found
++}
+diff --git a/enrich/resolvers_test.go b/enrich/resolvers_test.go
+new file mode 100644
+index 0000000..297cb9c
+--- /dev/null
++++ b/enrich/resolvers_test.go
+@@ -0,0 +1,25 @@
++package enrich
++
++// sandbox-ai's test of its patch: the system's nameservers, never dnsx's public ones.
++
++import (
++	"os"
++	"path/filepath"
++	"reflect"
++	"testing"
++)
++
++func TestSystemResolvers(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "resolv.conf")
++	text := "# the sandbox's\nnameserver 10.0.2.3\nnameserver ::1\nnameserver not-an-ip\nsearch example\noptions ndots:1\n"
++	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	want := []string{"udp:10.0.2.3:53", "udp:[::1]:53"}
++	if got := systemResolvers(path); !reflect.DeepEqual(got, want) {
++		t.Fatalf("systemResolvers = %v, want %v", got, want)
++	}
++	if got := systemResolvers(filepath.Join(t.TempDir(), "none")); got != nil {
++		t.Fatalf("no resolv.conf: %v, want none (DNS enrichment off)", got)
++	}
++}

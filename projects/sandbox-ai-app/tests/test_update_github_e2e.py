@@ -27,7 +27,7 @@ APP_ROOT = Path(__file__).resolve().parents[1]  # projects/sandbox-ai-app
 SAI = Path(os.environ.get("SANDBOX_AI_HOME") or APP_ROOT.parents[1])
 HAVE_KIT = (SAI / "tests" / "release_kit.py").is_file() and (SAI / "scripts" / "make_dist.py").is_file()
 if HAVE_KIT:
-    sys.path.insert(0, str(SAI / "tests"))
+    sys.path.append(str(SAI / "tests"))  # (after the app's own tests: conftest.app_tests_first)
     import fake_github  # noqa: E402
     import release_kit as kit  # noqa: E402
 
@@ -70,12 +70,39 @@ def github(world):
     assert set(fake.refused) <= fake.also, f"something other than GitHub was asked: {fake.refused}"
 
 
+def memory_folder(least=1 << 30):
+    """A folder on a file system in memory (tmpfs) that may run programs and has LEAST bytes free, or None (no
+    /proc/mounts: macOS; none such). The packages' first start writes its copy of some 2000 files with an fsync
+    each (scripts/dist_boot.py: on disk before the copy is renamed into place) - about 25 s on a busy disk (12 ms an
+    fsync), several times a test; on tmpfs an fsync costs nothing."""
+    try:
+        with open("/proc/mounts") as stream:
+            mounts = {fields[1]: fields for fields in (line.split() for line in stream) if len(fields) >= 4}
+    except OSError:
+        return None
+    for folder in ("/dev/shm", "/tmp", f"/run/user/{os.getuid()}"):
+        fields = mounts.get(folder)
+        if fields is None or fields[2] != "tmpfs" or "noexec" in fields[3].split(",") or \
+                not os.access(folder, os.W_OK | os.X_OK):
+            continue
+        try:
+            room = os.statvfs(folder)
+        except OSError:
+            continue
+        if room.f_bavail * room.f_frsize >= least:
+            return Path(tempfile.mkdtemp(prefix="upd-cache-", dir=folder))
+    return None
+
+
 @pytest.fixture
 def machine(tmp_path, world, github, monkeypatch):
     """This process as a user's session on a machine that reaches the fake GitHub: HOME and the XDG folders in
-    TMP_PATH, the proxy and the certificate of the fake, python3 (with PySide6), systemctl and hdiutil stand-ins
-    first on PATH. What the app's commands inherit."""
+    TMP_PATH (the cache, where the packages unpack their copies, in memory where the system has room for it:
+    memory_folder), the proxy and the certificate of the fake, python3 (with PySide6), systemctl and hdiutil
+    stand-ins first on PATH. What the app's commands inherit."""
     home = tmp_path / "home"
+    memory = memory_folder()
+    cache = (memory or home) / ".cache"
     stubs = kit.hdiutil_stub(tmp_path / "stubs")
     for name in ("systemctl", "launchctl", "notify-send", "osascript"):
         (stubs / name).write_text("#!/bin/sh\nexit 0\n")
@@ -84,7 +111,7 @@ def machine(tmp_path, world, github, monkeypatch):
     runtime.chmod(0o700)
     env = github.env({})
     env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".local/state"),
-               XDG_DATA_HOME=str(home / ".local/share"), XDG_CACHE_HOME=str(home / ".cache"),
+               XDG_DATA_HOME=str(home / ".local/share"), XDG_CACHE_HOME=str(cache),
                XDG_RUNTIME_DIR=str(runtime), TMPDIR=str(tmp_path), NO_COLOR="1",
                PATH=f"{stubs}:{world.bin}:{home}/.local/bin:/usr/bin:/bin")
     home.mkdir()
@@ -95,9 +122,11 @@ def machine(tmp_path, world, github, monkeypatch):
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)  # ask_first: yes
     monkeypatch.setattr(widgets, "SHOWN", [])
-    yield SimpleNamespace(home=home, stubs=stubs, runtime=runtime, tmp=tmp_path)
+    yield SimpleNamespace(home=home, cache=cache, stubs=stubs, runtime=runtime, tmp=tmp_path)
     shutil.rmtree(runtime, ignore_errors=True)
     kit.remove(tmp_path)  # (the installations and the read-only copies the packages unpacked: some 100 MB a test)
+    if memory is not None:
+        kit.remove(memory)
 
 
 def run(argv, seconds=LONG, **kwargs):
@@ -439,6 +468,6 @@ def test_after_the_update_the_new_app_takes_over_from_the_appimage(world, github
     def update():
         done = run([image, "cli", "update", "--install"])
         assert done.returncode == 0 and f"installed {NEW} (was {OLD})" in done.stdout, done.stdout + done.stderr
-    now = takes_over(machine, [image], update, machine.home / ".cache/sandbox-ai/appimage")
+    now = takes_over(machine, [image], update, machine.cache / "sandbox-ai/appimage")
     assert f"/appimage/{NEW}-" in now.path, now.path
     assert kit.sha256(image) == kit.sha256(world.dists[NEW] / image.name)

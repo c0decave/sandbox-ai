@@ -23,6 +23,6 @@
     "Its interactive surface is its web UI on the sandbox's loopback: add --browser to see it in the sandbox's own browser; the terminal has its chat too.",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-dsh or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on.",
-    "DeepSeek Harness is not live-tested yet (a start says so); its image first: sandbox-ai build dsh (a start builds it when it is missing)."
+    "Its image first: sandbox-ai build dsh (a start builds it when it is missing)."
   ]
 }

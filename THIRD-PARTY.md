@@ -47,6 +47,20 @@ and the Kotlin compiler 2.4.21 (Apache-2.0, JetBrains) are downloaded from their
   carries the text of the Android Software Development Kit License Agreement (Google LLC), as sdkmanager's own does.
 - `recipes/android-dev/android-sdk-license`: the acceptance sdkmanager records for that license (the SHA-1 of its text).
 
+## Fonts (projects/sandbox-ai-app/sandbox_ai_app/typefaces, sandbox/web/fonts)
+
+Bundled unchanged, each from its family's official repository at a pinned commit (older than 14 days when pinned on
+2026-11-22); every file's SHA-256 and git blob id are in the folder's `fonts.json`, and its licence text lies beside
+it (`OFL-*.txt`). The app loads a file only when its SHA-256 matches. The desktop app ships TTF/OTF, the web
+interface woff2 of the same commits.
+
+| Family | Upstream | Commit | Licence | Files | Copyright |
+|---|---|---|---|---|---|
+| Atkinson Hyperlegible Next | https://github.com/googlefonts/atkinson-hyperlegible-next | `7925f50f649b3813257faf2f4c0b381011f434f1` (2025-02-21) | SIL OFL 1.1 | Regular, Bold | Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors (Braille Institute of America) |
+| Atkinson Hyperlegible Mono | https://github.com/googlefonts/atkinson-hyperlegible-next-mono | `154d50362016cc3e873eb21d242cd0772384c8f9` (2024-11-20) | SIL OFL 1.1 | Regular | Copyright 2020-2024 The Atkinson Hyperlegible Mono Project Authors |
+| OpenDyslexic | https://github.com/antijingoist/opendyslexic (`compiled/`) | `77bda89f3f2069c78d81d33de43b461c2de6c48e` (2025-04-10) | SIL OFL 1.1, Reserved Font Name OpenDyslexic | Regular, Bold | Copyright (c) 2019-07-29, Abbie Gonzalez |
+| Lexend | https://github.com/googlefonts/lexend | `7894f02b2e7eabc48595f1d4eff3b17b48c6e651` (2023-03-02) | SIL OFL 1.1, Reserved Font Name "RevReading Lexend" | Regular, Bold | Copyright 2018 The Lexend Project Authors |
+
 ## Other
 
 - `sandbox/marketplace`: sandbox-ai's own Claude plugin marketplace; its entries `egm` (google/elephant-goldfish-model,

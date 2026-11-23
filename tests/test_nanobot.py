@@ -235,7 +235,7 @@ def test_the_provider_hosts_hold_no_telemetry_host():
 
 def test_plan_says_what_is_on_and_off():
     plan = nanobot.plan(ns("nanobot", "scheduler"))
-    assert plan["version"] == nanobot.VERSION and plan["commit"] == nanobot.COMMIT and plan["experimental"]
+    assert plan["version"] == nanobot.VERSION and plan["commit"] == nanobot.COMMIT and "experimental" not in plan
     assert plan["telemetry"]["switchable"] is False and plan["own_sandbox"] == "off"
     assert plan["enabled"] == [{"feature": "scheduler", "hosts": [], "secrets": []}]
     assert plan["off"] == ["gateway:telegram", "web-search", "web-reader", "updates"]

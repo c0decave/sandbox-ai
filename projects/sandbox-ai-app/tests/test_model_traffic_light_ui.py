@@ -19,7 +19,7 @@ from sandbox_ai_app import backend, i18n, model_profile as MP, widgets, wizard_l
 pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not backend.shutil.which("sandbox-ai"),
                                 reason="set SANDBOX_AI_HOME to a sandbox-ai checkout")
 QCN = "qwen/qwen3-coder-next"
-Q38 = "vcoder-120b-1.0-qx86-hi-mlx"   # known not to work in every agent (Qwen3.8-27B: yellow in Claude Code since round 7)
+Q38 = "mistralai/devstral-small-2-2512"   # red where it was run (Claude Code, OpenCode, Codex), no data elsewhere
 OTHER = "meta/llama3-8b"
 MODELS = [{"name": QCN, "size": 45_000_000_000, "loaded": True, "details": "", "type": "llm"},
           {"name": Q38, "size": 16_000_000_000, "loaded": False, "details": "", "type": "llm"},
@@ -74,10 +74,10 @@ def test_the_light_in_words_from_the_table(sai):
     assert "; partly working in " in MP.light_summary(found)
     assert MP.light_accessible(found, QCN).startswith(f"Support of {QCN}: verified in ")
     red = MP.support_of(sai, Q38)
-    assert MP.light_label(red) == "✗ does not work: every agent"
-    assert MP.light_summary(red) == "does not work in every agent"
+    assert MP.light_label(red) == "✗ does not work: Claude Code, OpenCode, Codex"
+    assert MP.light_summary(red) == "does not work in Claude Code, OpenCode, Codex"   # never "every agent"
     grey = MP.support_of(sai, OTHER)
-    assert MP.light_label(grey) == "? not tested" and MP.light_summary(grey) == "not tested: no data yet"
+    assert MP.light_label(grey) == "? no data yet" and MP.light_summary(grey) == "no data yet"
     assert MP.support_of(sai, "") is None and MP.support_of(None, QCN) is None
 
 
@@ -99,7 +99,7 @@ def test_the_details_per_agent(sai):
     assert any(line.startswith("Measured speed: ") and "tokens/s" in line for line in claude["lines"])
     codex = next(pair for pair in details["harnesses"] if pair["title"].startswith("Codex:"))   # round 8: OpenCode verified
     assert codex["title"].startswith("Codex: partly working (") and codex["light"] == "yellow"
-    assert details["untested"].startswith("Not tested in: ")
+    assert details["untested"].startswith("No data yet in: ")
     text = MP.support_text(details)
     assert text.startswith(f"Support of {QCN}\nverified in ") and f"✓ {claude['title']}" in text
     one = MP.measured_text({"runs": 1, "use_cases": 1, "rounds": "round 3"})
@@ -108,13 +108,15 @@ def test_the_details_per_agent(sai):
     assert none["lines"] == ["No data yet: no model family of sandbox-ai's research matches this name."]
     assert none["harnesses"] == [] and none["light"] == "grey"
     bad = MP.support_details(MP.support_of(sai, Q38))
-    assert any(line.startswith("Known not to work: its tool calls are broken") for line in bad["lines"])
+    assert not any(line.startswith("Known not to work") for line in bad["lines"]), "no verdict for every agent"
+    assert [pair["title"].split(":")[0] for pair in bad["harnesses"]] == ["Claude Code", "OpenCode", "Codex"]
+    assert bad["untested"].startswith("No data yet in: Codex") is False and "Qwen Code" in bad["untested"]
 
 
 def test_in_german(sai, german):
     found = MP.support_of(sai, QCN)
     assert MP.light_label(found).startswith("✓ verifiziert: ")
-    assert MP.light_summary(MP.support_of(sai, OTHER)) == "nicht getestet: noch keine Daten"
+    assert MP.light_summary(MP.support_of(sai, OTHER)) == "noch keine Daten"
     details = MP.support_details(found)
     assert details["title"] == f"Unterstützung von {QCN}"
     assert any(pair["title"].startswith("Claude Code: verifiziert (") and " Läufe, " in pair["title"] and
@@ -173,8 +175,8 @@ def test_the_llm_servers_page_shows_the_light_and_the_details(sai):
         assert cell.text().startswith("✓ verified: ") and not cell.icon().isNull()
         assert "verified in " in cell.toolTip() and "Claude Code" in cell.toolTip().split(";")[0]
         assert cell.data(Qt.ItemDataRole.AccessibleTextRole).startswith(f"Support of {QCN}: verified in ")
-        assert widget.item(rows[Q38], column).text() == "✗ does not work: every agent"
-        assert widget.item(rows[OTHER], column).text() == "? not tested"
+        assert widget.item(rows[Q38], column).text() == "✗ does not work: Claude Code, OpenCode, Codex"
+        assert widget.item(rows[OTHER], column).text() == "? no data yet"
         widget.clearSelection()
         assert page.support_panel.isHidden() and page.support_area.isHidden()
         widget.selectRow(rows[QCN])
@@ -210,7 +212,7 @@ def test_the_model_choice_of_the_board_and_the_start_page_is_marked(sai):
     assert "verified in " in tip and "Claude Code" in tip.split("verified in ", 1)[1].split(";")[0]
     assert f"Support of {QCN}: verified in " in combo.itemData(index, Qt.ItemDataRole.AccessibleTextRole)
     grey = combo.findData(f"studio:{OTHER}")
-    assert "not tested: no data yet" in combo.itemData(grey, Qt.ItemDataRole.ToolTipRole)
+    assert combo.itemData(grey, Qt.ItemDataRole.ToolTipRole).endswith("In OpenCode: no data yet</p>")
     assert combo.itemIcon(combo.findData("")).isNull(), "the agent's own provider: no light"
 
 
@@ -222,7 +224,7 @@ def test_the_picker_has_the_support_column_and_the_panel(sai):
     headers = [picker.table.horizontalHeaderItem(c).text() for c in range(picker.table.columnCount())]
     assert headers[-1] == "Support"
     shown = {picker.shown_rows[r]["model"]: r for r in range(picker.table.rowCount())}
-    assert picker.table.item(shown[Q38], len(headers) - 1).text() == "✗ does not work: every agent"
+    assert picker.table.item(shown[Q38], len(headers) - 1).text() == "✗ does not work: Claude Code, OpenCode, Codex"
     assert not picker.table.item(shown[QCN], 0).icon().isNull()
     assert picker.support_panel.isVisible() or not picker.isVisible()
     assert picker.support_panel.details["title"] == f"Support of {QCN}"

@@ -6,6 +6,9 @@
   sandbox-ai llm list [--json]
   sandbox-ai llm show NAME [--json]
   sandbox-ai llm remove NAME
+  sandbox-ai llm share NAME [--key-to HOST,... | --no-key]
+  sandbox-ai llm unshare NAME
+  sandbox-ai llm sync [NAME]
   sandbox-ai llm models NAME [--sort name|size|loaded] [--json]
   sandbox-ai llm check NAME [--agent AGENT] [--model MODEL]
   sandbox-ai llm status [NAME] [--json] [--watch SECONDS]
@@ -33,6 +36,8 @@ OpenRouter is one: llm add openrouter -k openai-compatible -u https://openrouter
 The key (a secret of sandbox-ai secrets, never stored here) is added by the connection proxy on the wire,
 so the agent only ever sees a placeholder. Endpoints are kept in ~/.config/sandbox-ai/llm.json. An endpoint
 added with --vpn is checked, listed and watched through that VPN (llm check|models|status).
+llm share NAME copies an endpoint to every host of sandbox-ai hosts and keeps the copies in sync (its key only to the
+hosts named with --key-to); llm list says per host whether it is copied, in sync, has the key and reaches the server.
 
 llm status shows what each server has loaded and uses now, as far as its API reports it: Ollama the loaded models
 with their VRAM and RAM, vLLM the KV cache and the requests running and waiting, llama.cpp its slots (and requests
@@ -328,7 +333,8 @@ def check_record(name, record):
     if not NAME.fullmatch(name) or not isinstance(record, dict):
         raise ValueError(f"{where}: invalid entry")
     known = {"kind", "url", "api_key_secret", "headers", "ca", "vpn", "model", "anthropic", "insecure_http",
-             "models", "checked", "contexts", "vision", "params", "forced", "loop_guard", "evict", "memory_gb"}
+             "models", "checked", "contexts", "vision", "params", "forced", "loop_guard", "evict", "memory_gb",
+             "shared_from"}
     if set(record) - known:
         raise ValueError(f"{where}: unknown fields {sorted(set(record) - known)}")
     if not isinstance(record.get("kind"), str) or record["kind"] not in KINDS:  # (a list in a file edited by hand)
@@ -377,6 +383,10 @@ def check_record(name, record):
         raise ValueError(f"{where}: evict is never or allow")
     if record.get("memory_gb") is not None and memory_value(record["memory_gb"]) is None:
         raise ValueError(f"{where}: memory_gb is the server's memory in GB (a number from 1 to {MEMORY_MAX_GB})")
+    shared_from = record.get("shared_from")
+    if shared_from is not None and (not isinstance(shared_from, str) or
+                                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", shared_from)):
+        raise ValueError(f"{where}: shared_from names the machine that shares the server (llm share there)")
     if parsed["scheme"] == "http" and not record.get("insecure_http"):
         problem = plain_http_problem(parsed)
         if problem:
@@ -388,7 +398,7 @@ def check_record(name, record):
             "vision": list(vision), "params": {scope: dict(values) for scope, values in record.get("params", {}).items()},
             "forced": {scope: list(keys) for scope, keys in record.get("forced", {}).items()},
             "loop_guard": dict(record.get("loop_guard") or {}), "evict": record.get("evict", "never"),
-            "memory_gb": record.get("memory_gb"), "parsed": parsed}
+            "memory_gb": record.get("memory_gb"), "shared_from": shared_from, "parsed": parsed}
 
 
 MEMORY_MAX_GB = 65536
@@ -401,6 +411,17 @@ def memory_value(value):
     return int(value) if float(value).is_integer() else round(float(value), 1)
 
 
+def missing_error(message, *args, **kwargs):
+    """The refusal MESSAGE as a ValueError that carries what fixes it (fixes.fix(*ARGS, **KWARGS)): a start lists it
+    with everything else it lacks (fixes.py)."""
+    spec = importlib.util.spec_from_file_location("sandbox_ai_fixes", HERE / "fixes.py")
+    fixes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixes)
+    error = ValueError(message)
+    error.fixes = [fixes.fix(*args, **kwargs)]
+    return error
+
+
 def endpoint(name, path=None):
     """The checked endpoint NAME; ValueError if there is none."""
     if not isinstance(name, str) or not NAME.fullmatch(name):
@@ -408,8 +429,11 @@ def endpoint(name, path=None):
     store = load_store(path)
     if name not in store["endpoints"]:
         known = ", ".join(sorted(store["endpoints"])) or "none yet"
-        raise ValueError(f"no LLM endpoint {name} (known: {known}); add one with: sandbox-ai llm add {name} "
-                         "--kind KIND --url URL")
+        raise missing_error(
+            f"no LLM endpoint {name} (known: {known}); add one with: sandbox-ai llm add {name} --kind KIND --url URL",
+            "llm", name, f"the LLM server {name} is not added on this host", "add it with its kind and address",
+            [["sandbox-ai", "llm", "add", name, "--kind", "KIND", "--url", "URL"]],
+            manual="its kind (ollama, lmstudio, llamacpp, vllm, openai ...) and address are yours to name")
     return check_record(name, store["endpoints"][name])
 
 
@@ -3292,7 +3316,7 @@ def selection(a, path=None):
 # Per use case the local-model research's ranked choices: model pattern, harness, settings over the model's profile,
 # why, known failures, evidence (model_usecases.json; round 5 fills it in). `llm recommend` picks from the models the
 # servers have now - what is loaded, what fits their memory (llm set --memory; a server on this host's loopback: this
-# host's) - the best tested choice per use case, else the nearest. A start with --use-case NAME lets it pick the model
+# host's) - the best measured choice per use case, else the nearest. A start with --use-case NAME lets it pick the model
 # of --llm's server for the start's agent (a model --llm names wins) and puts the use case's settings for that model
 # in that agent over the model's profile (pair_profile): the profile < the use case < the endpoint's values (llm set)
 # < --llm-param < explicit options; --no-llm-profile drops both, the choice stays.
@@ -3471,7 +3495,7 @@ def pinned_argv(a, argv):
 
 def use_case_lines(report, name):
     """The start's lines of --use-case's REPORT (use_case_start) for the endpoint NAME: what it chose and why, its
-    note, and that the use case is not tested where it is not."""
+    note, and that there is no data yet for the use case where there is none."""
     if not report:
         return []
     head = f"agent-sandbox: --llm {name}: use case {report['id']} ({report['label']}, {report['status']})"
@@ -3487,7 +3511,7 @@ def use_case_lines(report, name):
     if report["note"]:
         lines.append(f"agent-sandbox: note: --llm {name}: use case {report['id']}: {report['note']}")
     if report["status"] == "not tested":
-        lines.append(f"agent-sandbox: note: --llm {name}: use case {report['id']} is not tested yet"
+        lines.append(f"agent-sandbox: note: --llm {name}: no data yet for use case {report['id']}"
                      + (f" ({report['unknown'][0]})" if report["unknown"] else ""))
     return [printable(line) for line in lines]
 
@@ -3497,6 +3521,31 @@ def load_hosts_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class _Self:
+    """This module as llm_share.py uses it, whatever name it was loaded under (main.py's __main__, a test's)."""
+
+    def __getattr__(self, name):
+        try:
+            return globals()[name]
+        except KeyError:
+            return __getattr__(name)
+
+
+_share = None
+
+
+def share_module():
+    """llm_share.py (llm share, unshare, sync, receive), loaded once, with this module handed over."""
+    global _share
+    if _share is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_llm_share", HERE / "llm_share.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        loaded.bind(_Self())
+        _share = loaded
+    return _share
 
 
 def without_option(argv, option):
@@ -3514,7 +3563,7 @@ def without_option(argv, option):
 
 def recommend(args, argv, out=print, get=None):
     """sandbox-ai llm recommend [--use-case NAME] [--server NAME] [--agent AGENT] [--host H] [--json]: from the models
-    the servers have now (llm models: what is loaded, what fits their memory) the best tested choice per use case of
+    the servers have now (llm models: what is loaded, what fits their memory) the best measured choice per use case of
     the local-model research, else the nearest, with why; --host H: on that host of sandbox-ai hosts (over SSH)."""
     if args.host and args.host != "local":
         status, stdout, stderr = load_hosts_module().run(args.host, ["llm", "recommend",
@@ -3644,12 +3693,41 @@ def server_models(a, found):
         except Exception as exc:  # noqa: BLE001 - the remembered list then
             LOG.info("llm", f"the models of {found.get('name')} were not listed at the start: the remembered ones "
                             "are offered", exc)
+            try:  # (what the start says, with what makes it answer: unreachable_fix)
+                a._llm_unreachable = (found["name"], printable(str(exc))[:300] or type(exc).__name__)
+            except AttributeError:
+                pass
     result = (names[:OFFER_LIMIT], contexts, source)
     try:
         a._llm_server_models = (found["name"], result)
     except AttributeError:
         pass
     return result
+
+
+def unreachable_fix(a):
+    """The fix (fixes.py) for the --llm server of the start A when it did not answer at this start (server_models
+    asked it): not needed - the start goes on, the agent's requests fail until it answers - and yours to do: the
+    server is yours to start (sandbox-ai starts none), then `sandbox-ai llm check NAME` says whether it answers and
+    what it has loaded. None when it answered, was not asked (a dry run, behind a VPN), or there is no --llm."""
+    if not getattr(a, "llm", None):
+        return None
+    try:
+        found, _model = selection(a)
+    except ValueError:
+        return None
+    server_models(a, found)
+    said = getattr(a, "_llm_unreachable", None)
+    if not said or said[0] != found["name"]:
+        return None
+    spec = importlib.util.spec_from_file_location("sandbox_ai_fixes_for_llm", HERE / "fixes.py")
+    fixes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixes)
+    return fixes.fix("llm", found["name"], f"the LLM server {found['name']} ({printable(found['url'])}) did not "
+                                           f"answer ({said[1]})", "start it, then check it",
+                     [["sandbox-ai", "llm", "check", found["name"]]], needed=False,
+                     manual="the server is yours to start (LM Studio, Ollama, llama.cpp ...): sandbox-ai starts none; "
+                            "the agent's requests fail until it answers")
 
 
 def vision_models(a, found):
@@ -5156,6 +5234,12 @@ def describe(endpoint):
     lines += params_lines(endpoint)
     if endpoint["insecure_http"]:
         lines.append("  WARNING: plain http to a public address (--insecure-http)")
+    if endpoint.get("shared_from"):
+        lines.append(share_module().managed_text(endpoint))
+        with contextlib.suppress(OSError, ValueError):  # (whether this host keeps its key: said, never a value)
+            missing = share_module().key_here_text(endpoint, share_module().key_here(endpoint))
+            if missing:
+                lines.append(missing)
     return [printable(line) for line in lines]
 
 
@@ -5169,6 +5253,12 @@ def public_view(endpoint):
                 contexts=endpoint.get("contexts") or {},
                 evict=endpoint.get("evict") or "never", memory_gb=endpoint.get("memory_gb"))
     view["agents"] = [a for a in AGENTS if not agent_problem(endpoint, a)]
+    view["shared_from"] = endpoint.get("shared_from")
+    if endpoint.get("shared_from"):  # a copy: whether this host keeps the key it names (none, there, missing, locked)
+        try:
+            view["key_here"] = share_module().key_here(endpoint)
+        except (OSError, ValueError):
+            view["key_here"] = None
     return view
 
 
@@ -5226,6 +5316,11 @@ def add(args, out=print, get=None):
         # The same server at the same address: its model list stays until it is read again.
         record["models"], record["checked"] = old["models"], old.get("checked")
     add_params(args, record, old, out)  # refused here: the stored endpoint and its CA stay as they are
+    if isinstance(old.get("shared_from"), str):
+        # A copy another machine shares (llm share there): it stays marked as one - its next change there replaces it.
+        record["shared_from"] = old["shared_from"]
+        out(printable(f"note: {args.name} is managed from {old['shared_from']} (shared from there): its next change "
+                      "there replaces this one; to keep one of your own, add it under another name"))
     if args.ca:
         source = Path(args.ca).expanduser()
         try:
@@ -5363,7 +5458,8 @@ def show_profiles(args, out=print):
     family_wide = {}  # the family's own warnings (its "*" row): not repeated under each of its pairs
     for row in rows:
         every = row["agent"] == "*"
-        status = "every agent" if every and row["status"] == module.UNTESTED else row["status"]
+        status = "every agent" if every and row["status"] == module.UNTESTED else \
+            "no data yet" if row["status"] == module.UNTESTED else row["status"]  # (the id: never shown)
         symbol = " " if status == "every agent" else row.get("symbol", " ")  # the traffic light's shape
         out(printable(f"{row['name']:<34} {symbol} {status:<11} {module.values_text(module.settings(row)) or '-'}"))
         if every:
@@ -5374,7 +5470,7 @@ def show_profiles(args, out=print):
             details += [f"reasoning: {row['reasoning']}" if row["reasoning"] else None, *row["notes"],
                         *(f"sandbox-ai sets itself: {text}" for text in row["builtin"])]
             if not row["pair"]:
-                details.append("this pair was not tested: the model's settings for every agent apply")
+                details.append("no data yet for this pair: the model's settings for every agent apply")
         for line in filter(None, details):
             out(printable(f"    {line}"))
         known = module.knowledge_lines(row) if args.model and hasattr(module, "knowledge_lines") else []
@@ -5448,17 +5544,17 @@ def main(argv, out=print, get=None):
                                                             "working, ✗ does not work); for MODEL first the agents "
                                                             "it is verified, partly working and not working in.")
     profiling.add_argument("model", nargs="?", help="a model's name: its profile (in every harness, or --agent's) "
-                                                    "and what we know of it: what works, what does not, what was "
-                                                    "not tested")
+                                                    "and what we know of it: what works, what does not, what "
+                                                    "has no data yet")
     profiling.add_argument("-a", "--agent", choices=list(AGENTS), help="only for this agent")
     profiling.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     recommending = commands.add_parser(
-        "recommend", help="the best tested model and harness per use case, from the models your servers have",
-        description="The best tested model and harness per use case of the local-model research (model_usecases.json:"
+        "recommend", help="the best measured model and harness per use case, from the models your servers have",
+        description="The best measured model and harness per use case of the local-model research (model_usecases.json:"
                     " coding, sandbox behaviour, web research, code review ...), chosen from the models your LLM "
                     "servers have now - what is loaded, what fits their memory (llm set NAME --memory GB; a server on "
                     "this host's loopback: this host's) - else the nearest, with why, the evidence, the settings and "
-                    "the command that starts it; a use case not tested yet says so. One use case (USE_CASE or "
+                    "the command that starts it; a use case with no data yet says so. One use case (USE_CASE or "
                     "--use-case) also lists every model of your servers as a pair - model x its best harness -, "
                     "best first: the table's, then those not measured for it, then those it marks unsafe (with the "
                     "reason: never chosen on their own); with --agent, where it is not the pair's harness, what is "
@@ -5480,11 +5576,43 @@ def main(argv, out=print, get=None):
     showing.add_argument("name")
     showing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     commands.add_parser("remove", help="forget an endpoint (its secrets stay in sandbox-ai secrets)").add_argument("name")
+    sharing = commands.add_parser(
+        "share", help="copy an endpoint to every host of sandbox-ai hosts and keep it in sync",
+        description="Copy the endpoint to every host of sandbox-ai hosts (a host added later too) and keep the copies "
+                    "in sync with it: a session there reaches the server directly, and each host checks that it can. "
+                    "Nothing secret is copied; the key (the secrets the endpoint names) goes only to the hosts named "
+                    "with --key-to, over SSH into that host's secret store. Run again, it sends the keys again (after "
+                    "a new value of theirs here).")
+    sharing.add_argument("name")
+    keying = sharing.add_mutually_exclusive_group()
+    keying.add_argument("-K", "--key-to", metavar="HOST,...",
+                        help="the hosts that get the key as well (comma-separated; default: as before, none at first); "
+                             "a host left out has the key sent there deleted")
+    keying.add_argument("--no-key", action="store_true", help="no host gets the key (those sent are deleted)")
+    commands.add_parser("unshare", help="remove the copies of a shared endpoint (and the keys sent) from the hosts",
+                        description="Remove the copies of the endpoint from every host it was shared with, and the "
+                                    "keys sent there; the endpoint here stays.").add_argument("name")
+    syncing = commands.add_parser("sync", help="copy the shared endpoints again where a copy is missing or old",
+                                  description="Copy each shared endpoint (or NAME) to every host again where its copy "
+                                              "is missing or out of date - a host that did not answer, too - and "
+                                              "check from each host whether the server is reachable there.")
+    syncing.add_argument("name", nargs="?")
+    receiving = commands.add_parser(  # llm share's step on the other host, over SSH (not for a human: not listed)
+        "receive", help=argparse.SUPPRESS,
+        description="The step of llm share on the host a server is shared with: keeps the copy of the entry on standard "
+                    "input (JSON), never in place of an LLM server of this host's own; one JSON object answers.")
+    receiving.add_argument("--from", dest="origin", required=True, metavar="MACHINE",
+                           help="the machine that shares the server (the copy is marked as managed from there)")
+    target = receiving.add_mutually_exclusive_group()
+    target.add_argument("--remove", metavar="NAME", help="remove the copy NAME shared from MACHINE instead")
+    target.add_argument("--check", metavar="NAME",
+                        help="check whether the server of the copy NAME is reachable from this host instead")
     models = commands.add_parser("models", help="the models the server offers now, each with its traffic light",
                                  description="The models the server offers now. SUPPORT is the traffic light of "
                                              "sandbox-ai's local-model research (model_profiles.json): green ✓ "
-                                             "verified, yellow ~ partly working, red ✗ does not work, grey ? not "
-                                             "tested, with the agents of the model's best colour; --json has the "
+                                             "verified, yellow ~ partly working, red ✗ does not work, grey ? no "
+                                             "data yet (only measured agents have a colour), with the agents of the "
+                                             "model's best colour; --json has the "
                                              "details per agent (\"support\": what worked and failed, the "
                                              "recommended settings, the speed, the round and its date).")
     models.add_argument("name")
@@ -5543,11 +5671,31 @@ def main(argv, out=print, get=None):
     if args.command == "traffic":
         return traffic.main(argv[1:])
     try:
+        if args.command == "receive":  # (on the host a server is shared with: never a sync of its own from here)
+            return share_module().receive(args.origin, remove=args.remove, check=args.check, out=out)
+        if args.command not in ("share", "unshare", "sync"):
+            # A host that did not answer at the last copy (or a change not copied yet): tried again now when it is due.
+            share_module().pending(out, err=(lambda line: print(line, file=sys.stderr))
+                                   if getattr(args, "json", False) else None)
+        if args.command == "share":
+            key_to = None if args.key_to is None else [h.strip() for h in args.key_to.split(",") if h.strip()]
+            return share_module().share(args.name, key_to=key_to, no_key=args.no_key, out=out)
+        if args.command == "unshare":
+            endpoint(args.name)  # its refusal names the known ones
+            return share_module().unshare(args.name, out=out)
+        if args.command == "sync":
+            if args.name is not None:
+                endpoint(args.name)
+            return share_module().sync_now(args.name, out=out)
         if args.command == "add":
             with settings_lock(store_path()):  # from reading the store to writing it back (and the CA)
-                return add(args, out, get)
+                status = add(args, out, get)
+            share_module().changed(args.name, out)  # shared: the change copied to the hosts now
+            return status
         if args.command == "set":
-            return set_params(args, out)
+            status = set_params(args, out)
+            share_module().changed(args.name, out)
+            return status
         if args.command == "params":
             server = endpoint(args.name) if args.name else None  # `llm params lms`: the kind of server lms
             if server is not None and args.kind and args.kind != server["kind"]:
@@ -5584,29 +5732,57 @@ def main(argv, out=print, get=None):
                         print(note, file=sys.stderr)
                     else:
                         out(note)
+            sharing = share_module()
+            shares = sharing.shown_shares(lambda line: print(line, file=sys.stderr))
             if args.json:
-                out(json.dumps([public_view(e) for e in endpoints], indent=2))
+                out(json.dumps([dict(public_view(e), shared=sharing.view(e, shares) if shares else None)
+                                for e in endpoints], indent=2))
             for e in [] if args.json else endpoints:
                 agents = ",".join(a for a in AGENTS if not agent_problem(e, a))
                 out(printable(f"{e['name']}  {e['kind']}  {e['url']}  key={e['api_key_secret'] or '-'}"
-                              f"{'  vpn=' + e['vpn'] if e['vpn'] else ''}  agents={agents}"))
+                              f"{'  vpn=' + e['vpn'] if e['vpn'] else ''}  agents={agents}"
+                              f"{'  shared from ' + e['shared_from'] if e.get('shared_from') else ''}"))
+                if e.get("shared_from"):
+                    with contextlib.suppress(OSError, ValueError):
+                        missing = sharing.key_here_text(e, sharing.key_here(e))
+                        if missing:
+                            out(printable(missing))
+                if shares and e["name"] in shares["shares"]:
+                    for line in sharing.host_lines(e["name"], e, shares["shares"][e["name"]]):
+                        out(line)
             if not endpoints and not args.json:
                 out("no LLM endpoints; add one with: sandbox-ai llm add NAME --kind KIND --url URL")
             return 0
         if args.command == "show":
             found = endpoint(args.name)
-            for line in [json.dumps(public_view(found), indent=2)] if args.json else describe(found):
+            sharing = share_module()
+            shares = sharing.shown_shares(lambda line: print(line, file=sys.stderr))
+            if args.json:
+                out(json.dumps(dict(public_view(found), shared=sharing.view(found, shares) if shares else None),
+                               indent=2))
+                return 0
+            for line in describe(found):
                 out(line)
+            if shares and args.name in shares["shares"]:
+                for line in sharing.host_lines(args.name, found, shares["shares"][args.name]):
+                    out(line)
             return 0
         if args.command == "remove":
             with settings_lock(store_path()):
                 store = load_store()
-                if store["endpoints"].pop(args.name, None) is None:
+                removed = store["endpoints"].pop(args.name, None)
+                if removed is None:
                     out(f"{printable(args.name)} was not there")
                     return 1
                 save_store(store)
                 (ca_dir() / f"{args.name}.pem").unlink(missing_ok=True)
             out(f"{args.name} removed")
+            if isinstance(removed, dict) and isinstance(removed.get("shared_from"), str):
+                out(printable(f"note: it was managed from {removed['shared_from']} (shared from there): its next "
+                              "change or sync there copies it here again; for good: sandbox-ai llm unshare "
+                              f"{args.name} there"))
+            if args.name in share_module().shared_names():
+                return share_module().unshare(args.name, out=out, removed=True)  # the copies on the hosts too
             return 0
         if args.command == "detect":
             addresses = detect_addresses(args.address)

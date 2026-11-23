@@ -1,0 +1,10 @@
+{
+  "name": "sandbox-ai-artex-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ARTEX's browser tools in sandbox-ai's image: Playwright MCP and CLI, pinned (Containerfile.artex)",
+  "dependencies": {
+    "@playwright/cli": "0.1.23",
+    "@playwright/mcp": "0.0.84"
+  }
+}

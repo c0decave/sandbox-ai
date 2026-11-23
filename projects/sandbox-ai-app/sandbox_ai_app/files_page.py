@@ -1546,7 +1546,6 @@ class Pane(QWidget):
         sections.append((tr("Remote systems"), [place for place in places if place[1].startswith("ssh://")]))
         headed = any(place[1].startswith((HOST_PREFIX, "ssh://")) for place in places)
         self.roots.clear()
-        model = self.roots.model()
         for heading, items in sections:
             if not items:
                 continue
@@ -1557,25 +1556,19 @@ class Pane(QWidget):
                 font = self.roots.font()
                 font.setBold(True)
                 self.roots.setItemData(index, font, Qt.ItemDataRole.FontRole)
-                item = model.item(index) if hasattr(model, "item") else None
-                if item is not None:
-                    item.setEnabled(False)
-                    item.setSelectable(False)
+                widgets.set_row_enabled(self.roots, index, False, selectable=False)
             for text, data, tip, enabled in items:
                 self.roots.addItem(text, data)
                 index = self.roots.count() - 1
                 if tip:
                     self.roots.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
-                item = model.item(index) if hasattr(model, "item") else None
-                if item is not None and not enabled:
-                    item.setEnabled(False)
+                if not enabled:
+                    widgets.set_row_enabled(self.roots, index, False)
 
     def first_choice(self):
         """The first entry of the chooser that can be chosen (no heading, no note), or -1."""
-        model = self.roots.model()
         for index in range(self.roots.count()):
-            item = model.item(index) if hasattr(model, "item") else None
-            if self.roots.itemData(index) and (item is None or item.isEnabled()):
+            if self.roots.itemData(index) and widgets.row_enabled(self.roots, index):
                 return index
         return -1
 
@@ -3905,15 +3898,13 @@ class FilesPage(QWidget):
         menu.addSeparator()
         where = menu.addMenu(tr("Show in this pane"))
         where.setToolTipsVisible(True)
-        model = pane.roots.model()
         for index in range(pane.roots.count()):
             data = pane.roots.itemData(index)
             if pane.roots.itemData(index, HEADING_ROLE):
                 where.addSection(pane.roots.itemText(index).replace("&", "&&"))  # (a heading of the chooser)
                 continue
             action = where.addAction(pane.roots.itemText(index).replace("&", "&&"))
-            item = model.item(index) if hasattr(model, "item") else None
-            action.setEnabled(bool(data) and (item is None or item.isEnabled()))
+            action.setEnabled(bool(data) and widgets.row_enabled(pane.roots, index))
             tip = pane.roots.itemData(index, Qt.ItemDataRole.ToolTipRole)
             if tip:
                 action.setToolTip(tip)
@@ -4369,13 +4360,11 @@ class FilesPage(QWidget):
             if tip:
                 action.setToolTip(tip)
             action.triggered.connect(lambda *_: picked.append(wanted) or self.drop_at_place(plan, wanted))
-        model = pane.roots.model()
         for index in range(pane.roots.count()):
             data, text = pane.roots.itemData(index), pane.roots.itemText(index)
-            item = model.item(index) if hasattr(model, "item") else None
             if pane.roots.itemData(index, HEADING_ROLE):
                 menu.addSection(text)
-            elif data and (item is None or item.isEnabled()):
+            elif data and widgets.row_enabled(pane.roots, index):
                 add(menu, text, ("place", data), pane.roots.itemData(index, Qt.ItemDataRole.ToolTipRole))
         recent = pane.recent_entries()
         if recent:

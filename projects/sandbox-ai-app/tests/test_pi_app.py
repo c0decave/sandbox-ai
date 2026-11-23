@@ -1,7 +1,7 @@
 """Pi in the app: in the agent choice (its thinking levels as efforts), --pi-enable on the Board's agent node (a problem
 for another agent, its reach in the capabilities: packages and share warned), its words in both languages, its login
 (`sandbox-ai login pi`: a Credentials row and the frontier profile's sign-in), the help section Pi (exported to the web
-page too), its presets in the category Agents with the "not live-tested yet" badge, a note that never gates a start."""
+page too), its presets in the category Agents (no badge: the user, 2026-11-22)."""
 import json
 import os
 from pathlib import Path
@@ -76,10 +76,9 @@ def test_the_help_has_pi_in_both_languages():
     assert "pi" in {section["id"] for section in exported["sections"]}
 
 
-def test_the_presets_are_agents_and_marked_not_live_tested(sai):
+def test_the_presets_are_agents_and_not_marked(sai):
     presets = sai.launcher.load_presets_module()
     catalog = presets.catalog()
     for name in ("default-pi", "coding-pi", "pi-local-llm"):
         assert catalog[name]["category"] == "agents" and catalog[name]["agents"] == ["pi"]
-        assert presets.experimental(catalog[name]) == {"names": ["pi"]}, "a badge, never a gate"
-    assert sai.launcher.experimental_needs(["pi"]) == ["pi"]
+        assert "experimental" not in presets.public(catalog[name])

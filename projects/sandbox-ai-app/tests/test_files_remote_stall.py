@@ -130,14 +130,15 @@ def test_the_editor_reads_off_the_gui_thread(stalling, qapp, wait):
 def test_a_replaced_connection_is_closed_off_the_gui_thread(stalling, qapp, wait, monkeypatch):
     page, home, ws, host, stall = stalling
     old = page.left.root
-    slow = []
+    slow, real = [], old.close
 
     def close():
         slow.append(time.monotonic())
         time.sleep(1)
+        real()  # (and really closed: its ssh and server end with the test)
     monkeypatch.setattr(old, "close", close)
     result, took = timed(lambda: page.connect_remote("alice@fake"))
     assert result and took < MAX_CALL
     assert wait(lambda: page.left.root is not old and page.left.root is not None and page.left.root.alive, 10)
-    assert slow, "the old connection was closed"
+    assert wait(lambda: slow, 10), "the old connection was closed"
     assert gaps(qapp, 0.5) < MAX_GAP

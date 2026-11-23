@@ -223,6 +223,29 @@ report["established"] = {f"{name} {mode}": established(family, address, port, mo
                                                              ("lan", socket.AF_INET, "192.168.1.20", 22),
                                                              ("provider", socket.AF_INET, "192.0.2.10", 443))
                          for mode in rt.CUT_MODES}
+# DNS allowed during the run (sandbox-ai net allow --dns, runtime.runtime_rules): the nameserver answers the DNS stub's
+# questions (its sockets carry runtime.DNS_STUB_MARK, runtime.dns_upstream) and nothing else - not the agent asking it
+# itself over UDP; its TCP goes to the connection proxy, which does not list the nameserver.
+sh("nft", "-f", "-", data=rt.runtime_rules({"nets": set(), "https": set(), "tcp": set(), "dns": {"9.9.9.9"}}).encode())
+
+
+def stub_question(address, port):
+    sock = rt.dns_upstream(socket.AF_INET)
+    try:
+        sock.sendto(b"\0" * 12, (address, port))
+    except OSError as exc:
+        return "refused" if exc.errno in REFUSED else f"error {errno.errorcode.get(exc.errno, exc.errno)}"
+    finally:
+        sock.close()
+    return "sent"
+
+
+report["dns during the run"] = {"udp agent 9.9.9.9:53": udp(socket.AF_INET, "9.9.9.9", 53),
+                                "tcp agent 9.9.9.9:53": tcp(socket.AF_INET, "9.9.9.9", 53),
+                                "udp stub 9.9.9.9:53": stub_question("9.9.9.9", 53),
+                                "udp stub 9.9.9.9:5353": stub_question("9.9.9.9", 5353),
+                                "udp stub 9.9.9.8:53": stub_question("9.9.9.8", 53)}
+sh("nft", "-f", "-", data=rt.runtime_rules({"nets": set(), "https": set(), "tcp": set()}).encode())
 print(json.dumps({"table": table, "report": report,
                   "rules": {mode: rt.cut_rules({**rt.cut_settings(SETTINGS), "mode": mode, "modes": [mode]}, VPN_MARK,
                                                LEND_MARK)

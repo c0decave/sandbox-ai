@@ -182,6 +182,19 @@ def test_a_copy_that_cannot_replace_itself_says_the_command_and_uses_the_windows
     assert not panel.install_button.isEnabled()
 
 
+def test_roll_back_of_a_system_installation_you_cannot_write_says_the_command(qapp, wait, monkeypatch):
+    """A system installation this user cannot write keeps a version to go back to, but only root goes back: Roll
+    back… was offered, and failed after its question. Now it is greyed with the command that does it."""
+    data = status(kind="system", self_updating=False, install_now=False, rollback="0.9.0", rollback_now=False,
+                  manual="sudo sandbox-ai update (a system installation is root's to update)")
+    panel = updates_view.UpdatesPanel(InstallingSai(data))
+    assert wait(lambda: panel.data is not None)
+    assert not panel.rollback_button.isEnabled()
+    assert "sudo sandbox-ai update --rollback" in panel.rollback_button.toolTip()
+    panel = updates_view.UpdatesPanel(InstallingSai(status(rollback="0.9.0", rollback_now=True)))
+    assert wait(lambda: panel.data is not None) and panel.rollback_button.isEnabled()
+
+
 def test_roll_back_asks_and_a_no_does_nothing(qapp, wait, monkeypatch):
     answers = iter([True, False])
     monkeypatch.setattr(updates_view, "ask_first", lambda *a, **k: next(answers))
@@ -221,7 +234,9 @@ def test_check_now_shows_what_it_found_here_and_in_the_windows_status_line(qapp,
     ({"available": "9.9.9", "installed": "1.0.0", "signature": "unchecked", "newer": False},
      "9.9.9 is there, but not signed by a trusted key: not offered"),
     ({"available": "0.1.188", "installed": "0.1.198", "signature": "good", "newer": False},
-     "up to date (0.1.198; the newest release is 0.1.188)"),
+     "0.1.198 is newer than the newest release 0.1.188: nothing to update"),
+    ({"available": "0.1.188", "installed": "0.1.188", "signature": "good", "newer": False},
+     "up to date (0.1.188; the newest release is 0.1.188)"),
     ({"error": "api.github.com limits the requests to its API (HTTP 403); try again after 10:15"},
      "failed: api.github.com limits the requests to its API (HTTP 403); try again after 10:15"),
 ])

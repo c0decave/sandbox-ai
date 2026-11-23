@@ -33,7 +33,9 @@ packages = ["sandbox_ai_app"]
 [tool.setuptools.package-data]
 sandbox_ai_app = ["web/*.html", "web/*.js", "web/vendor/*.js", "web/vendor/*.css", "web/vendor/LICENSE.*",
                   "web/vendor/manifest.json",
-                  "icons/board/*.svg"]
+                  "icons/board/*.svg",
+                  # the fonts that come with the app (reading_fonts.py) and their licences
+                  "typefaces/*.ttf", "typefaces/*.otf", "typefaces/*.txt", "typefaces/fonts.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "sandbox_ai_app.__version__" }

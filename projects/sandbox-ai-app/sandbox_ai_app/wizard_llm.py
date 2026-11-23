@@ -1075,7 +1075,7 @@ def model_cell(model, key):
     """(text, sort value) of column KEY for MODEL (parse_models' entry). Context: the server's (LM Studio's, vLLM's
     ...), else the window Ollama serves it with (served_text says how), "default" for Ollama's own default."""
     value = model.get(key)
-    if key == "support":  # the traffic light of the research: green first, then yellow, red, not tested
+    if key == "support":  # the traffic light of the research: green first, then yellow, red, no data yet
         from . import model_profile as MP
         if not isinstance(value, dict):
             return "", 9

@@ -25,6 +25,6 @@
     "Memory: ~/.config/opencode/AGENTS.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
     "OpenCode 2 asks before what its rules ask before; -D lets it go on without asking. Its update check, model catalog, plugins from npm and web search stay off unless --opencode2-enable names them (updates, models-catalog, plugins, web-search).",
     "OpenCode 2's telemetry is always off and cannot be turned on (Bun's crash reporter and OpenTelemetry pinned off, bun.report refused by the proxy).",
-    "OpenCode 2 is not live-tested yet (a start says so); its image first: sandbox-ai build opencode2."
+    "Its image first: sandbox-ai build opencode2."
   ]
 }

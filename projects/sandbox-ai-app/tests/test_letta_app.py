@@ -1,8 +1,8 @@
 """Letta Code in the app: in the agent choice (no model list or effort of its own), --letta-enable on the Board's agent
 node (a problem for another agent, its reach in the capabilities: Letta Cloud warned), its words in both languages,
 no sign-in page of its own in the login browser and no Credentials row (no login sandbox-ai takes in), the help
-section Letta Code (exported to the web page too), its presets in the category Agents with the "not live-tested yet"
-badge, a note that never gates a start."""
+section Letta Code (exported to the web page too), its presets in the category Agents (no badge: the user,
+2026-11-22)."""
 import json
 import os
 from pathlib import Path
@@ -74,10 +74,10 @@ def test_the_help_has_letta_in_both_languages():
     assert "letta" in {section["id"] for section in exported["sections"]}
 
 
-def test_the_presets_are_agents_and_marked_not_live_tested(sai):
+def test_the_presets_are_agents_and_not_marked(sai):
     presets = sai.launcher.load_presets_module()
     catalog = presets.catalog()
     for name in ("coding-letta", "letta-local-llm"):
         assert catalog[name]["category"] == "agents" and catalog[name]["agents"] == ["letta"]
-        assert presets.experimental(catalog[name]) == {"names": ["letta"]}, "a badge, never a gate"
-    assert sai.launcher.experimental_needs(["letta"]) == ["letta"]
+        assert "experimental" not in presets.public(catalog[name])
+    assert not hasattr(sai.launcher, "experimental_needs")

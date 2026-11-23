@@ -40,6 +40,7 @@ def scenario(request):
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))  # (a server's own folders: mcp add makes them there)
     monkeypatch.setattr(m, "PROC", tmp_path / "proc")
     (tmp_path / "proc").mkdir()
 
@@ -671,19 +672,22 @@ def test_catalog_entry_becomes_a_checked_definition(tmp_path):
     definition = m.add("duckduckgo", network="full", catalogs=sources, pull=False, out=out.append)
     assert definition["image"] == f"ghcr.io/c0decave/sandbox-ai-mcp-duckduckgo@{DIGEST}" and definition["network"] == "full"
     assert any("html.duckduckgo.com:443" in line for line in out)
-    with pytest.raises(ValueError, match="needs --mount /work"):
-        m.add("t:binwalk", catalogs=sources, pull=False, out=out.append)
+    # (0.1.212) no --mount: /work is the start's workspace, /out a folder of its own (test_mcp_folder_defaults.py)
+    assert m.add("t:binwalk", catalogs=sources, pull=False, out=out.append)["mounts"][0]["host"] == "@workspace"
     m.add("binwalk", mounts=[f"/work={firmware}"], catalogs=sources, pull=False, out=out.append)
     with pytest.raises(ValueError, match="needs --env BRAVE_API_KEY"):
         m.add("brave-search", network="full", catalogs=sources, pull=False, out=out.append)
     with pytest.raises(ValueError, match="not published"):
         m.add("pending", network="full", catalogs=sources, pull=False, out=out.append)
     servers = m.definitions()
-    assert servers["binwalk"]["mounts"] == [{"target": "/work", "host": str(firmware), "mode": "ro"}]
+    assert servers["binwalk"]["mounts"] == [{"target": "/work", "host": str(firmware), "mode": "ro"},
+                                            {"target": "/out", "host": str(m.own_folder("binwalk", "/out")),
+                                             "mode": "ro"}]
     assert m.config_file().stat().st_mode & 0o077 == 0
 
 
-def test_image_command_is_the_hardened_run_line(tmp_path):
+def test_image_command_is_the_hardened_run_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(m.launcher(), "user_manager_running", lambda: True)  # (limits where Podman sets them)
     work = tmp_path / "w"
     work.mkdir()
     definition = m.validated_image({"image": f"ghcr.io/a/b@{DIGEST}", "network": "none", "env": ["KEY"],
@@ -1051,7 +1055,9 @@ def test_the_axross_entry_waits_for_its_digest_then_takes_folders_password_and_o
     assert not any("added" in line for line in out)
     sources = catalog(tmp_path, [{**AXROSS, "digest": DIGEST}], signed=False)
     local = m.add("axross", mounts=[f"/work={work}"], catalogs=sources, pull=False, out=out.append, unsigned=True)
-    assert local["network"] == "none" and local["mounts"] == [{"target": "/work", "host": str(work), "mode": "ro"}]
+    assert local["network"] == "none" and local["mounts"][0] == {"target": "/work", "host": str(work), "mode": "ro"}
+    assert [mount["host"] for mount in local["mounts"][1:]] == [str(m.own_folder("axross", "/axross")),
+                                                                str(m.own_folder("axross", "/ssh"))], "their defaults"
     assert "env" not in local or not local["env"]
     with pytest.raises(ValueError, match="takes AXROSS_PASSWORDS as a secret"):
         m.add("axross", env=["AXROSS_PASSWORDS={\"box\": \"pw\"}"], catalogs=sources, pull=False, out=out.append,
@@ -1468,6 +1474,67 @@ def test_attach_live_for_codex_and_a_helper(live):
     assert options[-2:] == ["--helper", "claude"] and "--mcp" in options
     assert m.detach(None, "web", helper="claude", live=True, out=live.out)["relay_closed"]
     assert "--helper" not in live.sessions.load("web")["options"]
+
+
+def restartable(live, agent, tmp_path, key="web"):
+    """A kept start KEY of AGENT whose run can start its agent again in its tmux window (kits restart-agent): its
+    session folder with the restart script the launcher writes for it (agent_restart_script)."""
+    session = tmp_path / f"session-{key}"
+    session.mkdir()
+    a = s.parse_args([agent, "--workspace", str(live.folder), "--no-auth", "--tmux-socket-dir", str(tmp_path / "t")])
+    (session / s.AGENT_RESTART_FILE).write_text(s.agent_restart_script(a, agent))
+    run, relays = live.make(key, agent=agent, record={"session_dir": str(session), "kits_live": {"restart": True}})
+    return session, run, relays
+
+
+def test_codex_restarted_in_its_sandbox_sees_the_server_attached_live(live, tmp_path):
+    """Reported live (0.1.211): a Codex session given the MCP server while it ran ("mcp hinzugefügt, agent sollte neu
+    gestartet werden -> fail") ended with exit status 143: the restart offered was `resume --restart`, which stops the
+    sandbox. Codex reads its MCP servers only from its command line (-c mcp_servers...): the restart inside the
+    sandbox (kits restart-agent) now gives it the servers attached live too (the session's agent-live-mcp.args, read by
+    its restart script), and attach says so - the sandbox goes on."""
+    session, run, _ = restartable(live, "codex", tmp_path)
+    result = m.attach_live("demo", "web", out=live.out)
+    assert result["agent_restart"] == "required" and result["restart_in_place"] is True
+    assert "sandbox-ai kits restart-agent web" in result["message"] and "resume web --restart" not in result["message"]
+    words = (session / m.LIVE_ARGS_FILE).read_text().splitlines()
+    assert words[:2] == ["-c", 'mcp_servers.demo.command="python3"'] and "mcp_servers.demo.args=" in words[3]
+    # The restart script, run as kits restart-agent runs it, hands Codex those words before its own.
+    script = (session / s.AGENT_RESTART_FILE).read_text().replace(m.LIVE_ARGS_TARGET, str(session / m.LIVE_ARGS_FILE))
+    script = script.replace(s.RUNTIME.AGENT_EXIT, str(tmp_path / "agent-exit"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(f'#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done > {tmp_path / "argv"}\n')
+    (bin_dir / "codex").chmod(0o755)
+    done = subprocess.run(["sh", "-c", script], env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    assert done.returncode == 0
+    argv = (tmp_path / "argv").read_text().splitlines()
+    assert argv[:len(words)] == words and argv[-2:] == ["resume", "--last"], argv
+    m.attach_live("web-search", "web", out=live.out)
+    assert "mcp_servers.web-search.command=\"python3\"" in (session / m.LIVE_ARGS_FILE).read_text()
+    m.detach("demo", "web", live=True, out=live.out)
+    assert "mcp_servers.demo." not in (session / m.LIVE_ARGS_FILE).read_text()
+    m.forget_live_config(run)  # the end of the run: its next start names its servers itself
+    assert not (session / m.LIVE_ARGS_FILE).exists()
+
+
+def test_whether_each_agent_restarts_in_its_sandbox_with_the_server(live, tmp_path):
+    """Claude Code reads ~/.claude.json again when it starts again in its sandbox; an agent whose MCP servers come
+    with its start only (OpenCode's OPENCODE_CONFIG_CONTENT, ...) cannot see one attached live without a new start:
+    said before anything is done, with the restart that keeps the session (resume --restart, its sandbox started
+    again). A start whose restart script is older (or none) is no restart in place either."""
+    restartable(live, "claude", tmp_path, "web")
+    result = m.attach_live("demo", "web", out=live.out)
+    assert result["agent_restart"] == "maybe" and result["restart_in_place"] is True
+    assert "sandbox-ai kits restart-agent web" in result["message"]
+    restartable(live, "opencode", tmp_path, "oc")
+    result = m.attach_live("demo", "oc", out=live.out)
+    assert result["agent_restart"] == "required" and result["restart_in_place"] is False
+    assert "cannot see it after a restart inside its sandbox" in result["message"]
+    assert "sandbox-ai resume oc --restart" in result["message"]
+    live.make("old", agent="codex")  # no restart script: started by an older sandbox-ai, or without tmux
+    result = m.attach_live("demo", "old", out=live.out)
+    assert result["restart_in_place"] is False and "sandbox-ai resume old --restart" in result["message"]
 
 
 def test_the_end_of_the_run_takes_the_live_entries_out_of_claudes_configuration(live):
@@ -1989,6 +2056,7 @@ def test_an_instance_of_its_own_only_for_other_limits(monkeypatch):
 
 
 def test_the_container_gets_the_cpu_limit_where_it_can_be_set(monkeypatch):
+    monkeypatch.setattr(m.launcher(), "user_manager_running", lambda: True)
     monkeypatch.setattr(m.os, "cpu_count", lambda: 4)
     definition = {"image": f"ghcr.io/a/b@{DIGEST}", "network": "none", "memory": "2g", "pids": 512, "cpus": 2}
     monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: {"cpu", "memory", "pids"})
@@ -2009,7 +2077,12 @@ def test_the_bubblewrap_scope_gets_the_cpu_quota(monkeypatch):
     monkeypatch.setattr(rootfs.shutil, "which", lambda name: "/usr/bin/systemd-run")
     launcher = SimpleNamespace(user_manager_running=lambda: True, delegated_controllers=lambda: {"cpu"})
     prefix = rootfs.limits_prefix({"memory": "2g", "cpus": 1.5, "pids": 512}, launcher)
-    assert ["-p", "MemoryMax=2G"] == prefix[5:7] and "CPUQuota=150%" in prefix and "TasksMax=512" in prefix
+    run = prefix.index("systemd-run")
+    assert ["-p", "MemoryMax=2G"] == prefix[run + 5:run + 7] and "CPUQuota=150%" in prefix and "TasksMax=512" in prefix
+    # The user live check 2026-11-23 ("Failed to connect to user scope bus via local transport"): systemd-run is told
+    # where the user manager's bus is, whatever XDG_RUNTIME_DIR the caller has.
+    runtime = f"/run/user/{os.getuid()}"
+    assert prefix[:run] == ["env", f"XDG_RUNTIME_DIR={runtime}", f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"]
     launcher.delegated_controllers = lambda: {"memory"}
     assert not any(str(p).startswith("CPUQuota") for p in rootfs.limits_prefix({"cpus": 2}, launcher))
 
@@ -2049,8 +2122,9 @@ def test_add_creates_a_writable_folder_that_is_not_there_yet(tmp_path):
     sources = catalog(tmp_path, [BINWALK], signed=False)
     out = []
     data = tmp_path / "cases" / "one" / "memory"
-    with pytest.raises(ValueError, match="needs --mount /work"):
-        m.add("binwalk", mounts=[f"/out={data}:rw"], catalogs=sources, pull=False, out=out.append, unsigned=True)
+    with pytest.raises(ValueError, match="TARGET is the folder inside the server's container"):
+        m.add("binwalk", mounts=[f"/out={data}:rw", "/work=/nowhere/at/all"], catalogs=sources, pull=False,
+              out=out.append, unsigned=True)
     assert not data.exists(), "a refused add creates nothing"
     work = tmp_path / "work"
     work.mkdir()
@@ -2179,6 +2253,8 @@ def test_mcp_set_on_a_running_server_says_so_or_stops_it(tmp_path, monkeypatch):
 
 
 def test_a_start_with_limits_of_its_own_gets_its_own_instance(tmp_path, monkeypatch):
+    monkeypatch.setattr(m.launcher(), "user_manager_running", lambda: True)  # (limits where Podman sets them)
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)
     config = m.config_file()
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({"pw": {"image": f"ghcr.io/a/b@{DIGEST}", "network": "none"}}))
@@ -2558,3 +2634,20 @@ def test_the_watch_hands_podman_a_cidfile_and_finds_the_container(tmp_path):
     vpn = load("vpn_for_watch_test", "vpn.py")
     assert vpn.guarded_options(watched_guard[6:], "sandbox-ai-vpn-mcp-x")[1][0] == "--cidfile=/s/2.cid"
     assert m.with_cidfile(["sh", "-c", "true"], "/s/3.cid") == (["sh", "-c", "true"], None)
+
+
+def test_container_side_hint():
+    """User report 2026-11-22 (`--mount /work=/app:rw`: "/app is not there on this machine and cannot be created" -
+    "es geht doch um Container und nicht die Maschine???"): a HOST that names one of the folders every server's image
+    has (/work, /work_ro, /work_rw, /app, /srv) is said to be the right side, a folder of this machine, with the
+    command that fills that folder of the container; any other HOST gets no such sentence."""
+    said = m.container_side_hint("/work=/app:rw", "/app")
+    assert "right side of = is a folder on" in said and "--mount /app=/a/folder/here:rw" in said
+    assert "the left side (/work) the folder in the container" in said
+    assert m.container_side_hint("/work=/home/me/project", "/home/me/project") == ""
+    assert m.container_side_hint("/out=/srv/", "/srv/").count("--mount /srv=/a/folder/here.") == 1
+    if not Path("/work_ro").exists():
+        with pytest.raises(ValueError) as caught:
+            m.mount_host("/work=/work_ro", "/work_ro", "ro")
+        assert "reads like a folder of the server's container" in str(caught.value)
+        assert "TARGET is the folder inside the server's container" in str(caught.value)

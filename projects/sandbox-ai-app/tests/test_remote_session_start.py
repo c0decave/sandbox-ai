@@ -173,6 +173,8 @@ def make_board(fleet, monkeypatch, agent, host="ct1", options=()):
     show = page.show_notice
     page.show_notice = lambda text, role="secondary": (page.notes.append(text), show(text, role))[1]
     workspace = fleet.of(host).workspace
+    # (the agent's image there: what is about sessions is not held up by the question about an image not built)
+    fleet.of(host).add_image(f"localhost/{agent}-sandbox:latest")
     board = B.from_argv(page.sai, agent, list(options), [], workspaces=[str(workspace)])
     page.set_board(board, workspace)
     if host != "local":

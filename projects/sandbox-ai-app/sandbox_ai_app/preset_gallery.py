@@ -54,15 +54,13 @@ def fill_preset_combo(combo, catalogue, current=None):
             if not presets:
                 continue
             combo.addItem(tr(title))
-            combo.model().item(combo.count() - 1).setEnabled(False)
+            widgets.set_row_enabled(combo, combo.count() - 1, False)
             for preset in presets:
-                experimental = PR.experimental_text(preset.experimental)  # listed, marked, with what enables it
-                combo.addItem("   " + preset.text(preset.title) + (f" ({tr('not live-tested yet')})" if experimental
-                                                                      else ""),
+                live = PR.live_text(preset)  # its last live check (nothing without one)
+                combo.addItem("   " + preset.text(preset.title) + (f"  {live.split(' ', 1)[0]}" if live else ""),
                               preset.key)
-                combo.setItemData(combo.count() - 1, safe_tooltip(
-                    "\n".join([preset.text(preset.description)] + [experimental] * bool(experimental))),
-                    Qt.ItemDataRole.ToolTipRole)
+                combo.setItemData(combo.count() - 1, safe_tooltip("\n".join(filter(None, [
+                    preset.text(preset.description), live]))), Qt.ItemDataRole.ToolTipRole)
         found = select_preset(combo, catalogue, current) if current else False
     finally:
         combo.blockSignals(False)
@@ -192,20 +190,13 @@ class PresetCard(QFrame):
                 tr("score {score}", score=score)]
         if to_fill:
             meta.append(tr("{count} to fill in", count=to_fill))
+        if PR.live_text(preset):  # its last live check: ✓/✗ (nothing without one)
+            meta.append(PR.live_text(preset).split(" ", 1)[0] + " " + tr("live check"))
         self.meta = plain_label(" · ".join(meta), role="secondary")
         layout.addWidget(self.meta)
-        # A preset that starts something not live-tested yet: listed and marked (sandbox-ai's one list), nothing more.
-        experimental = PR.experimental_text(preset.experimental)
-        self.experimental = None
-        if experimental:
-            self.experimental = plain_label(tr("Not live-tested yet"), role="notice-warn")
-            self.experimental.setToolTip(safe_tooltip(experimental))
-            layout.addWidget(self.experimental)
         layout.addStretch()
-        self.setToolTip(safe_tooltip("\n".join([experimental] * bool(experimental)
-                                               + [preset.text(n) for n in preset.notes])))
-        self.setAccessibleName(preset.text(preset.title) + (f" ({tr('not live-tested yet')})" if experimental
-                                                            else ""))
+        self.setToolTip(safe_tooltip("\n".join(preset.text(n) for n in preset.notes)))
+        self.setAccessibleName(preset.text(preset.title))
         self.select(False)
 
     measured = None  # its size hint, until something in it changes (event)
@@ -593,7 +584,8 @@ class PresetGallery(QDialog):
         self.title.setText(preset.text(preset.title))
         self.description.setText(preset.text(preset.description))
         self.meta.setText(" · ".join([category, tr(PR.DIFFICULTIES.get(preset.difficulty, preset.difficulty)),
-                                      tr("Security score: {score} of 100", score=score)]))
+                                      tr("Security score: {score} of 100", score=score),
+                                      *filter(None, [PR.live_text(preset)])]))
         lines = [f"{p.marker}: {preset.text(p.label)}" + (" " + tr("(optional)") if p.optional else "")
                  for p in preset.placeholders]
         self.fill_in.setText(tr("To fill in:") + "\n" + "\n".join(lines) if lines else tr("Nothing to fill in."))
@@ -900,10 +892,10 @@ class PlaceholderForm(QDialog):
                         combo.setItemData(combo.count() - 1, safe_tooltip(hint or detail),
                                           Qt.ItemDataRole.ToolTipRole)
                         if hint:  # e.g. Claude Code with a server without the Anthropic API: shown, not offered
-                            combo.model().item(combo.count() - 1).setEnabled(False)
+                            widgets.set_row_enabled(combo, combo.count() - 1, False)
             if kind == "llm":  # each NAME:MODEL's traffic light: how far the research supports the model
                 MPV.mark_combo(combo, self.sai, lambda index, c=combo:
-                               WL.parse_value(c.itemText(index))[1].split(",")[0] or None)
+                               WL.parse_value(c.itemText(index))[1].split(",")[0] or None, agent=self.agent)
             for entry in entries if kind != "llm" else []:
                 name = entry.get("profile") or entry.get("name")
                 if not isinstance(name, str) or combo.findText(name) >= 0:
@@ -916,8 +908,7 @@ class PlaceholderForm(QDialog):
                 browser = next((e["name"] for e in entries if str(e.get("name", "")).lower() in PR.BROWSER_SERVERS),
                                "")
                 combo.setCurrentText(browser)
-            usable = [i for i in range(1, combo.count()) if combo.model().item(i) is None
-                      or combo.model().item(i).isEnabled()]
+            usable = [i for i in range(1, combo.count()) if widgets.row_enabled(combo, i)]
             distinct = len([e for e in self.endpoints.values() if not self.agent or WL.usable_by(e, self.agent)]) \
                 if kind == "llm" else len(usable)
             if kind == "llm":  # the only server: by its name when that alone starts, else its only NAME:MODEL

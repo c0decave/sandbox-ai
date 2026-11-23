@@ -52,7 +52,6 @@ SDK_REPOSITORY = "https://github.com/OpenHands/software-agent-sdk"
 MANAGED_DIR = "/etc/openhands"
 SESSION_DIR = "openhands"  # in the session directory, mounted read-only at MANAGED_DIR
 SETTINGS = MANAGED_DIR + "/settings.json"  # what this start lays over OpenHands' settings (openhands_cli.py applies it)
-EXPERIMENTAL = "openhands"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "OpenHands"
 HOME = "/root/.openhands"  # its settings, conversations, keys and the automation database
 PROGRAM = "openhands"  # the image's command (sandbox/openhands_cli.py)
@@ -333,10 +332,6 @@ def canvas_note(a):
             "the app's Browser button), or give it one task without the UI: sandbox-ai openhands -- task \"TASK\"")
 
 
-def experimental_note():
-    return "OpenHands: not live-tested yet (its image and a real start have not passed their live test)"
-
-
 def mcp_servers(names, bridge_args, timeouts=None):
     """OpenHands' MCP servers (agent_settings.mcp_config) for the --mcp servers NAMES: each a stdio server that runs
     the launcher's bridge (BRIDGE_ARGS(name)), with its wait for one call (seconds) from TIMEOUTS ({name: seconds},
@@ -450,13 +445,13 @@ def command_args(args):
 
 def plan(a):
     """The dry run's "openhands": the reviewed releases, the settings' place, the web UI, what is on and off, the
-    telemetry, and that it is experimental."""
+    telemetry."""
     names = features(a)
     args = getattr(a, "agent_args", None) or []
     return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}", "repository": REPOSITORY,
             "agent_server": {"version": SERVER_VERSION, "commit": SERVER_COMMIT, "repository": SDK_REPOSITORY},
             "automation": {"version": AUTOMATION_VERSION, "commit": AUTOMATION_COMMIT},
-            "experimental": True, "settings": SETTINGS, "home": HOME, "runtime": "local",
+            "settings": SETTINGS, "home": HOME, "runtime": "local",
             "web_ui": None if args[:1] == [TASK] else WEB_URL,
             "confirmation_mode": not getattr(a, "dangerously_skip_permissions", False),
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),

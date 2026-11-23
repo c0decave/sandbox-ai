@@ -387,7 +387,7 @@ NAMED = {
     ("canaries", "*", "run"): run_names, ("activity", None, "run"): run_names,
     ("safeguards", None, "run"): run_names, ("report", None, "name"): start_names_all,
     ("hosts", "*", "name"): host_names, ("mcp", "*", "name"): mcp_names, ("llm", "*", "name"): llm_names,
-    ("llm", "traffic", "run"): run_names,
+    ("llm", "traffic", "run"): run_names, ("artex", "console", "run"): run_names,
     ("spend", "run", "name"): run_names, ("spend", "raise", "name"): run_names,
     ("spend", "remove", "model"): own_price_models,
     ("vpn", "*", "name"): vpn_names, ("kits", "*", "name"): kit_names,
@@ -410,7 +410,8 @@ NAMED = {
     ("approvals", "ask-again", "id"): answered_ids, ("approvals", "blocked", "run"): run_names,
     ("approvals", "relay", "id"): answered_ids, ("approvals", "callback", "id"): answered_ids,
     ("approvals", "decided", "run"): run_names,
-    ("hosts", "update", "names"): host_names, ("mcp", "attach", "start"): start_names,
+    ("hosts", "update", "names"): host_names, ("mcp", "update", "names"): mcp_names,
+    ("mcp", "attach", "start"): start_names,
     ("mcp", "detach", "start"): start_names, ("rules", "show", "name"): start_names,
     ("rules", "reload", "name"): start_names, ("presets", "show", "name"): preset_names,
     ("presets", "check", "name"): preset_names,
@@ -444,6 +445,7 @@ NAMED = {
     ("checkpoint", "restore", "target"): lambda: [*start_names(), *checkpoint_ids()],
     ("rules", "builtin", "name"): lambda: builtin_rulesets(),
     ("toolchain", "show", "name"): toolchain_names, ("toolchain", "remove", "name"): toolchain_names,
+    ("cairn", "workers", "agents"): lambda: list(AGENTS),  # every harness can be Cairn's worker
 }
 
 def builtin_rulesets():
@@ -490,7 +492,7 @@ FREE_TEXT = {
                      "--jobs", "--top", "--interval", "--wait", "--timeout", "--tool-timeout", "--context", "--ttl",
                      "--older-than", "--logs-older-than", "--transcripts", "--compact-transcripts", "--since",
                      "--until", "--watch", "--request",
-                     "--bootstrap-attempts", "--bootstrap-stall", "--bootstrap-timeout", "--port",
+                     "--bootstrap-attempts", "--bootstrap-stall", "--bootstrap-timeout", "--port", "--artex-port",
                      "--for", "--idle", "--password-fd", "--ask-timeout", "--rate", "--quiet", "--every", "--at",
                      "--cron", "--keep-starts", "--budget", "--expect",
                      "--checkpoint-every"),
@@ -520,6 +522,7 @@ FREE_TEXT = {
     ("session", "duplicate", "new"): "the new session's name, of your own",
     # the package guard: a package of a registry, named by you (never looked up anywhere: not on a Tab either)
     "--allow-package": "a package you name: ECOSYSTEM:NAME[@VERSION]",
+    "--fix-only": "the id of a fix as this start's --fix-plan names it (image:..., mcp:NAME): known only then",
     "--sha256": "the SHA-256 you got for the file (64 hex digits)",
     "--source-sha256": "the source archive's SHA-256 mcp add --build-plan said (64 hex digits)",
     ("packages", "*", "spec"): "a package you name: ECOSYSTEM:NAME[@VERSION]",
@@ -578,7 +581,9 @@ VALUES = {"--home": start_names, "--unpack": start_names, "--detail": start_name
           "--server": llm_names, "--use-case": use_case_names,  # llm recommend, a start's --use-case
           "--to": lambda: ["local", *(host_names() or [])],  # mcp copy: the target host
           "--session": start_names, "--auth-from-session": start_names, "--from-session": start_names,
-          "--name": start_names, "--for": start_names, "--host": host_names, "--helper": lambda: list(AGENTS),
+          "--name": start_names, "--for": start_names, "--host": host_names,
+          "--key-to": lambda: [name for name in host_names() or [] if name != "local"],  # llm share: other hosts
+          "--helper": lambda: list(AGENTS),
           "--agent": lambda: list(AGENTS),  # models --agent, presets check --agent
           # The agents of the team image: the launcher's own list says which are not in it.
           "--with": lambda: sorted(agent for agent in AGENTS if agent not in module("agent_sandbox").NOT_IN_TEAM),
@@ -721,7 +726,7 @@ def complete(words):
             return []  # the value of an option: nothing to offer
         if "--variant" in done[1:] and done[-1] == "--variant":
             return [c for c in variant_names() if c.startswith(current)]
-        return [c for c in (*AGENTS, "all", "team", "cairn", "vpn", "tor", "browser", *variant_names())
+        return [c for c in (*AGENTS, "all", "team", "cairn", "artex", "vpn", "tor", "browser", *variant_names())
                 if c.startswith(current)]
     if command == "update":  # (no argparse parser: install.sh takes most of its options)
         if done[1:2] == ["mode"]:

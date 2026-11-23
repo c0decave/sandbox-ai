@@ -27,6 +27,6 @@
     "Memory: ~/.config/goose/AGENTS.md (Goose's global hints) belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
     "Goose asks before it changes something (its mode smart_approve); -D gives it its own default, auto. Its scheduler, Telegram gateway, local models, model catalog and updates stay off unless --goose-enable names them.",
     "Goose's telemetry is always off and cannot be turned on (its opt-out variables are set and the proxy refuses PostHog).",
-    "Goose is not live-tested yet (a start says so); its image first: sandbox-ai build goose."
+    "Its image first: sandbox-ai build goose."
   ]
 }

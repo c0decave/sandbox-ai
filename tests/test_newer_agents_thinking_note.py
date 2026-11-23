@@ -273,7 +273,9 @@ def test_every_agent_names_where_it_reads_the_note():
 TABLE = {"schema": 1, "source": "test", "families": [{
     "id": "fam", "label": "Fam", "pattern": "fam-model", "examples": ["fam-model"],
     "all": {"params": {"temperature": 0.5}},
-    "harnesses": {agent: {"status": "verified", "evidence": "e", "params": {"top_p": 0.9}}
+    "harnesses": {agent: {"status": "verified", "params": {"top_p": 0.9},
+                          "evidence": {"derived": "scripts/profile_status.py", "rule": "test", "runs": 10,
+                                       "run_ids": f"round 8: TASK__{agent}__fam__BLOCK"}}
                   for agent in ("opencode2", "pi", "openhands", "nanobot", "letta")}}]}
 
 

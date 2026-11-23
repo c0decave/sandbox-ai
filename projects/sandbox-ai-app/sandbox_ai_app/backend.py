@@ -116,6 +116,7 @@ GROUPS = {
     "Display & terminal": ["--gui", "--gui-vnc", "--gui-screen", "--gui-wayland", "--browser", "--browser-control",
                            "--browser-profile", "--audio", "--tmux", "--no-tmux"],
     "Cairn": ["--cairn", "--cairn-workers", "--cairn-origin", "--cairn-goal", "--cairn-hint", "--cairn-board"],
+    "ARTEX": ["--artex", "--artex-data", "--artex-port"],
     "Hardware": ["--device", "--gpu"],
     "Limits": ["--memory", "--cpus", "--pids", "--tmp-size"],
     "Engine": ["--backend", "--image", "--image-variant", "--nested-containers", "--podman-url", "--binary", "--runtime", "--config", "--no-config", "--probe",
@@ -126,7 +127,8 @@ PATH_OPTIONS = {"--workspace", "--state-dir", "--privacy-rules", "--rules", "--l
 # Options the app sets itself (it starts sessions and dry runs on its own).
 # --yes: the start's own risk question answered unseen - the app asks itself (ask_first "shared-wildcard") and passes
 # what was confirmed as --allow-shared-wildcard, never --yes.
-HIDDEN = {"--session", "--dry-run", "--help", "--version", "--yes"}
+# --fix, --fix-only, --fix-plan: what a start lacks - the app reads the plan and asks itself (prerequisites.py).
+HIDDEN = {"--session", "--dry-run", "--help", "--version", "--yes", "--fix", "--fix-only", "--fix-plan"}
 # A hidden launcher option the app adds to its own starts on this machine (SandboxAI.as_given).
 AS_GIVEN = "--workspaces-as-given"
 SCOPES = ("once", "run", "always")
@@ -136,7 +138,9 @@ REMOTE_QUESTION_WAIT = 30  # seconds a host may take to list its open questions 
 HOST_FOLDERS_WAIT = 20
 HOST_FOLDER_KINDS = ("run", "run-home", "session", "session-home")
 HOST_FOLDERS_LIMIT = 500
-NET_OPTIONS_SECONDS = 600  # how long a host's `net allow --help` is kept when its sandbox-ai version is not known
+# How long a host's `COMMAND --help` is kept when its sandbox-ai version is not known (kept per version otherwise; an
+# update there drops it, and an option it lacks is asked once more before anything is refused: require_options).
+NET_OPTIONS_SECONDS = 120
 BASE_NET_OPTIONS = frozenset({"--allow-host", "--allow-tcp", "--allow"})  # what every sandbox-ai since 0.1.70 takes
 RECENT_PROJECTS = 12  # projects the app's own list keeps
 RECENT_FOLDERS = 10  # recent project folders the wizard offers
@@ -280,9 +284,6 @@ class SandboxAI:
                 if name == "presets" and hasattr(module, "EXPOSED_BEFORE"):
                     # Extra preset directories where sandboxes wrote are skipped: the launcher knows where.
                     module.EXPOSED_BEFORE = self.launcher.exposed_before
-                if name == "presets" and hasattr(module, "EXPERIMENTAL_BADGE") and \
-                        hasattr(self.launcher, "experimental_badge"):
-                    module.EXPERIMENTAL_BADGE = self.launcher.experimental_badge  # the badge: the launcher's list
                 if name == "liveness" and isinstance(getattr(module, "CACHE_SECONDS", None), (int, float)):
                     # The app asks every sandboxes_interval (3 s): a Podman listing (`podman pod ps`, a Go program
                     # that may start Podman's service) is kept a little longer than one look; an action's own
@@ -560,17 +561,6 @@ class SandboxAI:
             if action.dest == "agent" and action.choices:
                 return tuple(action.choices)
         return AGENTS
-
-    def experimental_agent(self, agent):
-        """The badge of AGENT when it has not passed its live test in this sandbox-ai ({"names"}: its launcher's
-        experimental_badge, from its one list EXPERIMENTAL_PARTS), else {} (an older sandbox-ai: none)."""
-        badge = getattr(self.launcher, "experimental_badge", None)
-        try:
-            found = badge([agent]) if badge else None
-        except Exception as _exc:  # noqa: BLE001 - a badge is a hint: never a reason the agent cannot be chosen
-            applog.swallowed("backend", "SandboxAI.experimental_agent: a badge is a hint: never a reason the ag…", _exc)
-            found = None
-        return found if isinstance(found, dict) else {}
 
     @property
     def question_id(self):
@@ -1482,9 +1472,9 @@ class SandboxAI:
                        and valid_toolchain(row.get("name")) and isinstance(row.get("version"), str)]
             signed = (found.get("signature") or {}).get("state") == "good"
             if not signed:
-                problem = printable(str((found.get("signature") or {}).get("reason") or "not signed"))[:300]
+                problem = printable_text(str((found.get("signature") or {}).get("reason") or "not signed"))[:300]
         except (ValueError, OSError, AttributeError) as exc:
-            problem = printable(str(exc))[-300:]
+            problem = printable_text(str(exc))[-300:]
         return {"installed": rows, "catalog": catalog if signed else [], "signed": signed, "problem": problem}
 
     def toolchains_of_run(self, run, host="local"):
@@ -3164,9 +3154,9 @@ class SandboxAI:
         sandbox-ai version (for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
         return self.host_command_options(name, "net", command)
 
-    def host_command_options(self, name, *command):
+    def host_command_options(self, name, *command, fresh=False):
         """The options `sandbox-ai COMMAND... --help` lists on host NAME, kept per host, command and sandbox-ai version
-        (for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
+        (for NET_OPTIONS_SECONDS without a known version); FRESH: asked now. ValueError: no answer."""
         try:
             version = (self.host_statuses(cached=True).get(name) or {}).get("version")
         except Exception as _exc:  # noqa: BLE001
@@ -3176,7 +3166,7 @@ class SandboxAI:
         cache = self.__dict__.setdefault("_net_options", {})
         key = (name, *command, version)
         kept = cache.get(key)
-        if kept is not None and (version or time.time() - kept[0] < NET_OPTIONS_SECONDS):
+        if kept is not None and not fresh and (version or time.time() - kept[0] < NET_OPTIONS_SECONDS):
             return set(kept[1])
         status, out, err = self.host_run(name, *command, "--help", timeout=60)
         found = set(re.findall(r"(?<![\w-])--[a-z0-9][a-z0-9-]*", out)) if status == 0 else set()
@@ -3225,7 +3215,23 @@ class SandboxAI:
             return
         missing = [o for o in options if o not in known]
         if missing:
+            # What was kept may be from before an update there (user report 2026-11-23: --toolchain refused on
+            # coding-101 just updated): the host is asked once more before a start is refused.
+            try:
+                known = self.host_command_options(host, *command, fresh=True)
+            except Exception as _exc:  # noqa: BLE001 - not answered now: the command itself goes, and says
+                applog.swallowed("backend", "SandboxAI.require_options: asked again, not answered", _exc)
+                return
+            missing = [o for o in options if o not in known]
+        if missing:
             raise HostTooOld(host, command, missing)
+
+    def forget_host_options(self, name):
+        """What host_command_options kept of host NAME (after its sandbox-ai changed: an update, an installation, an
+        uninstall)."""
+        for cache in (self.__dict__.get("_net_options") or {}, self.__dict__.get("_launch_options") or {}):
+            for key in [key for key in cache if key and key[0] == name]:
+                cache.pop(key, None)
 
     def too_old_text(self, host, result, command):
         """What to say when the sandbox-ai on HOST answered RESULT ((status, out, err) of `sandbox-ai COMMAND...` there)
@@ -3393,21 +3399,76 @@ class SandboxAI:
         except (TypeError, ValueError):
             return False
 
-    def host_update(self, name, sudo=None, from_here=False):
+    def host_update(self, name, sudo=None, from_here=False, installation=None):
         """The result of `sandbox-ai hosts update NAME --json` ({"before", "after", "changed", "error",
-        "needs_sudo", "needs_password", "notes", "fixed"}); SUDO None: the host's own setting. FROM_HERE: with this
-        machine's copy, as the same kind of installation (--from-here), instead of the host's signed update."""
+        "needs_sudo", "needs_password", "notes", "fixed", "installation"}); SUDO None: the host's own setting.
+        FROM_HERE: with this machine's copy, as the same kind of installation (--from-here), instead of the host's
+        signed update. INSTALLATION: "user" or "system" (--installation; None: the one the host's commands run).
+        Its status is read again by hosts update itself; what was kept of its commands' options is dropped."""
         if from_here and name == "local":
             raise ValueError("this machine updates with: sandbox-ai update")
+        if installation not in (None, "user", "system"):
+            raise ValueError("the installation is user or system")
         args = ["hosts", "update", name, "--json", *(["--sudo"] if sudo else ["--no-sudo"] if sudo is False else []),
-                *(["--from-here"] if from_here else [])]
+                *(["--from-here"] if from_here else []), *(["--installation", installation] if installation else [])]
         hosts = self.module("hosts")
         timeout = max(hosts.UPDATE_TIMEOUT, getattr(hosts, "INSTALL_TIMEOUT", 0) if from_here else 0) + 60
-        status, out, err = self.call(*args, timeout=timeout)
+        try:
+            status, out, err = self.call(*args, timeout=timeout)
+        finally:
+            self.forget_host_options(name)
         try:
             return json.loads(out)[0]
         except (ValueError, IndexError, KeyError, TypeError, RecursionError):
             raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
+
+    def host_uninstall_supported(self):
+        """Whether this sandbox-ai removes sandbox-ai on a host (hosts uninstall, 0.1.237)."""
+        return hasattr(self.module("hosts"), "uninstall")
+
+    def host_uninstall_args(self, name, installation=None, purge=False, secrets=False, mcp_data=False,
+                            stop_running=False, remove=False, dry_run=False):
+        """The words after `sandbox-ai` of `hosts uninstall NAME ... --json`, every value checked."""
+        if not (isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name)) or name == "local":
+            raise ValueError("not a host of the list (this machine: sandbox-ai uninstall in a terminal here)")
+        if installation not in (None, "user", "system"):
+            raise ValueError("the installation is user or system")
+        if (secrets or mcp_data) and not purge:
+            raise ValueError("--secrets and --mcp-data go with --purge")
+        return ["hosts", "uninstall", name, "--json", *(["--installation", installation] if installation else []),
+                *(["--purge"] if purge else []), *(["--secrets"] if secrets else []),
+                *(["--mcp-data"] if mcp_data else []), *(["--stop-running"] if stop_running else []),
+                *(["--remove-from-list"] if remove else []), "--dry-run" if dry_run else "--yes"]
+
+    def host_uninstall_plan(self, name, installation=None, purge=False, secrets=False, mcp_data=False):
+        """What `sandbox-ai uninstall` would remove on host NAME (its own table, --dry-run there): the result of
+        hosts uninstall --dry-run --json ({"plan", "installation", "sudo", "error"})."""
+        status, out, err = self.call(*self.host_uninstall_args(name, installation, purge, secrets, mcp_data,
+                                                               dry_run=True), timeout=240)
+        try:
+            return json.loads(out)
+        except (ValueError, RecursionError):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
+
+    def host_uninstall(self, name, installation=None, purge=False, secrets=False, mcp_data=False, stop_running=False,
+                       remove=False):
+        """`sandbox-ai hosts uninstall NAME --yes --json ...`: {"removed", "remaining", "sudo", "error",
+        "needs_password", "removed_from_list", "output", "notes"}."""
+        args = self.host_uninstall_args(name, installation, purge, secrets, mcp_data, stop_running, remove)
+        try:
+            status, out, err = self.call(*args, timeout=self.module("hosts").UPDATE_TIMEOUT + 60)
+        finally:
+            self.forget_host_options(name)
+        try:
+            return json.loads(out)
+        except (ValueError, RecursionError):
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}") from None
+
+    def host_uninstall_terminal(self, name, installation=None, purge=False, secrets=False, mcp_data=False,
+                                stop_running=False):
+        """argv of host NAME's uninstall in a terminal tab, where sudo may ask for its password."""
+        return list(self.module("hosts").uninstall_terminal(name, installation, purge, secrets, mcp_data,
+                                                            stop_running))
 
     def host_install_supported(self):
         return hasattr(self.module("hosts"), "install")
@@ -3441,7 +3502,10 @@ class SandboxAI:
         "notes"}. ValueError: no such answer."""
         args = self.host_install_args(name, mode, prefix, sudo, source, version)
         timeout = getattr(self.module("hosts"), "INSTALL_TIMEOUT", 900) + 60
-        status, out, err = self.call(*args, "--json", timeout=timeout)
+        try:
+            status, out, err = self.call(*args, "--json", timeout=timeout)
+        finally:
+            self.forget_host_options(name)  # (another sandbox-ai there now: its commands' options asked anew)
         try:
             result = json.loads(out)
         except (ValueError, RecursionError):
@@ -3454,9 +3518,12 @@ class SandboxAI:
         """argv of the same installation in a terminal tab, where sudo on the host may ask for its password."""
         return self.command(*self.host_install_args(name, mode, prefix, sudo, source, version))
 
-    def host_update_terminal(self, name):
-        """argv of host NAME's update in a terminal tab, where sudo may ask for its password."""
-        return list(self.module("hosts").update_terminal(name))
+    def host_update_terminal(self, name, installation=None):
+        """argv of host NAME's update in a terminal tab, where sudo may ask for its password (INSTALLATION: as
+        host_update's)."""
+        if installation is None:
+            return list(self.module("hosts").update_terminal(name))
+        return list(self.module("hosts").update_terminal(name, installation_=installation))
 
     def checked(self, *args, timeout=120):
         status, out, err = self.call(*args, timeout=timeout)
@@ -3525,6 +3592,39 @@ class SandboxAI:
             applog.swallowed("backend", "SandboxAI.desktop_notification_levels failed (went on without it)", _exc)
             return ()
 
+    def fix_questions_known(self):
+        """This sandbox-ai has the fix plan (fixes.py: what a start lacks, offered) and its default fix_questions."""
+        try:
+            return "fix_questions" in getattr(self.launcher, "DEFAULTS_KEYS", ())
+        except Exception as _exc:  # noqa: BLE001
+            applog.swallowed("backend", "SandboxAI.fix_questions_known failed (went on without it)", _exc)
+            return False
+
+    def fix_questions(self):
+        """How what a start lacks is asked about: "all" (one question for everything, the default) or "each" (one per
+        fix) - sandbox-ai's default fix_questions, which the command line reads too."""
+        try:
+            value = self.sandbox_defaults()[0].get("fix_questions")
+        except Exception as _exc:  # noqa: BLE001 - not read: the default
+            applog.swallowed("backend", "SandboxAI.fix_questions: the defaults were not read (all)", _exc)
+            value = None
+        return value if value in ("all", "each") else "all"
+
+    def host_fix_plan(self, host, agent, argv, timeout=150):
+        """What the start `AGENT ARGV` lacks on HOST and what would fix each, as that host's sandbox-ai says it
+        (`AGENT ARGV --fix-plan`: fixes.plan_json): {"fixes": [...], "questions", "mode"}, every text printable and
+        every command one of sandbox-ai's own (checked_fix_plan). ValueError when the host does not answer one (an
+        older sandbox-ai: its start says what is missing itself)."""
+        status, out, err = self.host_run(host, agent, *self.as_given(argv), "--fix-plan", timeout=timeout)
+        if status == 2 and host != "local" and re.search(r"unrecognized arguments|invalid choice", err or ""):
+            # An older sandbox-ai there, which does not know --fix-plan or an option of the start: HostTooOld - the
+            # prerequisites' question offers its update (sandbox-ai hosts update HOST, run on this machine).
+            named = re.search(r"unrecognized arguments: ([^\n]+)", err or "")
+            raise HostTooOld(host, (str(agent),), named[1].split()[:8] if named else ["--fix-plan"])
+        if status != 0:
+            raise ValueError((err or out).strip()[-500:] or f"exit status {status}")
+        return checked_fix_plan(out)
+
     def save_sandbox_default(self, key, value):
         """Set KEY of sandbox-ai's defaults file to VALUE (None: remove it, sandbox-ai's own default applies);
         the other keys stay. Only keys and values this sandbox-ai accepts: a file it refused would stop every
@@ -3551,6 +3651,12 @@ class SandboxAI:
                 why = self.module("storage").check_value(key, value)
                 if why:
                     raise ValueError(why)
+        elif key == "fix_questions":
+            # What a start lacks: one question for everything, or one per fix (fixes.QUESTIONS).
+            if not self.fix_questions_known():
+                raise ValueError("this sandbox-ai has no default fix_questions yet; update it")
+            if value is not None and value not in ("all", "each"):
+                raise ValueError("fix_questions is all or each")
         elif key == "ask_timeout":
             # How long a request waits for its answer (agent_sandbox.ASK_TIMEOUT_RANGE): only with this sandbox-ai.
             if "ask_timeout" not in getattr(self.launcher, "DEFAULTS_KEYS", ()):
@@ -4846,10 +4952,11 @@ class SandboxAI:
     # host_terminal); every value that goes back as an argument is checked first (start_options.py-like rules of the
     # web interface: absolute paths, names, X.Y.Z) and never read as an option.
 
-    def host_launch_options(self, name, agent):
+    def host_launch_options(self, name, agent, fresh=False):
         """The option strings `sandbox-ai AGENT` takes on host NAME: this machine's from the launcher's own parser,
         another host's from its `sandbox-ai AGENT --help` there (the option lines parsed; kept per host, agent and
-        sandbox-ai version, for NET_OPTIONS_SECONDS without a known version). ValueError: no answer."""
+        sandbox-ai version, for NET_OPTIONS_SECONDS without a known version; FRESH: asked now). ValueError: no
+        answer."""
         if not (isinstance(agent, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", agent)):
             raise ValueError("not an agent")
         if name == "local":
@@ -4864,7 +4971,7 @@ class SandboxAI:
         cache = self.__dict__.setdefault("_launch_options", {})
         key = (name, agent, version)
         kept = cache.get(key)
-        if kept is not None and (version or time.time() - kept[0] < NET_OPTIONS_SECONDS):
+        if kept is not None and not fresh and (version or time.time() - kept[0] < NET_OPTIONS_SECONDS):
             return set(kept[1])
         status, out, err = self.host_run(name, agent, "--help", timeout=60)
         found = help_options(out) if status == 0 else set()
@@ -4990,22 +5097,47 @@ class SandboxAI:
             if not hasattr(mcp, "last_problem"):
                 return {}
             found = {}
+            try:
+                own = set(mcp.read_config()[1])
+            except (OSError, ValueError):
+                own = set()
             for server, definition in mcp.definitions().items():
                 problems = [p for p in (mcp.last_problem(i) for i in mcp.instances(server, include_stopped=True)) if p]
                 problem = max(problems, key=lambda p: str(p.get("time") or "")) if problems else None
                 below = mcp.below_recommended(definition) if "image" in definition or "rootfs" in definition else {}
-                if problem or below:
-                    found[server] = {"problem": problem, "below": below}
+                # The newer image its catalog pins (as last read here): Update takes it (sandbox-ai mcp update).
+                newer = mcp.newer_pin(definition) if hasattr(mcp, "newer_pin") and server in own else None
+                if problem or below or newer:
+                    found[server] = {"problem": problem, "below": below, "newer": newer_shown(newer)}
             return found
         found = {}
         for entry in self.__dict__.get("_mcp_listed", {}).get(name, []):
             problem = entry.get("last_problem") if isinstance(entry.get("last_problem"), dict) else None
             below = entry.get("below_recommended") if isinstance(entry.get("below_recommended"), dict) else {}
-            if problem or below:
+            newer = newer_shown(entry.get("newer"))
+            if problem or below or newer:
                 found[entry["name"]] = {"problem": {k: printable_text(str(problem.get(k) or ""))[:600]
                                                     for k in ("time", "what", "why", "fix")} if problem else None,
-                                        "below": {printable(str(k))[:20]: printable(str(v))[:20] for k, v in below.items()}}
+                                        "below": {printable(str(k))[:20]: printable(str(v))[:20] for k, v in below.items()},
+                                        "newer": newer}
         return found
+
+    def host_mcp_update(self, host, names, unsigned=False):
+        """`sandbox-ai mcp update NAMES --yes --json` on HOST (no names: every server of its own from a catalog), asked
+        first by the page (mcp-update): the catalogs read again there, each signature checked, the images pulled by
+        digest. Its result ({"servers": [...], "updated": [names]}); ValueError with what it said when it failed."""
+        names = [str(name) for name in names]
+        if not all(re.fullmatch(MCP_NAME, name) for name in names):
+            raise ValueError("not an MCP server's name")
+        status, out, err = self.host_run(host, "mcp", "update", *names, "--yes", "--json",
+                                         *(["--unsigned"] if unsigned else []), timeout=3600)
+        try:
+            result = json.loads(out)
+        except (ValueError, RecursionError):
+            result = None
+        if status != 0 or not isinstance(result, dict):
+            raise ValueError(printable_text((err or out).strip()[-1500:] or f"exit status {status}"))
+        return result
 
     def host_mcp_list(self, name):
         """[{"name", "status", "limits", "instances", "kind", "own", "definition", "builtin_defaults", ...}] of the MCP
@@ -5688,6 +5820,76 @@ def valid_toolchain(value):
                                                         value)) and value.partition("@")[0] != "bin"
 
 
+def toolchain_version_key(version):
+    """VERSION for ordering as sandbox-ai orders them (toolchains.version_key): its numbers first, then its text."""
+    return [int(part) for part in re.findall(r"[0-9]+", str(version))][:8], str(version)
+
+
+def toolchain_selector(name, version, versions, bare=True):
+    """What a sandbox-ai with versions (toolchains.selector) takes for NAME VERSION among VERSIONS: NAME for the newest
+    (unless not BARE), else the shortest NAME@START that picks it up to a '.', '+', '-' or '_' (jdk@17,
+    python@3.12), else NAME@VERSION."""
+    versions = {*versions, version}
+
+    def newest(start=None):
+        found = [v for v in versions if start is None or v == start
+                 or (v.startswith(start) and v[len(start)] in ".+-_")]
+        if start is not None and start in versions:
+            found = [start]
+        return max(found, key=toolchain_version_key) if found else None
+    if bare and newest() == version:
+        return name
+    for index, char in enumerate(version):
+        if char in ".+-_" and newest(version[:index]) == version:
+            return f"{name}@{version[:index]}"
+    return f"{name}@{version}"
+
+
+def toolchain_choices(found, attached=()):
+    """What a list of toolchains offers of a host's store and signed catalog (FOUND: host_toolchains):
+    [{"value", "name", "version", "row", "stored"}] - every version in the store, then the catalog's versions that
+    are not, newest of a name first. "value" is what --toolchain, `toolchain add` and `attach` take for exactly that
+    version, among the store's and the catalog's: NAME for the newest of both, else NAME@START (jdk@17); never NAME
+    alone for one of the catalog when the store has another version of NAME (NAME at a start is the store's
+    newest). A host's sandbox-ai before versions (its rows name no "toolchain") takes exact versions only:
+    NAME@VERSION. A name in ATTACHED (one version of a toolchain per sandbox) is left out."""
+    installed = [row for row in found.get("installed") or [] if row.get("name") not in attached]
+    catalog = [row for row in found.get("catalog") or [] if row.get("name") not in attached]
+    versioned = any("toolchain" in row for row in [*installed, *catalog])
+    stored = {}
+    for row in installed:
+        stored.setdefault(row["name"], set()).add(row["version"])
+    known = {name: set(versions) for name, versions in stored.items()}
+    for row in catalog:
+        known.setdefault(row["name"], set()).add(row["version"])
+
+    def value_of(row, in_store):
+        name, version = row["name"], row["version"]
+        bare = in_store or not stored.get(name)
+        if versioned:
+            return toolchain_selector(name, version, known[name], bare=bare)
+        among = stored[name] if in_store else known[name]
+        newest = max(among, key=toolchain_version_key)
+        return name if bare and version == newest else f"{name}@{version}"
+
+    def ordered(rows):
+        return sorted(rows, key=lambda row: (row["name"], [-n for n in toolchain_version_key(row["version"])[0]]))
+    choices, values = [], set()
+    for row in ordered(installed):
+        value = value_of(row, True)
+        if value not in values:
+            values.add(value)
+            choices.append({"value": value, "name": row["name"], "version": row["version"], "row": row,
+                            "stored": True})
+    for row in ordered(catalog):
+        value = value_of(row, False)
+        if row["version"] not in stored.get(row["name"], ()) and value not in values:
+            values.add(value)
+            choices.append({"value": value, "name": row["name"], "version": row["version"], "row": row,
+                            "stored": False})
+    return choices
+
+
 def valid_device(path):
     """A device path of one line under /dev, or a USB device by identity, usb:VENDOR:PRODUCT[:SERIAL] (as
     `sandbox-ai devices add` takes it); never read as an option."""
@@ -5761,6 +5963,8 @@ NEEDS_CONFIRM = {
                    "continues its conversation)",
     "host-edit": "changing a host's SSH target, port, key, command or sudo setting changes where and how this "
                  "service's commands run",
+    "host-uninstall": "uninstalling sandbox-ai on a host removes that installation there (with --purge also the "
+                      "SSH user's data, with --secrets its secrets and logins, which cannot be recovered)",
     "host-install": "installing sandbox-ai on a host puts this machine's copy (or the signed release) there, for the "
                     "SSH user or for every user, as root or with sudo",
     "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
@@ -5768,6 +5972,8 @@ NEEDS_CONFIRM = {
     'project-trust': 'a trusted project configuration gives every later start of that project its options',
     'project-forget': 'a project configuration no longer trusted stops the starts of that project from starting until it is trusted again',
     'mcp-stop': 'stopping an MCP server ends it for every start that uses it now',
+    "mcp-update": "the server's image is replaced by the newer one its catalog pins (its signature checked again; its "
+                  "folders, variables, limits and network stay): every later start runs that image",
     'mcp-unsigned': 'an MCP server from a catalog no trusted key signed is taken without that check',
     "mcp-build": "an MCP server its catalog has no signed image of is built on that host from its source at the commit "
                  "and source archive shown, and added unsigned: nobody signed the image built",
@@ -5803,6 +6009,10 @@ NEEDS_CONFIRM = {
     "vpn-replace": "replacing a VPN profile of that name changes the tunnel of every start that uses it",
     "llm-replace": "replacing an LLM server of that name changes where every start that uses it sends its prompts "
                    "and its key",
+    "llm-share-key": "the key of a server shared with all hosts is kept in the secret store of each host it is sent "
+                     "to from then on: whoever controls that host can use it",
+    "llm-unshare": "unsharing removes the server's copies (and the keys sent) from every host it was shared with: "
+                   "sessions there cannot start with it any more",
     "team-stop": "stopping a team ends what runs in every member and its board",
     "team-delete": "deleting a team removes its members with their HOMEs and its board",
     "image-file": "a host file added to an image's extension is built into the image: every later start of it can "
@@ -6597,7 +6807,9 @@ def settings_problem():
 
 
 # The settings the app knows, with their defaults (the Settings dialog edits them; the file keeps them).
-SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "", "language": "system", "terminal": "app", "tray": True, "notify": True,
+SETTINGS = {"theme": "system", "ui_font": "", "mono_font": "",
+            # a font that comes with the app for all its text, for reading (reading_fonts.READING): "" the theme's
+            "reading_font": "", "language": "system", "terminal": "app", "tray": True, "notify": True,
             "notifications": False, "notify_safeguards": True, "short_notices": True,
             "notify_seconds": 15, "notify_style": "themed", "approvals_interval": 1000, "sandboxes_interval": 3000, "connections_interval": 2000,
             "sandbox_ai_home": "", "default_agent": "claude", "default_backend": "podman",
@@ -6762,6 +6974,64 @@ def write_private_text(path, text):
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+# The commands of sandbox-ai a fix may be (fixes.COMMANDS): what the app runs of a plan a host answered - never
+# anything else that answer names (a host's answer is its text, not this machine's instructions).
+FIX_COMMANDS = ("build", "images", "mcp", "toolchain", "identities", "login", "vpn", "plugins", "kits", "hosts", "llm",
+                "secrets", "publish-logins")
+FIX_VERDICTS = ("offered", "manual", "refused")
+
+
+def checked_fix_plan(text):
+    """`AGENT ... --fix-plan`'s JSON checked: {"fixes": [{id, kind, name, missing, title, commands, command, duration,
+    unsigned, security, terminal, needed, verdict, why}], "questions": all|each, "mode"}. Every text one printable
+    line of bounded length; a fix whose commands are not all `sandbox-ai COMMAND ...` with a command of FIX_COMMANDS
+    is never "offered" here (it is shown as manual, with its commands as text). ValueError when it is no plan."""
+    from .files import printable
+    try:
+        plan = json.loads(text)
+    except (ValueError, RecursionError):
+        raise ValueError("not a fix plan") from None
+    if not isinstance(plan, dict) or not isinstance(plan.get("fixes"), list):
+        raise ValueError("not a fix plan (no list of fixes)")
+
+    def line(value, limit=600):
+        return printable(" ".join(str(value if value is not None else "").split()))[:limit]
+    fixes = []
+    for item in plan["fixes"][:64]:
+        if not isinstance(item, dict):
+            continue
+        commands = [[str(word) for word in command] for command in item.get("commands") or []
+                    if isinstance(command, list) and command and all(isinstance(word, str) for word in command)][:8]
+        own = bool(commands) and all(command[0] == "sandbox-ai" and len(command) > 1 and command[1] in FIX_COMMANDS
+                                     and not any("\0" in word or "\n" in word for word in command)
+                                     for command in commands)
+        verdict = item.get("verdict") if item.get("verdict") in FIX_VERDICTS else "manual"
+        why = line(item.get("why"))
+        # A fix that changes the start's own options (add --with claude; fixes.py "options"): launcher options and
+        # their values only, each one printable word - applied by the page that starts, never run.
+        change = item.get("options") if isinstance(item.get("options"), dict) else None
+        if change is not None:
+            words = {key: [str(word) for word in change.get(key) or [] if isinstance(word, str)][:16]
+                     for key in ("add", "remove")}
+            fine = all(word == printable(word) and word.strip() == word and word and len(word) <= 400
+                       for key in words for word in words[key]) and \
+                all(word.startswith("--") for word in words["remove"]) and \
+                (not words["add"] or words["add"][0].startswith("--")) and "--" not in words["add"]
+            change = words if fine and (words["add"] or words["remove"]) else None
+        if verdict == "offered" and not own and change is None:
+            verdict, why = "manual", why or "not a command of sandbox-ai's own"
+        fixes.append({"id": line(item.get("id"), 200), "kind": line(item.get("kind"), 40),
+                      "name": line(item.get("name"), 200), "missing": line(item.get("missing")),
+                      "title": line(item.get("title")), "commands": commands,
+                      "command": line(item.get("command"), 2000), "duration": line(item.get("duration"), 80),
+                      "unsigned": item.get("unsigned") is True, "security": line(item.get("security")),
+                      "terminal": item.get("terminal") is True, "needed": item.get("needed") is not False,
+                      "options": change, "choice": line(item.get("choice"), 200), "start": line(item.get("start"), 2000),
+                      "verdict": verdict, "why": why})
+    return {"fixes": fixes, "questions": plan.get("questions") if plan.get("questions") in ("all", "each") else "all",
+            "mode": line(plan.get("mode"), 40)}
 
 
 def parse_dry_run(status, out, err):
@@ -8452,6 +8722,16 @@ def catalog_options(catalogs):
 MCP_NETWORKS = ("full", "allowlist", "lan", "none")
 
 
+MCP_DEFAULT_FOLDER = "default"  # --mount TARGET=default: the folder's default (sandbox-ai's mcp.DEFAULT_HOST)
+
+
+def mcp_folder_value(value):
+    """The HOST of an MCP server's --mount: an absolute path (path_value), or MCP_DEFAULT_FOLDER - its default, the
+    start's workspace for /work, else a folder of the server's own, made by sandbox-ai where it is added."""
+    return MCP_DEFAULT_FOLDER if str(value or "").strip() == MCP_DEFAULT_FOLDER else \
+        path_value(value, "a mount's host directory")
+
+
 def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=None, pids=None, catalogs=(),
                  no_pull=False, engine=None, unsigned=False, vpn=None, cpus=None, tmp=None):
     """(the words after `sandbox-ai` of `mcp add ... ENTRY`, the host directories mounted writable) with --as,
@@ -8465,11 +8745,11 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
             raise ValueError("a name for --mcp is 1-32 letters, digits, '_' or '-'")
         args.append(f"--as={name_as}")
     for target, source, mode in mounts:
-        target, source = path_value(target, "a mount's target"), path_value(source, "a mount's host directory")
+        target, source = path_value(target, "a mount's target"), mcp_folder_value(source)
         if mode not in ("ro", "rw") or "=" in target + source or ":" in target + source:
             raise ValueError("a mount is TARGET=HOST with ro or rw (no '=' or ':' in the paths)")
         args.append(f"--mount={target}={source}:{mode}")
-        if mode == "rw":
+        if mode == "rw" and source != MCP_DEFAULT_FOLDER:  # (its default: the start's workspace, its own folder)
             writable.append(source)
     for variable in env:
         args.append(f"--env={env_spec(variable)}")  # NAME, NAME=VALUE or NAME@SECRET
@@ -8561,7 +8841,7 @@ def mcp_set_args(name, stop=False, **changes):
         if not changes["mounts"]:
             args.append("--no-mounts")
         for target, source, mode in changes["mounts"]:
-            target, source = path_value(target, "a mount's target"), path_value(source, "a mount's host directory")
+            target, source = path_value(target, "a mount's target"), mcp_folder_value(source)
             if mode not in ("ro", "rw") or "=" in target + source or ":" in target + source:
                 raise ValueError("a mount is TARGET=HOST with ro or rw (no '=' or ':' in the paths)")
             args.append(f"--mount={target}={source}:{mode}")
@@ -8611,6 +8891,25 @@ def mcp_unsigned_refusal(text):
         return None
     match = MCP_UNSIGNED_SOURCE.search(text)
     return {"catalog": printable(match["catalog"])[:2048] if match else ""}
+
+
+def newer_shown(newer):
+    """What the app shows of mcp.newer_pin's NEWER (a host's answer too): {"image": [old, new] or None, "rootfs": [...]
+    or None, "signed": bool}, each digest printable and bounded; None for nothing newer (or not of that shape)."""
+    if not isinstance(newer, dict):
+        return None
+    shown = {}
+    for key in ("image", "rootfs"):
+        pair = newer.get(key)
+        if isinstance(pair, list) and len(pair) == 2:
+            shown[key] = [printable(str(value))[:200] for value in pair]
+    return {**shown, "signed": newer.get("signed") is True} if shown else None
+
+
+def short_digest(value):
+    """The first 12 of an image's digest (REF@sha256:HEX) or of a rootfs's SHA-256."""
+    value = str(value)
+    return value.rpartition("@sha256:")[2][:12] if "@sha256:" in value else value[:12]
 
 
 def mcp_start_args(name, engine=None, vpn=None, for_start=None, restart=False):

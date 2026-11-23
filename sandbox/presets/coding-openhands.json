@@ -30,6 +30,6 @@
     "Memory: ~/.openhands/skills/AGENTS.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
     "OpenHands asks before risky actions (its confirmation mode with the LLM security analyzer); -D turns that off. Its automation backend is off (--openhands-enable automations).",
     "OpenHands' telemetry is always off and cannot be turned on (its kill switches pinned, its consent recorded as denied, its hosts refused by the proxy).",
-    "OpenHands is not live-tested yet (a start says so); its image first: sandbox-ai build openhands."
+    "Its image first: sandbox-ai build openhands."
   ]
 }

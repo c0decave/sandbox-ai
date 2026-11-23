@@ -417,6 +417,26 @@ class Reader:
         return found
 
 
+def drain(stream, session):
+    """ssh's own messages (why it failed) for the Sftp SESSION, the last STDERR_KEPT bytes - until ssh's stderr ends
+    or the session was closed here and nothing more comes (what ssh started - a proxy command, a helper - may hold its
+    stderr open after ssh went: the thread waited for good, one more per connection)."""
+    while True:
+        try:
+            ready, _, _ = select.select([stream], [], [], 0.5)
+        except (OSError, ValueError):  # (closed meanwhile)
+            return
+        if not ready:
+            if session.closed.is_set():
+                return
+            continue
+        chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
+        if not chunk:
+            return
+        session.errors += chunk
+        del session.errors[:-STDERR_KEPT]
+
+
 class Sftp:
     """An SFTP session over ARGV's process (`ssh ... -s HOST sftp`, or in tests any program that speaks SFTP on its
     stdin and stdout). One request at a time per session (a lock), a file's chunks pipelined (WINDOW)."""
@@ -436,7 +456,8 @@ class Sftp:
         except OSError as exc:
             applog.log("WARNING", "remote", f"SFTP to {where}: ssh could not be started: {applog.error_text(exc)}")
             raise RemoteError(tr("ssh could not be started: {error}", error=printable(exc))) from None
-        threading.Thread(target=self.drain, daemon=True).start()
+        self.closed = threading.Event()  # close(): the connection was ended here
+        threading.Thread(target=drain, args=(self.process.stderr, self), name="sftp-stderr", daemon=True).start()
         self.buffer = b""
         try:
             self.send(INIT, struct.pack(">I", 3))
@@ -459,16 +480,6 @@ class Sftp:
         while reader.at < len(payload):
             name = reader.text()
             self.extensions[name] = reader.string()
-
-    def drain(self):
-        """ssh's own messages (why it failed), the last STDERR_KEPT bytes."""
-        stream = self.process.stderr
-        while True:
-            chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
-            if not chunk:
-                return
-            self.errors += chunk
-            del self.errors[:-STDERR_KEPT]
 
     def reason(self):
         """The RemoteError of a session that ended (ssh's messages, once it has gone)."""
@@ -498,6 +509,7 @@ class Sftp:
                 self.process.kill()
             except OSError:
                 pass
+        self.closed.set()  # (drain() ends: what ssh started may hold its stderr open after it went)
 
     # -- packets --
 

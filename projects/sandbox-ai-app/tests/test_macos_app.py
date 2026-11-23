@@ -146,12 +146,13 @@ def test_an_interactive_start_detaches_on_a_mac_with_a_new_sandbox_ai(mac):
     assert not terminal.detaches(argv, SimpleNamespace(interactive_args=lambda *a: True))  # older: no tmux on a Mac
 
 
-def test_notifications_of_an_unbundled_python_go_through_osascript(mac):
+def test_notifications_of_an_unbundled_python_go_through_osascript(mac, qapp, wait):
     from sandbox_ai_app import notifications
     assert notifications.mac_unbundled("/usr/local/bin/python3")
     assert not notifications.mac_unbundled("/Applications/sandbox-ai.app/Contents/MacOS/python3")
     started = []
     notifications.mac_notification("sandbox-ai", 'a "quote" & stuff', popen=lambda argv, **k: started.append(argv))
+    assert wait(lambda: started)  # (started in the background: the window does not wait for the fork)
     argv = started[0]
     assert argv[:2] == ["/usr/bin/osascript", "-e"] and argv[-2:] == ["sandbox-ai", 'a "quote" & stuff']
     assert " ".join(argv[2:7:2]) == " ".join(notifications.OSASCRIPT_NOTIFICATION)

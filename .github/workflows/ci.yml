@@ -134,7 +134,7 @@ jobs:
   # connection proxy (a refused destination stays refused, and the proxy logs it). Builds the claude image and its dev
   # variant first; the job fails if the test was skipped all the same - except for the one skip the test names a
   # "known limitation of this runner" (crun may not mount mqueue here although the agent has an IPC namespace of its
-  # own): a warning then, and the option stays not live-tested.
+  # own): a warning then (that runner cannot run containers inside the sandbox).
   nested:
     runs-on: ubuntu-24.04
     steps:
@@ -266,7 +266,7 @@ jobs:
             exit 1
           fi
 
-  # The agents and parts not live-tested before, one job each, in parallel (tests/test_<name>_live.py, what they share:
+  # The agents and parts with a live test of their own, one job each, in parallel (tests/test_<name>_live.py, what they share:
   # tests/live_agents.py): each agent in a real sandbox of its image against a scripted model server on the runner's
   # loopback (tests/devtools/agent_model.py with --llm: no provider, no key), one prompt answered, one tool of
   # sandbox-ai's demo MCP server called through the bridge (it runs in the codex image), no telemetry host reached

@@ -29,8 +29,7 @@ Verified here: the organisation and repository (GitHub's API), the dates and the
 one-shot `dsh headless` against a local fake model with sandbox-ai's patch (its bash tool ran a command, in the
 default `workspace-write` mode with DSH's own Landlock confinement and in `danger-full-access`), and `dsh web`
 starting on loopback - every other connection sent to a logging proxy that refuses it. Not verified here: the image
-build (no Podman here: it builds in CI or on the host) and a start in a real sandbox; hence not live-tested yet
-(the start says so in one line; no opt-in).
+build (no Podman here: it builds in CI or on the host) and a start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (dsh)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## What DSH is
 
@@ -172,7 +171,7 @@ only deny (`ToolGuard`). `run_code`'s sub-calls re-enter the same pipeline.
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - The official repository is verified (DeepSeek's organisation, its npm scope and maintainer); MIT.
 - DSH reaches nothing by default beyond its model, and its one telemetry has a hard opt-out (variable and patch) that
@@ -183,5 +182,5 @@ only deny (`ToolGuard`). `run_code`'s sub-calls re-enter the same pipeline.
 - Against: a *developer preview* with only pre-releases and announced breaking changes; no terminal UI of its own
   (sandbox-ai's chat runs its headless mode once per message: no approvals there, output per step, a boot of DSH per
   message; its web UI with `--browser`); 687 packages; plugins are
-  code in the agent's process; not live-tested in a sandbox. Hence experimental; each release taken in is reviewed
+  code in the agent's process; not live-tested in a sandbox when reviewed; it has been since (see above). Each release taken in is reviewed
   again.

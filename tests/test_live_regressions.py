@@ -417,13 +417,17 @@ def test_second_start_attaches(starting):
 
 def test_exiftool_needs_folder(host):
     """User: the Board's adding exiftool ended in 'needs --mount /work=HOST'. The catalog says which folders each
-    server must have (mcp catalog --json: mounts, required) - what the app reads to ask for one -, the server is not
-    added without it, and is with the folder the app asked for."""
+    server must have (mcp catalog --json: mounts, required); since 0.1.214 (the user: "alle mcp server sollten bzgl.
+    /work pfad defaults haben") one added without it gets the default - /work the start's workspace (@workspace) -,
+    and a folder given wins."""
     catalog = json.loads(host.run("mcp", "catalog", "--json").stdout)
     entry = next(e for e in catalog["entries"] if e["name"] == "exiftool")
     assert [m["target"] for m in entry["mounts"] if m.get("required")] == ["/work"]
-    refused = host.run("mcp", "add", "hub:exiftool", "--no-pull")
-    assert refused.returncode != 0 and "exiftool needs --mount /work=HOST" in refused.stderr
+    defaulted = host.run("mcp", "add", "hub:exiftool", "--no-pull")
+    assert defaulted.returncode == 0, defaulted.stderr
+    mounts = json.loads((host.home / ".config/sandbox-ai/mcp.json").read_text())["exiftool"]["mounts"]
+    assert any(m.get("target") == "/work" and m.get("host") == "@workspace" for m in mounts), mounts
+    host.run("mcp", "remove", "exiftool")
     folder = host.directory / "case-downloads"
     folder.mkdir()
     added = host.run("mcp", "add", "hub:exiftool", "--no-pull", "--mount", f"/work={folder}:ro")

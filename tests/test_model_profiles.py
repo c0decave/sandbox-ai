@@ -88,7 +88,8 @@ def test_the_researchs_findings_are_in_it():
     assert {agent for agent in next(f for f in TABLE["families"] if f["id"] == "qwen3-coder-next")["harnesses"]} == \
         {"opencode", "codex", "claude", "qwen", "goose", "hermes", "dsh", "pi", "opencode2"}
     assert entry("nemotron-3-super", "claude")["env"] == {"CLAUDE_CODE_DISABLE_THINKING": "1"}
-    assert entry("nemotron-3-super-mlx", "claude")["status"] == "known-bad"
+    # phase 1's API probe of the MLX build (no harness run): a fact of the family, no status (2026-11-22)
+    assert "harnesses" not in next(f for f in TABLE["families"] if f["id"] == "nemotron-3-super-mlx")
     laguna = next(f for f in TABLE["families"] if f["id"] == "laguna-s")["all"]
     # Round 1 (0.1.98's MCP fixes): the smoke test with two MCP servers passes in 8 of 9 harnesses -> mcp_max 2.
     assert laguna["mcp_max"] == 2 and "sampling" not in laguna and set(laguna["params"]) == {"num_ctx", "max_tokens"}
@@ -98,7 +99,8 @@ def test_the_researchs_findings_are_in_it():
     assert entry("laguna-s", "qwen")["status"] == "partial" and entry("laguna-s", "opencode2")["status"] == "partial"
     assert entry("qwen3-coder-next", "claude")["status"] == "verified"  # round 5's tier 1 in Claude Code
     qwen38 = next(f for f in TABLE["families"] if f["id"] == "qwen3.8-27b")["all"]
-    assert qwen38["status"] == "known-bad" and "prefill" in qwen38["reason"]
+    # a family has no status of its own (the user, 2026-11-22): phase 1's finding is a note with its source
+    assert "status" not in qwen38 and any(note.startswith("phase 1") and "prefill" in note for note in qwen38["notes"])
     glm = next(f for f in TABLE["families"] if f["id"] == "glm-4.7")["all"]["params"]
     assert glm["max_tokens"] == 16384 and glm["temperature"] == 0.7 and glm["top_p"] == 1.0
     # P2 sampling presets: Nemotron, Gemma-4, GLM-4.7 (the makers' values)
@@ -134,18 +136,26 @@ def test_the_harness_wildcard_without_an_entry_for_the_pair():
     assert profile["params"]["temperature"] == 0.7 and profile["loop_guard"] == {"steps": 150}
 
 
-def test_a_model_known_bad_for_every_harness_warns_with_its_reason():
-    """qwen3.8-27b and codex: too slow for big contexts, said as a warning; its settings still apply (a smaller
-    window so the agents compact in time) - never a refusal."""
+def test_a_harness_never_measured_has_no_status_whatever_the_family_found():
+    """The user, 2026-11-22 ("how you know otherwise what works"): qwen3.8-27b was measured in Claude Code only, so
+    in Codex it has no status - no data yet, no warning; the family's settings still apply (a smaller window so the
+    agents compact in time), and phase 1's finding stays a note with its source."""
     profile = mp.match("qwen/qwen3.8-27b", "codex", TABLE)
-    assert profile["status"] == "known-bad" and profile["pair"] is False
-    assert profile["warnings"] and "prefill" in profile["warnings"][0]
+    assert profile["status"] == mp.UNTESTED and profile["pair"] is False and profile["light"] == "grey"
+    assert profile["warnings"] == [] and profile["measured_pair"] is False
+    assert any("prefill" in note for note in profile["notes"])
     assert profile["params"]["num_ctx"] == 49152
+    assert mp.headline(profile) == "profile qwen3.8-27b × codex (no data yet in Codex)"
+    assert mp.match("qwen/qwen3.8-27b", "claude", TABLE)["status"] == "partial"   # its measured pair (round 7)
 
 
 def test_a_pair_known_bad_and_the_pairs_own_settings():
-    assert mp.match("nvidia-nemotron-3-super-120b-a12b-mlx", "claude", TABLE)["status"] == "known-bad"
-    assert "HTTP 500" in mp.match("nvidia-nemotron-3-super-120b-a12b-mlx", "claude", TABLE)["warnings"][0]
+    # seed-oss-36b x Claude Code: 0 of 4 graded runs (round 3), derived known-bad, said as a warning with its reason
+    seed = mp.match("seed-oss-36b-instruct-mlx", "claude", TABLE)
+    assert seed["status"] == "known-bad" and seed["warnings"] and seed["warnings"][0] == seed["reason"]
+    # the Nemotron MLX build's HTTP 500 was phase 1's API probe, no harness run: no status, the fact in its fails
+    mlx = mp.match("nvidia-nemotron-3-super-120b-a12b-mlx", "claude", TABLE)
+    assert mlx["status"] == mp.UNTESTED and mlx["warnings"] == [] and any("HTTP 500" in x for x in mlx["fails"])
     assert mp.match("nvidia-nemotron-3-super-120b-a12b-mlx", "opencode", TABLE)["status"] == mp.UNTESTED
     claude = mp.match("nvidia/nemotron-3-super", "claude", TABLE)
     assert claude["env"] == {"CLAUDE_CODE_DISABLE_THINKING": "1"} and claude["status"] == "partial"
@@ -232,7 +242,9 @@ def test_every_entry_of_the_shipped_table_says_what_we_know():
     # round 4: seven new families (40 pairs); round 6: Nex-N2.5, Nanbeige4.3 (8 pairs); the derived statuses: four
     # measured pairs that had no entry (Devstral x Codex; Ornith-122B, Flash-Next, KAT x OpenCode 2); round 7:
     # Xing4.0 (2), Bolt (1)
-    assert pairs == 111   # round 8: Ornith-35B x OpenCode 2, Qwen3.8-27B x Claude Code (derived)
+    # round 8: Ornith-35B x OpenCode 2, Qwen3.8-27B x Claude Code (derived); 2026-11-22: phase 1's three API-probe
+    # pairs (no harness run) are facts of their families now, no pairs: 108, each in the snapshot
+    assert pairs == 108
     qcn = mp.match("qwen/qwen3-coder-next", "opencode", TABLE)
     assert any("168 requests" in text for text in qcn["fails"])
     assert any("8 of 10" in text for text in qcn["works"])
@@ -241,7 +253,7 @@ def test_every_entry_of_the_shipped_table_says_what_we_know():
     assert any("22 of 22" in text for text in laguna["works"])
     nemotron = mp.match("nvidia-nemotron-3-super-120b-a12b-mlx", "claude", TABLE)
     assert any("HTTP 500" in text for text in nemotron["fails"]) and not nemotron["works"][2:]
-    assert "no run in a real agent" in mp.match("qwen/qwen3.8-27b", "codex", TABLE)["unknown"]
+    assert "no run in any harness but Claude Code (round 7)" in mp.match("qwen/qwen3.8-27b", "codex", TABLE)["unknown"]
 
 
 def test_an_older_table_without_the_knowledge_is_valid():

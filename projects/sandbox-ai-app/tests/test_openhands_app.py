@@ -1,7 +1,7 @@
 """OpenHands in the app: OpenHands in the agent choice with its model and effort lists, --openhands-enable on the
 Board's agent node (a problem for another agent, its reach in the capabilities: the automation backend warned), its
 words in both languages, no sign-in page and no login row of its own, the help section OpenHands (exported to the web
-page too), its presets in the category Agents with the "not live-tested yet" badge (a note, never a gate)."""
+page too), its presets in the category Agents (no badge: the user, 2026-11-22)."""
 import json
 import os
 from pathlib import Path
@@ -75,11 +75,11 @@ def test_the_help_has_openhands_in_both_languages():
     assert "openhands" in {section["id"] for section in exported["sections"]}
 
 
-def test_the_presets_are_in_the_agents_category_with_their_badge(sai):
+def test_the_presets_are_in_the_agents_category(sai):
     catalog = sai.launcher.load_presets_module().catalog()
     agents = {name for name, preset in catalog.items() if preset["category"] == "agents"}
     assert {"coding-openhands", "openhands-local-llm"} <= agents
     presets = sai.launcher.load_presets_module()
     for name in ("coding-openhands", "openhands-local-llm"):
-        assert presets.experimental(catalog[name]) == {"names": ["openhands"]}, name
+        assert "experimental" not in presets.public(catalog[name]), name
     assert catalog["coding-openhands"]["translations"]["de"]["title"] == "Programmieren mit OpenHands"

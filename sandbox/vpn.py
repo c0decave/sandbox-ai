@@ -188,11 +188,45 @@ def profile_path(name):
     return profiles_dir() / f"{check_name(name)}.json"
 
 
+def fixes_module():
+    spec = importlib.util.spec_from_file_location("sandbox_ai_fixes", HERE / "fixes.py")
+    fixes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixes)
+    return fixes
+
+
+def missing_error(message, *args, **kwargs):
+    """The refusal MESSAGE as a ValueError that carries what fixes it (fixes.fix(*ARGS, **KWARGS)): a start lists it
+    with everything else it lacks (fixes.py)."""
+    error = ValueError(message)
+    error.fixes = [fixes_module().fix(*args, **kwargs)]
+    return error
+
+
+def profile_fixes(name):
+    """What makes the VPN profile NAME that is not there (fixes.py): two ways, one of them yours to choose - a Tor
+    profile of that name (nothing to fill in: offered, asked on its own with No as its default, never taken by --fix,
+    since the name may stand for a VPN of yours), or your own VPN profile with its keys or login (shown)."""
+    f = fixes_module()
+    missing = f"the VPN profile {name} is not on this host"
+    return [f.fix("vpn", name, missing, f"make {name} a Tor profile (nothing to fill in; its image is built when the "
+                                        "start needs it)", [["sandbox-ai", "vpn", "add", name, "--tor"]],
+                  duration="seconds", security="the sandbox's connections go through Tor: its exits see them, not "
+                                               "a VPN of yours", choice=f"vpn:{name}"),
+            f.fix("vpn", name, missing, "make it with its keys or login",
+                  [["sandbox-ai", "vpn", "add", name, "--wireguard", "FILE"]], choice=f"vpn:{name}",
+                  ident=f"vpn:{name}:yours",
+                  manual="a VPN profile of yours needs keys or a login only you have (--wireguard FILE, --openvpn "
+                         "FILE, --mullvad, --tailscale)")]
+
+
 def load_profile(name):
     path = profile_path(name)
     if not path.exists():
         known = ", ".join(list_profiles()) or "none yet"
-        raise ValueError(f"no VPN profile {name} (profiles: {known}); add one with: sandbox-ai vpn add {name} ...")
+        error = ValueError(f"no VPN profile {name} (profiles: {known}); add one with: sandbox-ai vpn add {name} ...")
+        error.fixes = profile_fixes(name)
+        raise error
     try:
         profile = json.loads(read_private(path))
     except (ValueError, RecursionError) as exc:

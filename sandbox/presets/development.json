@@ -3,11 +3,11 @@
   "version": 1,
   "id": "development",
   "title": "Development",
-  "description": "Python and JavaScript projects with GitHub: PyPI, npm, GitHub and DuckDuckGo open, everything else closed.",
+  "description": "Python and JavaScript projects with GitHub: Python with uv and Node with npm and TypeScript mounted in; PyPI, npm, GitHub and DuckDuckGo open, everything else closed.",
   "translations": {
     "de": {
       "title": "Entwicklung",
-      "description": "Python- und JavaScript-Projekte mit GitHub: PyPI, npm, GitHub und DuckDuckGo offen, alles andere zu."
+      "description": "Python- und JavaScript-Projekte mit GitHub: Python mit uv und Node mit npm und TypeScript eingehängt; PyPI, npm, GitHub und DuckDuckGo offen, alles andere zu."
     }
   },
   "category": "development",
@@ -17,13 +17,18 @@
     "opencode"
   ],
   "options": [
+    "--toolchain",
+    "python",
+    "--toolchain",
+    "node",
     "--allow-pypi",
     "--allow-npm",
     "--allow-github",
     "--allow-duckduckgo"
   ],
   "notes": [
-    "Compilers and interpreters newer than the image's (Python with uv, Node with TypeScript, Go, also rust, jdk, dotnet, zig, cc): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox): sandbox-ai toolchain add python && sandbox-ai toolchain add node && sandbox-ai toolchain add go once, then --toolchain python --toolchain node --toolchain go on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN python. Its registries are the ones this preset opens.",
+    "Python (3.14 with pip and uv) and Node (with npm and TypeScript) come with the preset (--toolchain python --toolchain node): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add them (sandbox-ai toolchain add python, sandbox-ai toolchain add node: downloads, their signatures and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Their registries are the ones this preset opens.",
+    "Other languages: --toolchain go (or rust, jdk, dotnet, zig, cc) on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN go; their registries are opened with them. The presets rust, go, jvm, dotnet, c-cpp and zig bring one each.",
     "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
   ]
 }

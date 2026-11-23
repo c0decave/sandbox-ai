@@ -639,7 +639,9 @@
           "toy long run (no agent): 6 of 6 with one nudge, ~3 min"
         ],
         "fails": [
-          "LM Studio's parser drops some of its XML tool calls (empty answers)"
+          "LM Studio's parser drops some of its XML tool calls (empty answers)",
+          "Responses API: HTTP 500 \"Failed to parse tool call\" (API probe)",
+          "Messages API: HTTP 500 \"Failed to generate a valid tool call\" (API probe)"
         ],
         "unknown": [
           "no run in a real agent",
@@ -647,24 +649,6 @@
           "Ollama, llama.cpp and vLLM servers: not measured (LM Studio only)"
         ],
         "tool_class": "mid"
-      },
-      "harnesses": {
-        "codex": {
-          "status": "known-bad",
-          "reason": "LM Studio's parser drops its tool calls on the Responses API or answers HTTP 500 (\"Failed to parse tool call\")",
-          "round": "phase 1",
-          "fails": [
-            "Responses API: HTTP 500 \"Failed to parse tool call\" (API probe)"
-          ]
-        },
-        "claude": {
-          "status": "known-bad",
-          "reason": "LM Studio's parser drops its tool calls on the Messages API or answers HTTP 500 (\"Failed to generate a valid tool call\")",
-          "round": "phase 1",
-          "fails": [
-            "Messages API: HTTP 500 \"Failed to generate a valid tool call\" (API probe)"
-          ]
-        }
       }
     },
     {
@@ -1317,8 +1301,6 @@
         "qwen3.8-27b-mlx@8bit"
       ],
       "all": {
-        "status": "known-bad",
-        "reason": "too slow for big agent contexts: prefill ~200 tokens/s (3-8 min for a 55-83k prompt), 15-18 tokens/s out; with the harnesses' 300-360 s idle limits the largest prompt that works is about 50k tokens",
         "params": {
           "temperature": 0.6,
           "top_p": 0.95,
@@ -1331,6 +1313,7 @@
         },
         "reasoning": "thinking on (the GGUF build: off, low, medium, xhigh, on; default xhigh); no switch works on the MLX build",
         "notes": [
+          "phase 1 (API probe and a toy run, no harness): too slow for big agent contexts: prefill ~200 tokens/s (3-8 min for a 55-83k prompt), 15-18 tokens/s out; with the harnesses' 300-360 s idle limits the largest prompt that works is about 50k tokens",
           "the best per-step quality of phase 1 (the fix in 8 steps) and perfect vision: fine for small tasks and short conversations",
           "a context of 49152 tokens is told so that the agents compact before the prefill outlasts their idle limit",
           "LM Studio runtime 2.73.0 (round 7): Claude Code tier 1 0.50-1.00 (blocked network at its time limit), 32 tokens/s"
@@ -1346,7 +1329,7 @@
           "agents give up during such a prefill: about 50k tokens is the most that works"
         ],
         "unknown": [
-          "no run in a real agent",
+          "no run in any harness but Claude Code (round 7)",
           "toy long run: not done",
           "Ollama, llama.cpp and vLLM servers: not measured (LM Studio only)"
         ],
@@ -1423,7 +1406,8 @@
         },
         "reasoning": "thinking on",
         "notes": [
-          "prefer the GGUF build (nvidia/nemotron-3-super): the MLX build reuses no prompt cache when the last message changes"
+          "prefer the GGUF build (nvidia/nemotron-3-super): the MLX build reuses no prompt cache when the last message changes",
+          "phase 1 API probe (no harness run): its Messages API fails with tools (HTTP 500, a chat template error): use the GGUF build nvidia/nemotron-3-super"
         ],
         "speed": "prefill 290-375 tokens/s (LM Studio, Apple silicon)",
         "works": [
@@ -1432,23 +1416,14 @@
         ],
         "fails": [
           "slower prefill than the GGUF (290-375 tokens/s); no prompt cache at parallel 4",
-          "invented a finish tool 6 times; </think> leaked into the answer (toy runs)"
+          "invented a finish tool 6 times; </think> leaked into the answer (toy runs)",
+          "Messages API with tools: HTTP 500 (chat template error) for every schema tried"
         ],
         "unknown": [
           "no run in a real agent",
           "Ollama, llama.cpp and vLLM servers: not measured (LM Studio only)"
         ],
         "tool_class": "large"
-      },
-      "harnesses": {
-        "claude": {
-          "status": "known-bad",
-          "reason": "its Messages API fails with tools (HTTP 500, a chat template error): use the GGUF build nvidia/nemotron-3-super",
-          "round": "phase 1",
-          "fails": [
-            "Messages API with tools: HTTP 500 (chat template error) for every schema tried"
-          ]
-        }
       }
     },
     {
@@ -2499,12 +2474,12 @@
         "vcoder-120b-1.0-qx86-hi-mlx"
       ],
       "all": {
-        "status": "known-bad",
-        "reason": "its tool calls are broken on every API (Harmony fragments or calls as plain text: 0 valid calls in phase 1): not for agents",
         "params": {
           "max_tokens": 16384
         },
-        "notes": [],
+        "notes": [
+          "phase 1 API probe (no harness run): its tool calls are broken on every API (Harmony fragments or calls as plain text: 0 valid calls in phase 1): not for agents"
+        ],
         "fails": [
           "tool calls broken on every API: Harmony fragments or plain text (16 of 38 cases)",
           "toy fix runs: no valid tool call, ended after 2-5 steps"

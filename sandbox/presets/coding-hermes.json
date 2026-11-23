@@ -24,6 +24,6 @@
     "PyPI, npm and GitHub are open for the project's dependencies; everything else is refused or asked (--ask). Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy.",
     "Memory: ~/.hermes/memories/MEMORY.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
     "Hermes Agent's telemetry is always off and cannot be turned on (pinned in its read-only configuration and refused by the proxy).",
-    "Hermes Agent is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+    "Its image first: sandbox-ai build hermes."
   ]
 }

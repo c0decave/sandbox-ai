@@ -144,13 +144,77 @@ How it runs (`--cairn`, sandbox/cairn.py):
   launcher's configuration, never from Cairn. Claude Code is told `IS_SANDBOX=1` (as `-D` does), since Cairn gives it
   `--dangerously-skip-permissions`.
 - Cairn's third driver, pi, runs `/bin/sh -lc SCRIPT` in local mode: an arbitrary shell line, which no narrow relay
-  can take. It is not offered.
+  can take. It is never used: Pi is a worker through the claudecode driver like every other harness (below).
 - The socket: a folder beside the run's directory (only yours; on macOS a Podman volume of the run in the VM, since a
   socket does not cross podman machine's shared folders), read-write for the agent's container (it makes the socket,
   0600), read-only for Cairn's. Nothing else in the pod mounts it; abstract sockets, which every container of the pod
   would reach, are not used.
 - When the shim goes (Cairn's timeout, the dispatcher stopped), the CLI's process group gets SIGTERM, then SIGKILL; a
   worker runs at most 3 hours whatever Cairn's timeouts say; at most 8 calls at once.
+
+## Every harness as a worker (2026-11-22)
+
+The user asked why only Claude Code and Codex could be Cairn's workers. Every harness of the launcher can be one now,
+without a change to Cairn. What Cairn's drivers expect (read at the reviewed commit:
+`dispatcher/workers/adapters/claudecode.py`, `codex.py`, `workers/base.py`, `tasks/*.py`, `output_parser.py`):
+
+| | claudecode driver | codex driver |
+|---|---|---|
+| Command lines | `claude --session-id UUID --dangerously-skip-permissions -p -- PROMPT`; the conclusion `claude -r UUID ... -p -- PROMPT` | `codex exec --dangerously-bypass-approvals-and-sandbox -- PROMPT`; `codex exec resume ID ...` |
+| Session | made by Cairn (a UUID) before the call | read from the error output (`session id: ...`) |
+| The answer | standard output as it is; Cairn looks for a JSON object in it (the whole text, a fenced block, or the first `{...}` that parses) | the same |
+| Success | exit status 0 (124 or 137: a timeout); an answer that does not parse leads to the conclusion in the same session | the same |
+| Environment | the dispatcher's, merged with the worker's `env` from the configuration | the same |
+
+So sandbox-ai keeps Cairn calling its claudecode (or codex) driver and maps the worker in its own relay:
+
+- The dispatcher's configuration (written by the launcher) gives every worker `env: {SANDBOX_AI_CAIRN_WORKER:
+  AGENT}` and the type `claudecode` (`codex` for Codex). Cairn hands that variable to the process it starts - the
+  shim `claude` - which sends it to the relay with the command line (`{"agent", "driver", "argv", "cwd", "files"}`).
+- The relay checks, as before, that the harness is a worker of this session, that it is called through its own
+  driver's shim (Codex through `codex`, every other one through `claude`), that the command line is exactly the
+  claudecode driver's and the folder one of `/work/cairn/runs`. It then builds the harness's own one-shot command
+  line itself (`cairn_relay.harness_argv`): `opencode run`, `opencode2 run --auto`, `hermes --oneshot=`,
+  `dsh headless --patch ... -` (the task on standard input), `qwen --yolo --prompt=`, `goose run --quiet --text=`,
+  `openhands task --text=`, `nanobot agent --no-markdown --session cairn-UUID --message=`, `letta -p --new --yolo`,
+  `pi -p` - the forms of the helpers' one-shot runs (`agent_mcp.command`; a test keeps them the same), with the
+  launcher's arguments for that worker (its model) and the harness's own switch to work without questions
+  (`agent_mcp.SKIP`, the launcher's `DANGER_ENV`). Nothing of Cairn's but the prompt reaches the command line, and
+  the prompt is never an option (after `--`, as an option's own value, or on standard input).
+- The answer: the harness's standard output is kept (16 MiB at most), terminal escapes and nanobot's header taken
+  out, and its final message sent back as the standard output Cairn reads, with the exit status; the error output
+  is passed on as it comes.
+- The conclusion (`-r UUID`) goes on in exactly the task's own conversation. Only nanobot's one-shot run can be
+  named a conversation (`--session cairn-UUID`, the same for both calls). The others' "continue" goes on in the last
+  conversation of the folder or of the HOME - which can be the lead's own, since the lead and the workers share the
+  container. So for them the relay answers the conclusion with exit status 1 and says why (`NoSession`), and runs
+  nothing: the task fails and Cairn hands it out again (the pauses below bound that). Never a conversation that may
+  be another's.
+- A model per worker (`--cairn-workers AGENT=MODEL`) only for a harness with a model option on its command line
+  (claude, codex, opencode, hermes, qwen, letta, pi); for the others it is refused (their model is their settings').
+- Codex workers get the lead's `-c` telemetry overrides (they win over every config.toml) on their command line.
+- OpenHands is a worker beside another lead only: as the lead `--cairn` stays refused (its Agent Canvas holds port
+  8000). With `--llm` only the lead is a worker (`--with` is refused with `--llm`).
+
+What this gives a compromised Cairn container beyond what it had: the choice of which of the session's workers runs
+a task (the variable) - which it had already by its configuration's task types. Each harness still runs as the
+agent, with the launcher's arguments, in a project folder, with no shell line and no option of Cairn's.
+
+**Support, shown as a traffic light.** `sandbox/cairn_workers.json` holds each harness's status in the model lights'
+vocabulary (verified green, smoke-only and partial yellow, failing and known-bad red, untested grey - shown as "no data yet"); a status other
+than untested must name its run (a CI job, a live check's report; `cairn_workers.load` refuses it otherwise), a red
+one its reason. `sandbox-ai cairn workers`, the start's notes, its dry run, `presets show` and the app's Board
+(each harness with its light in the worker field) show it; a red harness is refused with its reason and another
+agent of the session offered. As of this change:
+
+| Harness | Light | From |
+|---|---|---|
+| claude | partly working | CI's job agents-live (cairn): one task of the real dispatcher in a real pod through the relay to the real Claude Code (a scripted model); a real answer taken as a fact is not measured there |
+| codex | no data yet (untested) | its relay command lines are tested with stand-ins (tests/test_cairn_relay.py) |
+| opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi | no data yet (untested) | the relay's command line, the answer and the refusals are tested with stand-ins (tests/test_cairn_relay_harnesses.py); real Cairn at the reviewed commit (its server and dispatcher in local execution mode, with sandbox-ai's runtime, shims and relay) completed a project with a stand-in of each, 2026-11-22 (tests/test_cairn_real_dispatcher.py, opt-in: SANDBOX_AI_CAIRN_PYTHON) - stand-ins, not the real CLIs |
+
+The live check `cairn-workers-live` (`scripts/live_check.sh --only cairn-workers-live --llm NAME`) runs one small task
+of real Cairn with each harness (OpenHands skipped with the reason) and gives a row per harness for the table.
 
 What a compromised Cairn container could do: give the session's agents prompts in `/work/cairn/runs` - which is what
 Cairn does anyway - and post to its own board. It cannot read the agents' logins, run a shell line, reach the engine or
@@ -203,7 +267,7 @@ changes.
 | Telemetry | none | Go |
 | Updates | none (no update code); a new commit is a new review | Go |
 | Docker socket | only in its Docker mode, which sandbox-ai never uses; the local mode never connects | Go, local mode only |
-| Its workers | the session's claude and codex through the relay (Cairn's driver command lines only), their own approvals off, inside the agent's boundary | Go |
+| Its workers | the session's agents of any harness through the relay (Cairn's claudecode and codex driver command lines only, every other harness's own one-shot line made by the relay), their own approvals off, inside the agent's boundary; the conclusion only in the task's own session | Go |
 | Its container | no login, no project files, no capabilities, read-only, the pod's network; only the relay's socket | Go |
 | Autonomy and cost | keeps dispatching until complete; unlimited retries of failing tasks | Go, with sandbox-ai's pauses (runtime and relay), the start's warning and the lead told to stop it |
 | Server | no authentication, loopback only | Go (loopback only) |

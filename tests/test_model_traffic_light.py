@@ -102,37 +102,57 @@ def test_the_details_of_one_harness():
     assert any("recommended: " in line and "temperature 0.7" in line for line in lines)
 
 
-def test_a_hand_written_pair_keeps_its_rounds_and_date():
-    """A pair without derived numbers (phase 1's API failures): the rounds its evidence names, their dates."""
-    codex = next(h for h in mp.support("qwen3-coder-30b-a3b-instruct-mlx", TABLE)["harnesses"]
-                 if h["agent"] == "codex")
-    assert codex["rounds"] == ["phase 1"] and codex["measured"] is None and codex["measured_counts"] is None
+def test_a_status_without_measured_runs_is_grey():
+    """The user, 2026-11-22 ("how you know otherwise what works"): a status entered by hand, without the pair's
+    derived evidence block (its runs), gives no light - grey, no data yet, no warning."""
+    document = copy.deepcopy(TABLE)
+    family = next(f for f in document["families"] if f["id"] == "qwen3-coder-30b")
+    family["harnesses"] = {"codex": {"status": "known-bad", "reason": "an API probe", "evidence": "phase 1: probe",
+                                     "fails": ["HTTP 500"]},
+                           "opencode": {"status": "verified", "evidence": "by hand", "works": ["smoke"]}}
+    table = checked(document)
+    found = mp.support("qwen3-coder-30b-a3b-instruct-mlx", table)
+    assert found["light"] == "grey" and found["harnesses"] == [] and found["text"] == "no data yet"
+    assert "codex" in found["untested"] and "opencode" in found["untested"]
+    profile = mp.match("qwen3-coder-30b-a3b-instruct-mlx", "codex", table)
+    assert profile["status"] == mp.UNTESTED and profile["warnings"] == [] and profile["light"] == "grey"
 
 
-def test_a_model_known_not_to_work_in_every_harness_is_red():
-    """Qwen3.8-27B's family is known-bad in every harness; round 7 measured it in Claude Code (6 graded runs, a
-    derived pair): yellow there, red in every other harness."""
+def test_a_model_measured_in_one_harness_is_grey_in_every_other():
+    """Qwen3.8-27B was measured in Claude Code only (round 7, 6 graded runs: partial): yellow there, and every other
+    harness grey - no colour taken from the family or from Claude Code (the user, 2026-11-22: "it says opencode
+    verifiziert")."""
     found = mp.support(Q38, TABLE)
-    reason = next(f for f in TABLE["families"] if f["id"] == "qwen3.8-27b")["all"]["reason"]
     assert found["light"] == "yellow" and found["symbol"] == "~" and [h["agent"] for h in found["harnesses"]] == ["claude"]
-    assert found["reason"] == reason
-    assert found["text"] == "yellow in Claude Code; red in every other harness: known not to work"
+    assert found["status"] is None and found["reason"] is None
+    assert found["text"] == "yellow in Claude Code"
+    assert set(found["untested"]) == set(mp.HARNESSES) - {"claude"}
     assert mp.support_cell(found) == "~ yellow: claude"
+    assert mp.support_lines(found)[-1].startswith("  ? no data yet in: Codex, OpenCode")
+    assert mp.match(Q38, "opencode", TABLE)["light"] == "grey"
 
 
 def test_a_model_of_no_family_is_grey_with_no_data_yet():
     found = mp.support("llama3:8b", TABLE)
     assert found["family"] is None and found["light"] == "grey" and found["symbol"] == "?"
-    assert found["text"] == "not tested: no data yet"
+    assert found["text"] == "no data yet"
     assert found["harnesses"] == [] and found["untested"] == list(mp.HARNESSES)
-    assert mp.support_cell(found) == "? not tested"
-    assert mp.support_lines(found) == ["? not tested: no data yet"]
+    assert mp.support_cell(found) == "? no data yet"
+    assert mp.support_lines(found) == ["? no data yet"]
 
 
 def test_red_only_where_tested_red():
-    found = mp.support("qwen/qwen3-coder-30b", TABLE)
-    assert found["light"] == "red" and found["by_light"]["red"] == ["codex", "claude"]
-    assert found["text"] == "red in Codex, Claude Code"
+    found = mp.support("mistralai/devstral-small-2-2512", TABLE)
+    assert found["light"] == "red" and found["by_light"]["red"] == ["claude", "opencode", "codex"]
+    assert found["text"] == "red in Claude Code, OpenCode, Codex"
+    assert mp.match("mistralai/devstral-small-2-2512", "qwen", TABLE)["light"] == "grey"   # never run there
+
+
+def derived(last_round, date=None):
+    """A pair's evidence block as scripts/profile_status.py writes it (a few numbers, the run ids)."""
+    return {"derived": "scripts/profile_status.py", "rule": "test", "runs": 2, "passed": 1, "rounds": [last_round],
+            "last_round": last_round, "run_ids": f"{last_round}: TASK__x__brandnew__BLOCK",
+            **({"date": date} if date else {})}
 
 
 def test_the_table_is_read_at_run_time_never_hard_coded():
@@ -143,15 +163,18 @@ def test_the_table_is_read_at_run_time_never_hard_coded():
     document["families"].append({
         "id": "brandnew-9b", "label": "Brandnew 9B", "pattern": "brandnew-?9b", "examples": ["acme/brandnew-9b"],
         "all": {"params": {"temperature": 0.5}, "speed": "prefill ~900 tokens/s, 70 tokens/s out"},
-        "harnesses": {"pi": {"status": "partial", "evidence": "round 4: smoke 1/1; debug 0/1", "works": ["smoke"]},
-                      "goose": {"status": "verified", "evidence": "smoke 2/2", "round": "round 4", "date": "2026-11-19",
-                                "speed": "60 tokens/s out in Goose"}}})
+        "harnesses": {"pi": {"status": "partial", "evidence": derived("round 4"), "works": ["smoke"]},
+                      "goose": {"status": "verified", "evidence": derived("round 4", "2026-11-19"),
+                                "speed": "60 tokens/s out in Goose"},
+                      # a status by hand, without measured runs: no light (grey)
+                      "codex": {"status": "verified", "evidence": "smoke 2/2", "works": ["smoke"]}}})
     next(f for f in document["families"] if f["id"] == "qwen3-coder-next")["harnesses"]["opencode"]["status"] = \
         "failing"
     next(f for f in document["families"] if f["id"] == "qwen3-coder-next")["harnesses"]["opencode"]["reason"] = "x"
     table = checked(document)
     found = mp.support("ACME/Brandnew-9B-MLX", table)
     assert found["light"] == "green" and found["text"] == "green in Goose; yellow in Pi"
+    assert "codex" in found["untested"]
     pi, goose = found["harnesses"]
     assert pi["rounds"] == ["round 4"] and pi["date"] == "2026-11-18" and pi["speed"] == found["speed"]
     assert goose["rounds"] == ["round 4"] and goose["date"] == "2026-11-19"
@@ -160,8 +183,8 @@ def test_the_table_is_read_at_run_time_never_hard_coded():
 
 
 def test_an_older_table_without_the_new_keys_still_works():
-    """Backward compatible: a table of before (no rounds, speed, round, date) is valid; dates are then unknown and
-    the speed comes from the bullets that name one."""
+    """Backward compatible: a table of before (no rounds, speed, round, date, derived evidence) is valid; the speed
+    comes from the bullets that name one; its hand-written statuses give no light."""
     document = copy.deepcopy(TABLE)
     document.pop("rounds")
     for family in document["families"]:
@@ -173,10 +196,13 @@ def test_an_older_table_without_the_new_keys_still_works():
                 if summary:
                     entry["evidence"] = summary
     table = checked(document)
-    opencode = next(h for h in mp.support(QCN, table)["harnesses"] if h["agent"] == "opencode")
-    assert opencode["rounds"] == ["round 1", "phase 2"] and opencode["date"] is None
-    assert "tokens/s" in opencode["speed"]
-    assert mp.support(LAGUNA, table)["light"] == "yellow"   # round 7-8: a canary fired: no harness green
+    # its statuses were entered by hand (no derived evidence block, no run ids): valid, but no light - grey in
+    # every harness (2026-11-22: a light only from measured runs); the family's settings and speed still apply
+    found = mp.support(QCN, table)
+    assert found["light"] == "grey" and found["harnesses"] == [] and found["text"] == "no data yet"
+    assert "tokens/s" in found["speed"]
+    assert mp.match(QCN, "opencode", table)["params"]["temperature"] == 0.7
+    assert mp.support(LAGUNA, table)["light"] == "grey"
 
 
 @pytest.mark.parametrize("change, message", [
@@ -241,7 +267,7 @@ def test_llm_models_has_the_support_column(studio):
     column = head.index("SUPPORT")
     cells = {line.split()[1]: line[column:].strip() for line in lines[1:]}
     assert cells[QCN].startswith("✓ green: ") and cells[Q38] == "~ yellow: claude"   # round 7: Claude Code measured
-    assert cells["meta/llama3-8b"] == "? not tested"
+    assert cells["meta/llama3-8b"] == "? no data yet"
     shown = {m["name"]: m["support"] for m in json.loads(run("models", "studio", "--json"))}
     assert shown[QCN]["light"] == "green" and shown[QCN]["family"] == "qwen3-coder-next"
     assert shown[QCN]["harnesses"][0]["works"] and shown[QCN]["harnesses"][0]["settings_text"]
@@ -260,7 +286,8 @@ def test_llm_profiles_shows_the_light(isolated):
     listing = run("profiles").splitlines()
     assert any(re.match(r"qwen3-coder-next × claude\s+✓ verified", line) for line in listing)
     assert any(re.match(r"qwen3-coder-next × opencode\s+✓ verified", line) for line in listing)   # round 8
-    assert any(re.match(r"qwen3-coder-30b × codex\s+✗ known-bad", line) for line in listing)
+    assert any(re.match(r"seed-oss-36b × claude\s+✗ known-bad", line) for line in listing)   # derived: 0 of 4
+    assert not any(line.startswith("qwen3-coder-30b × codex") for line in listing)   # phase 1's probe: no pair
     one = run("profiles", QCN).splitlines()
     assert one[0].startswith("Qwen3-Coder-Next 80B: ✓ green in ") and "Claude Code" in one[0].split(";")[0]
     rows = json.loads(run("profiles", QCN, "--json"))
@@ -285,7 +312,7 @@ def test_e2e_llm_models_and_profiles_through_sandbox_ai(tmp_path):
         assert added.returncode == 0, added.stderr
         listed = host.run("llm", "models", "studio", env=env)
         assert listed.returncode == 0, listed.stderr
-        assert "SUPPORT" in listed.stdout and "✓ green: " in listed.stdout and "? not tested" in listed.stdout
+        assert "SUPPORT" in listed.stdout and "✓ green: " in listed.stdout and "? no data yet" in listed.stdout
         shown = host.run("llm", "models", "studio", "--json", env=env)
         assert {m["name"]: m["support"]["light"] for m in json.loads(shown.stdout)} == \
             {QCN: "green", "meta/llama3-8b": "grey"}

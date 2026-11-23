@@ -112,7 +112,7 @@ def test_the_servers_of_this_machine_and_of_a_host(qapp, sai):
     assert sai.asked == [("local", ("llm", "list", "--json"))]
     assert sai.status_asked == [("local", ("llm", "status", "--json"))], "then what its servers have loaded now"
     assert cells(page) == ["lm", "lmstudio", "http://192.168.1.20:1234", "qwen2.5-coder:7b", "LLM_KEY", "",
-                           "claude, codex, opencode"]
+                           "claude, codex, opencode", ""], "the last column: For all hosts (not shared)"
     assert page.server_status.text() == ("lm: loaded: qwen2.5-coder:7b (4.5 GB; context 8192) · not reported: "
                                          "VRAM/RAM use, KV cache, requests")
     assert "LLM servers on local (this machine): 1" in page.status.text()
@@ -280,7 +280,7 @@ def test_check_and_models_show_what_the_host_says(qapp, sai):
     assert sai.asked[-1] == ("local", models)
     assert page.models_title.text().startswith("Models of lm (local (this machine)): 2"), "in the page's table"
     cells = [[page.model_table.item(r, c).text() for c in range(page.model_table.columnCount())] for r in range(2)]
-    assert cells == [["qwen2.5-coder:7b", "yes", "4.5 GB", "? not tested"], ["llama3.1:8b", "", "", "? not tested"]], \
+    assert cells == [["qwen2.5-coder:7b", "yes", "4.5 GB", "? no data yet"], ["llama3.1:8b", "", "", "? no data yet"]], \
         "the traffic light last: neither model is in the research's table"
     args = parsed(sai, list(check))
     assert (args.command, args.name, args.agent) == ("check", "lm", "claude")

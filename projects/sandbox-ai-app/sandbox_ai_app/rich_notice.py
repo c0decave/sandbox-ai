@@ -67,7 +67,7 @@ FILE_ENDINGS = frozenset(
     "rs go c h cc cpp hpp java kt rb php lua pl ps1 bat cmd mp4 mp3 wav webm pdf doc docx odt ods xls xlsx ppt pptx "
     "patch diff orig old new local example".split())
 # sandbox-ai's commands: "sandbox-ai net allow x.example" is a command, "sandbox-ai keeps answering" is prose.
-COMMANDS = ("activity", "approvals", "attach", "browser", "build", "cairn", "canaries", "claude", "codex",
+COMMANDS = ("activity", "approvals", "artex", "attach", "browser", "build", "cairn", "canaries", "claude", "codex",
             "completion", "defaults", "demo-device", "devices", "doctor", "dsh", "gc", "git-logins", "goose", "hermes",
             "hosts", "identities", "images", "kits", "limits", "llm", "logs", "mcp", "net", "opencode", "pause",
             "plugins", "presets", "privacy-check", "publish-logins", "qwen", "rename", "report", "resume", "rules",

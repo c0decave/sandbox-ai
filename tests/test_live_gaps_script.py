@@ -13,6 +13,8 @@ import sys
 from types import SimpleNamespace
 import time
 
+import re
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,12 +48,94 @@ def test_the_brief_s_gaps_each_have_a_check():
     names = set(LG.BY_NAME)
     assert {"release-gates", "firejail-hides-control", "firewall-login-hosts", "git-login-give", "hide-workspace-add",
             "untrusted-home", "kits-attach", "plugins-attach", "bridge-live", "devices-scan", "devices-live",
-            "remote-mcp", "local-llm"} <= names
+            "remote-mcp", "local-llm", "harnesses-live", "presets-live", "mcp-live"} <= names
     gates = LG.BY_NAME["release-gates"]
     assert gates.tests == ("tests/test_agent_sandbox_live.py",)
     assert gates.keyword == "isolation or strict_mode_starts or relays"
-    assert {check.name for check in LG.CHECKS if check.optional} == {"remote-mcp", "local-llm", "live-suites"}
+    assert {check.name for check in LG.CHECKS if check.optional} == {"remote-mcp", "local-llm", "harnesses-live",
+                                                                       "presets-live", "cairn-workers-live",
+                                                                       "live-suites", "mcp-live", "artex-live"}
     assert LG.LLM_MODELS == ("qwen3.8-flash-next", "ornith-1.5-35b-a3b-mlx", "ornith-1.5-122b-mlx")
+
+
+def test_harnesses_live_runs_every_harness_the_launcher_knows():
+    """The user, 2026-11-22: every harness has a real live smoke run in the live check - each agent of the launcher
+    (its agent choices), in the one-shot form the agents' own live checks use (tests/live_agents.py)."""
+    launcher = load("agent_sandbox_for_live_gaps", ROOT / "sandbox" / "agent_sandbox.py")
+    assert set(LG.HARNESSES) == set(launcher.AUTH_TARGETS), "a harness of the launcher without its live smoke run"
+    assert {"claude", "codex", "opencode", "opencode2", "goose", "hermes", "qwen", "pi", "letta", "dsh", "nanobot",
+            "openhands"} <= set(LG.HARNESSES)
+    agents = load("live_agents_for_live_gaps", ROOT / "tests" / "live_agents.py")
+    for agent, spec in agents.AGENTS.items():
+        assert LG.one_shot(agent, agents.PROMPT) == spec["args"], agent
+    assert LG.one_shot("claude", "do it") == ["-p", "do it"]
+    assert LG.one_shot("hermes", "do it") == ["--oneshot=do it"]
+    check = LG.BY_NAME["harnesses-live"]
+    assert check.optional and check.needs == ("sandbox", "llm") and not check.podman_only
+    assert check.tests == ("tests/test_live_gaps.py::test_live_harness_smoke_run",)
+    assert "--no-provider-defaults" in check.network and "built" in check.proves
+    assert all(agent in check.proves for agent in LG.HARNESSES), "--list names every harness it runs"
+    assert set(LG.LLM_CHECKS) == {"local-llm", "harnesses-live", "cairn-workers-live"}
+
+
+def test_cairn_workers_live_runs_every_harness_as_cairn_s_worker():
+    """The user, 2026-11-22: "why workers only for claude and not all harnesses?" - the live check gives each harness
+    one small task of real Cairn's (its row for sandbox/cairn_workers.json), Podman only, with --llm's server."""
+    cairn = load("cairn_for_live_gaps", ROOT / "sandbox" / "cairn.py")
+    assert LG.CAIRN_WORKERS == cairn.WORKERS, "every harness Cairn takes as a worker"
+    assert set(LG.CAIRN_SKIPPED) == {"openhands"} and "port 8000" in LG.CAIRN_SKIPPED["openhands"]
+    check = LG.BY_NAME["cairn-workers-live"]
+    assert check.optional and check.podman_only and check.needs == ("podman", "llm")
+    assert check.tests == ("tests/test_live_gaps.py::test_live_cairn_worker",)
+    assert "--no-provider-defaults" in check.network and "built first" in check.proves
+    assert all(agent in check.proves for agent in LG.CAIRN_WORKERS if agent not in LG.CAIRN_SKIPPED)
+    assert "OpenHands is skipped" in check.proves and "cairn_workers.json" in check.proves
+
+
+def test_the_cairn_workers_table_of_the_report(tmp_path):
+    """cairn-workers-live per harness: its image, the run's outcome, and what that gives sandbox/cairn_workers.json
+    (verified when the fact reached the board, failing when not, untested when skipped or not run)."""
+    (tmp_path / "goose.json").write_text(json.dumps({"built": True, "seconds": 300.2, "problem": None}))
+    (tmp_path / "pi.json").write_text(json.dumps({"present": True}))
+    name = "test_live_gaps::test_live_cairn_worker[{}]"
+    tests = [{"name": name.format("goose"), "outcome": "passed", "seconds": 140.0, "detail": ""},
+             {"name": name.format("pi"), "outcome": "failed", "seconds": 900.0,
+              "detail": "AssertionError: Cairn took no answer of pi's as a fact with the code word\nmore"},
+             {"name": name.format("openhands"), "outcome": "skipped", "seconds": 0,
+              "detail": "openhands: as the lead --cairn is refused"},
+             {"name": "test_live_gaps::test_live_harness_smoke_run[podman-goose]", "outcome": "failed",
+              "seconds": 5, "detail": "x"}]
+    rows = {row["agent"]: row for row in LG.cairn_worker_rows(tests, tmp_path)}
+    assert list(rows) == list(LG.CAIRN_WORKERS)
+    assert rows["goose"] == {"agent": "goose", "image": "built now in 300 s", "result": "passed (140 s)",
+                             "status": "verified"}
+    assert rows["pi"]["status"] == "failing" and rows["pi"]["result"].startswith("failed: AssertionError: Cairn took")
+    assert rows["openhands"]["status"] == "untested" and rows["openhands"]["result"].startswith("skipped: openhands")
+    assert rows["codex"] == {"agent": "codex", "image": "not used", "result": "not run", "status": "untested"}
+    report = {"version": 1, "date": "X", "facts": {}, "prerequisites": [], "network": [], "counts": {},
+              "checks": [{"name": "cairn-workers-live", "proves": "p", "outcome": "failed", "seconds": 1,
+                          "missing": [], "tests": tests[:1], "tail": [], "cairn_workers": list(rows.values())}]}
+    text = LG.markdown(report)
+    assert "| harness | image | as Cairn's worker | for sandbox/cairn_workers.json |" in text
+    assert "| goose | built now in 300 s | passed (140 s) | verified |" in text
+
+
+def test_the_llm_question_names_cairn_s_worker_runs(tmp_path, capsys):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "llm.json").write_text(json.dumps({"version": 1, "endpoints": {
+        "mac": {"kind": "lmstudio", "url": "http://192.168.1.20:1234"}}}))
+    LG.prepare_llm(args(), config, tmp_path / "t", {}, Terminal("no\n"), ["cairn-workers-live"])
+    said = capsys.readouterr().out
+    assert f"cairn-workers-live: one small task of real Cairn with each of the {len(LG.CAIRN_WORKERS) - 1} " \
+           "harnesses as its worker with qwen3.8" in said and "harnesses-live" not in said
+
+
+def load(name, path):
+    module_spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
 
 
 def test_every_test_a_check_names_exists():
@@ -482,6 +566,111 @@ def test_the_llm_section_asks_and_hands_the_endpoint_over(tmp_path):
     assert LG.prepare_llm(args(), config, tmp_path / "t", {}) == "give --llm NAME (configured: a, b)"
 
 
+def test_presets_live_runs_the_artex_preset_with_podman_only():
+    """presets-live: artex-pentest's part is a container of the pod, so Bubblewrap is not tried for it."""
+    preset = json.loads((ROOT / "sandbox/presets/artex-pentest.json").read_text())
+    plan = LG.preset_plan(preset, {"target": "10.0.0.5"}, llm="lab:qwen3")
+    assert "--artex" in plan["podman_only"] and plan["backends"] == ["podman"]
+
+
+def test_the_artex_check_asks_first_and_is_optional():
+    """artex-live: optional (only with --only), Podman only, and asked first: its image's build is big."""
+    check = LG.BY_NAME["artex-live"]
+    assert check.optional and check.podman_only and "artex" in check.needs
+    assert check.tests == (f"{LG.GAPS}::test_live_artex_beside_the_agent",)
+    missing = lambda *a, **k: (1, "", "")  # noqa: E731 - the image is not there
+    asked = io.StringIO()
+    assert LG.prepare_artex(args(), {}, io.StringIO(""), runner=missing).startswith("not run: not confirmed")
+    assert LG.prepare_artex(args(), {}, Terminal("y\n"), runner=missing) is None
+    given = args()
+    given.yes = True
+    assert LG.prepare_artex(given, {}, io.StringIO(""), runner=missing) is None
+    assert asked.getvalue() == ""
+
+
+def test_the_llm_question_names_the_harness_runs_when_they_run(tmp_path, capsys):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "llm.json").write_text(json.dumps({"version": 1, "endpoints": {
+        "mac": {"kind": "lmstudio", "url": "http://192.168.1.20:1234"}}}))
+    checks = ["local-llm", "harnesses-live"]
+    assert LG.prepare_llm(args(), config, tmp_path / "t", {}, Terminal("no\n"), checks).startswith("not run")
+    both = capsys.readouterr().out
+    assert "local-llm: 9 smoke runs" in both and "qwen3.8-flash-next" in both and "built first" in both
+    assert f"harnesses-live: one smoke run of each of the {len(LG.HARNESSES)} harnesses with qwen3.8" in both
+    LG.prepare_llm(args(), config, tmp_path / "t", {}, Terminal("no\n"), ["harnesses-live"])
+    alone = capsys.readouterr().out
+    assert "local-llm" not in alone and "harnesses-live" in alone
+
+
+def test_a_harness_image_is_built_when_missing_and_its_time_kept(tmp_path, monkeypatch):
+    """test_live_harness_smoke_run's image step (tests/test_live_gaps.py, with stand-ins for podman and sandbox-ai
+    build): there before - used; missing - built, how long kept for the report; not buildable - a skip with the
+    build's last line, and the next backend's run of that harness skips without building again."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    live = load("live_gaps_tests_for_unit", ROOT / "tests" / "test_live_gaps.py")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "podman").write_text("#!/bin/sh\ncase \"$3\" in *claude*) exit 0 ;; *) exit 1 ;; esac\n")
+    (fake / "podman").chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake}:/usr/bin:/bin"}
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    monkeypatch.setenv("SAI_LIVE_HARNESS_DIR", str(facts))
+    builds = []
+
+    def build(env, *args, timeout=180, input=None):
+        builds.append(args)
+        ok = args[1] == "hermes"
+        return subprocess.CompletedProcess(args, 0 if ok else 1, "built\n" if ok else "",
+                                           "" if ok else "step 7/9: npm ci\nnpm error E404 @x/y\n")
+    monkeypatch.setattr(live, "sai", build)
+    assert live.harness_image("claude", env) == "localhost/claude-sandbox:latest" and builds == []
+    assert json.loads((facts / "claude.json").read_text()) == {"present": True}
+    assert live.harness_image("hermes", env) == "localhost/hermes-sandbox:latest"
+    assert builds == [("build", "hermes")]
+    hermes = json.loads((facts / "hermes.json").read_text())
+    assert hermes["built"] is True and hermes["problem"] is None and hermes["seconds"] >= 0
+    with pytest.raises(pytest.skip.Exception, match="cannot be built here .*npm error E404"):
+        live.harness_image("goose", env)
+    assert json.loads((facts / "goose.json").read_text())["problem"] == "npm error E404 @x/y"
+    with pytest.raises(pytest.skip.Exception, match="npm error E404"):
+        live.harness_image("goose", env)
+    assert builds == [("build", "hermes"), ("build", "goose")], "a harness that cannot be built is tried once"
+
+
+def test_the_harness_table_of_the_report(tmp_path):
+    """harnesses-live per harness: its image (there before, built now in N s, cannot be built here), and its run with
+    each backend (the test's outcome, its seconds or why it was skipped)."""
+    (tmp_path / "hermes.json").write_text(json.dumps({"built": True, "seconds": 412.4, "problem": None}))
+    (tmp_path / "goose.json").write_text(json.dumps({"built": False, "seconds": 30, "problem": "npm ci: E404"}))
+    (tmp_path / "claude.json").write_text(json.dumps({"present": True}))
+    name = "test_live_gaps::test_live_harness_smoke_run[{}]"
+    tests = [{"name": name.format("podman-hermes"), "outcome": "passed", "seconds": 88.0, "detail": ""},
+             {"name": name.format("bwrap-hermes"), "outcome": "skipped", "seconds": 0,
+              "detail": "Bubblewrap runs this host's own `hermes`, which is not on PATH here\n/x.py:1: skipped"},
+             {"name": name.format("podman-goose"), "outcome": "skipped", "seconds": 0,
+              "detail": "its image cannot be built here: npm ci: E404"},
+             {"name": name.format("podman-claude"), "outcome": "failed", "seconds": 61.0,
+              "detail": "AssertionError: (None, '', '')\nmore"},
+             {"name": "test_live_gaps::test_live_local_model_smoke_run[podman-m-codex]", "outcome": "passed",
+              "seconds": 5, "detail": ""}]
+    rows = {row["agent"]: row for row in LG.harness_rows(tests, tmp_path)}
+    assert list(rows) == list(LG.HARNESSES)
+    assert rows["hermes"] == {"agent": "hermes", "image": "built now in 412 s", "podman": "passed (88 s)",
+                              "bwrap": "skipped: Bubblewrap runs this host's own `hermes`, which is not on PATH here"}
+    assert rows["goose"]["image"] == "cannot be built here: npm ci: E404" and rows["goose"]["bwrap"] == "not run"
+    assert rows["claude"]["image"] == "there before" and rows["claude"]["podman"] == "failed: AssertionError: " \
+        "(None, '', '')"
+    assert rows["codex"] == {"agent": "codex", "image": "not used", "podman": "not run", "bwrap": "not run"}
+    report = {"version": 1, "date": "X", "facts": {}, "prerequisites": [], "network": [], "counts": {},
+              "checks": [{"name": "harnesses-live", "proves": "p", "outcome": "failed", "seconds": 1, "missing": [],
+                          "tests": tests[:1], "tail": [], "harnesses": list(rows.values())}]}
+    text = LG.markdown(report)
+    assert "| harness | image | podman | bwrap |" in text
+    assert "| hermes | built now in 412 s | passed (88 s) | skipped: Bubblewrap runs" in text
+
+
 # --- the report and a whole run --------------------------------------------------------------------------------------
 
 def test_the_report_in_markdown_and_json_redacted(tmp_path):
@@ -578,10 +767,12 @@ def test_a_whole_run_with_stand_ins_for_podman_and_pytest(tmp_path, monkeypatch,
     assert outcomes["release-gates"] == "passed" and outcomes["firejail-hides-control"] == "failed"
     assert outcomes["kits-attach"] == "skipped" and outcomes["plugins-attach"] == "skipped"
     assert outcomes["devices-live"] == "skipped" and outcomes["local-llm"] == "skipped"
+    assert outcomes["harnesses-live"] == "skipped", "an LLM server configured: every harness's smoke run joins"
     assert "remote-mcp" not in outcomes and "live-suites" not in outcomes
     checks = {check["name"]: check for check in report["checks"]}
     assert checks["kits-attach"]["missing"] == ["image:claude: missing: sandbox-ai build claude (or --build)"]
     assert checks["local-llm"]["missing"][0].startswith("llm: not run: not confirmed")
+    assert checks["harnesses-live"]["missing"][0].startswith("llm: not run: not confirmed")
     assert checks["devices-live"]["missing"] == ["device: devices scan offers no serial port, camera, render node or "
                                                  "/dev/kvm to hand over; give --device PATH"]
     assert checks["git-login-give"]["outcome"] == "passed" and "--agent-backend podman" in checks[
@@ -653,3 +844,15 @@ def test_a_checks_basetemp_has_its_parent_when_pytest_starts(tmp_path, monkeypat
     entry = {}
     LG.run_check(check, entry, sys.executable, ["podman"], tmp_path / "t", {}, lc, lambda line: None)
     assert seen == {"parent": True, "exists": False}, seen  # its parent made; the folder itself is pytest's to make
+
+
+def test_the_list_says_the_timeout_and_why_a_check_exists_on_lines_of_their_own():
+    """Journeys round 1: `live_check.sh --list` said "timeout:  86400 s; from the user, 2026-11-22: \"mir scheint
+    ...\"" - as if the user had set the timeout. The timeout is a line, why the check exists another."""
+    said = []
+    LG.listing(out=said.append)
+    timeouts = [line for line in said if line.startswith("    timeout:")]
+    assert timeouts and all(re.fullmatch(r"    timeout:  \d+ s", line) for line in timeouts), timeouts[:3]
+    at = said.index("presets-live (optional)")
+    block = said[at:at + 7]
+    assert any(line.startswith("    why:      the user, 2026-11-22") for line in block), block

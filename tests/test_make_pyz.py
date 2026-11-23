@@ -153,6 +153,15 @@ def test_the_real_bundle_runs_as_a_pyz(tmp_path):
     [copy] = copies(tmp_path)
     assert (copy / "sandbox" / "__pycache__").is_dir()  # precompiled once
     assert not (copy / "tests" / "__pycache__").exists()
+    # the data files added since 0.1.188 are read from the copy: the presets, Cairn's workers and their evidence
+    presets = run(pyz, tmp_path, "presets", "list")
+    assert presets.returncode == 0 and "android-development" in presets.stdout, presets.stderr[-2000:]
+    workers = run(pyz, tmp_path, "cairn", "workers")
+    assert workers.returncode == 0 and "claude" in workers.stdout, workers.stderr[-2000:]
+    for name in ("sandbox/cairn_workers.json", "sandbox/live_evidence.json", "sandbox/pid1.py", "sandbox/hostinit.py",
+                 "sandbox/web/help.json", "sandbox/web/fonts/fonts.json",
+                 "projects/sandbox-ai-app/sandbox_ai_app/typefaces/fonts.json"):
+        assert (copy / name).is_file(), name
 
 
 def test_main_py_is_executed_isolated_with_the_arguments(pyz, tmp_path):

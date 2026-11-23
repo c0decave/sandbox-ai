@@ -19,7 +19,7 @@ network, what was left out and why, and how sandbox-ai keeps it in check. Review
   `kits.shared_skills`). A start copies the skills read-only to where each agent looks: `~/.claude/skills`
   (Claude Code), `~/.agents/skills` (Codex), `~/.config/opencode/skills` (OpenCode 1.19.5; it takes a skill whose
   `name` matches its folder, `^[a-z0-9]+(-[a-z0-9]+)*$`, with a description of at most 1024 characters - every
-  vendored skill passes, tested), `~/.agents/skills` for Hermes too (its external skills: sandbox/hermes.py) and for DeepSeek Harness (its shared
+  vendored skill passes, tests/test_vendored_skills.py::test_every_skill_is_valid_for_claude_codex_and_opencode), `~/.agents/skills` for Hermes too (its external skills: sandbox/hermes.py) and for DeepSeek Harness (its shared
   agents root), for Goose and for OpenHands, `~/.qwen/skills` (Qwen Code), `~/.nanobot/workspace/skills` (nanobot: the only
   folder it reads skills from), `~/.letta/skills` (Letta Code, its global skills), `~/.agents/skills` for Pi. Nothing is installed, fetched or built at a start.
 - **Off by default.** No kit is part of a start unless it is named: `--kit NAME`, `"options": ["--kit", "NAME"]` in
@@ -281,7 +281,7 @@ packages), `.gitignore`/`.gitkeep`.
   registry.npmjs.org only under `--allow-npm`.
 - **risk (handled): the plugin launcher.** `hyperframes/scripts/plugin-cli.mjs` (for plugin installs) runs
   `npx hyperframes@VERSION`, a download. It is chosen only when a `plugin.json` lies two folders above SKILL.md; the
-  kit ships no plugin manifest (tested), so the skills take the standalone path.
+  kit ships no plugin manifest (tests/test_vendored_skills.py::test_the_vendored_kits_install_nothing_from_the_network), so the skills take the standalone path.
 - **note: cloud services on request.** `render --cloud`/`lambda`/`cloudrun`/`publish` upload the project (to
   HeyGen's S3, your AWS or GCP); media-use calls HeyGen (OAuth or API key; billed), Gemini (`GEMINI_API_KEY`;
   `hyperframes/scripts/locate.mjs` too), ElevenLabs, OpenAI/Groq (transcription), Openverse and Freesound; the

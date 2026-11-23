@@ -1,5 +1,5 @@
 #!/bin/sh
-# Live check of the agents and parts that have not been live-tested before (Hermes, Qwen Code, DSH, Goose, OpenHands, nanobot, Letta Code, Pi,
+# Live check of the agents and parts with a live test of their own (Hermes, Qwen Code, DSH, Goose, OpenHands, nanobot, Letta Code, Pi,
 # Cairn and the sandbox's own browser), on this host with your own Podman. Run it on the host, in a checkout of sandbox-ai, not
 # inside a sandbox:
 #

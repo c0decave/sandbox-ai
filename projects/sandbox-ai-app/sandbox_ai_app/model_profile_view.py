@@ -9,8 +9,10 @@ line that folds the rest away (folded stays folded for every box of this run of 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QStandardItemModel
 from PySide6.QtWidgets import QApplication, QFrame, QToolButton, QVBoxLayout, QWidget
 
+from . import widgets
 from .i18n import tr
 from .widgets import context_menu, disclosure, exec_dropped, plain_label, safe_tooltip
 
@@ -99,7 +101,7 @@ class KnowledgeBox(QFrame):
 # --- the traffic light (Qt): an icon per colour, the light on a model's list entry, the detail panel ------------------
 # User: "farbliche Ampel zu den Modellen ... Detail-Infos, was funktioniert hat und was nicht, pro Modell". The colour
 # is the theme's status colour (ok, warn, bad, muted: readable on every theme) and each colour has a shape of its own
-# drawn into it - a check (verified), a bar (partly working), a cross (does not work), a ring (not tested) - so it reads
+# drawn into it - a check (verified), a bar (partly working), a cross (does not work), a ring (no data yet) - so it reads
 # without the colour; its words are in the entry's tooltip and accessible text (model_profile.light_summary).
 
 _ICONS = {}
@@ -144,7 +146,7 @@ def light_icon(colour, size=14):
     return icon
 
 
-def mark_combo(combo, sai, model_of=None):
+def mark_combo(combo, sai, model_of=None, agent=None):
     """Each entry of COMBO (a list of a server's models) with its light: the icon, the summary in its tooltip and its
     accessible text. MODEL_OF(index) is the entry's model (default: the MODEL of its data NAME:MODEL); an entry
     without a model (the agent's provider, a server's name alone) is left as it is. Nothing without a sandbox-ai that
@@ -161,17 +163,77 @@ def mark_combo(combo, sai, model_of=None):
             return None
         return WL.parse_value(value)[1].split(",")[0] or None  # NAME:MODEL,MODEL...: the agent's (the first)
     model_of = model_of or default
+    lights = {}
     for index in range(combo.count()):
         model = model_of(index)
         found = support_of(sai, model) if model else None
         if found is None:
             continue
-        combo.setItemIcon(index, light_icon(found["light"]))
+        colour, summary = agent_light(found, agent)
+        combo.setItemIcon(index, light_icon(colour))
+        combo.setItemData(index, colour, LIGHT_ROLE)
         tip = combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
-        summary = light_summary(found)
         combo.setItemData(index, safe_tooltip(f"{tip}\n{summary}" if tip else summary), Qt.ItemDataRole.ToolTipRole)
         combo.setItemData(index, f"{combo.itemText(index)}, {light_accessible(found, model)}",
                           Qt.ItemDataRole.AccessibleTextRole)
+        lights[index] = colour
+    order_by_light(combo, lights, model_of)
+
+
+LIGHT_ROLE = Qt.ItemDataRole.UserRole + 41  # an entry's light colour (what its icon shows)
+
+
+def agent_light(found, agent):
+    """(colour, words) of a model's light (FOUND: support_of) for AGENT: that agent's own measured light - grey (no
+    data yet) for an agent the model was never run in, whatever the other agents or its family say - named first,
+    then the others; without AGENT the best of its measured harnesses (the LLM servers' pages: no agent chosen
+    there). The user 2026-11-22 saw "verified" for a model that was only partly working in their agent, then
+    "opencode verifiziert" for one never run in OpenCode: only that agent's own runs."""
+    from .model_profile import LIGHT_WORDS, agent_name, light_summary
+    summary = light_summary(found)
+    if not agent:
+        return found["light"], summary
+    measured = {h.get("agent"): h.get("light") for h in found.get("harnesses") or []}
+    colour = measured.get(agent) or "grey"
+    own = tr("In {agent}: {words}", agent=agent_name(agent), words=tr(LIGHT_WORDS.get(colour, LIGHT_WORDS["grey"])))
+    return colour, own if not found.get("harnesses") else f"{own}. {summary}"  # (nothing measured: said once)
+
+
+LIGHT_ORDER = {"green": 0, "yellow": 1, "red": 2, "grey": 3}  # (the user 2026-11-22: "green first, then orange...")
+
+
+def order_by_light(combo, lights, model_of):
+    """COMBO's models in the order of their lights (LIGHTS: index -> colour): green, yellow, red, grey, then models
+    without one, each group in its order. Leading entries without a model (the agent's provider, "none") stay first;
+    the chosen entry stays chosen and nothing is said about a change (no signal: only the order changed).
+    The rows are rewritten in place from what each had (its text, icon, every data role and its flags), never moved
+    with takeRow/insertRow: those keep a wrapper of each QStandardItem that outlives it (see widgets.ITEM_FLAGS_ROLE).
+    """
+    model = combo.model()
+    if not isinstance(model, QStandardItemModel):  # (a combo box with a model of its own: left as it is)
+        return
+    first = 0
+    while first < combo.count() and not model_of(first):
+        first += 1
+    rank = {index: LIGHT_ORDER.get(lights.get(index), len(LIGHT_ORDER)) for index in range(first, combo.count())}
+    wanted = sorted(rank, key=lambda index: (rank[index], index))
+    if wanted == list(range(first, combo.count())):
+        return
+    current = combo.currentIndex()
+    column = combo.modelColumn()
+    rows = {index: (model.itemData(model.index(index, column)), widgets.row_flags(combo, index)) for index in wanted}
+    blocked = combo.blockSignals(True)
+    try:
+        for position, index in enumerate(wanted):
+            row = first + position
+            roles, flags = rows[index]
+            model.clearItemData(model.index(row, column))
+            model.setItemData(model.index(row, column), roles)
+            widgets.set_row_flags(combo, row, flags)
+        if current >= first:
+            combo.setCurrentIndex(first + wanted.index(current))
+    finally:
+        combo.blockSignals(blocked)
 
 
 class SupportPanel(QFrame):

@@ -16,7 +16,7 @@ import pytest
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
 from PySide6 import QtCore  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
-from sandbox_ai_app import backend, widgets  # noqa: E402
+from sandbox_ai_app import backend, terminal, widgets  # noqa: E402
 
 from test_projects import ask, close, env, fake_run, project  # noqa: E402,F401
 
@@ -77,7 +77,7 @@ def test_another_host_is_read_through_ssh_without_a_python_start(env, monkeypatc
     sai = backend.SandboxAI()
     assert sai.host_questions("h1") == []
     assert not python_starts(started), started
-    assert started[-1][0] == "ssh" and started[-1][-1].endswith("approvals list --state all --json; fi")
+    assert started[-1][0] == "ssh" and terminal.neutral_script(started[-1][-1]).endswith("approvals list --state all --json; fi")
     assert len(calls(notes, "ssh")) == 1
     # What the command line would be, as sandbox-ai's own `hosts run` builds it.
     assert started[-1] == sai.module("hosts").argv("h1", ["approvals", "list", "--state", "all", "--json"])
@@ -173,7 +173,7 @@ def test_a_lazy_window_makes_only_its_first_pages_and_the_others_when_shown(qapp
         built = [key for key, _ in ui.PAGES if w.built(key) is not None]
         assert sorted(built) == sorted(ui.FIRST_PAGES), built
         assert w.pages.count() == len(ui.PAGES)  # every page has its place (an empty one until it is made)
-        assert w.current_page() == "launch" and w.built("kits") is None
+        assert w.current_page() == "board" and w.built("kits") is None  # (the Start page, as its Board)
         w.show_page("kits")  # shown: made, in its place, linked
         assert w.built("kits") is not None and w.pages.currentWidget() is w.kits and w.current_page() == "kits"
         assert w.pages.frame_of(w.kits) is not None and "kits" in w.help_buttons

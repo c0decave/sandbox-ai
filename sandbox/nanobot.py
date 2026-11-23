@@ -33,7 +33,6 @@ SETTINGS = MANAGED_DIR + "/sandbox-ai.json"  # sandbox-ai's settings for this st
 PIN_FILE = MANAGED_DIR + "/pin_config.py"  # lays them over CONFIG before every start (the image's nanobot command)
 SESSION_DIR = "nanobot"  # in the session directory, mounted read-only at MANAGED_DIR
 CONFIG = "/root/.nanobot/config.json"  # nanobot's own file (the user's, in the sandbox HOME)
-EXPERIMENTAL = "nanobot"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "nanobot"
 LOOPBACK_HOST = "127.0.0.1"
 WEB_PORT = 8765  # the WebUI's and the terminal client's WebSocket (channels.websocket)
@@ -379,10 +378,6 @@ def telemetry_rules(a=None):
     return rules
 
 
-def experimental_note():
-    return ("nanobot: not live-tested yet (its image and a real start have not passed their live test)")
-
-
 def mcp_servers(names, bridge_args, timeouts=None, timeout=30):
     """nanobot's tools.mcpServers for the --mcp servers NAMES: each a stdio server that runs the launcher's bridge
     (BRIDGE_ARGS(name)), with its wait for one call (toolTimeout, seconds) from TIMEOUTS ({name: seconds}, the
@@ -480,10 +475,9 @@ def command_args(args):
 
 
 def plan(a):
-    """The dry run's "nanobot": the reviewed release, the settings' place, what is on and what stays off, and
-    whether it is experimental here."""
+    """The dry run's "nanobot": the reviewed release, the settings' place, what is on and what stays off."""
     names = features(a)
-    return {"version": VERSION, "commit": COMMIT, "repository": REPOSITORY, "experimental": True,
+    return {"version": VERSION, "commit": COMMIT, "repository": REPOSITORY,
             "settings": SETTINGS, "config": CONFIG, "own_sandbox": "off",
             "loopback": {"webui": f"{LOOPBACK_HOST}:{WEB_PORT}", "gateway": f"{LOOPBACK_HOST}:{GATEWAY_PORT}",
                          "api": f"{LOOPBACK_HOST}:{API_PORT}"},

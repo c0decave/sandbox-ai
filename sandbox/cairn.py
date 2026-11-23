@@ -7,9 +7,10 @@ dispatcher that hands tasks to coding-agent CLIs, its workers. sandbox-ai runs i
 session's Podman pod, like the sandbox's browser (browser.py) and the services (services.py):
 
   --cairn                       Cairn's board beside the agent (its image once: sandbox-ai build cairn)
-  --cairn-workers AGENT[=MODEL],...  which of the session's agents are Cairn's workers: claude and codex, the lead
-                                or an agent --with (default: every one of them the session has), each with its own
-                                model if given (else the agent's own; with --llm the server's)
+  --cairn-workers AGENT[=MODEL],...  which of the session's agents are Cairn's workers: any harness, the lead or
+                                an agent --with (default: every one of them the session has, the best supported
+                                first), each with its own model if given (else the agent's own; with --llm the
+                                server's); how far each is supported: sandbox-ai cairn workers (cairn_workers.py)
   --cairn-origin TEXT           what is given: the target, the scope (Cairn's origin fact)
   --cairn-goal TEXT             what counts as done (Cairn's goal fact); with the origin, the project is made at
                                 the start
@@ -28,7 +29,10 @@ works), so the board opens in the app's Browser window.
 Its workers are the session's agents, in the agent's container: Cairn's dispatcher runs in its own container in
 Cairn's local execution mode, and the claude and codex it starts there are sandbox-ai's shims (cairn_relay.py
 worker), which hand the call over a Unix socket to the relay in the agent's container (cairn_relay.py serve, started
-inside Firejail with the agent's environment). The relay accepts exactly the command lines Cairn's own drivers make
+inside Firejail with the agent's environment). Claude Code and Codex are called through Cairn's own drivers; every
+other harness through Cairn's claudecode driver, the worker's SANDBOX_AI_CAIRN_WORKER naming it, and the relay maps
+that driver's command line onto the harness's own one-shot run (cairn_relay.harness_argv) - Cairn is unchanged.
+The relay accepts exactly the command lines Cairn's own drivers make
 (a prompt, a session to resume, nothing else), in a folder below /work/cairn/runs, and runs the agent's own CLI there:
 its login, --api-key, OpenRouter or --llm server (with the loop guard on the wire), its managed settings, hooks and
 rules, behind the same firewall and proxy. Never a Docker or Podman socket, never more than the agent has.
@@ -65,10 +69,14 @@ RELAY_SOCKET = "relay.sock"
 WORKSPACE = "/work/cairn/runs"  # one folder per Cairn project, in the agent's /work
 PRESET = "cairn-pentest-board"
 LOCAL_PRESET = "cairn-local-llm"
-# Cairn's drivers for the session's agents. Its third, pi, runs `/bin/sh -lc SCRIPT` in local mode: an arbitrary
-# shell line no narrow relay can take, so it is never offered.
-DRIVERS = {"claude": "claudecode", "codex": "codex"}
-WORKERS = tuple(DRIVERS)
+# Cairn's driver for each harness the launcher knows: codex and claude Cairn's own, every other one Cairn's
+# claudecode driver, which the relay maps onto that harness's one-shot run. Cairn's own pi driver runs `/bin/sh -lc
+# SCRIPT` in local mode: an arbitrary shell line no narrow relay can take, so it is never used - Pi is a worker
+# through the claudecode driver like the others.
+WORKERS = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot",
+           "letta", "pi")
+DRIVERS = {agent: "codex" if agent == "codex" else "claudecode" for agent in WORKERS}
+WORKER_VARIABLE = "SANDBOX_AI_CAIRN_WORKER"  # the harness a worker is, in its environment (cairn_relay.worker)
 TEXT_LIMIT = 4000
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
 # Its options and their places in the launcher's namespace (--cairn-workers' parsed list is a.cairn_workers).
@@ -79,6 +87,20 @@ TASKS = {"bootstrap": {"timeout": 300, "conclude_timeout": 60}, "reason": {"time
          "explore": {"timeout": 900, "conclude_timeout": 120}}
 
 _launcher = None
+_workers = None
+
+
+def workers():
+    """cairn_workers.py: how each harness fares as Cairn's worker (the traffic light), loaded once."""
+    global _workers
+    if _workers is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sandbox_ai_cairn_workers", Path(__file__).with_name(
+            "cairn_workers.py"))
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _workers = loaded
+    return _workers
 
 
 def launcher():
@@ -103,16 +125,35 @@ def parse_workers(value):
         agent, given, model = item.partition("=")
         agent = agent.strip()
         if agent not in DRIVERS:
-            raise ValueError(f"--cairn-workers: {agent!r} is none of Cairn's workers here ({', '.join(WORKERS)}; "
-                             "Cairn's pi driver runs a shell line of its own, which the relay never takes)")
+            raise ValueError(f"--cairn-workers: {agent!r} is none of the launcher's harnesses ({', '.join(WORKERS)})")
         if given and not MODEL.fullmatch(model.strip()):
             raise ValueError(f"--cairn-workers {agent}=MODEL: {model!r} is not a model name")
+        if given and agent not in workers().MODEL_OPTION:
+            raise ValueError(f"--cairn-workers {agent}=MODEL: {agent} has no model option on its command line (its "
+                             "model is its settings'; as the lead the start's --model or --llm): give it as "
+                             f"--cairn-workers {agent}")
         if agent in {w["agent"] for w in found}:
             raise ValueError(f"--cairn-workers: {agent} is given twice")
         found.append({"agent": agent, "model": model.strip() if given else None})
     if not found:
-        raise ValueError("--cairn-workers names no worker (claude, codex)")
+        raise ValueError(f"--cairn-workers names no worker ({', '.join(WORKERS)})")
     return found
+
+
+def light_of(agent):
+    """How AGENT fares as Cairn's worker (cairn_workers.row): its light, words, evidence, limits."""
+    return workers().row(agent)
+
+
+def refuse_red(worker, agents):
+    """A worker whose light is red: ValueError with its reason and another of the session's AGENTS offered."""
+    reason = workers().refusal(worker)
+    if reason is None:
+        return
+    others = [agent for agent in agents if agent != worker and agent in DRIVERS and workers().refusal(agent) is None]
+    offer = (f"; use another of this session's agents: --cairn-workers {others[0]}" if others else
+             "; start the session with another lead, or add --with claude")
+    raise ValueError(f"--cairn-workers {worker}: {worker} does not work as Cairn's worker: {reason}{offer}")
 
 
 def text(value, option):
@@ -151,6 +192,29 @@ def session_key(a):
     return None
 
 
+def worker_choice(l, message, lacking, choice, answers):
+    """The refusal MESSAGE as one that carries what would let the start go on (the launcher's fixes.py: a choice of
+    the human's between ways to start - asked on a terminal, shown as whole command lines elsewhere). ANSWERS:
+    (AGENT, None) - AGENT added beside the lead (--with AGENT) - or (None, [agents]) - those agents of the session as
+    Cairn's workers instead (--cairn-workers)."""
+    fixes = getattr(l, "FIXES", None)
+    if fixes is None:
+        return ValueError(message)
+    found = []
+    for agent, own in answers:
+        if agent:
+            found.append(fixes.fix(
+                "option", f"with-{agent}", lacking, f"add {agent} beside the lead (the team image with both is built "
+                "when it is not there)", options={"add": ["--with", agent]}, choice=choice,
+                security=f"{agent} runs in the same sandbox, with its own login and its provider's hosts"))
+        else:
+            found.append(fixes.fix(
+                "option", f"cairn-workers-{'-'.join(own)}", lacking,
+                f"let the session's own {' and '.join(own)} be Cairn's worker{'s' if len(own) > 1 else ''}",
+                options={"remove": ["--cairn-workers"], "add": ["--cairn-workers", ",".join(own)]}, choice=choice))
+    return fixes.Missing(message, found)
+
+
 def check(a, l=None):
     """--cairn and its options, checked; a.cairn_container gets Cairn's container (a member of services.members),
     a.cairn_workers its workers. Without --browser, --cairn brings the sandbox's browser where its live view works
@@ -171,17 +235,34 @@ def check(a, l=None):
         raise ValueError("--cairn is for an agent's start; an MCP server's or helper's sandbox has none")
     agents = session_agents(a, l)
     value = getattr(a, "cairn_workers_text", None)
-    workers = parse_workers(value) if value else [{"agent": agent, "model": None} for agent in agents
-                                                   if agent in DRIVERS]
-    if not workers:
-        # Every lead takes --with claude or codex (0.1.98: the other agents are layers of the team image).
-        raise ValueError(f"--cairn: Cairn's workers are the session's agents, and {', '.join(agents)} is none of "
-                         "Cairn's (claude, codex): start claude or codex, or add --with claude or --with codex")
-    for worker in workers:
+    a.cairn_left_out = []
+    if value:
+        chosen = parse_workers(value)
+    else:
+        # Every agent of the session, the best supported first (the first takes every kind of task); a red one left
+        # out (the start says why).
+        table = workers().load()
+        usable = [agent for agent in agents if agent in DRIVERS]
+        a.cairn_left_out = [agent for agent in usable if workers().refusal(agent, table) is not None]
+        kept = [agent for agent in usable if agent not in a.cairn_left_out]
+        chosen = [{"agent": agent, "model": None}
+                  for agent in sorted(kept, key=lambda agent: workers().rank(agent, table))]
+        if not chosen and a.cairn_left_out:
+            refuse_red(a.cairn_left_out[0], agents)
+    for worker in chosen:
         if worker["agent"] not in agents:
-            raise ValueError(f"--cairn-workers {worker['agent']}: no agent of this session (the lead "
-                             f"{a.agent}{', --with ' + ', '.join(agents[1:]) if agents[1:] else ''}); add --with "
-                             f"{worker['agent']}")
+            # Offered, not only refused (fixes.py): the agent beside the lead, or the session's own agents that
+            # work as Cairn's workers instead. A choice of the human's: never taken by --fix.
+            own = [agent for agent in agents if agent in DRIVERS and workers().refusal(agent) is None]
+            raise worker_choice(
+                l, f"--cairn-workers {worker['agent']}: no agent of this session (the lead "
+                   f"{a.agent}{', --with ' + ', '.join(agents[1:]) if agents[1:] else ''}); add --with "
+                   f"{worker['agent']}" + (f", or let the session's own {', '.join(own)} work: --cairn-workers "
+                                           f"{','.join(own)}" if own else ""),
+                f"--cairn-workers {worker['agent']}: {worker['agent']} is no agent of this session (the lead "
+                f"{a.agent}{', --with ' + ', '.join(agents[1:]) if agents[1:] else ''})",
+                f"cairn-workers-{worker['agent']}", [(worker["agent"], None)] + ([(None, own)] if own else []))
+        refuse_red(worker["agent"], agents)
         if worker["model"] and worker["agent"] == a.agent and getattr(a, "llm", None):
             raise ValueError(f"--cairn-workers {worker['agent']}={worker['model']}: with --llm the model is the "
                              f"server's (--llm NAME:MODEL)")
@@ -211,7 +292,7 @@ def check(a, l=None):
             raise ValueError(f"--service {service['name']}: port {PORT} is Cairn's board's (--cairn)")
     if not getattr(a, "browser", None) and not l.on_machine(a):
         a.browser, a.cairn_browser = "chromium", True  # its board opens there (browser.check comes next)
-    a.cairn_workers = workers
+    a.cairn_workers = chosen
     a.cairn_project = {"title": f"sandbox-ai: {origin.splitlines()[0][:80]}", "origin": origin, "goal": goal,
                        "hints": [{"content": hint, "creator": "human"}] if hint else []} if goal else None
     a.cairn_container = {
@@ -225,17 +306,27 @@ def notes(a):
     """What a start with Cairn says about it before it runs."""
     if not getattr(a, "cairn_container", None):
         return []
-    workers = ", ".join(w["agent"] + (f" ({w['model']})" if w["model"] else "") for w in a.cairn_workers)
+    names = ", ".join(w["agent"] + (f" ({w['model']})" if w["model"] else "") for w in a.cairn_workers)
     found = [f"cairn: Cairn's board in its own container beside the agent, at {SERVER} on the pod's loopback; its "
-             f"workers are this session's {workers}, run in the agent's container through sandbox-ai's relay (their "
-             "logins, models, rules and network; never a Docker or Podman socket)",
+             f"workers are this session's {names}, run in the agent's container through sandbox-ai's relay (their "
+             "logins, models, rules and network; never a Docker or Podman socket)"]
+    # How far each worker is supported: its traffic light, what it comes from, what Cairn expects that it cannot give.
+    for worker in a.cairn_workers:
+        row = light_of(worker["agent"])
+        found.append(f"cairn: worker {workers().summary(row)}"
+                     + "".join(f"; {limit}" for limit in row["limits"]))
+    for agent in getattr(a, "cairn_left_out", None) or []:
+        found.append(f"cairn: {agent} is not one of Cairn's workers here: {workers().refusal(agent)} "
+                     f"(sandbox-ai cairn workers {agent})")
+    found += [
              "cairn: once a project is active, Cairn hands out tasks on its own until it is complete or stopped, and "
              "every task spends your models' usage; sandbox-ai pauses Cairn's dispatcher after 5 failed tasks within "
              "10 minutes and the workers after 5 failed runs in a row (60 seconds, doubling to 15 minutes). Stop a "
              "project on the board to stop it",
              "cairn: Cairn's workers run without their own approval questions (Cairn gives claude "
-             "--dangerously-skip-permissions and codex --dangerously-bypass-approvals-and-sandbox): this sandbox's "
-             "firewall, proxy, approvals and rules hold",
+             "--dangerously-skip-permissions and codex --dangerously-bypass-approvals-and-sandbox; every other "
+             "harness gets its own switch from sandbox-ai's relay): this sandbox's firewall, proxy, approvals and "
+             "rules hold",
              "cairn: AGPL-3.0, built unchanged from the reviewed commit by sandbox-ai build cairn on your machine"]
     if getattr(a, "cairn_browser", False):
         found.append("cairn: the sandbox's browser starts on Cairn's board (--browser came with --cairn): the app's "
@@ -303,20 +394,22 @@ def prepare_folders(a, l=None):
 def dispatch(a):
     """Cairn's dispatcher configuration (JSON, which its YAML loader reads): local execution only, workers the
     session's agents through the relay, one project at a time."""
-    workers = []
+    found = []
     for index, worker in enumerate(a.cairn_workers):
-        workers.append({"name": f"sandbox-{worker['agent']}", "type": DRIVERS[worker["agent"]],
-                        # The first takes every kind of task; the others explore (Cairn's own example's split).
-                        "task_types": ["bootstrap", "reason", "explore"] if index == 0 else ["explore"],
-                        "max_running": 1, "priority": index})
-    count = len(workers)
+        found.append({"name": f"sandbox-{worker['agent']}", "type": DRIVERS[worker["agent"]],
+                      # The first takes every kind of task; the others explore (Cairn's own example's split).
+                      "task_types": ["bootstrap", "reason", "explore"] if index == 0 else ["explore"],
+                      "max_running": 1, "priority": index,
+                      # The harness it is: the shim tells the relay (Cairn hands a worker's env to its process).
+                      "env": {WORKER_VARIABLE: worker["agent"]}})
+    count = len(found)
     return {"server": SERVER,
             "runtime": {"execution": "local", "worker_healthcheck": "disabled", "max_workers": count,
                         "max_running_projects": 1, "max_project_workers": count, "interval": 5,
                         "healthcheck_timeout": 15, "prompt_group": "default"},
             "tasks": json.loads(json.dumps(TASKS)),
             "local": {"workspace_root": WORKSPACE, "completed_action": "keep"},
-            "workers": workers}
+            "workers": found}
 
 
 def config(a):
@@ -330,15 +423,17 @@ def worker_arguments(a, worker, l=None):
     """The arguments sandbox-ai puts before a worker's own (cairn_relay.command): its model of --cairn-workers; for
     the lead without one what its start gives it (--model, --effort, Codex's --llm profile: model_effort_args,
     llm.agent_arguments), so that a worker is the session's agent as it was started."""
-    if worker["model"]:
-        return ["--model", worker["model"]]
-    if worker["agent"] != a.agent:
-        return []  # an agent --with: its own login and default model, as from the shell
     l = l or launcher()
+    # Codex's telemetry overrides, as the lead's command line has them: they win over every config.toml.
+    telemetry = list(l.codex_telemetry_args(l.telemetry_level(a))) if worker["agent"] == "codex" else []
+    if worker["model"]:
+        return [*telemetry, "--model", worker["model"]]
+    if worker["agent"] != a.agent:
+        return telemetry  # an agent --with: its own login and default model, as from the shell
     found = list(l.model_effort_args(a))
     if getattr(a, "llm", None):
         found = [*l.load_llm_module().agent_arguments(a), *found]
-    return found
+    return [*telemetry, *found]
 
 
 def relay_config(a, l=None):
@@ -396,6 +491,7 @@ def mounts(a, session, l=None):
     session = Path(session)
     found = [(session / "resolv.conf", "/etc/resolv.conf", "ro"), (session / "hosts", "/etc/hosts", "ro"),
              (HERE / "cairn_runtime.py", f"{MOUNT}/cairn_runtime.py", "ro"),
+             (HERE / "pid1.py", f"{MOUNT}/pid1.py", "ro"),  # its PID 1: sandbox-ai's own init, nothing of the host
              (HERE / "cairn_relay.py", f"{MOUNT}/cairn_relay.py", "ro"),
              (session / CONFIG_FILE, f"{MOUNT}/config.json", "ro")]
     board = board_dir(a, l)
@@ -415,7 +511,9 @@ def create_command(a, pod, service, session, l=None, limits=None):
         raise ValueError(f"Cairn's image was not checked ({BUILD})")
     argv = l.podman_command(a, "create", "--pull=never", "--pod", pod, "--name", services.container_name(pod, service),
                             "--label", f"{l.RUN_LABEL}={a.run_id}", "--label", f"{services.SERVICE_LABEL}={NAME}",
-                            "--user", USER, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--init",
+                            "--user", USER, "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                            # (no --init: that is the host's catatonit, which a host need not have - its PID 1 is
+                            # sandbox-ai's own init, pid1.py, run by the image's Python: the entrypoint below)
                             "--read-only", "--log-driver=k8s-file", "--log-opt", "max-size=10mb",
                             # /tmp holds the workers' shims (cairn_runtime.shims), which Cairn's dispatcher runs.
                             "--image-volume=tmpfs", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m,mode=1777",
@@ -433,7 +531,8 @@ def create_command(a, pod, service, session, l=None, limits=None):
     for source, target, mode in mounts(a, session, l):
         argv += l.mount_option(source, target, mode)
     argv += relay_mount(a, l)(f"{MOUNT}/relay", "ro")
-    return argv + ["--entrypoint", "/opt/cairn/venv/bin/python", image, "-I", f"{MOUNT}/cairn_runtime.py"], {}
+    return argv + ["--entrypoint", "/opt/cairn/venv/bin/python", image, "-I", f"{MOUNT}/pid1.py",
+                   "/opt/cairn/venv/bin/python", "-I", f"{MOUNT}/cairn_runtime.py"], {}
 
 
 def agent_mounts(a, l=None):
@@ -463,16 +562,24 @@ def plan(a, l=None):
             "workers": [{"agent": w["agent"], "driver": DRIVERS[w["agent"]],
                          "model": w["model"] or ("the --llm server's" if w["agent"] == a.agent and
                                                  getattr(a, "llm", None) else "the agent's own"),
-                         "arguments": worker_arguments(a, w, l)}
+                         "arguments": worker_arguments(a, w, l), **plan_light(w["agent"])}
                         for w in a.cairn_workers],
             "relay": {"agent_socket": f"{RELAY_DIR}/{RELAY_SOCKET}",
                       "host": str(relay_dir(a, l)) if relay_dir(a, l) else f"the Podman volume {relay_volume(a)}",
                       "workspace": WORKSPACE,
                       "takes": "only the command lines of Cairn's claudecode and codex drivers (a prompt, a session); "
-                               "never a shell line, a Docker or Podman socket"},
+                               "a harness other than Claude Code and Codex runs its own one-shot command line, which "
+                               "the relay makes; never a shell line, a Docker or Podman socket"},
             "dispatch": dispatch(a), "project": getattr(a, "cairn_project", None),
             "browser": "starts on the board" if getattr(a, "browser_container", None) or
             getattr(a, "cairn_browser", False) else None}
+
+
+def plan_light(agent):
+    """A worker's light in the dry run: its colour, status, the command line a task runs, whether it is mapped."""
+    row = light_of(agent)
+    return {"light": row["light"], "status": row["status"], "run": row["run"], "mapped": row["mapped"],
+            "limits": row["limits"]}
 
 
 def record(a, pod):

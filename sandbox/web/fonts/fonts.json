@@ -1,0 +1,113 @@
+{
+ "comment": "Fonts bundled unchanged from each family's official repository at a pinned commit (each commit older than 14 days when pinned on 2026-11-22; the commit's date below). Every file was checked against the git blob id GitHub gives for it at that commit, then its SHA-256 written here; tests check the files against it. SIL Open Font License 1.1: the OFL-*.txt beside them.",
+ "pinned": "2026-11-22",
+ "sources": {
+  "AtkinsonHyperlegibleNext": {
+   "repository": "https://github.com/googlefonts/atkinson-hyperlegible-next",
+   "commit": "7925f50f649b3813257faf2f4c0b381011f434f1",
+   "commit_date": "2025-02-21",
+   "copyright": "Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors (https://github.com/googlefonts/atkinson-hyperlegible-next)",
+   "license": "OFL-1.1"
+  },
+  "AtkinsonHyperlegibleMono": {
+   "repository": "https://github.com/googlefonts/atkinson-hyperlegible-next-mono",
+   "commit": "154d50362016cc3e873eb21d242cd0772384c8f9",
+   "commit_date": "2024-11-20",
+   "copyright": "Copyright 2020-2024 The Atkinson Hyperlegible Mono Project Authors (https://github.com/googlefonts/atkinson-hyperlegible-next-mono)",
+   "license": "OFL-1.1"
+  },
+  "OpenDyslexic": {
+   "repository": "https://github.com/antijingoist/opendyslexic",
+   "commit": "77bda89f3f2069c78d81d33de43b461c2de6c48e",
+   "commit_date": "2025-04-10",
+   "copyright": "Copyright (c) 2019-07-29, Abbie Gonzalez (https://abbiecod.es|support@abbiecod.es), with Reserved Font Name OpenDyslexic.",
+   "license": "OFL-1.1"
+  },
+  "Lexend": {
+   "repository": "https://github.com/googlefonts/lexend",
+   "commit": "7894f02b2e7eabc48595f1d4eff3b17b48c6e651",
+   "commit_date": "2023-03-02",
+   "copyright": "Copyright 2018 The Lexend Project Authors (https://github.com/googlefonts/lexend), with Reserved Font Name “RevReading Lexend”.",
+   "license": "OFL-1.1"
+  }
+ },
+ "files": {
+  "AtkinsonHyperlegibleMono-Regular.woff2": {
+   "family": "AtkinsonHyperlegibleMono",
+   "upstream": "https://github.com/googlefonts/atkinson-hyperlegible-next-mono/blob/154d50362016cc3e873eb21d242cd0772384c8f9/fonts/webfonts/AtkinsonHyperlegibleMono-Regular.woff2",
+   "sha256": "3b916de5c5247c5fa9736aad6c2673f1b0b0381ab306dcddfcee4a184a842a51",
+   "git_blob": "01921a9ea3b4300053ea5f48d007483c13508b41",
+   "size": 22328
+  },
+  "AtkinsonHyperlegibleNext-Bold.woff2": {
+   "family": "AtkinsonHyperlegibleNext",
+   "upstream": "https://github.com/googlefonts/atkinson-hyperlegible-next/blob/7925f50f649b3813257faf2f4c0b381011f434f1/fonts/webfonts/AtkinsonHyperlegibleNext-Bold.woff2",
+   "sha256": "dda449f0f556a595cffd0a9ce479bb1210beba286cb4c2f5aeca6975f9c85a3b",
+   "git_blob": "cd6f3ae70e6b02b6130d06f366675f0c462b7ac4",
+   "size": 25928
+  },
+  "AtkinsonHyperlegibleNext-Regular.woff2": {
+   "family": "AtkinsonHyperlegibleNext",
+   "upstream": "https://github.com/googlefonts/atkinson-hyperlegible-next/blob/7925f50f649b3813257faf2f4c0b381011f434f1/fonts/webfonts/AtkinsonHyperlegibleNext-Regular.woff2",
+   "sha256": "378aea0f5c1d179f4e0b5382c06bfc87571b98cfcc4fd1352bc979e2e2259c54",
+   "git_blob": "6deb0f465c28ded75d46cd29309d3bf1ba807a12",
+   "size": 24896
+  },
+  "Lexend-Bold.woff2": {
+   "family": "Lexend",
+   "upstream": "https://github.com/googlefonts/lexend/blob/7894f02b2e7eabc48595f1d4eff3b17b48c6e651/fonts/lexend/webfonts/Lexend-Bold.woff2",
+   "sha256": "e7d67b85eb8cd3bc444ff7ed005ade0290c94b2a7664b4289024d387ed58ffc7",
+   "git_blob": "dad8b9df531882b630e4e83a7f182d64cd530d95",
+   "size": 39144
+  },
+  "Lexend-Regular.woff2": {
+   "family": "Lexend",
+   "upstream": "https://github.com/googlefonts/lexend/blob/7894f02b2e7eabc48595f1d4eff3b17b48c6e651/fonts/lexend/webfonts/Lexend-Regular.woff2",
+   "sha256": "dc9905cb55fde950de4e2c1c3240a9ece5ab7b3a7db8d8840322236705e0c017",
+   "git_blob": "b454f26d5e3ce8d06dc2388991a3b232670f6219",
+   "size": 37180
+  },
+  "OFL-AtkinsonHyperlegibleMono.txt": {
+   "family": "AtkinsonHyperlegibleMono",
+   "upstream": "https://github.com/googlefonts/atkinson-hyperlegible-next-mono/blob/154d50362016cc3e873eb21d242cd0772384c8f9/OFL.txt",
+   "sha256": "1ebb31cf7393164f20d10c1d48406cddb5314feff8465531cf1e4ba37e9dd740",
+   "git_blob": "63eb4ba5ba8498a919c911b9cf2b3091b1447096",
+   "size": 4436
+  },
+  "OFL-AtkinsonHyperlegibleNext.txt": {
+   "family": "AtkinsonHyperlegibleNext",
+   "upstream": "https://github.com/googlefonts/atkinson-hyperlegible-next/blob/7925f50f649b3813257faf2f4c0b381011f434f1/OFL.txt",
+   "sha256": "aca6a428580965d2297d1b718042dd427c2a9443ece3b0d02d758e161e0c4030",
+   "git_blob": "88955733b80000358ef3e5521f3369b276e066a9",
+   "size": 4431
+  },
+  "OFL-Lexend.txt": {
+   "family": "Lexend",
+   "upstream": "https://github.com/googlefonts/lexend/blob/7894f02b2e7eabc48595f1d4eff3b17b48c6e651/OFL.txt",
+   "sha256": "5da8505887d0fa7fe963445fd58852707fda34adfeb65af25c99d152bab285bd",
+   "git_blob": "b1477aae6210797999bd5ad9c13bcae5fc98788b",
+   "size": 4436
+  },
+  "OFL-OpenDyslexic.txt": {
+   "family": "OpenDyslexic",
+   "upstream": "https://github.com/antijingoist/opendyslexic/blob/77bda89f3f2069c78d81d33de43b461c2de6c48e/OFL.txt",
+   "sha256": "caafcccfb70fc72458fcbda812ec8f0a06cb300cbabb87eabbb30b946124394b",
+   "git_blob": "bb867823f2408fb8d2b3af5cb118b4bc0cd61972",
+   "size": 4453
+  },
+  "OpenDyslexic-Bold.woff2": {
+   "family": "OpenDyslexic",
+   "upstream": "https://github.com/antijingoist/opendyslexic/blob/77bda89f3f2069c78d81d33de43b461c2de6c48e/compiled/OpenDyslexic-Bold.woff2",
+   "sha256": "b534a0b84ef3cca941ebdb506ce3f4e0010aa4ef881271bac8b6959dbf694fbf",
+   "git_blob": "b5fd5e4f4b0977495d39bb3220096aef50120e31",
+   "size": 108068
+  },
+  "OpenDyslexic-Regular.woff2": {
+   "family": "OpenDyslexic",
+   "upstream": "https://github.com/antijingoist/opendyslexic/blob/77bda89f3f2069c78d81d33de43b461c2de6c48e/compiled/OpenDyslexic-Regular.woff2",
+   "sha256": "0441bc21071e42db57c217f93fbc48d3b55a2987c02814c94dc93621c42e8695",
+   "git_blob": "4ee220be7e9b551ad100468bd08ba35f6f9fe2f8",
+   "size": 103336
+  }
+ }
+}

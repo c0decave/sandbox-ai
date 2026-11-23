@@ -26,6 +26,12 @@ A server can also be a container image from an MCP catalog (sandbox-ai-mcp, axro
             "source": "...", "vpn": "PROFILE",
             "env_optional": ["VARIABLE"], "env_values": {"FLAG": "1"}, "env_secrets": {"VARIABLE": "SECRET"}}}
 
+Its folders need no --mount (folder defaults, below mount_host): "/work" is by default "@workspace", the first
+workspace of the start that uses the server, bound at each start in an instance of that workspace's own (never shared
+with another project's start); every other folder a folder of the server's own under sandbox-ai's data directory
+(mcp-folders/NAME/TARGET, made 0700 at add; for a server bound to the start's workspace one of each workspace's own
+below it, .workspaces/KEY/TARGET); --mount TARGET=HOST wins, TARGET=default is the default again.
+
 Its variables (see "variables" below): "env" required (your environment's, else the secret of that name),
 "env_optional" passed where there is one, "env_values" fixed values that are no secret, "env_secrets" from the
 secret named; `mcp add/set --env NAME`, `--env NAME=VALUE`, `--env NAME@SECRET`, a start's own: --mcp-env.
@@ -70,6 +76,7 @@ each agent makes of it). `mcp detach NAME START [--live]` takes it out again (wi
 import argparse
 import base64
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -262,7 +269,7 @@ def validated_image(definition, where):
         if not isinstance(target, str) or not MOUNT_TARGET.fullmatch(target) or ".." in target.split("/") \
                 or target in targets:
             raise ValueError(f"{where}: mount target {target!r} is not a distinct absolute path")
-        if not isinstance(host, str) or not os.path.isabs(os.path.expanduser(host)) or \
+        if not isinstance(host, str) or (host != WORKSPACE_HOST and not os.path.isabs(os.path.expanduser(host))) or \
                 any(c in host for c in (",", "\n", "\r", "\0", ":")):
             raise ValueError(f"{where}: mount host {host!r} must be an absolute path without , or :")
         if mode not in ("ro", "rw"):
@@ -315,6 +322,34 @@ def checked_built(definition, where):
 
 
 _egress = None
+
+
+_hostinit = None
+
+
+def hostinit_module():
+    """hostinit.py: whether Podman's --init works on this host (its init binary catatonit), and what a container gets
+    instead, loaded once."""
+    global _hostinit
+    if _hostinit is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_hostinit", HERE / "hostinit.py")
+        with LOADING:
+            if _hostinit is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _hostinit = loaded
+    return _hostinit
+
+
+def image_init(name, definition, found=None):
+    """Whether the container of the image server NAME (DEFINITION) is started with Podman's --init (hostinit.
+    wants_init): not with "pid1": "server" (the server is PID 1 and reaps its children itself); else where this host
+    has Podman's init binary (catatonit as PID 1 holds the MCP pipes and reaps what the server starts) - on a Mac it
+    is podman machine's, taken as there; without it only an image whose ENTRYPOINT is an init runs without --init,
+    and any other is refused (ValueError: what is missing, the package command) - never a silently weaker start."""
+    return hostinit_module().wants_init(f"MCP server {name}", image=definition.get("image"),
+                                        own_pid1=server_is_pid1(definition), local=sys.platform != "darwin",
+                                        found=found)
 
 
 def egress_module():
@@ -1061,7 +1096,8 @@ CODE_ENV = frozenset({"NODE_OPTIONS", "NODE_PATH", "PYTHONSTARTUP", "PYTHONPATH"
                       "PYTHONINSPECT", "PERL5OPT", "PERL5LIB", "PERLLIB", "PERL5DB", "RUBYOPT", "RUBYLIB", "BASH_ENV",
                       "ENV", "PROMPT_COMMAND", "PATH", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
                       "CLASSPATH", "GCONV_PATH", "LUA_INIT", "LUA_PATH", "LUA_CPATH", "GIT_EXEC_PATH",
-                      "DENO_DIR", "BUN_OPTIONS", "GODEBUG", "PHPRC", "PHP_INI_SCAN_DIR"})
+                      "DENO_DIR", "BUN_OPTIONS", "GODEBUG", "PHPRC", "PHP_INI_SCAN_DIR", "LOCPATH",
+                      "GLIBC_TUNABLES", "NLSPATH", "MALLOC_CONF"})
 CODE_ENV_PREFIXES = ("LD_", "DYLD_")
 
 
@@ -1137,10 +1173,11 @@ def instance_of(a, name):
         return chosen
     limits, mounts = start_change(a, name)
     env = start_env(a).get(name)
-    if not limits and not mounts and not env:
-        return name
     servers = {**definitions(getattr(a, "project_document", None)), **(getattr(a, "helper_definitions", None) or {})}
     if name not in servers:
+        return name
+    mounts = start_folders(a, name, servers[name], mounts)  # (the start's workspace: an instance of that workspace's)
+    if not limits and not mounts and not env:
         return name
     return instance_for(name, servers[name], limits, mounts, env)[0]
 
@@ -1239,6 +1276,8 @@ def check_image_mounts(name, definition, remember=True, warn=None):
     writable = []
     vpn = l.load_vpn_module()
     for mount in definition.get("mounts", []):
+        if mount["host"] == WORKSPACE_HOST:
+            continue  # (the start's workspace: checked as its start resolves it, start_folders)
         host = os.path.expanduser(mount["host"])
         option = f"MCP server {name}: mount {mount['target']}"
         vpn.check_paths([host], option, warn=warn)
@@ -1252,18 +1291,33 @@ def check_image_mounts(name, definition, remember=True, warn=None):
                 break
         # As a --mount gets, whatever its mode (the container runs as root, you): a folder of sockets, a file system
         # of the kernel's own, a tree with a live socket, sandbox-ai's own folders, a private location - each said.
-        l.check_given_path(resolved, option, mount.get("mode", "ro") == "rw", warn=warn)
+        # (its own folder, made by sandbox-ai for it alone, is no risk you chose: not said as sandbox-ai's own folder)
+        # (a workspace's own one below it, start_folders, is so too: journeys round 1, warned at every start)
+        own = [own_folder(name, mount["target"])] if is_own_folder(name, mount["target"], mount["host"]) else \
+            [Path(os.path.normpath(host))] if is_workspace_folder(name, mount["target"], mount["host"]) else []
+        # (the path as made, never what a link there resolves to: a link on the way is checked as any folder)
+        l.check_given_path(resolved, option, mount.get("mode", "ro") == "rw", own=own, warn=warn)
         if mount.get("mode", "ro") == "rw":
             writable.append(resolved)
     if writable and remember:
         l.remember_exposed(None, writable)
 
 
+def unbound_host(mount):
+    """The host folder of MOUNT as given (~ expanded); ValueError for the start's workspace that no start bound
+    (start_folders binds it): never run with the marker, never with a folder it would resolve to."""
+    host = os.path.expanduser(str(mount.get("host")))
+    if mount.get("host") == WORKSPACE_HOST or not os.path.isabs(host):
+        raise ValueError(f"the folder {mount.get('target')} is the start's workspace, bound only for a start: this "
+                         "server runs for a start that uses it (--mcp NAME, mcp start NAME --for START)")
+    return host
+
+
 def mount_records(definition):
     """[{"path", "dev", "ino"}] of an image server's host folders, as image_command mounts them."""
     records = []
     for mount in definition.get("mounts", []):
-        path = Path(os.path.expanduser(mount["host"])).resolve()
+        path = Path(unbound_host(mount)).resolve()
         info = os.stat(path)
         records.append({"path": str(path), "dev": info.st_dev, "ino": info.st_ino})
     return records
@@ -1358,6 +1412,46 @@ def tor_environment():
     return launcher().load_vpn_module().tor_environment()
 
 
+LIMIT_FLAGS = {"memory": "--memory", "cpus": "--cpus", "pids": "--pids"}  # (as a start's options name them)
+
+
+def unenforced_limits():
+    """([memory, cpus, pids: those of an image server's container that rootless Podman cannot set on this host], why
+    or None), decided as for the agent's own pod (agent_sandbox.enforced_limits), a service's (services.enforceable)
+    and a Bubblewrap server's scope (mcp_rootfs.limits_prefix): without a systemd user session Podman runs on
+    cgroupfs, which sets none; else a controller systemd does not delegate to this user cannot be set (unknown: all
+    asked for). On a Mac podman machine's VM sets them (its own systemd)."""
+    if sys.platform != "linux":
+        return [], None
+    l = launcher()
+    if not l.user_manager_running():
+        return list(LIMIT_KEYS_ORDER), ("no systemd user session (rootless Podman runs on cgroupfs, which sets no "
+                                        "limits; `loginctl enable-linger` or a desktop login provides one)")
+    controllers = l.delegated_controllers()
+    if controllers is None:
+        return [], None
+    names = getattr(l, "CGROUP_CONTROLLERS", {"memory": "memory", "cpus": "cpu", "pids": "pids"})
+    missing = [key for key in LIMIT_KEYS_ORDER if names.get(key) not in controllers]
+    if not missing:
+        return [], None
+    return missing, (f"the {', '.join(names[key] for key in missing)} controller{'s are' if len(missing) > 1 else ' is'} "
+                     "not delegated to your user (systemd: Delegate=yes in user@.service; see sandbox-ai doctor)")
+
+
+LIMIT_KEYS_ORDER = ("memory", "cpus", "pids")
+
+
+def unenforced_text(name):
+    """"MCP server NAME: its limits --memory ... are not enforced here (WHY)" or None (unenforced_limits)."""
+    missing, why = unenforced_limits()
+    if not missing:
+        return None
+    flags = [LIMIT_FLAGS[key] for key in missing]
+    listed = flags[0] if len(flags) == 1 else ", ".join(flags[:-1]) + " and " + flags[-1]
+    return (f"MCP server {name}: its limit{'s' if len(flags) > 1 else ''} {listed} "
+            f"{'are' if len(flags) > 1 else 'is'} not enforced here ({why}); its /tmp stays bounded")
+
+
 def image_command(plan, engine="podman"):
     """The podman command that runs one instance of an image server (one per connection), from its network PLAN
     (server_network: the definition - an instance's with its limits - and its one network option). The network
@@ -1366,13 +1460,19 @@ def image_command(plan, engine="podman"):
     limits = default_limits(definition)
     flags = [flag.replace(",size=64m,", f",size={limits['tmp']},") if flag.startswith("--tmpfs=/tmp:") else flag
              for flag in RUN_FLAGS]
-    if server_is_pid1(definition):  # no catatonit holding the MCP pipes at /proc/1/fd: the server is PID 1
+    # --init is the host's catatonit as PID 1 (it holds the MCP pipes at /proc/1/fd and reaps the server's children):
+    # not where the server is PID 1 itself ("pid1": "server"), not where the host has none and the image's ENTRYPOINT
+    # is an init of its own; refused where neither is there (image_init).
+    if not image_init(plan.get("server") or "?", definition):
         flags.remove("--init")
     if definition.get("tmp_exec") is True:  # (its signed entry: helpers it runs from /tmp; nosuid, nodev stay)
         flags = [flag.replace(",noexec,", ",exec,") if flag.startswith("--tmpfs=/tmp:") else flag for flag in flags]
-    command = [engine, "run", *flags, f"--pids-limit={limits['pids']}", f"--memory={limits['memory']}"]
-    controllers = launcher().delegated_controllers()
-    if controllers is None or "cpu" in controllers:  # rootless Podman sets it only where the controller is delegated
+    # Only the limits rootless Podman can set here (unenforced_limits): one it cannot set makes it refuse the
+    # container, and every connection ended before the server could answer (the user, 2026-11-23).
+    skipped = unenforced_limits()[0]
+    command = [engine, "run", *flags, *([f"--pids-limit={limits['pids']}"] if "pids" not in skipped else []),
+               *([f"--memory={limits['memory']}"] if "memory" not in skipped else [])]
+    if "cpus" not in skipped:
         # Never more than this host has: Podman refuses that (a catalog's 2 on a machine with one CPU).
         command.append(f"--cpus={min(float(limits['cpus']), float(os.cpu_count() or 1)):g}")
     command.append(network)
@@ -1385,7 +1485,7 @@ def image_command(plan, engine="podman"):
     if definition.get("mounts"):
         command.append("--user=0:0")  # the mounted files belong to you, who are root in rootless podman
         for mount in definition["mounts"]:
-            host = Path(os.path.expanduser(mount["host"])).resolve()
+            host = Path(unbound_host(mount)).resolve()
             command.append(f"--volume={host}:{mount['target']}:{mount.get('mode', 'ro')}")
     egress = plan.get("egress") or {}
     if egress.get("kind") == "hosts":
@@ -1643,6 +1743,9 @@ def remember_catalog_env(found):
                for v in entry.get("env", []) if isinstance(v, dict) and isinstance(v.get("name"), str)
                and ENV_NAME.fullmatch(v["name"])}
         kept = {"signature": state, "env": env}
+        # What it pins now (its image's digest, its rootfs's SHA-256): `mcp list`, `mcp show`, doctor and a start
+        # say when a definition runs another one than its catalog pins (newer_pin; mcp update takes it).
+        kept.update({key: value for key, value in catalog_pin(entry).items() if value})
         # Its network and hosts too: `mcp list` and doctor tell a full server of an allowlist entry to switch to
         # its hosts without reading the catalog (cached_entry).
         if entry.get("network") in ("none", "full", "allowlist"):
@@ -1661,6 +1764,271 @@ def remember_catalog_env(found):
         with contextlib.suppress(OSError):
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             write_private(path, known)
+
+
+# --- a newer image of a catalog server (mcp update; the user, 2026-11-23: "add mcp update") ----------------------------
+#
+# A definition keeps the digest it was added with: the signed catalog pins a newer image of the same server (rebuilt,
+# with new mount points or fixes), and the definition ran the old one until it was added again. Whenever a catalog is
+# read (mcp catalog, add, update, the app's and the web's catalog) what it pins is kept here (remember_catalog_env);
+# `mcp list`, `mcp show`, doctor and a start compare a definition with it without the network (newer_pin), and
+# `mcp update [NAME...]` takes it - its signature checked again, everything else of the definition kept.
+
+def catalog_pin(entry):
+    """{"image": REF@DIGEST or None, "rootfs": SHA-256 or None}: what catalog ENTRY pins now."""
+    digest, image = entry.get("digest"), entry.get("image")
+    rootfs = entry.get("rootfs") if isinstance(entry.get("rootfs"), dict) else {}
+    sha = rootfs.get("sha256")
+    return {"image": f"{image}@{digest}" if isinstance(image, str) and isinstance(digest, str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) and IMAGE_REPOSITORY.fullmatch(image) else None,
+            "rootfs": sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha) else None}
+
+
+IMAGE_REPOSITORY = re.compile(r"[a-z0-9][a-z0-9._-]*(?::[0-9]{1,5})?(?:/[a-z0-9][a-z0-9._-]*)+")
+
+
+def newer_pin(definition, entry=None):
+    """{"image": [ITS, THE CATALOG'S] where they differ, "rootfs": [...] likewise, "signed": whether the catalog's
+    signature verified (by a trusted key)} when the catalog entry DEFINITION was added from (ENTRY: as read now; else
+    as its catalog was last read here, nothing downloaded) pins another image or rootfs than DEFINITION runs; None
+    when it pins the same, is not known, or the definition is no catalog server's. A rootfs only where the definition
+    has one; an image only where it has one (a Bubblewrap-only server's rootfs alone)."""
+    if not isinstance(definition, dict) or not isinstance(definition.get("source"), str):
+        return None
+    if entry is not None:
+        pin, signed = catalog_pin(entry), (entry.get("_signature") or {}).get("state") == "good"
+    else:
+        catalog, source = definition.get("catalog"), definition.get("source")
+        if not isinstance(catalog, str):
+            return None
+        try:
+            known = json.loads(catalog_env_file().read_text())
+        except (OSError, ValueError, RecursionError):
+            return None
+        entries = known.get(catalog) if isinstance(known, dict) else None
+        cached = entries.get(source) if isinstance(entries, dict) else None
+        if not isinstance(cached, dict) or cached.get("signature") not in ("good", "unsigned"):
+            return None
+        pin = {"image": cached.get("image"), "rootfs": cached.get("rootfs")}
+        signed = cached.get("signature") == "good"
+    found = {}
+    if isinstance(definition.get("image"), str) and isinstance(pin.get("image"), str) and \
+            pin["image"] != definition["image"]:
+        found["image"] = [definition["image"], pin["image"]]
+    have = (definition.get("rootfs") or {}).get("sha256") if isinstance(definition.get("rootfs"), dict) else None
+    if isinstance(have, str) and isinstance(pin.get("rootfs"), str) and pin["rootfs"] != have:
+        found["rootfs"] = [have, pin["rootfs"]]
+    return {**found, "signed": signed} if found else None
+
+
+def short_pin(value):
+    """The digest of an image REF@sha256:HEX (or a rootfs's SHA-256) as people compare them: its first 12."""
+    return str(value).rpartition("@sha256:")[2][:12] if "@sha256:" in str(value) else str(value)[:12]
+
+
+def newer_text(name, newer):
+    """What is said of server NAME whose catalog pins NEWER (newer_pin): its image and the newer one, the command."""
+    parts = []
+    if "image" in newer:
+        parts.append(f"image {short_pin(newer['image'][0])} -> {short_pin(newer['image'][1])}")
+    if "rootfs" in newer:
+        parts.append(f"rootfs {short_pin(newer['rootfs'][0])} -> {short_pin(newer['rootfs'][1])}")
+    return (f"MCP server {name}: its {'signed ' if newer['signed'] else 'unsigned '}catalog pins a newer "
+            f"{' and '.join(parts)}: sandbox-ai mcp update {name}" + ("" if newer["signed"] else " --unsigned")
+            + " (its folders, variables, limits and network stay)")
+
+
+def updated_definition(name, old, entry, fetch=None, rootfs=True):
+    """Server NAME's definition OLD with what catalog ENTRY pins now: its image (the catalog's digest), and where it
+    has one its rootfs (fetched, checked against the catalog's SHA-256 and unpacked with ROOTFS; else only named),
+    what the image says of itself (pid1, tmp_exec), an allowlist server's hosts (what the new image reaches), and
+    who signed it. Its folders, variables, limits, network, VPN and tool timeout stay as they are."""
+    new = json.loads(json.dumps(old))
+    pin = catalog_pin(entry)
+    if "image" in old:
+        if not pin["image"]:
+            raise ValueError(f"MCP server {name}: its catalog entry pins no image (not published)")
+        new["image"] = pin["image"]
+        new.pop("built", None)  # (built here once: now the catalog's own image)
+    if "rootfs" in old and pin["rootfs"] and pin["rootfs"] != old["rootfs"].get("sha256"):
+        new["rootfs"] = entry_rootfs(entry, fetch) if rootfs else {**old["rootfs"], "sha256": pin["rootfs"]}
+    for key in ("pid1", "tmp_exec"):
+        new.pop(key, None)
+        if key in entry:
+            new[key] = entry[key]
+    if old.get("network") == "allowlist" and entry.get("network") == "allowlist" and entry.get("hosts"):
+        new["hosts"] = [str(host) for host in entry["hosts"]]
+    return new
+
+
+def update_plan(names=(), fetch=None, catalogs=None, unsigned=False, mode=None):
+    """[{"server", "state" (newer, current, refused, unknown), "image": [old, new] or None, "rootfs": likewise,
+    "signed_by", "hosts": [added, removed] or None, "why", "entry"}] of the servers NAMES of your mcp.json (none: all
+    of them that came from a catalog): each catalog read once (CATALOGS: these instead of each definition's own), its
+    signature checked as `mcp add` checks it - a signed server takes only an entry signed by a trusted key; one added
+    unsigned takes an unsigned entry with UNSIGNED, never in the security modes high and paranoid (MODE)."""
+    _path, document = read_config()
+    wanted = list(dict.fromkeys(names)) or sorted(document)
+    unknown = [name for name in wanted if name not in document]
+    if unknown:
+        raise ValueError(f"no MCP server {', '.join(unknown)} in {config_file()} (sandbox-ai mcp list shows yours; a "
+                         "built-in one or a team's board has no catalog image to update)")
+    servers = validated({name: document[name] for name in wanted}, config_file())
+    read = {}
+
+    def entries_of(source):
+        if source not in read:
+            read[source] = catalog_entries(catalogs or [("c0", source)], fetch)
+        return read[source]
+    rows = []
+    for name in wanted:
+        definition = servers[name]
+        row = {"server": name, "state": "unknown", "image": None, "rootfs": None, "signed_by": None, "hosts": None,
+               "why": "", "entry": None}
+        rows.append(row)
+        source, catalog = definition.get("source"), definition.get("catalog")
+        if not ("image" in definition or "rootfs" in definition) or not isinstance(source, str):
+            row["why"] = "not a catalog server (its own definition: nothing to take from a catalog)"
+            continue
+        if not isinstance(catalog, str) and not catalogs:
+            row["why"] = "its catalog is not recorded (added before 0.1.78): add it again, or give --catalog"
+            continue
+        entries, problems = entries_of(catalog if isinstance(catalog, str) else "")
+        bare = source.rpartition(":")[2]
+        matches = [entry for _prefix, entry in entries if entry.get("id") == source or entry.get("name") == bare]
+        if not matches:
+            row["why"] = f"its catalog entry {source} cannot be read now" + (f" ({'; '.join(problems)})"
+                                                                             if problems else "")
+            continue
+        entry = matches[0]
+        row["entry"] = entry
+        signature = entry.get("_signature") or {"state": "unsigned", "reason": "no signature was read"}
+        if signature["state"] == "bad":
+            row.update(state="refused", why=f"its catalog's signature does not verify ({signature['reason']}): "
+                                            "nothing of it is taken")
+            continue
+        if signature["state"] != "good":
+            if definition.get("signed_by"):
+                row.update(state="refused", why=f"it was added from a signed catalog, and the catalog read now is not "
+                                                f"signed by a trusted key ({signature['reason']})")
+                continue
+            if mode in ("high", "paranoid"):
+                row.update(state="refused", why=f"its catalog is not signed ({signature['reason']}): the security "
+                                                f"mode {mode} takes nothing unsigned (the mode medium does, with "
+                                                "--unsigned)")
+                continue
+            if not unsigned:
+                row.update(state="refused", why=f"its catalog is not signed by a trusted key ({signature['reason']}): "
+                                                "--unsigned takes its image anyway, as it was added")
+                continue
+        newer = newer_pin(definition, entry)
+        row["signed_by"] = signature.get("signer") if signature["state"] == "good" else None
+        if newer is None:
+            row.update(state="current", why="it runs the image its catalog pins")
+            continue
+        row.update(state="newer", image=newer.get("image"), rootfs=newer.get("rootfs"))
+        if definition.get("network") == "allowlist" and entry.get("network") == "allowlist":
+            have, now = set(definition.get("hosts") or []), [str(h) for h in entry.get("hosts") or []]
+            if set(now) != have:
+                row["hosts"] = [sorted(set(now) - have), sorted(have - set(now))]
+    return rows
+
+
+def plan_line(row):
+    """One line of `mcp update` (--check) for ROW of update_plan."""
+    name = row["server"]
+    if row["state"] != "newer":
+        return f"  {name}: {row['state']} - {row['why']}"
+    parts = []
+    if row["image"]:
+        parts.append(f"image {short_pin(row['image'][0])} -> {short_pin(row['image'][1])} ({row['image'][1]})")
+    if row["rootfs"]:
+        parts.append(f"rootfs {short_pin(row['rootfs'][0])} -> {short_pin(row['rootfs'][1])}")
+    said = f"  {name}: " + "; ".join(parts) + (f"; signed by {row['signed_by'][:16]}" if row["signed_by"]
+                                               else "; UNSIGNED (--unsigned)")
+    if row["hosts"]:
+        added, removed = row["hosts"]
+        said += "; its hosts change: " + ", ".join([*(f"+{h}" for h in added), *(f"-{h}" for h in removed)])
+    return said
+
+
+def update_servers(names=(), check=False, yes=False, pull=True, unsigned=False, mode=None, stop_running=False,
+                   out=print, ask=None, fetch=None, catalogs=None):
+    """sandbox-ai mcp update [NAME...]: the servers of yours whose catalog pins a newer image (update_plan) get it -
+    each image pulled by its digest (PULL), a rootfs fetched and checked - with everything else of their definition
+    kept; asked first (ASK(question) -> bool; None: on a terminal, else refused without YES). CHECK: only said. Their
+    running instances run on as they were until stopped (STOP_RUNNING: stopped now); a start meanwhile gets an
+    instance of its own with the new image. {"servers": [row without its entry], "updated": [names], "stopped": [...]}"""
+    rows = update_plan(names, fetch=fetch, catalogs=catalogs, unsigned=unsigned, mode=mode)
+    shown = [{key: value for key, value in row.items() if key != "entry"} for row in rows]
+    result = {"servers": shown, "updated": [], "stopped": []}
+    newer = [row for row in rows if row["state"] == "newer"]
+    for row in rows:
+        if row["state"] != "newer" and (names or row["state"] in ("refused",)):
+            out(plan_line(row))
+    if not newer:
+        out("sandbox-ai mcp: " + ("every server of yours runs the image its catalog pins" if not names else
+                                  "nothing to update"))
+        return result
+    out(f"sandbox-ai mcp: {len(newer)} server{'s' if len(newer) > 1 else ''} of yours with a newer image of its "
+        "catalog (their folders, variables, limits and network stay):")
+    for row in newer:
+        out(plan_line(row))
+    if check:
+        return result
+    if not yes:
+        if ask is None and not sys.stdin.isatty():
+            raise ValueError("nothing updated: asked first on a terminal; give --yes to update without the question "
+                             "(sandbox-ai mcp update --check lists what would change)")
+        question = f"Update {', '.join(row['server'] for row in newer)} now (each image pulled by its digest)?"
+        if not (ask or launcher_ask)(question):
+            out("sandbox-ai mcp: nothing updated")
+            return result
+    for row in newer:
+        name = row["server"]
+        with config_lock():
+            old = validated({name: read_config()[1][name]}, config_file())[name]
+        new = updated_definition(name, old, row["entry"], fetch)
+        new["signed_by"] = row["signed_by"] if row["signed_by"] else None
+        new = validated_image(new, f"MCP server {name}")
+        if pull and "image" in new and new["image"] != old.get("image"):
+            check_pull_room(name, row["entry"])
+            pull_image(new["image"], name, out)
+        write_definition(name, new)
+        LOG.info("mcp", f"{name} updated: {old.get('image')} -> {new.get('image')}"
+                        + (f", rootfs {new['rootfs']['sha256'][:12]}" if "rootfs" in new else ""))
+        result["updated"].append(name)
+        running = instances(name)
+        if running and stop_running:
+            for instance in running:
+                stop(instance)
+            result["stopped"] += running
+            out(f"sandbox-ai mcp: {name} updated; stopped {', '.join(running)}: the next start that uses it starts "
+                "the new image")
+        elif running:
+            out(f"sandbox-ai mcp: {name} updated; it runs ({', '.join(running)}) with the old image until it is "
+                f"stopped (sandbox-ai mcp stop {name}); a start meanwhile gets an instance of the new one")
+        else:
+            out(f"sandbox-ai mcp: {name} updated ({short_pin(new.get('image') or new['rootfs']['sha256'])})")
+    return result
+
+
+def configured_mode():
+    """The security mode of your defaults (defaults.json "mode"), else medium."""
+    with contextlib.suppress(OSError, ValueError, RecursionError, AttributeError):
+        mode = json.loads(Path(launcher().defaults_file()).read_text()).get("mode")
+        if mode in ("lax", "low", "medium", "high", "paranoid"):
+            return mode
+    return "medium"
+
+
+def launcher_ask(question):
+    """QUESTION on the terminal, yes or no (no by default)."""
+    try:
+        answer = input(f"{question} [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes", "j", "ja")
 
 
 def cached_entry(definition):
@@ -1758,12 +2126,17 @@ def find_entry(entries, name):
     if not matches:
         raise ValueError(f"no catalog entry {name}; see sandbox-ai mcp catalog")
     if len(matches) > 1:
-        raise ValueError(f"{name} is in several catalogs: {', '.join(p + ':' + bare for p, _ in matches)}")
+        each = ", ".join(f"sandbox-ai mcp add {p}:{bare} for the one of {catalog_label(e.get('_catalog') or p)}"
+                         for p, e in matches)
+        raise ValueError(f"{name} is in several catalogs: {', '.join(p + ':' + bare for p, _ in matches)}; name the "
+                         f"one you want - {each}")
     return matches[0][1]
 
 
 MOUNT_HELP = ("--mount TARGET=HOST[:ro|rw]: TARGET is the folder inside the server's container, HOST the folder on "
-              "this machine (read-only unless :rw; a writable one that is not there yet is created)")
+              "this machine (read-only unless :rw; a writable one that is not there yet is created; HOST default: the "
+              "folder's default - /work the workspace of the start that uses the server, any other a folder of the "
+              "server's own)")
 START_MOUNT_HELP = ("--mcp-mount NAME:TARGET=HOST[:ro|rw]: TARGET is the folder inside the server NAME's container, HOST "
                     "the folder on this machine (read-only unless :rw; a writable one that is not there yet is created)")
 
@@ -1836,6 +2209,251 @@ def sandbox_path_hint(value, path):
                if str(value).endswith(":rw") else ""))
 
 
+# The folders every server's image has for mounts (the user, 2026-11-22): a HOST naming one of them was meant as a
+# folder of the container.
+CONTAINER_FOLDERS = ("/work", "/work_ro", "/work_rw", "/app", "/srv")
+
+
+def container_side_hint(value, host):
+    """A sentence for --mount VALUE whose HOST (the right side) is one of CONTAINER_FOLDERS, the folders of the server's
+    container: the right side is a folder of this machine; '' otherwise."""
+    folder = os.path.normpath(host or "")
+    if folder not in CONTAINER_FOLDERS:
+        return ""
+    target = str(value).partition("=")[0]
+    return (f" {folder} reads like a folder of the server's container, but the right side of = is a folder on "
+            f"{this_machine()}, the left side ({launcher().printable(target)}) the folder in the container: to fill the container's "
+            f"{folder}, give --mount {folder}=/a/folder/here" + (":rw" if str(value).endswith(":rw") else "") + ".")
+
+
+# --- folder defaults (user 2026-11-22: "alle mcp server sollten bzgl. /work pfad defaults haben, sodass sie simpel und
+# fast hinzugefügt werden können"): `mcp add NAME` needs no --mount. A folder the catalog entry declares and --mount
+# leaves out gets its default, with the mode the entry declares (declared_mode: read-only unless it says the server
+# writes there):
+#   /work           WORKSPACE_HOST ("@workspace" in the definition, "the start's workspace"): the first workspace of the
+#                   start that uses the server, bound at each start (start_folders) in an instance of that workspace's
+#                   own (instance_for: NAME.HASH of the folder). A running server is shared by its starts, so one bound to
+#                   a workspace serves only starts of that very workspace: one project's files never reach another
+#                   project's agent, and NAME itself never runs bound (image_command refuses the marker).
+#   any other one   a folder of the server's own, own_folders_root()/NAME/TARGET under sandbox-ai's data directory, made
+#                   0700 at add (make_own_folder: never through a symbolic link; its warning of sandbox-ai's own folders
+#                   is not said of it). A server bound to the start's workspace mounts each workspace's own instead
+#                   (workspace_folder: .workspaces/KEY/TARGET below it): its instances never share one (security
+#                   review 2026-11-22: binwalk's /out held one project's extracted files for another's agent).
+# --mount TARGET=HOST wins; --mount TARGET=default (add, set) is the default again.
+
+WORKSPACE_HOST = "@workspace"
+DEFAULT_HOST = "default"
+WORKSPACE_TARGET = "/work"
+
+
+def own_folders_root():
+    """Where the servers' own folders are: sandbox-ai's data directory's mcp-folders/ (one folder per server below)."""
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "sandbox-ai" / "mcp-folders"
+
+
+def folder_slug(target):
+    """The name of the own folder for TARGET (/out: out; /a/b: a__b; never a dot file's name)."""
+    slug = str(target).strip("/").replace("/", "__")
+    return "_" + slug if not slug or slug.startswith(".") else slug
+
+
+def own_folder(name, target):
+    """The folder of server NAME's own for its TARGET (its default for a folder other than /work)."""
+    return own_folders_root() / server_of(name) / folder_slug(target)
+
+
+WORKSPACES_FOLDER = ".workspaces"  # below a server's own folders: one folder per workspace (never a slug: no dot)
+
+
+def workspace_key(workspace):
+    """The name of WORKSPACE's folders below a server's own (its resolved path's digest)."""
+    return hashlib.sha256(str(workspace).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def workspace_folder(name, target, workspace):
+    """Server NAME's own folder for TARGET as an instance bound to the start's WORKSPACE has it: one of that
+    workspace's own (start_folders) - never the one the instances of other workspaces write."""
+    return own_folders_root() / server_of(name) / WORKSPACES_FOLDER / workspace_key(workspace) / folder_slug(target)
+
+
+def is_own_folder(name, target, host):
+    """Whether HOST is server NAME's own folder for TARGET (own_folder)."""
+    return isinstance(host, str) and host != WORKSPACE_HOST and \
+        os.path.normpath(os.path.expanduser(host)) == os.path.normpath(own_folder(name, target))
+
+
+def is_workspace_folder(name, target, host):
+    """Whether HOST is server NAME's own folder for TARGET as an instance bound to a workspace has it
+    (workspace_folder, of whichever workspace)."""
+    if not isinstance(host, str) or host == WORKSPACE_HOST:
+        return False
+    path = Path(os.path.normpath(os.path.expanduser(host)))
+    key = path.parent.name
+    return path.name == folder_slug(target) and len(key) == 16 and all(c in "0123456789abcdef" for c in key) \
+        and path.parent.parent == Path(os.path.normpath(own_folders_root() / server_of(name) / WORKSPACES_FOLDER))
+
+
+def make_own_folder(name, target, out=None, create=True, workspace=None):
+    """Server NAME's own folder for TARGET (WORKSPACE: the one of that workspace, workspace_folder), made 0700 with
+    CREATE (OUT says so; else only checked): each folder from own_folders_root() down opened without following a
+    symbolic link (O_NOFOLLOW) and checked to be a folder of yours, so that nothing is made behind a link planted
+    there. sandbox-ai's data directory itself is taken as it is (it may be a link of yours to another disk).
+    ValueError says what is in the way."""
+    path = own_folder(name, target) if workspace is None else workspace_folder(name, target, workspace)
+    base = own_folders_root().parent
+    parts = [own_folders_root().name, server_of(name),
+             *([WORKSPACES_FOLDER, workspace_key(workspace)] if workspace is not None else []), folder_slug(target)]
+    if create:
+        try:
+            base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(f"MCP server {name}: its own folder for {target} cannot be made ({base}: "
+                             f"{exc.strerror or exc})") from None
+    elif not base.is_dir():
+        return path  # (made at add: nothing of it there yet, nothing in the way)
+    made = False
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    owner = os.fstat(fd).st_uid  # (whose sandbox-ai's data directory is: each folder below is that user's too)
+    try:
+        here = base
+        for part in parts:
+            here = here / part
+            made = False
+            if create:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                    made = True
+                except FileExistsError:
+                    pass
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return path  # (only checked: the rest is made at add)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError(f"MCP server {name}: its own folder for {target} is not made: {here} is a "
+                                     "symbolic link or no folder (never followed); remove it, or give the folder: "
+                                     f"--mount {target}=FOLDER") from None
+                raise ValueError(f"MCP server {name}: its own folder for {target}: {here}: {exc.strerror or exc}") \
+                    from None
+            os.close(fd)
+            fd = child
+            if os.fstat(fd).st_uid != owner:
+                raise ValueError(f"MCP server {name}: its own folder for {target} is not made: {here} belongs to "
+                                 f"another user than {base}; give the folder: --mount {target}=FOLDER")
+            if made:
+                os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+    if made:
+        (out or print)(f"sandbox-ai mcp: created {path} (the folder of {name}'s own for {target})")
+    return path
+
+
+def declared_mode(entry, mount):
+    """The mode catalog ENTRY declares for its folder MOUNT: its "mode"; else what its words say - the --mount TARGET=
+    DIR:ro|rw they show, "writable" in its description, "writable TARGET" in the entry's - else read-only."""
+    if mount.get("mode") in ("ro", "rw"):
+        return mount["mode"]
+    target = re.escape(str(mount.get("target") or ""))
+    own_words, entry_words = str(mount.get("description") or ""), str(entry.get("description") or "")
+    for text in (own_words, entry_words):
+        shown = re.search(r"--mount\s+" + target + r"=[^\s:;,)]*:(ro|rw)\b", text)
+        if shown:
+            return shown.group(1)
+    if re.search(r"\bwritable\b", own_words, re.IGNORECASE) or \
+            re.search(r"\bwritable\s+" + target + r"(?![\w/.-])", entry_words, re.IGNORECASE):
+        return "rw"
+    return "ro"
+
+
+def default_mount(entry, name, mount):
+    """{target, host, mode}: the default of catalog ENTRY's folder MOUNT for the server NAME (see above)."""
+    target = mount["target"]
+    host = WORKSPACE_HOST if target == WORKSPACE_TARGET else str(own_folder(name, target))
+    return {"target": target, "host": host, "mode": declared_mode(entry, mount)}
+
+
+def folder_default(name, mount):
+    """"workspace", "own" or None: what the folder MOUNT of server NAME is."""
+    if mount.get("host") == WORKSPACE_HOST:
+        return "workspace"
+    return "own" if is_own_folder(name, mount.get("target"), mount.get("host")) else None
+
+
+def folders_of(name, definition):
+    """[{target, host, mode, default, shown}] of server NAME's folders: SHOWN as people read it ("the start's
+    workspace (read-only)", "its own folder PATH (writable)", "PATH (read-only)")."""
+    found = []
+    for mount in definition.get("mounts", []) if isinstance(definition.get("mounts"), list) else []:
+        if not isinstance(mount, dict):
+            continue
+        mode, default = mount.get("mode", "ro"), folder_default(name, mount)
+        where = ("the start's workspace" if default == "workspace" else
+                 f"its own folder {mount.get('host')}" if default == "own" else str(mount.get("host")))
+        found.append({"target": mount.get("target"), "host": mount.get("host"), "mode": mode, "default": default,
+                      "shown": f"{where} ({'writable' if mode == 'rw' else 'read-only'})"})
+    return found
+
+
+def folders_text(name, definition):
+    """"/work: the start's workspace (read-only); /out: its own folder PATH (writable)", "" without folders."""
+    return "; ".join(f"{folder['target']}: {folder['shown']}" for folder in folders_of(name, definition))
+
+
+def start_workspace(a):
+    """The first workspace of the start A on this machine, resolved (what its agent sees at /work): a.mcp_workspace
+    where it was set (None: the start has none - `mcp start NAME` on its own), else a.workspaces[0]; None for a
+    remote one not mounted yet or a relative path."""
+    if hasattr(a, "mcp_workspace"):
+        given = a.mcp_workspace
+        return given if isinstance(given, str) and os.path.isabs(given) else None
+    workspaces = getattr(a, "workspaces", None) or []
+    first = workspaces[0] if workspaces else getattr(a, "workspace", None)
+    if not isinstance(first, str) or "://" in first:
+        return None
+    path = os.path.expanduser(first)
+    if not os.path.isabs(path):
+        return None
+    try:
+        return str(Path(path).resolve())
+    except (OSError, RuntimeError):
+        return None
+
+
+def start_folders(a, name, definition, mounts=None):
+    """{target: {host, mode}}: the folders the start A gives server NAME (DEFINITION) - MOUNTS (its --mcp-mount for
+    NAME; None: none) and each folder the definition binds to the start's workspace (WORKSPACE_HOST) that MOUNTS does
+    not name: A's first workspace (start_workspace), in the definition's mode. A server bound so runs one instance per
+    workspace, and its own folders (own_folder) are that workspace's too (workspace_folder): what it writes for one
+    project never reaches another project's start through them. MOUNTS where nothing is bound. ValueError where a
+    folder is bound and A is no start with a workspace."""
+    bound = [mount["target"] for mount in definition.get("mounts", []) if isinstance(mount, dict)
+             and mount.get("host") == WORKSPACE_HOST and mount.get("target") not in (mounts or {})]
+    if not bound:
+        return mounts
+    workspace = start_workspace(a)
+    if workspace is None:
+        raise ValueError(f"MCP server {name} works on the workspace of the start that uses it ({', '.join(bound)}: "
+                         "the start's workspace), so it starts with such a start: a start with --mcp "
+                         f"{name}, or sandbox-ai mcp start {name} --for START; for a folder of its own: sandbox-ai mcp "
+                         f"set {name} --mount {bound[0]}=FOLDER")
+    own = {mount["target"]: {"host": str(workspace_folder(name, mount["target"], workspace)), "mode": None}
+           for mount in definition.get("mounts", []) if isinstance(mount, dict)
+           and mount.get("target") not in (mounts or {}) and is_own_folder(name, mount.get("target"), mount.get("host"))}
+    return {**(mounts or {}), **own, **{target: {"host": workspace, "mode": None} for target in bound}}
+
+
+def make_workspace_folders(name, a, mounts):
+    """The own folders of the workspace of start A among MOUNTS (start_folders' for server NAME), made 0700, never
+    through a link (make_own_folder) - before its instance starts."""
+    workspace = start_workspace(a)
+    for target, given in (mounts or {}).items() if workspace else ():
+        if given.get("host") == str(workspace_folder(name, target, workspace)):
+            make_own_folder(name, target, out=lambda line: None, workspace=workspace)
+
+
 def mount_host(value, host, mode, create=False, out=None, option="--mount"):
     """The folder HOST (of --mount VALUE) on this machine, resolved: a folder that is there; for MODE rw one that is
     not there yet is created with CREATE (0700, its parents as needed; OUT says so), else only checked to be creatable.
@@ -1852,13 +2470,15 @@ def mount_host(value, host, mode, create=False, out=None, option="--mount"):
     if mode != "rw":
         raise ValueError(f"{option} {value}: the folder {path} is not there on {this_machine()}; a read-only folder "
                          f"must be there (a writable one, :rw, is created)." + (sandbox_path_hint(value, path)
-                                                                                or f" {help_text}"))
+                                                                                or container_side_hint(value, host)
+                                                                                + f" {help_text}"))
     parent = path.parent
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
     if not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
         raise ValueError(f"{option} {value}: {path} is not there on {this_machine()} and cannot be created ({parent} is "
-                         "not a folder you can write)." + sandbox_path_hint(value, path))
+                         "not a folder you can write)." + (sandbox_path_hint(value, path)
+                                                           or container_side_hint(value, host) + f" {help_text}"))
     if create:
         try:
             path.mkdir(mode=0o700, parents=True)
@@ -1868,25 +2488,40 @@ def mount_host(value, host, mode, create=False, out=None, option="--mount"):
     return path
 
 
-def entry_mounts(entry, mounts, create=False, out=None):
-    """[{target, host, mode}] of the --mount TARGET=HOST[:ro|rw] values MOUNTS for catalog ENTRY: only the targets it
-    takes, each once, every required one; the host folders checked (mount_host: a writable one created with CREATE)."""
+def entry_mounts(entry, mounts, create=False, out=None, local=None, defaults=True):
+    """[{target, host, mode}] of the --mount TARGET=HOST[:ro|rw] values MOUNTS for catalog ENTRY (as the server LOCAL,
+    default: the entry's name): only the targets it takes, each once; the host folders checked (mount_host: a writable
+    one created with CREATE); HOST default: that folder's default (default_mount), @workspace: the start's workspace.
+    With DEFAULTS every folder the entry declares and MOUNTS leaves out gets its default (in the entry's order);
+    without, a required one left out is refused (mcp set --no-mounts)."""
+    local = local or entry.get("name")
     known = {m.get("target"): m for m in entry.get("mounts", []) if isinstance(m, dict)}
     given = {}
     for value in mounts:
         target, sep, rest = value.partition("=")
-        host, _, mode = rest.rpartition(":") if rest.endswith((":ro", ":rw")) else (rest, "", "ro")
+        explicit = rest.endswith((":ro", ":rw"))
+        host, _, mode = rest.rpartition(":") if explicit else (rest, "", "ro")
         if not sep or target not in known:
             raise ValueError(f"{MOUNT_HELP}. {entry['name']} takes "
                              + (", ".join(t for t in known if t) or "no folders") + f", not {shown_value(value)}")
         if target in given:
             raise ValueError(f"--mount {target}: given twice")
+        if host in (DEFAULT_HOST, WORKSPACE_HOST):
+            folder = default_mount(entry, local, known[target]) if host == DEFAULT_HOST else \
+                {"target": target, "host": WORKSPACE_HOST, "mode": declared_mode(entry, known[target])}
+            given[target] = {**folder, "mode": mode if explicit else folder["mode"]}
+            continue
         path = mount_host(value, host, mode or "ro", create, out)
         given[target] = {"target": target, "host": str(path), "mode": mode or "ro"}
+    if defaults:
+        for target, mount in known.items():
+            if target not in given and isinstance(target, str) and MOUNT_TARGET.fullmatch(target) \
+                    and ".." not in target.split("/"):
+                given[target] = default_mount(entry, local, mount)
     missing = [t for t, m in known.items() if m.get("required") and t not in given]
     if missing:
         raise ValueError(f"{entry['name']} needs --mount {missing[0]}=HOST (HOST: a folder on this machine)")
-    return list(given.values())
+    return [given[target] for target in known if target in given]
 
 
 def recommended_limits(entry):
@@ -1905,11 +2540,12 @@ def cpus_number(text):
 
 
 def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, pids=None, vpn=None, cpus=None,
-                          create=False, out=None, tmp=None, allow_private=(), allow_tcp=()):
+                          create=False, out=None, tmp=None, allow_private=(), allow_tcp=(), local=None):
     """A definition for ENTRY with the folders, variables and network given on the command line; the limits given, else
     those the entry recommends (recommended_limits), else none (the defaults). CREATE: a writable folder that is not
     there yet is created (mount_host). NETWORK: the entry's own unless given (an allowlist entry: only its hosts);
-    ALLOW_PRIVATE, ALLOW_TCP: parts of your network opened to it (--allow-private, --allow-tcp)."""
+    ALLOW_PRIVATE, ALLOW_TCP: parts of your network opened to it (--allow-private, --allow-tcp). LOCAL: the server's
+    name (its own folders' names; default: the entry's)."""
     digest, image = entry.get("digest"), entry.get("image")
     if entry.get("kind") != "oci" or not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError(f"{entry.get('name')}: the catalog has no digest for it yet (not published): sandbox-ai mcp "
@@ -1929,7 +2565,7 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
     # --env NAME (required as the entry says, else optional), NAME=VALUE (never for a secret), NAME@SECRET.
     variables = entry_variables(entry, env)
     definition = {"image": f"{image}@{digest}", "network": network,
-                  "mounts": entry_mounts(entry, mounts, create, out), **variables,
+                  "mounts": entry_mounts(entry, mounts, create, out, local=local), **variables,
                   "description": str(entry.get("title") or entry.get("name")),
                   "source": str(entry.get("id") or entry.get("name"))}
     if "memory" in limits:
@@ -2072,8 +2708,11 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     backend = backend or ("podman" if shutil.which("podman") or not entry.get("rootfs") else "bwrap")
     if backend not in ("podman", "bwrap", "both"):
         raise ValueError("--backend is podman, bwrap or both")
+    local = local or entry["name"]
+    if not re.fullmatch(MCP_NAME_PATTERN, local) or local in BUILTIN:
+        raise ValueError(f"invalid or reserved server name: {local}")
     definition = {**definition_from_entry(entry, mounts, env, network, memory, pids, vpn, cpus=cpus, tmp=tmp,
-                                          allow_private=allow_private, allow_tcp=allow_tcp),
+                                          allow_private=allow_private, allow_tcp=allow_tcp, local=local),
                   **signed,
                   **({"catalog": entry["_catalog"]} if isinstance(entry.get("_catalog"), str) else {}),
                   **({"built": dict(built["record"])} if built is not None else {})}
@@ -2084,9 +2723,6 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     if backend == "bwrap":
         definition.pop("image")
         pull = False
-    local = local or entry["name"]
-    if not re.fullmatch(MCP_NAME_PATTERN, local) or local in BUILTIN:
-        raise ValueError(f"invalid or reserved server name: {local}")
     for line in network_said(local, definition, entry, network):
         out(line)
     recommended = {key: value for key, value in recommended_limits(entry).items()
@@ -2097,10 +2733,11 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     if "image" in definition or "rootfs" in definition:  # (a folder you chose with a risk: said, then added)
         check_image_mounts(local, definition, remember=False, warn=lambda line: out(f"sandbox-ai mcp: warning: {line}"))
     checked_behind_tor(local, definition, vpn, out, entry)
+    create_mounts(definition, out, local, create=False)  # (its own folders: nothing in their way, before the pull)
     if pull:
         check_pull_room(local, entry)
         pull_image(definition["image"], local, out)
-    create_mounts(definition, out)
+    create_mounts(definition, out, local)
     write_definition(local, definition)
     for line in unsigned_note:
         out(line)
@@ -2109,6 +2746,11 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
     if built is not None:
         form += ", built here, not signed"
     LOG.info("mcp", f"{local} added ({form}; catalog {definition.get('catalog') or 'none'})")
+    if definition.get("mounts"):
+        out(f"sandbox-ai mcp: {local}'s folders (in its container: on this machine): {folders_text(local, definition)}"
+            + (" - the start's workspace is bound at each start, in an instance of that workspace's own"
+               if any(m["host"] == WORKSPACE_HOST for m in definition["mounts"]) else "")
+            + f" (sandbox-ai mcp set {local} --mount TARGET=FOLDER chooses another; TARGET=default the default)")
     out(f"sandbox-ai mcp: {local} added ({form}); use it with --mcp {local}")
     return definition
 
@@ -2131,10 +2773,16 @@ def network_said(local, definition, entry=None, given=None):
     return lines
 
 
-def create_mounts(definition, out=print):
-    """The writable host folders of DEFINITION that are not there yet, created (mount_host)."""
+def create_mounts(definition, out=print, name=None, create=True):
+    """The writable host folders of DEFINITION that are not there yet, created (mount_host); the folders of server
+    NAME's own (own_folder) made 0700 whatever their mode, never through a link (make_own_folder; without CREATE only
+    checked); the start's workspace is none of them (bound at each start)."""
     for mount in definition.get("mounts", []):
-        if mount.get("mode") == "rw" and not Path(mount["host"]).exists():
+        if mount["host"] == WORKSPACE_HOST:
+            continue
+        if name and is_own_folder(name, mount["target"], mount["host"]):
+            make_own_folder(name, mount["target"], out, create=create)
+        elif create and mount.get("mode") == "rw" and not Path(mount["host"]).exists():
             mount_host(f"{mount['target']}={mount['host']}:rw", mount["host"], "rw", create=True, out=out)
 
 
@@ -2274,7 +2922,8 @@ def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
     if "mounts" in changes or "env" in changes:
         entry = entry or catalog_entry_of(name, old, fetch, catalogs)
         if "mounts" in changes:
-            new["mounts"] = entry_mounts(entry, changes["mounts"])
+            # Those given; every other one its default (--no-mounts, none given: no folder at all).
+            new["mounts"] = entry_mounts(entry, changes["mounts"], local=name, defaults=bool(changes["mounts"]))
         if "env" in changes:
             # All of its variables (as add takes them): NAME, NAME=VALUE (never for a secret one), NAME@SECRET.
             new = {**{key: value for key, value in new.items() if key not in ENV_KEYS},
@@ -2374,11 +3023,13 @@ def set_server(name, changes, stop_running=False, out=print, fetch=None, catalog
             out(line)
     if "mounts" in changed and ("image" in new or "rootfs" in new):  # (a folder you chose with a risk: said, set)
         check_image_mounts(name, new, remember=False, warn=lambda line: out(f"sandbox-ai mcp: warning: {line}"))
-    create_mounts(new, out)
+    create_mounts(new, out, name)
     write_definition(name, new)
     running = instances(name)
     result["running"] = running
     text = f"MCP server {name}: {', '.join(changed)} set; limits now {limits_text(default_limits(new))}"
+    if "mounts" in changed:
+        text += f"; folders now {folders_text(name, new) or 'none'}"
     if running and stop_running:
         for instance in running:
             stop(instance)
@@ -3147,6 +3798,7 @@ def start_definition(name, a, servers=None):
     if name not in servers:
         raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
     limits, mounts = start_change(a, name)
+    mounts = start_folders(a, name, servers[name], mounts)
     instance, definition = instance_for(name, servers[name], limits, mounts, start_env(a).get(name))
     gateway = launcher().mcp_gateway(a, name, None)  # (only its rules count for the digest, not where it asks)
     digest = definition_digest({**definition, "gateway": gateway["rules"]} if gateway else definition,
@@ -3213,7 +3865,34 @@ def image_present(image, run=subprocess.run):
         return None  # (its line in launcher.log says why)
 
 
-def start_problems(a, names, servers=None, present=None):
+def gone_image_fix(name, image, signed=False, project=False, built=False, mode=None):
+    """The fix (fixes.py) for the image IMAGE of the MCP server NAME that Podman no longer has. One pinned by its
+    digest is pulled again by that digest: SIGNED (added from a catalog whose signature verified, in your mcp.json) -
+    the very image that was added, its signature checked then, offered in every mode; otherwise (added unsigned, or
+    PROJECT: a project file names the server, whatever it says of a signature) UNSIGNED - offered, but in the modes
+    high and paranoid only shown with its command (fixes.STRICT: never pulled by an offer or --fix there). One BUILT
+    here, or named by a tag, is shown with how it is added again."""
+    spec = importlib.util.spec_from_file_location("sandbox_ai_fixes_for_mcp", HERE / "fixes.py")
+    fixes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixes)
+    missing = f"the image of the MCP server {name} ({image}) is not in Podman's store"
+    if re.search(r"@sha256:[0-9a-f]{64}$", str(image)) and not built:
+        pull = [["podman", "pull", str(image)]]
+        if signed and not project:
+            return fixes.fix("mcp-image", name, missing, "pull it again by its digest (the very image that was added "
+                             "from a signed catalog; its signature was checked then)", pull, duration="a download")
+        whose = "a project file names it" if project else "the image that was added unsigned"
+        manual = (f"not offered in the security mode {mode}: nobody vouched for this image ({whose}); pull it "
+                  f"yourself if you mean it, or start in the mode {fixes.LAXER}" if mode in fixes.STRICT else "")
+        return fixes.fix("mcp-image", name, missing, f"pull it again by its digest ({whose}: nobody vouched for it)",
+                         pull, duration="a download", unsigned=True, manual=manual)
+    return fixes.fix("mcp-image", name, missing, "add it again",
+                     [["sandbox-ai", "mcp", "remove", name], ["sandbox-ai", "mcp", "add", name]],
+                     manual="it was built here or named by a tag: which image it is again is yours to say (sandbox-ai "
+                            "mcp add NAME --build builds one its catalog has no signed image of)")
+
+
+def start_problems(a, names, servers=None, present=None, fixes=None):
     """([problem], {name: instance}, [note]) of the --mcp servers NAMES of the start A, each checked before anything
     is made or started, every problem with its fix and all of them at once (a start used to fail on the first one,
     late, after its workspace and session were made - and again on the next): what the start asks for them
@@ -3241,7 +3920,8 @@ def start_problems(a, names, servers=None, present=None):
         own_problems = []
         try:
             _instance, definition = instance_for(name, servers[name], wanted["limits"].get(name),
-                                                 wanted["mounts"].get(name), wanted["env"].get(name))
+                                                 start_folders(a, name, servers[name], wanted["mounts"].get(name)),
+                                                 wanted["env"].get(name))
             if wanted["mounts"].get(name):
                 check_start_mounts(a, {name: servers[name]})
         except ValueError as exc:
@@ -3270,10 +3950,23 @@ def start_problems(a, names, servers=None, present=None):
             own_problems += run_variables(name, definition, notes=notes)[1]
             engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) \
                 else "podman"
+            if engine == "podman" and present(definition["image"]) is not False:
+                try:  # (Podman's --init needs the host's catatonit: said here, before anything is started)
+                    image_init(name, definition)
+                except ValueError as exc:
+                    own_problems.append(str(exc))
             if engine == "podman" and present(definition["image"]) is False:
                 own_problems.append(f"MCP server {name}: its image {definition['image']} is not there (its containers "
                                     f"are not pulled at a start): podman pull {definition['image']}, or add it again "
                                     f"(sandbox-ai mcp add)")
+                if fixes is not None:  # (what makes it: fixes.py - offered with everything else the start lacks)
+                    # Signed only as your mcp.json has it from a verified catalog: a project file's server of the name
+                    # (it wins over yours) is someone else's word, whatever "signed_by" it claims.
+                    project = getattr(a, "project_document", None)
+                    named = name in ((project.get("mcp_servers") or {}) if isinstance(project, dict) else {})
+                    fixes.append(gone_image_fix(name, definition["image"], signed=origin(name, servers[name])["signed"]
+                                                is True, project=named, built="built" in servers[name],
+                                                mode=getattr(a, "mode", None)))
             elif engine == "bwrap" and not Path(str(definition["rootfs"].get("path", ""))).is_dir():
                 own_problems.append(f"MCP server {name}: its rootfs is gone ({definition['rootfs'].get('path')}); "
                                     "add it again: sandbox-ai mcp add ... --backend bwrap")
@@ -3456,6 +4149,8 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
     limits, mounts = start_change(a, name)
     if mounts:  # the start's own folders: a writable one that is not there yet is made now (as mcp add makes it)
         check_start_mounts(a, {name: servers[name]}, create=True, out=lambda line: print(line, file=sys.stderr))
+    mounts = start_folders(a, name, servers[name], mounts)  # (and the start's workspace where it is bound to it)
+    make_workspace_folders(name, a, mounts)  # (its own folders of that workspace: there before it starts)
     base, definition = instance_for(name, servers[name], limits, mounts, start_env(a).get(name))
     instance = instance if isinstance(instance, str) and server_of(instance) == name and \
         re.fullmatch(INSTANCE_PATTERN, instance) else base
@@ -3545,6 +4240,10 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         # there is only the rootfs.
         # (With a VPN the plan has the Podman form only: a VPN is a container's network namespace.)
         engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) else "podman"
+        unenforced = unenforced_text(label) if engine == "podman" else None
+        if unenforced:  # (said as the agent's own limits are: the human decides whether that is enough)
+            LOG.info("mcp", unenforced)
+            print(f"agent-sandbox: {unenforced}", file=sys.stderr)
         if plan.get("egress") and not plan["vpn"]:
             # Its egress rules are loaded with this host's nft: without it the server would reach your network.
             problem = egress_module().prerequisite_problem(engine)
@@ -3940,8 +4639,8 @@ def stop_lent(run, timeout=30):
 # (claude, codex or opencode) reads its MCP servers when it starts (--mcp-config, -c mcp_servers, opencode.json).
 LIVE = ("a running sandbox cannot take a new MCP server while it runs unless it is attached with --live: its agent "
         "(claude, codex or opencode) reads its MCP servers when it starts (--mcp-config, -c mcp_servers, "
-        "opencode.json); --live opens the server's relay in the running sandbox now (Codex and OpenCode see it after "
-        "a restart of the agent all the same)")
+        "opencode.json); --live opens the server's relay in the running sandbox now (Codex sees it after sandbox-ai "
+        "kits restart-agent START, inside its sandbox; OpenCode only after a new start)")
 
 _starts = None
 
@@ -3982,6 +4681,7 @@ def start_arguments(data, extra=()):
         a.project_config, a.project_document = (str(config_path) if config_path else None), document
         l.check_policy(a, policy)
         l.MODES.check(l.launcher_namespace(), a, policy)
+        a.mcp_workspace = start_workspace(a)  # (its first workspace as its own folder resolves it: start_folders)
     return a
 
 
@@ -4022,7 +4722,7 @@ def attach(name, start, restart=False, start_server=False, vpn=None, ask=None, o
     a = start_arguments(data, ["--mcp", name])  # refuses what its start would refuse
     servers = definitions(a.project_document)
     if name not in servers:
-        raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+        raise unknown_server(a, name, servers)
     running = entry["state"] in ("running", "paused")
     if running and isinstance(entry.get("run"), str):
         a.run_id = entry["run"]  # (the run that lends its tunnel to the start's own servers while it runs)
@@ -4099,22 +4799,20 @@ LIVE_AGENTS = {
                "attach": "Claude Code: the server is in the sandbox's ~/.claude.json (user scope). Open /mcp in Claude "
                          "and look for {name}; Claude Code reads its MCP servers when it starts, and whether a "
                          "running one takes up a server added since is not documented: if /mcp does not list it, "
-                         "restart the agent: sandbox-ai resume {start} --restart (the conversation continues).",
+                         "restart the agent: {restart}.",
                "detach": "Claude Code: its connection to {name} ends now and its calls fail; /mcp may still list it "
-                         "until the agent restarts (sandbox-ai resume {start} --restart; the conversation continues)."},
+                         "until the agent restarts ({restart})."},
     "codex": {"config": None, "restart": "required",
               "attach": "Codex reads its MCP servers only when it starts (its -c mcp_servers options): restart the "
-                        "agent to use {name}: sandbox-ai resume {start} --restart (the conversation continues). Until "
-                        "then the relay is open, but Codex does not know it.",
+                        "agent to use {name}: {restart}. Until then the relay is open, but Codex does not know it.",
               "detach": "Codex: its connection to {name} ends now and its calls fail; it still names the server until "
-                        "the agent restarts (sandbox-ai resume {start} --restart; the conversation continues)."},
+                        "the agent restarts ({restart})."},
     "opencode": {"config": None, "restart": "required",
                  "attach": "OpenCode reads its MCP servers only when it starts (OPENCODE_CONFIG_CONTENT): restart the "
-                           "agent to use {name}: sandbox-ai resume {start} --restart (the conversation continues). "
-                           "Until then the relay is open, but OpenCode does not know it.",
+                           "agent to use {name}: {restart}. Until then the relay is open, but OpenCode does not know "
+                           "it.",
                  "detach": "OpenCode: its connection to {name} ends now and its calls fail; it still names the server "
-                           "until the agent restarts (sandbox-ai resume {start} --restart; the conversation "
-                           "continues)."},
+                           "until the agent restarts ({restart})."},
 }
 AGENT_TITLES = {"hermes": "Hermes", "dsh": "DeepSeek Harness", "qwen": "Qwen Code", "goose": "Goose",
                 "openhands": "OpenHands", "nanobot": "nanobot", "letta": "Letta Code", "opencode2": "OpenCode 2",
@@ -4129,10 +4827,93 @@ def live_agent(agent):
     title = AGENT_TITLES.get(agent) or "The agent"
     return {"config": None, "restart": "required",
             "attach": f"{title} reads its MCP servers only when it starts: restart the agent to use {{name}}: "
-                      "sandbox-ai resume {start} --restart (the conversation continues). Until then the relay is "
-                      f"open, but {title} does not know it.",
+                      f"{{restart}}. Until then the relay is open, but {title} does not know it.",
             "detach": f"{title}: its connection to {{name}} ends now and its calls fail; it still names the server "
-                      "until the agent restarts (sandbox-ai resume {start} --restart; the conversation continues)."}
+                      "until the agent restarts ({restart})."}
+
+
+LIVE_ARGS_FILE = "agent-live-mcp.args"  # the launcher's AGENT_LIVE_MCP_FILE, in the run's session folder
+LIVE_ARGS_TARGET = f"/sandbox/session/{LIVE_ARGS_FILE}"  # the launcher's AGENT_LIVE_MCP_TARGET: what its script reads
+
+
+def restart_in_place(record, agent):
+    """Whether `sandbox-ai kits restart-agent` starts the agent of the run RECORD again inside its sandbox AND it then
+    sees the servers attached live: its run can (a detached tmux session with the agent in it, its restart script in
+    its session folder) and AGENT reads them there - Claude Code ~/.claude.json (agent_config), Codex the words its
+    restart script takes (live_args; a script of an older sandbox-ai takes none). Any other agent has its MCP servers
+    from its start only (OpenCode's OPENCODE_CONFIG_CONTENT, ...): only a new start (resume --restart) gives it one."""
+    l = launcher()
+    kits = record.get("kits_live")
+    session = record.get("session_dir")
+    if not (isinstance(kits, dict) and kits.get("restart")) or not isinstance(session, str):
+        return False
+    script = Path(session) / l.AGENT_RESTART_FILE
+    try:
+        text = script.read_text() if script.is_file() and not script.is_symlink() else ""
+    except OSError:
+        return False
+    if not text:
+        return False
+    if agent == "claude":
+        return bool(record.get("agent_home"))
+    return agent in l.LIVE_MCP_ARG_AGENTS and LIVE_ARGS_TARGET in text
+
+
+def restart_text(record, agent, start):
+    """The restart that gives AGENT of START a server attached (or detached) live: inside its sandbox where it can
+    (restart_in_place), else the new start that keeps its session - said as such, before anything is done."""
+    if restart_in_place(record or {}, agent):
+        return (f"sandbox-ai kits restart-agent {start} (inside its running sandbox: the sandbox, its network and "
+                "MCP servers stay; the conversation continues)")
+    title = "Claude Code" if agent == "claude" else "Codex" if agent == "codex" else "OpenCode" \
+        if agent == "opencode" else AGENT_TITLES.get(agent) or "the agent"
+    return (f"it cannot see it after a restart inside its sandbox ({title}: "
+            + ("its MCP servers come with its start" if agent not in ("claude", *launcher().LIVE_MCP_ARG_AGENTS) else
+               "its run cannot start it again there - started by an older sandbox-ai, as a task or without tmux")
+            + f"), so: sandbox-ai resume {start} --restart (its sandbox is started again; its HOME and conversation "
+              "are kept, the conversation continues)")
+
+
+def write_live_args(session, words_of):
+    """The session folder SESSION's LIVE_ARGS_FILE: the words of WORDS_OF ({server: [word]}), one per line, for the
+    restart script; none: the file goes. Replaced in one step, never through a link (the sandbox reads the folder
+    read-only; only the host writes it)."""
+    path = Path(session) / LIVE_ARGS_FILE
+    words = [word for name in sorted(words_of) for word in words_of[name]]
+    if any(not isinstance(word, str) or re.search(r"[\n\r\0]", word) for word in words):
+        raise ValueError("a word of the restart's command line has a line break: not written")
+    if not words:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644), "w") as stream:
+        stream.write("".join(f"{word}\n" for word in words))
+    os.replace(temporary, path)
+
+
+def live_args(record, a, name, add=True):
+    """Codex (the launcher's LIVE_MCP_ARG_AGENTS): the words that name the server NAME on its command line (as a start
+    gives them: mcp_agent_args, its wait for one call included) added to (or taken out of) those its restart inside the
+    sandbox takes (write_live_args); kept in the run's LIVE_STATE ("args"), whose end takes them out
+    (forget_live_config). A description of what was done, or None (another agent, no session folder)."""
+    l = launcher()
+    agent = record.get("agent")
+    session = record.get("session_dir")
+    if agent not in l.LIVE_MCP_ARG_AGENTS or not isinstance(session, str):
+        return None
+    state = live_state(record)
+    known = state.get("args") if isinstance(state.get("args"), dict) else {}
+    words_of = {key: value for key, value in known.items() if key != name and isinstance(value, list)}
+    if add:
+        one = SimpleNamespace(agent=agent, mcp=[name], project_document=getattr(a, "project_document", None),
+                              helper_definitions=getattr(a, "helper_definitions", None))
+        words_of[name] = list(l.mcp_agent_args(one))
+    elif name not in known:
+        return None
+    write_live_args(session, words_of)
+    write_private(Path(record["directory"]) / LIVE_STATE, {**state, "args": words_of})
+    return f"the command line of its restart inside the sandbox ({LIVE_ARGS_FILE})"
 
 
 LIVE_STATE = "mcp-live.json"  # in the run's directory: what attach --live wrote into the agent's configuration
@@ -4347,7 +5128,7 @@ def agent_config(record, name, add=True):
     if problem:
         raise ValueError(f"~/.claude.json in the sandbox was left as it is ({problem})")
     names = [n for n in state.get("claude", []) if n != name] + ([name] if add else [])
-    state = {"claude": names, "created": bool(state.get("created") or created) and (add or bool(names))}
+    state = {**state, "claude": names, "created": bool(state.get("created") or created) and (add or bool(names))}
     write_private(Path(record["directory"]) / LIVE_STATE, state)
     return "~/.claude.json (mcpServers)"
 
@@ -4360,6 +5141,9 @@ def forget_live_config(directory):
         for name in live_state(record).get("claude", []):
             with contextlib.suppress(Exception):
                 agent_config(record, name, add=False)
+        if isinstance(record.get("session_dir"), str):  # Codex's words for its restart (live_args)
+            with contextlib.suppress(Exception):
+                write_live_args(record["session_dir"], {})
 
 
 def keep_server(key, name=None, helper=None, add=True):
@@ -4401,16 +5185,44 @@ def socket_dir_handle(record, directory, identity):
                          "with the server instead (sandbox-ai mcp attach NAME START --restart)") from None
 
 
+def unknown_server(a, name, servers):
+    """The refusal of `mcp attach NAME` for a server that is not defined, with what adds it (the launcher's
+    mcp_fixes: from its signed catalog, or built here unsigned - as a start offers it, judged by the start A's
+    security mode): offered by the command on a terminal (attach_offered)."""
+    error = ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+    try:
+        l = launcher()
+        error.fixes = l.mcp_fixes(a, l.load_mcp_module(), [name])
+        error.mode = getattr(a, "mode", None)
+    except Exception as exc:  # noqa: BLE001 - only for the offer: the refusal stands as it is without it
+        LOG.debug("mcp", f"what adds {name} was not found", exc)
+    return error
+
+
+def attach_offered(attach_once, about):
+    """ATTACH_ONCE() - `mcp attach`'s work - and, when it is refused because the server is not defined (its fixes:
+    unknown_server), what adds it offered on this terminal (launcher.offer_fixes) and the attach tried again once."""
+    try:
+        return attach_once()
+    except ValueError as exc:
+        if not getattr(exc, "fixes", None):
+            raise
+        launcher().offer_fixes(exc, mode=getattr(exc, "mode", None), about=about, again="attach it again")
+        print("sandbox-ai mcp: what the attach lacked is there now: it goes on", file=sys.stderr)
+        return attach_once()
+
+
 def attach_live(name, start, helper=None, out=print):
     """`sandbox-ai mcp attach NAME START --live` (HELPER: --helper AGENT instead of NAME): the server into the
     running sandbox of START now, without a restart. {"server", "start", "run", "state", "attached": "live" |
-    "already", "server_started", "kept", "agent", "agent_config", "agent_restart", "relay", "message"}."""
+    "already", "server_started", "kept", "agent", "agent_config", "agent_restart", "restart_in_place" (whether `kits
+    restart-agent` gives the agent the server inside its running sandbox: restart_in_place), "relay", "message"}."""
     printable = launcher().printable
     entry, record, data = live_target(start)
     a, name = live_arguments(data, record, name, helper)
     servers = {**definitions(a.project_document), **(getattr(a, "helper_definitions", None) or {})}
     if name not in servers:
-        raise ValueError(f"Unknown MCP server: {name}; defined: {', '.join(sorted(servers))}")
+        raise unknown_server(a, name, servers)
     shown = printable(entry["name"])
     net = net_module()
     listed = net.ask(record["directory"], {"op": "mcp-list"})
@@ -4460,7 +5272,7 @@ def attach_live(name, start, helper=None, out=print):
             # Relayed already: a server of the start is on the agent's command line, one attached live was written
             # then; never twice.
             if result["attached"] == "live":
-                result["agent_config"] = agent_config(record, name)
+                result["agent_config"] = agent_config(record, name) or live_args(record, a, name)
         except (OSError, ValueError) as exc:
             out(f"  the agent's configuration was not changed: {printable(str(exc))}")
     # The run's kill switch (sandbox-ai net cut) holds for the server it reaches now as well.
@@ -4474,7 +5286,10 @@ def attach_live(name, start, helper=None, out=print):
     except (OSError, ValueError) as exc:
         result["kept"] = False
         out(f"  not kept for the next start: {printable(str(exc))}")
-    how = live_agent(agent)["attach"].format(name=name, start=shown)
+    # How the agent sees it: inside its sandbox where it can, else the new start that keeps its session - said before
+    # anything is restarted (reported live: Codex given a server while it ran, `resume --restart` ended its sandbox).
+    result["restart_in_place"] = restart_in_place(record, agent)
+    how = live_agent(agent)["attach"].format(name=name, start=shown, restart=restart_text(record, agent, shown))
     result["message"] = (f"{shown} reaches the MCP server {name} now"
                          f"{' (it was attached already)' if result['attached'] == 'already' else ''}"
                          f"{', kept for its later starts' if result['kept'] else ''}. {how}")
@@ -4522,7 +5337,8 @@ def detach(name, start, helper=None, live=False, out=print):
             result["relay_closed"] = bool(answer.get("closed"))
             record_server(record, name, add=False)
             try:
-                result["agent_config"] = agent_config(record, name, add=False)
+                result["agent_config"] = agent_config(record, name, add=False) or live_args(record, None, name,
+                                                                                            add=False)
             except (OSError, ValueError) as exc:
                 out(f"  the agent's configuration was not changed: {printable(str(exc))}")
     try:
@@ -4534,7 +5350,8 @@ def detach(name, start, helper=None, live=False, out=print):
     later = ", and its later starts go without it" if removed else ""
     if result["relay_closed"]:
         result["detached"] = "live"
-        how = live_agent(agent)["detach"].format(name=name, start=shown)
+        result["restart_in_place"] = restart_in_place(record, agent)
+        how = live_agent(agent)["detach"].format(name=name, start=shown, restart=restart_text(record, agent, shown))
         result["message"] = f"{shown} no longer reaches the MCP server {name}: its relay is closed{later}. {how}"
     elif removed:
         result["detached"] = "next start"
@@ -4571,8 +5388,8 @@ def server_list(served=None):
     running ones: NAME, and NAME.HASH of starts with limits of their own), "kind" (image, rootfs, command, helper),
     "own" (in your mcp.json: `mcp set` changes it), "definition", "builtin_defaults" (what an empty limit of `mcp set`
     gives), "last_problem" ({time, what, why, fix}: what ended or failed its processes last; None), "below_recommended"
-    ({key: value} of the limits below what its catalog entry recommends: `mcp set NAME --recommended`), "catalog",
-    "catalog_source", "signed"}]."""
+    ({key: value} of the limits below what its catalog entry recommends: `mcp set NAME --recommended`), "newer"
+    (newer_pin: the newer image its catalog pins, `mcp update NAME`; None), "catalog", "catalog_source", "signed"}]."""
     served = {} if served is None else served
     found = []
     try:
@@ -4603,12 +5420,16 @@ def server_list(served=None):
                       "kind": "image" if "image" in d else "rootfs" if "rootfs" in d else
                       "helper" if "helper" in d else "command", "own": name in own,
                       "definition": {key: value for key, value in d.items() if key != "rootfs"},
+                      # Its folders as people read them ("the start's workspace", "its own folder PATH"): folders_of.
+                      "folders": folders_of(name, d) if "image" in d or "rootfs" in d else [],
                       # Its variables, each with where its value comes from (variables_of; a secret's value never).
                       "variables": variables_of(d) if "image" in d or "rootfs" in d else [],
                       "builtin_defaults": default_limits({"image": ""} if "image" in d or "rootfs" in d
                                                          else {"command": []}) if "helper" not in d else None,
                       "last_problem": problem,
                       "below_recommended": below_recommended(d) if "image" in d or "rootfs" in d else {},
+                      # The newer image (or rootfs) its catalog pins, as that catalog was last read here: mcp update.
+                      "newer": newer_pin(d) if name in own and ("image" in d or "rootfs" in d) else None,
                       # Where it reaches (an image server: network_label; a command server: its sandbox's own
                       # rules), and what to say of it (egress_note).
                       "network": network_label(d) if "image" in d or "rootfs" in d else None,
@@ -4616,6 +5437,41 @@ def server_list(served=None):
                       else None,
                       **origin(name, d)})
     return found
+
+
+def show(name, as_json=False, out=print):
+    """`mcp show NAME`: server NAME as `mcp list --json` has it (server_list), its folders as people read them - the
+    start's workspace, its own folder and where that is - its network, limits and variables. ValueError for a name
+    defined nowhere."""
+    found = next((entry for entry in server_list() if entry["name"] == name), None)
+    if found is None:
+        raise ValueError(f"no MCP server {name}; sandbox-ai mcp list shows them")
+    if as_json:
+        out(json.dumps(found, indent=2))
+        return 0
+    printable = launcher().printable
+    lines = [f"{name}: {found['command']} ({found['kind']}, {found['status']})"]
+    if found.get("network"):
+        lines.append(f"  network: {found['network']}")
+    lines.append(f"  limits: {limits_text(found['limits'])}")
+    if found["folders"]:
+        lines.append("  folders (in its container: on this machine):")
+        lines += [f"    {folder['target']}: {folder['shown']}" for folder in found["folders"]]
+        if any(folder["default"] == "workspace" for folder in found["folders"]):
+            lines.append("    (the start's workspace: the first workspace of the start that uses it, bound at each "
+                         "start in an instance of that workspace's own)")
+    elif found["kind"] in ("image", "rootfs"):
+        lines.append("  folders: none")
+    if found.get("variables"):
+        lines.append("  variables: " + ", ".join(str(v.get("name")) for v in found["variables"] if isinstance(v, dict)))
+    if found.get("newer"):
+        lines.append("  " + newer_text(name, found["newer"]))
+    lines += [f"  instance {i['instance']}: " + ", ".join(f"{m.get('target')}={m.get('host')}:{m.get('mode')}"
+                                                         for m in i.get("mounts") or [] if isinstance(m, dict))
+              for i in found["instances"] if i["instance"] != name and i.get("mounts")]
+    for line in lines:
+        out(printable(line))
+    return 0
 
 
 def catalog_json(prefix, entry):
@@ -4632,14 +5488,20 @@ def catalog_json(prefix, entry):
                  and ENV_NAME.fullmatch(item["name"])]
     # The folders it takes ([{target, required, description}]): one it requires is asked for before `mcp add` (the
     # app's Board), not left for add to refuse with "needs --mount TARGET=HOST".
+    # Each with its default (the add forms show it filled in): "workspace" (/work: the start's workspace) or "own" (a
+    # folder of the server's own, made by sandbox-ai where it is added), and the mode its entry declares.
     mounts = [{"target": item["target"], "required": bool(item.get("required")),
-               "description": shown(item.get("description") or "", 300)}
+               "description": shown(item.get("description") or "", 300),
+               "default": "workspace" if item["target"] == WORKSPACE_TARGET else "own",
+               "mode": declared_mode(entry, item)}
               for item in entry.get("mounts", []) if isinstance(item, dict) and isinstance(item.get("target"), str)
               and item["target"].startswith("/") and item["target"].isprintable() and len(item["target"]) <= 200]
     return {"entry": f"{shown(prefix)}:{shown(entry.get('name'))}", "prefix": shown(prefix),
             "name": shown(entry.get("name")), "title": shown(entry.get("title", "")),
             "network": shown(entry.get("network", "none")), "hosts": [shown(host) for host in entry.get("hosts", [])],
             "published": bool(entry.get("digest")), "signature": {"good": "good", "bad": "bad"}.get(signature, "none"),
+            # (0.1.232) what it pins (mcp update compares a definition with it) and whether it has a Bubblewrap form
+            "digest": catalog_pin(entry)["image"], "bubblewrap": bool(catalog_pin(entry)["rootfs"]),
             "catalog": shown(catalog_label(entry["_catalog"])) if isinstance(entry.get("_catalog"), str) else None,
             "env": variables, "mounts": mounts, "tool_timeout": entry_tool_timeout(entry),
             # (0.1.98) what Add… on another host shows as this machine's does: its description and the limits it
@@ -4795,8 +5657,9 @@ def cli(argv):
                                 "start")
     attaching.add_argument("-l", "--live", action="store_true",
                            help="into the running sandbox now, without a restart: its relay is opened and the agent's "
-                                "MCP configuration updated (Claude Code: /mcp; Codex and OpenCode: after a restart "
-                                "of the agent)")
+                                "MCP configuration updated (Claude Code: /mcp; Codex: after sandbox-ai kits "
+                                "restart-agent START, inside its sandbox; OpenCode and the others: their next start, "
+                                "or resume START --restart)")
     attaching.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     detaching = commands.add_parser("detach", help="take a server from an agent start",
                                               description="Take a server from an agent start (and with --live from "
@@ -4809,6 +5672,9 @@ def cli(argv):
     detaching.add_argument("-l", "--live", action="store_true",
                            help="close its relay in the running sandbox now (the agent's connections to it end)")
     detaching.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    showing = commands.add_parser("show", help="One server: what it is, its folders, network, limits, variables")
+    showing.add_argument("name")
+    showing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     commands.add_parser("stop", help="Stop a server sandbox: all of its instances (NAME.HASH: that one)").add_argument(
         "name")
     setting = commands.add_parser("set", help="change a server of yours (mcp.json)",
@@ -4837,10 +5703,11 @@ def cli(argv):
     setting.add_argument("--no-allow", action="store_true",
                          help="None of your network again (takes --allow-private and --allow-tcp away)")
     setting.add_argument("-m", "--mount", action="append", metavar="TARGET=HOST[:ro|rw]",
-                         help="The folders, all of them (TARGET: in the server's container, of those its catalog entry "
-                              "takes; HOST: a folder on this machine, a writable one is created; held to the "
-                              "host-path policy of its start); repeatable")
-    setting.add_argument("--no-mounts", action="store_true", help="No folders")
+                         help="The folders (TARGET: in the server's container, of those its catalog entry takes; "
+                              "HOST: a folder on this machine, a writable one is created; held to the host-path "
+                              "policy of its start); one left out gets its default (/work the start's workspace, any "
+                              "other one a folder of the server's own; HOST default: back to it); repeatable")
+    setting.add_argument("--no-mounts", action="store_true", help="No folders (not even their defaults)")
     setting.add_argument("-e", "--env", action="append", metavar="NAME[=VALUE|@SECRET]",
                          help="The variables, all of them: NAME (your environment's, else the secret NAME), "
                               "NAME=VALUE (a value that is no secret, kept in the definition) or NAME@SECRET (that "
@@ -4854,6 +5721,27 @@ def cli(argv):
     setting.add_argument("-s", "--stop", action="store_true",
                          help="Stop its running instances now: the next start that uses it starts it with the change")
     setting.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    updating = commands.add_parser("update", help="take the newer image a server's catalog pins (signature checked)",
+                                   description="Your servers whose catalog pins a newer image than they run (a "
+                                               "definition keeps the digest it was added with) get it: the catalog "
+                                               "read now, its signature checked as mcp add checks it, the image "
+                                               "pulled by its digest; their folders, variables, limits, network and "
+                                               "VPN stay. Asked first.")
+    updating.add_argument("names", nargs="*", metavar="NAME", help="these servers (default: every server of yours "
+                                                                     "from a catalog)")
+    updating.add_argument("--check", action="store_true", help="only say which have a newer image; change nothing")
+    updating.add_argument("-y", "--yes", action="store_true", help="without the question (scripts)")
+    updating.add_argument("-N", "--no-pull", action="store_true", help="do not pull the new image (it is there)")
+    updating.add_argument("-U", "--unsigned", action="store_true",
+                          help="a server added unsigned: take its unsigned catalog's image (never in the security "
+                               "modes high and paranoid)")
+    updating.add_argument("--mode", choices=["lax", "low", "medium", "high", "paranoid"],
+                          help="the security mode it is judged in (default: your defaults' mode, else medium)")
+    updating.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
+                          help="read this catalog instead of each server's own; repeatable")
+    updating.add_argument("-s", "--stop", action="store_true",
+                          help="stop their running instances now: the next start that uses them starts the new image")
+    updating.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     catalog = commands.add_parser("catalog", help="Servers of the MCP catalogs (sandbox-ai-mcp, axross-mcp-hub)")
     catalog.add_argument("-c", "--catalog", action="append", default=[], metavar="FILE_OR_URL",
                          help="Read this catalog instead of the default ones; repeatable")
@@ -4866,7 +5754,9 @@ def cli(argv):
                        help="A folder of the server (TARGET: in its container, one its catalog entry takes - "
                             "exiftool's and binwalk's /work, engram's and memory's data; HOST: a folder on this "
                             "machine, a writable one is created); held to the host-path policy of its start before "
-                            "anything is pulled (not HOME itself, nothing of sandbox-ai's own); repeatable")
+                            "anything is pulled (not HOME itself, nothing of sandbox-ai's own); repeatable. A folder "
+                            "left out gets its default: /work the workspace of the start that uses the server, any "
+                            "other one a folder of the server's own (HOST default: that default)")
     added.add_argument("-e", "--env", action="append", default=[], metavar="NAME[=VALUE|@SECRET]",
                        help="A variable of the entry: NAME passes your environment's NAME, else the secret NAME "
                             "(required where the entry requires it, else only where there is one); NAME=VALUE keeps a "
@@ -4932,10 +5822,14 @@ def cli(argv):
                              help="replace a server of that name there (asked first; --yes when nothing can ask)")
         command.add_argument("-y", "--yes", action="store_true", help="with --replace: without asking")
         command.add_argument("-P", "--path", action="append", default=[], metavar="OLD=NEW",
-                             help="the source's folder OLD is NEW there (NEW=OLD keeps it); a folder of the source "
-                                  "is never mounted there unasked; repeatable")
+                             help="the source's folder OLD is NEW there (NEW=OLD keeps it; @workspace: the "
+                                  "workspace of the start that uses it); a folder of the source is never mounted "
+                                  "there unasked; repeatable")
         command.add_argument("-D", "--drop-path", action="append", default=[], metavar="OLD",
-                             help="leave the source's folder OLD out; repeatable")
+                             help="the source's folder OLD is a path of that machine, which means nothing there: "
+                                  "the server's default folder there instead (/work: the start's workspace; any "
+                                  "other: a folder of its own made there, new and empty); a command server's option "
+                                  "naming OLD is left out; repeatable")
         command.add_argument("--secrets-later", action="store_true",
                              help="copied although a secret it uses is missing there (keep it before it starts)")
         command.add_argument("--pull-image", action="store_true",
@@ -5042,6 +5936,14 @@ def cli(argv):
                   file=sys.stderr)
             return 1
         return 0
+    if a.command == "update":
+        say = (lambda text: print(text, file=sys.stderr)) if a.json else print
+        result = update_servers(a.names, check=a.check, yes=a.yes, pull=not a.no_pull, unsigned=a.unsigned,
+                                mode=a.mode or configured_mode(), stop_running=a.stop, out=say,
+                                catalogs=[(f"c{index}", source) for index, source in enumerate(a.catalog)] or None)
+        if a.json:
+            print(json.dumps(result, indent=2))
+        return 0
     if a.command == "set":
         result = set_server(a.name, set_changes(a), stop_running=a.stop,
                             out=(lambda text: print(text, file=sys.stderr)) if a.json else print)
@@ -5071,6 +5973,8 @@ def cli(argv):
             if e["below_recommended"]:
                 notes.append(f"{e['name']}: below the limits its catalog recommends ({limits_text(e['below_recommended'])})"
                              f": sandbox-ai mcp set {e['name']} --recommended")
+            if e.get("newer"):
+                notes.append(printable(newer_text(e["name"], e["newer"])))
             if e.get("egress_note"):
                 notes.append(printable(f"{e['name']}: {e['egress_note']}"))
             if e["last_problem"]:
@@ -5090,10 +5994,13 @@ def cli(argv):
             for note in notes:
                 print(note)
         return 0
+    if a.command == "show":
+        return show(a.name, a.json)
     if a.command == "start" and a.for_start is None:
         if a.restart or a.json:
             raise ValueError("--restart and --json go with --for START")
         given = launcher().parse_args(["codex", "--backend", a.backend])
+        given.mcp_workspace = None  # (no start's: a server bound to the start's workspace is refused, start_folders)
         if a.name in start_servers(given):
             # What an agent start with --mcp NAME checks first (its image there, its folders, policy, secrets):
             # "started" was said for a server whose every connection would then fail (its image never pulled).
@@ -5112,7 +6019,7 @@ def cli(argv):
             if a.command == "attach" and a.restart:
                 raise ValueError("--live attaches without a restart; --restart restarts: choose one")
             result = (detach(name, target, a.helper, a.live, out=say) if a.command == "detach" else
-                      attach_live(name, target, a.helper, out=say))
+                      attach_offered(lambda: attach_live(name, target, a.helper, out=say), f"mcp attach {name}"))
             if a.json:
                 print(json.dumps(result, indent=2))
             return 0
@@ -5129,9 +6036,10 @@ def cli(argv):
             answer = input(f"{launcher().printable(question)} [y/N] ")
             return answer.strip().lower() in ("y", "yes", "j", "ja")
         say = (lambda text: print(text, file=sys.stderr)) if a.json else print
-        result = attach(a.name, a.for_start if a.command == "start" else a.start, restart=a.restart,
-                        start_server=a.command == "start", vpn=getattr(a, "vpn", None),
-                        ask=ask if interactive else None, out=say)
+        result = attach_offered(lambda: attach(a.name, a.for_start if a.command == "start" else a.start,
+                                               restart=a.restart, start_server=a.command == "start",
+                                               vpn=getattr(a, "vpn", None), ask=ask if interactive else None,
+                                               out=say), f"mcp {a.command} {a.name}")
         if a.json:
             print(json.dumps(result, indent=2))
         return 0

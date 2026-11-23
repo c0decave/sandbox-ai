@@ -44,7 +44,7 @@ const STORE = __STORE__, HELD = __HELD__;
   result.none = posts().length;
   select.value = "go"; select.fire("change");
   button(card, "Add toolchain").fire("click");
-  result.question = card.all().map(n => n.textContent).find(text => text.startsWith("Mount go read-only into web"));
+  result.question = card.all().map(n => n.textContent).find(text => text.startsWith("Mount go 1.27.3 read-only into web"));
   button(card, "Yes, mount it").fire("click"); await settle();
   const remove = card.all().filter(n => n.tagName === "button" && n.textContent === "Remove").pop();
   remove.fire("click"); await settle();
@@ -75,3 +75,22 @@ def test_the_resources_card_lists_attaches_and_detaches_toolchains(tmp_path):
         ["/api/hosts/ct1/toolchains/web/remove", {"toolchain": "jdk"}],
         ["/api/hosts/ct1/toolchains/web/remove", {"toolchain": "jdk", "force": True, "confirm": True}]]
     assert result["german"] == ["Toolchain hinzufügen", "Ja, einhängen", "Im Lager von ct1"]
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_every_version_of_the_store_is_offered_by_what_attach_takes_for_it(tmp_path):
+    """Versions side by side (the user 2026-11-23: older toolchain versions): each is offered, newest first, by its
+    "toolchain" (node, node@22); from a sandbox-ai before versions (no "toolchain") the newest by its name and another
+    by its exact version. The question names the version, the mount point is the name's."""
+    store = [{"name": "node", "version": "22.23.4", "toolchain": "node@22", "commands": ["node"], "hosts": [], "allow": ["npm"]},
+             {"name": "node", "version": "26.13.0", "toolchain": "node", "commands": ["node"], "hosts": [], "allow": ["npm"]},
+             {"name": "go", "version": "1.26.10", "commands": ["go"], "hosts": [], "allow": []},
+             {"name": "go", "version": "1.27.3", "commands": ["go"], "hosts": [], "allow": []}]
+    source = DRIVER.replace("__STORE__", json.dumps(store)).replace("__HELD__", json.dumps(HELD)) \
+        .replace('select.value = "go"', 'select.value = "node@22"') \
+        .replace('startsWith("Mount go 1.27.3 read-only into web")', 'startsWith("Mount node 22.23.4 read-only into web")')
+    result = run_driver(tmp_path, source, "toolchain-versions")
+    assert result["offered"] == [["", "Choose a toolchain…"], ["go", "go 1.27.3 (go)"], ["go@1.26.10", "go 1.26.10 (go)"],
+                                 ["node", "node 26.13.0 (node)"], ["node@22", "node 22.23.4 (node)"]]
+    assert "at /opt/toolchains/node?" in result["question"] and "--allow-npm" in result["question"]
+    assert result["posts"][0] == ["/api/hosts/ct1/toolchains/web", {"toolchain": "node@22", "confirm": True}]

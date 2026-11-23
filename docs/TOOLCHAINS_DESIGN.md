@@ -20,7 +20,7 @@ One archive (`tar.xz`) of the files of one prefix, and its manifest, which is it
 | `arch` | `x86_64` or `aarch64`: an entry per architecture |
 | `url`, `sha256`, `size`, `unpacked` | the archive (a release asset of sandbox-ai-mcp), its SHA-256 and sizes |
 | `commands` | `{"go": "bin/go", ...}`: the programs put on PATH, each a file below the prefix. Named one by one: a toolchain never shadows a command it did not name |
-| `env` | `{"JAVA_HOME": "{prefix}"}`: variables its programs need; `{prefix}` is `/opt/toolchains/NAME` |
+| `env` | `{"JAVA_HOME": "{prefix}"}`: variables its programs need; `{prefix}` is `/opt/toolchains/NAME`. They reach the agent's own environment and every `bash -c` (env.sh), so none may steer code the toolchain does not ship (`toolchains.ENV_REFUSALS`, each with why: the loader and the C library - `LD_*`, `DYLD_*`, `MALLOC_*`, `GCONV_PATH`, `LOCPATH`, `GLIBC_TUNABLES`, a locale, the resolver's; interpreters and package tools - `PYTHON*`, `PERL5*`, `RUBY*`, `NODE_*`, `BUN_*`, `JAVA_TOOL_OPTIONS`, npm's and pip's code and trust keys; shells - `BASH_*`, `ENV`, `ZDOTDIR`, `PROMPT_COMMAND`; programs others start - `PATH`, `EDITOR`, `PAGER`, `LESSOPEN`, `SSH_*`; `GIT_*`; the sandbox's and the agents' configuration and hooks - `HOME`, `XDG_*`, `SANDBOX_AI_*`, `CLAUDE_*`, `CODEX_*`, `OPENCODE_*`, `QWEN_*` ...; connections - proxies, certificate files, `SSLKEYLOGFILE`, `OPENSSL_*`; telemetry but sandbox-ai's own opt-out values). Refused in a catalog; an entry in the store from before is listed with `refused` and refused at a start and an attach, and env.sh, the wrappers and the agent's environment never carry such a variable |
 | `caches` | `{"NPM_CONFIG_PREFIX": ".local"}`: variables that name a writable folder, always below the sandbox's HOME. Nothing is ever written into the tree (it is read-only); most package managers keep their caches in HOME by themselves (`~/go`, `~/.cargo`, `~/.m2`, `~/.gradle`, `~/.npm`, `~/.nuget`, `~/.cache`) |
 | `hosts` | the registries its package manager reaches (`proxy.golang.org`, `sum.golang.org`): opened as `--allow-host` does |
 | `allow` | launcher presets opened with it (`github`, `pypi`, `npm`: what `--allow-github` ... open) |
@@ -75,6 +75,20 @@ toolchain says so.
 The archive is streamed to a file in the store while it is hashed (never held in memory), checked, unpacked and
 deleted. `toolchain remove NAME[@VERSION]` removes the entry and its tree (refused while a running sandbox uses
 it). Nothing in the store is writable for a sandbox.
+
+## Versions
+
+The catalog may have several versions of a name (sandbox-ai-mcp: one recipe each, `toolchains/NAME/toolchain.json`
+the newest, `toolchains/NAME/LINE/toolchain.json` an older line), and the store keeps them side by side (each its own
+tree, `installed.json` by name and version). A value `NAME[@VERSION]` (`toolchains.picked`) is: without `@` the newest
+(of the catalog for `add`, of the store at a start, an attach, `show`); `@VERSION` that version, else the newest whose
+version starts with VERSION followed by `.`, `+`, `-` or `_` (`jdk@17` -> 17.0.21+9, `python@3.12` -> 3.12.16;
+`go@1.2` does not take 1.26.0). `toolchain list` and `catalog` show for each version the shortest value that picks it
+(`toolchains.selector`: `jdk` for the newest, `jdk@17` for an older line; JSON `"toolchain"`). A start resolves every
+`--toolchain` value first: two that pick two versions of one name are refused (both would be
+`/opt/toolchains/NAME`); a toolchain another requires (`rust` requires `cc`) is the version the start picks for it,
+else its newest. `attach` of a version other than the one attached is refused until that one is detached. A store
+written by an older sandbox-ai, one version per name, is the same format.
 
 ## The mount
 
@@ -142,6 +156,10 @@ every mode; `--offline` does too. The package guard and the secret guard hold fo
 - **Logged**: `toolchains.jsonl` in the run's log directory (attach, detach, refused, the hosts opened), the
   launcher's log, `sandbox-ai report`, the plan (`--dry-run`: `"toolchains"`).
 - **The administrator's policy**: `forbid: ["--toolchain"]` refuses it at the start and for running sandboxes.
+  Its other rules bind a toolchain's registries as they bind the options: a host outside its ceiling
+  (`allow_hosts`), a forbidden `--allow-host` (or one value of it), `--allow-PRESET` or shared wildcard stays
+  closed at the start (the toolchain is mounted, the start says which), and `attach` asks `net allow`, which checks
+  them too.
 
 Threat model, short. *A toolchain that is malicious or was tampered with*: the signature and the SHA-256 keep a
 changed archive out; what a signed toolchain does, it does inside the sandbox, as any program the agent downloads
@@ -165,7 +183,7 @@ Bubblewrap does not exist on macOS.
 
     sandbox-ai toolchain catalog [--json]            what the signed catalog offers for this machine
     sandbox-ai toolchain add NAME[@VERSION]          download, check, unpack into the store
-    sandbox-ai toolchain list [--json]               the store; which running sandboxes use what
+    sandbox-ai toolchain list [--run [RUN]] [--json] the store; which running sandboxes use what (--run: one's)
     sandbox-ai toolchain show NAME[@VERSION]         its manifest: commands, variables, hosts, needs, sources
     sandbox-ai toolchain remove NAME[@VERSION]       out of the store
     sandbox-ai toolchain attach [RUN] NAME[@VERSION] [--offline]     into a running sandbox

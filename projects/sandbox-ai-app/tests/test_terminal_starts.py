@@ -140,7 +140,7 @@ def test_the_starts_of_another_host(qapp, sai):
     assert sai.asked[-1] == ("ct1", ("list", "--json"))
     button(page, row_of(page, "web")).click()
     argv, title = opened[-1]
-    assert argv[0] == "ssh" and argv[-1].endswith("attach web; fi") and title == "ct1: web"
+    assert argv[0] == "ssh" and terminal.neutral_script(argv[-1]).endswith("attach web; fi") and title == "ct1: web"
     # Another host is asked every fifth tick only (SSH).
     count = len(sai.asked)
     for _ in range(5):

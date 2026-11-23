@@ -1,0 +1,31 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "node",
+  "title": "Node.js",
+  "description": "Node.js and TypeScript projects: Node with npm and TypeScript mounted in; npm's registry and GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Node.js",
+      "description": "Node.js- und TypeScript-Projekte: Node mit npm und TypeScript eingehängt; die Registry von npm und GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--toolchain",
+    "node",
+    "--allow-npm",
+    "--allow-github"
+  ],
+  "notes": [
+    "Node.js (with npm, npx and the TypeScript compiler tsc) comes with the preset (--toolchain node): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox); it comes before the image's own node. Not in the store yet, the start offers to add it (sandbox-ai toolchain add node: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "npm's cache is in the sandbox's HOME (~/.npm), global installs go to ~/.local; a package's install scripts run in the sandbox, under its rules. Another registry (yarn's, your company's): --allow-host NAME on the command line.",
+    "A web app to test in a browser: the preset web-frontend (Playwright, a virtual screen).",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

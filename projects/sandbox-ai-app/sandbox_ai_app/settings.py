@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import (
-    backend, fonts, help_texts, help_view, intro_choice, notifications, presets as PR, project_trust as PT, theme,
+    backend, fonts, help_texts, help_view, intro_choice, notifications, presets as PR, project_trust as PT, reading_fonts,
+    theme,
 )
 from .board_view import PathEdit
 from .files import printable, printable_text
@@ -440,10 +441,12 @@ class SettingsDialog(QDialog):
         # appearance
         page, form = self.tab(tr("Appearance"))
         self.combo(form, "theme", tr("Theme"), [(key, tr(text)) for key, text in theme.choices()], current)
+        self.reading_combo(form, current)
         self.font_combo(form, "ui", tr("Interface font"), current)
         self.font_combo(form, "mono", tr("Monospace font (terminal, code, logs)"), current)
-        form.addRow(explanation(tr("The app downloads no fonts: one marked not installed says how to get it (point at it "
-                                   "in the list). Terminal tabs opened from now on use the monospace font.")))
+        form.addRow(explanation(tr("The app downloads no fonts: the reading fonts come with it; an interface or "
+                                   "monospace font marked not installed says how to get it (point at it in the "
+                                   "list). Terminal tabs opened from now on use the monospace font.")))
         self.combo(form, "language", tr("Language"), (("system", tr("as the system")), ("en", "English"),
                                                       ("de", "Deutsch")), current)
         form.addRow(explanation(tr("A new language applies when the app is started again.")))
@@ -594,6 +597,27 @@ class SettingsDialog(QDialog):
                                    "start (ask_timeout in {path}; --ask-timeout wins). Unanswered by then, the request "
                                    "fails and the question stays open (Approvals › Timed out): allowed later, the next "
                                    "try goes through. Keep the question interval short.",
+                                   path=printable(str(sai.sandbox_defaults_file())))))
+
+        # What a start lacks (its image not built, an MCP server not added): one question for everything, or one per
+        # fix (sandbox-ai's defaults: fix_questions; the command line asks the same way, the app's dialog too).
+        self.fix_questions = QComboBox()
+        for value, text in (("all", tr("one question for everything (Fix all, Choose…, Cancel)")),
+                            ("each", tr("one question per fix"))):
+            self.fix_questions.addItem(text, value)
+        self.fix_questions.setCurrentIndex(max(0, self.fix_questions.findData(defaults.get("fix_questions", "all"))))
+        self.fix_questions.setEnabled(not problem and sai.fix_questions_known())
+        self.fix_questions.setAccessibleName(tr("What a start lacks"))
+        self.fix_questions.currentIndexChanged.connect(
+            lambda _: self.save_fix_questions(self.fix_questions.currentData()))
+        self.fields["fix_questions"] = self.fix_questions
+        form.addRow(tr("What a start lacks"), self.fix_questions)
+        form.addRow(explanation(tr("When a start lacks something sandbox-ai can provide - its image not built, an MCP "
+                                   "server not added, a toolchain not in the store - it is listed with what would be "
+                                   "done, and asked about: once for everything, or each on its own (fix_questions in "
+                                   "{path}; a start in a terminal asks the same way, --fix does it without asking). "
+                                   "What is unsigned or security-relevant is always named so, and nothing is offered "
+                                   "that the security mode refuses.",
                                    path=printable(str(sai.sandbox_defaults_file())))))
 
         # sandbox-ai
@@ -850,7 +874,7 @@ class SettingsDialog(QDialog):
         if key == "theme":
             theme.apply_soon(value, after=lambda _mode: self.changed.emit(key))  # after the combo box's event
             return
-        if key in fonts.SETTING.values():  # at once: the app's font, its monospace font, new terminal tabs
+        if key in (*fonts.SETTING.values(), reading_fonts.SETTING):  # at once: the app's fonts, new terminal tabs
             fonts.use(self.sai.settings())
             theme.apply_font()
         self.changed.emit(key)
@@ -864,6 +888,32 @@ class SettingsDialog(QDialog):
         form.addRow(label, widget)
         self.fields[key] = widget
         return widget
+
+    def reading_combo(self, form, current):
+        """The reading font: the theme's, or one of the fonts that come with the app (reading_fonts.READING) for all of
+        the app's text and the Help; terminals, code and logs keep the monospace font. Applied at once."""
+        items = [(value, tr(label)) for value, _family, label, _note in reading_fonts.READING]
+        widget = self.combo(form, reading_fonts.SETTING, tr("Reading font"), items, current)
+        for index, (_value, _family, _label, note) in enumerate(reading_fonts.READING):
+            widget.setItemData(index, tr(note), Qt.ItemDataRole.ToolTipRole)
+        hint = plain_label(role="secondary")
+        form.addRow("", hint)
+        self.font_hints["reading"] = hint
+        widget.currentIndexChanged.connect(lambda _: self.show_reading_hint())
+        self.show_reading_hint()
+        return widget
+
+    def show_reading_hint(self):
+        """Under the reading font: what it is for, and - when its files are missing from this copy of the app - that
+        the theme's font is used instead."""
+        value = self.fields[reading_fonts.SETTING].currentData() or ""
+        hint = self.font_hints["reading"]
+        entry = next((e for e in reading_fonts.READING if e[0] == value), reading_fonts.READING[0])
+        text = tr(entry[3]) if value else ""
+        if value and reading_fonts.family_of(value) is None:
+            text = tr("{font} is missing from this copy of the app: the theme's font is used.", font=entry[1])
+        hint.setText(text)
+        hint.setVisible(bool(text))
 
     def font_combo(self, form, kind, label, current):
         """The font of KIND ("ui" or "mono"): the theme's own, or one of fonts.KINDS[kind]. Installed fonts are
@@ -919,6 +969,14 @@ class SettingsDialog(QDialog):
             warn(self, tr("Wait for an answer"), printable_text(exc))
             return
         self.changed.emit("ask_timeout")
+
+    def save_fix_questions(self, value):
+        try:
+            self.sai.save_sandbox_default("fix_questions", None if value == "all" else value)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("What a start lacks"), printable_text(exc))
+            return
+        self.changed.emit("fix_questions")
 
     def save_desktop(self, level):
         try:

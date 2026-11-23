@@ -17,7 +17,7 @@ from . import applog
 
 OPTION = "--no-llm-profile"
 STATUS = {"verified": N_("verified"), "smoke-only": N_("smoke test only"), "partial": N_("partly working"),
-          "failing": N_("failing"), "known-bad": N_("known not to work"), "untested": N_("this pair untested")}
+          "failing": N_("failing"), "known-bad": N_("known not to work"), "untested": N_("no data yet in this agent")}
 WARNING_STATUSES = ("failing", "known-bad")
 # What each kind of setting is, in the app's words (the values themselves are sandbox-ai's names).
 WORDS = {"temperature": N_("temperature"), "top_p": N_("top P"), "top_k": N_("top K"),
@@ -114,8 +114,8 @@ def details(profile, mine=(), enabled=True):
     lines = [badge(profile, enabled)]
     if profile.get("evidence"):
         lines.append(tr("Measured: {evidence}", evidence=printable(str(profile["evidence"]))))
-    if not profile.get("pair"):
-        lines.append(tr("This model was not measured in this agent: its settings for every agent apply."))
+    if profile.get("status") == "untested":
+        lines.append(tr("No data yet for this model in this agent: its settings for every agent apply."))
     lines.append(tr("It sets (under your own values):") if enabled else
                  tr("It would set (switched off: --no-llm-profile):"))
     lines += ["  " + line for line in value_lines(profile, mine, enabled)] or ["  " + tr("nothing")]
@@ -219,19 +219,19 @@ def tool_budget_details(found):
 
 # --- what we know: the "What we know" box beside the profile --------------------------------------------------------
 # User: "a box ... with agent + harness what we know and what we dont with short bullet points and what is working and
-# what not". sandbox-ai's table lists per family and pair what works, what fails and what was not tested
+# what not". sandbox-ai's table lists per family and pair what works, what fails and what is not known yet
 # (model_profiles.KNOWLEDGE); this says it with the pair's status in words. Information only: nothing is refused.
 
 STATUS_WORDS = {
-    # derived from the research's graded runs (sandbox-ai's model_evidence.RULES); a pair without data keeps the
-    # status given by hand
+    # derived from the research's graded runs (sandbox-ai's model_evidence.RULES); a pair without measured runs has
+    # none (untested: no data yet)
     "verified": N_("Verified: at least 10 graded runs over 5 use cases, the sandbox's own among them, a mean score of "
                    "0.85 or more, no use case below 0.50 and no injection that fired."),
     "smoke-only": N_("Smoke test only: it starts, calls tools and edits; nothing else was run."),
     "partial": N_("Partly working: something passed, short of verified (the evidence says what is missing)."),
     "failing": N_("Failing: nothing passed."),
     "known-bad": N_("Known not to work: {reason}"),
-    "untested": N_("This pair was not tested: the model's settings for every agent apply."),
+    "untested": N_("No data yet for this pair: the model's settings for every agent apply."),
 }
 GROUPS = (("works", "✓", N_("Works")), ("fails", "✗", N_("Does not work")), ("unknown", "?", N_("Not known yet")))
 
@@ -246,8 +246,8 @@ def knowledge(profile, model=None, agent=None):
     """What we know of a model in an agent ({title, lines, groups: [(sign, heading, [bullet])], bad: the line that
     says it is known not to work, or None}) from PROFILE
     (lookup's; None: a model of no family, MODEL and AGENT name it): the pair's status in words (with what was
-    measured), or that the pair was not tested with the family's general notes; then ✓ works, ✗ does not work,
-    ? not known yet (the pair's own bullets first, then the family's)."""
+    measured), or that there is no data yet for the pair, with the family's general notes; then ✓ works, ✗ does not
+    work, ? not known yet (the pair's own bullets first, then the family's)."""
     if profile is None:
         name = f"{printable(str(model or ''))} × {printable(str(agent or ''))}"
         return {"title": tr("What we know: {name}", name=name), "groups": [], "bad": None,
@@ -255,14 +255,12 @@ def knowledge(profile, model=None, agent=None):
                              "name. The agent's and the server's own settings apply.")]}
     name = printable(str(profile.get("name") or profile.get("id") or ""))
     status = profile.get("status")
-    if profile.get("pair"):
+    if status != "untested":  # a measured pair (only its own runs give a status)
         lines = [_status_line(status, profile.get("reason"))]
         if profile.get("evidence"):
             lines.append(tr("Measured: {evidence}", evidence=printable(str(profile["evidence"]))))
     else:
         lines = [_status_line("untested", None)]
-        if status in WARNING_STATUSES:  # the model itself (every agent) is known not to work
-            lines.append(_status_line(status, profile.get("reason")))
         lines += [printable(str(note)) for note in profile.get("notes") or []]
     groups = [(sign, tr(heading), [printable(str(text)) for text in profile.get(key) or []])
               for key, sign, heading in GROUPS]
@@ -301,7 +299,7 @@ def board_knowledge(sai, board, servers=None):
 # the app's words. Colour, a shape of its own per colour (model_profile_view.light_icon) and words: never colour alone.
 
 LIGHT_WORDS = {"green": N_("verified"), "yellow": N_("partly working"), "red": N_("does not work"),
-               "grey": N_("not tested")}
+               "grey": N_("no data yet")}
 LIGHT_THEME = {"green": "ok", "yellow": "warn", "red": "bad", "grey": "muted"}  # theme.color's names
 SYMBOLS = {"green": "✓", "yellow": "~", "red": "✗", "grey": "?"}
 
@@ -334,7 +332,7 @@ def harness_names(agents):
 
 
 def light_label(found):
-    """A cell's short text: "✓ verified: OpenCode, Codex +5", "✗ does not work: every agent", "? not tested"."""
+    """A cell's short text: "✓ verified: OpenCode, Codex +5", "? no data yet"."""
     colour = found.get("light", "grey")
     agents = (found.get("by_light") or {}).get(colour) or []
     words = tr(LIGHT_WORDS.get(colour, LIGHT_WORDS["grey"]))
@@ -345,14 +343,11 @@ def light_label(found):
 
 
 def light_summary(found):
-    """In words (a tooltip, a screen reader): "verified in OpenCode, Claude Code; does not work in Codex", "not tested:
-    no data yet"."""
+    """In words (a tooltip, a screen reader): "verified in OpenCode, Claude Code; does not work in Codex", "no data
+    yet" - only the agents the model was measured in."""
     parts = [tr("{words} in {agents}", words=tr(LIGHT_WORDS[colour]), agents=harness_names(agents))
              for colour, agents in (found.get("by_light") or {}).items() if agents and colour in LIGHT_WORDS]
-    if found.get("status") in WARNING_STATUSES and found.get("untested"):
-        parts.append(tr("{words} in every other agent", words=tr(LIGHT_WORDS["red"])) if found.get("harnesses") else
-                     tr("{words} in every agent", words=tr(LIGHT_WORDS["red"])))
-    return "; ".join(parts) or tr("not tested: no data yet")
+    return "; ".join(parts) or tr("no data yet")
 
 
 def light_accessible(found, model=""):
@@ -383,12 +378,10 @@ def support_details(found):
     model = printable(str(found.get("model") or ""))
     title = tr("Support of {model}", model=model)
     if found.get("family") is None:
-        return {"title": title, "light": "grey", "summary": tr("not tested: no data yet"),
+        return {"title": title, "light": "grey", "summary": tr("no data yet"),
                 "lines": [tr("No data yet: no model family of sandbox-ai's research matches this name.")],
                 "harnesses": [], "untested": ""}
     lines = [tr("Model family: {label}", label=printable(str(found.get("label") or found["family"])))]
-    if found.get("status") in WARNING_STATUSES and found.get("reason"):
-        lines.append(tr("Known not to work: {reason}", reason=printable(str(found["reason"]))))
     if found.get("speed"):
         lines.append(tr("Measured speed: {speed}", speed=printable(str(found["speed"]))))
     if found.get("settings_text"):
@@ -420,7 +413,7 @@ def support_details(found):
     untested = found.get("untested") or []
     return {"title": title, "light": found.get("light", "grey"), "summary": light_summary(found), "lines": lines,
             "harnesses": harnesses,
-            "untested": tr("Not tested in: {agents}", agents=harness_names(untested)) if untested else ""}
+            "untested": tr("No data yet in: {agents}", agents=harness_names(untested)) if untested else ""}
 
 
 def support_text(details):

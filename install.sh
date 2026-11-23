@@ -110,6 +110,7 @@ note() { case "$*" in warning:*) say warning "$*" ;; *) say note "$*" ;; esac; }
 
 source_url=${SANDBOX_AI_SOURCE:-$DEFAULT_SOURCE}
 want_version="" from="" fetch_dir="" mode="" prefix=/usr/local bin_override="" force=0 action=install dry_run=0
+prefix_given=0
 app=1 app_deps=auto app_terminal=1 allow_downgrade=0 allow_unsigned=0 verify=0 modify_rc=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -118,7 +119,7 @@ while [[ $# -gt 0 ]]; do
     --from) [[ $# -ge 2 ]] || die "--from needs a path"; from=$2; shift 2 ;;
     --user) mode=user; shift ;;
     --system) mode=system; shift ;;
-    --prefix) [[ $# -ge 2 ]] || die "--prefix needs a directory"; prefix=$2; shift 2 ;;
+    --prefix) [[ $# -ge 2 ]] || die "--prefix needs a directory"; prefix=$2; prefix_given=1; shift 2 ;;
     --bin-dir) [[ $# -ge 2 ]] || die "--bin-dir needs a directory"; bin_override=$2; shift 2 ;;
     --force) force=1; shift ;;
     --check) action=check; shift ;;
@@ -146,13 +147,34 @@ done
 command -v python3 >/dev/null || die "python3 is required (3.9 or newer)"
 python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die "python3 3.9 or newer is required"
 
+# Run from an installation (its sandbox-ai-update link: DATA/versions/X/install.sh) and told no other: that
+# installation - a system one under its prefix, whoever runs it (a user's --check reads it; a change needs root), a
+# user's own as theirs (root updating it does not make a system one). Else root makes a system installation, anyone
+# else one of their own.
+if [[ -z "$mode" && $prefix_given == 0 && -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  own=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
+  own_data=$(dirname -- "$(dirname -- "$own")")
+  if [[ $(basename -- "$(dirname -- "$own")") == versions && -L "$own_data/current" &&
+        -f "$own/sandbox/agent_sandbox.py" ]]; then
+    if [[ "$own_data" == "${XDG_DATA_HOME:-${HOME:-/nonexistent}/.local/share}/sandbox-ai" ]]; then
+      mode=user
+    else
+      case "$own_data/" in
+        /home/*|/root/*|/Users/*|/var/home/*) ;;  # (another user's own: never taken for a system installation)
+        */lib/sandbox-ai/) mode=system prefix=$(dirname -- "$(dirname -- "$own_data")") ;;
+      esac
+    fi
+  fi
+fi
 if [[ -z "$mode" ]]; then
   if [[ $(id -u) == 0 ]]; then mode=system; else mode=user; fi
 fi
 if [[ $mode == system ]]; then
   # --check only reads (what is installed, what the source offers, its signature): every user of a system
   # installation asks it (sandbox-ai update --check, the app's and notify's daily check); what changes one needs root.
-  [[ $action == check || $(id -u) == 0 || -w "$prefix" ]] || die "--system needs root: sudo bash install.sh --system"
+  # (--uninstall --dry-run only lists what would go: sandbox-ai hosts uninstall shows it before it asks for sudo)
+  [[ $action == check || ( $action == uninstall && $dry_run == 1 ) || $(id -u) == 0 || -w "$prefix" ]] \
+    || die "--system needs root: sudo bash install.sh --system"
   # For every user: what is made here is open to all and writable by its owner only, whatever root's umask (077 on
   # hardened systems or in a root shell made every folder root's alone - the users' sandbox-ai, builds and app failed).
   umask 022
@@ -363,23 +385,42 @@ def version_key(version):
     return (int(match[1]), int(match[2]), int(match[3]), match[4] == "", match[4]) if match else (0, 0, 0, False, "")
 
 
-def highest_seen(state):
+def source_key(source):
+    return re.sub(r"\.git$", "", str(source or "").rstrip("/"))
+
+
+def highest_seen(state, source=None):
+    """The newest release this installation has installed or seen signed - of every source, or (SOURCE) of that one
+    (kept per source since 0.1.205: a release of the local Gitea is no reason to distrust GitHub's older newest)."""
     try:
-        value = json.loads(read(state)).get("highest_seen", "")
+        document = json.loads(read(state))
+        value = (document.get("by_source") or {}).get(source_key(source), "") if source is not None else \
+            document.get("highest_seen", "")
         return value if isinstance(value, str) and ASSET.fullmatch(f"sandbox-ai-bundle-{value}.tar.gz") else ""
     except (OSError, ValueError, AttributeError):
         return ""
 
 
-def cmd_record(state, version):
-    """Remember the newest release this installation has installed or seen signed (rollback warnings)."""
-    seen = highest_seen(state)
-    if not os.path.isdir(os.path.dirname(state)) or (seen and version_key(seen) >= version_key(version)):
+def cmd_record(state, version, source=None):
+    """Remember the newest release this installation has installed or seen signed (rollback warnings), also per
+    source (SOURCE)."""
+    seen, here = highest_seen(state), highest_seen(state, source) if source else ""
+    known = seen and version_key(seen) >= version_key(version)
+    known_here = not source or (here and version_key(here) >= version_key(version))
+    if not os.path.isdir(os.path.dirname(state)) or (known and known_here):
         return
+    try:
+        document = json.loads(read(state))
+        by_source = document.get("by_source") if isinstance(document.get("by_source"), dict) else {}
+    except (OSError, ValueError, AttributeError):
+        by_source = {}
+    if source and not (here and version_key(here) >= version_key(version)):
+        by_source[source_key(source)] = version
     temporary = f"{state}.{os.getpid()}"
     try:
         with open(temporary, "w") as stream:
-            json.dump({"highest_seen": version, "recorded": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+            json.dump({"highest_seen": version if not seen or version_key(version) > version_key(seen) else seen,
+                       "by_source": by_source, "recorded": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
                       stream)
         os.replace(temporary, state)
     except OSError:
@@ -391,15 +432,36 @@ def cmd_record(state, version):
             pass
 
 
-def check_version(found, current, state, allow_downgrade, explicit):
-    """No release older than the installed one (a source serving an old, vulnerable release), unless asked for."""
+NEWER_INSTALLED = 3  # the helper's status: the installed version is newer than the newest release (nothing to do)
+
+
+def newer_installed(current, found):
+    """What --check and an update say when the installed version is newer than the newest release (installed from
+    a checkout, another source or a release not published there yet)."""
+    return f"sandbox-ai {current} is newer than the newest release {found}: nothing to update"
+
+
+def check_version(found, current, state, allow_downgrade, explicit, source=""):
+    """No release older than the installed one (a source serving an old, vulnerable release), unless asked for. The
+    newest release older than the installed version: nothing to update - said, status NEWER_INSTALLED."""
+    seen, here = highest_seen(state), highest_seen(state, source)
     if current and version_key(found) < version_key(current):
         if allow_downgrade != "1":
-            why = "" if explicit else ", although the source lists it as the newest release (an old release served again?)"
+            # (the installed version was never the source's release - a checkout, another source, a release not
+            # published there yet: nothing to update; one the source did publish before: it may be replaying an
+            # old release, which is refused as such)
+            if not explicit and not (here and version_key(here) > version_key(found)):
+                note(f"{newer_installed(current, found)} ({source}; an older release is installed only with "
+                     "--allow-downgrade)")
+                if seen and version_key(seen) > version_key(found):  # (seen before 0.1.205: of no known source)
+                    note(f"this installation has seen {seen} before (of another source, or before the sources were "
+                         "told apart): if it was this one's, the source may be serving an old release")
+                sys.exit(NEWER_INSTALLED)
+            why = "" if explicit else (f", although the source lists it as the newest release and this installation "
+                                       f"has seen {here} there before (an old release served again?)")
             fail(f"sandbox-ai {found} is older than the installed {current}{why}; nothing installed. "
                  "--allow-downgrade installs it anyway")
         note(f"downgrading from {current} to {found} (--allow-downgrade)")
-    seen = highest_seen(state)
     if not explicit and seen and version_key(found) < version_key(seen):
         note(f"the newest release of the source is {found}, but this installation has seen {seen} before: "
              "the source may be serving an old release")
@@ -535,19 +597,27 @@ def cmd_check(source, version, current, state, *trust):
         verdict, detail = verify(sums, signature, trust)
         status = f"good, by the trusted key {detail}" if verdict == "good" else f"BAD: {detail}"
         if verdict == "good":
-            cmd_record(state, found)
+            cmd_record(state, found, source)
     print(f"signature: {status}")
     print(f"trusted keys: {trust.describe()}")
     if trust.policy:
         print("policy: signed updates required (require_signed_updates)")
     if trust.keys and not status.startswith("good"):
         print("           an update refuses this release" + ("" if trust.policy else " without --allow-unsigned"))
+    seen = highest_seen(state, source)
+    if seen and version_key(seen) > version_key(found):
+        print(f"result: the newest release there is {found}, but this installation has seen {seen} there before: "
+              "the source may be serving an old release")
+    elif current and version_key(found) < version_key(current):
+        print(f"result: {newer_installed(current, found)}")
+    elif current and found == current:
+        print(f"result: sandbox-ai {current} is up to date")
 
 
 def cmd_download(source, version, target, current, state, allow_downgrade, *trust):
     trust = Trust(*trust)
     found, name, bundle_url, sums_url, sig_url = release(source, version)
-    check_version(found, current, state, allow_downgrade, bool(version))
+    check_version(found, current, state, allow_downgrade, bool(version), source)
     sums = download(sums_url)
     status = judge(sums, download(sig_url) if sig_url else None, trust, f"the release {found}")
     data = download(bundle_url)
@@ -568,7 +638,7 @@ def cmd_fetch(source, version, directory, current, state, *trust):
     if not trust.keys:
         fail("--fetch needs a trusted release key (the installed tree lists none): nothing downloaded")
     found, name, bundle_url, sums_url, sig_url = release(source, version)
-    check_version(found, current, state, "0", bool(version))
+    check_version(found, current, state, "0", bool(version), source)
     sums = download(sums_url)
     if sig_url is None:
         fail(f"the release {found} is not signed (no SHA256SUMS.sig); nothing downloaded")
@@ -585,7 +655,7 @@ def cmd_fetch(source, version, directory, current, state, *trust):
         with open(temporary, "wb") as stream:
             stream.write(content)
         os.replace(temporary, os.path.join(directory, file))
-    cmd_record(state, found)
+    cmd_record(state, found, source)
     print(found)
     print(f"good {detail}")
     print(name)
@@ -801,9 +871,23 @@ def cmd_user_note(source, version):
         print(line)
 
 
-{"check": cmd_check, "fetch": cmd_fetch, "download": cmd_download, "verify": cmd_verify, "accept": cmd_accept, "record": cmd_record,
- "policy": cmd_policy, "unpack": cmd_unpack, "copy": cmd_copy, "invoking_user": cmd_invoking_user,
- "user_note": cmd_user_note}[sys.argv[1]](*sys.argv[2:])
+def run_command(argv):
+    """The helper's command ARGV[1] with its arguments; what the system refuses (a full disk, a read-only or foreign
+    folder) is said in one line - no traceback - and nothing is switched."""
+    try:
+        {"check": cmd_check, "fetch": cmd_fetch, "download": cmd_download, "verify": cmd_verify, "accept": cmd_accept,
+         "record": cmd_record, "policy": cmd_policy, "unpack": cmd_unpack, "copy": cmd_copy,
+         "invoking_user": cmd_invoking_user, "user_note": cmd_user_note}[argv[1]](*argv[2:])
+    except OSError as exc:
+        import errno
+        where = f" ({exc.filename})" if exc.filename else ""
+        why = {errno.ENOSPC: "the disk is full", errno.EROFS: "the file system is read-only",
+               errno.EACCES: "permission denied", errno.EPERM: "not permitted"}.get(exc.errno,
+                                                                                   exc.strerror or str(exc))
+        fail(f"{why}{where}; nothing installed")
+
+
+run_command(sys.argv)
 PY
 }
 
@@ -1230,7 +1314,11 @@ if [[ -n "$from" ]]; then
   fi
 else
   downloaded=$(helper download "$source_url" "$want_version" "$work/bundle.tar.gz" "$(installed_version)" \
-    "$state_file" "$allow_downgrade" "${trust[@]}")
+    "$state_file" "$allow_downgrade" "${trust[@]}") || {
+    status=$?
+    [[ $status == 3 ]] && exit 0  # (newer than the newest release: said by the helper, nothing to do)
+    exit $status
+  }
   release_version=${downloaded%%$'\n'*} signature=${downloaded#*$'\n'}
   case "$signature" in
     good*) signed="signed by ${signature#good }" ;;
@@ -1251,7 +1339,7 @@ if [[ -n "$release_version" && "$version" != "$release_version" ]]; then
 fi
 # The new tree's release keys: only a release a trusted key signed may change them.
 [[ -z "$signature" ]] || helper accept "$staged" "$signature" "${trust[@]}"
-[[ -z "$release_version" ]] || helper record "$state_file" "$release_version"
+[[ -z "$release_version" ]] || helper record "$state_file" "$release_version" "$source_url"
 
 current=$(installed_version)
 if [[ "$current" == "$version" && $force == 0 && -z "$from" ]]; then
@@ -1266,8 +1354,14 @@ if [[ "$current" == "$version" && $force == 0 && -z "$from" ]]; then
   exit 0
 fi
 
-rm -rf -- "${data_dir:?}/versions/$version"
-mv "$staged" "$data_dir/versions/$version"
+# The new tree beside the old one, then swapped in by renames: an update or a --force that stops half way (a full
+# disk, a refused rename, Ctrl-C) leaves the installed version whole - removed first, it left current pointing at
+# nothing. (Half-made folders are dot-named: no version, removed by the next run.)
+rm -rf -- "${data_dir:?}/versions/.$version.new" "${data_dir:?}/versions/.$version.old"
+mv "$staged" "$data_dir/versions/.$version.new"
+if [[ -e "$data_dir/versions/$version" ]]; then mv "$data_dir/versions/$version" "$data_dir/versions/.$version.old"; fi
+mv "$data_dir/versions/.$version.new" "$data_dir/versions/$version"
+rm -rf -- "${data_dir:?}/versions/.$version.old"
 app_dependencies "$data_dir/versions/$version"
 precompile "$data_dir/versions/$version"
 chmod -R go-w "$data_dir/versions/$version"

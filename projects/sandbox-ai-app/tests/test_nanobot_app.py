@@ -1,7 +1,7 @@
 """nanobot in the app: nanobot in the agent choice with its model and effort lists, --nanobot-enable on the Board's
 agent node (a problem for another agent, its reach in the capabilities: the Telegram channel and the scheduler
 warned), its words in both languages, no sign-in page of its own in the login browser and no row on the Credentials
-page (it has no login), the "not live-tested yet" note on its presets and in the wizard (a note, never a refusal), the
+page (it has no login), its presets without a badge (the user, 2026-11-22), the
 help section nanobot (exported to the web page too), its presets in the category Agents."""
 import json
 import os
@@ -67,13 +67,13 @@ def test_nanobot_has_no_sign_in_page_and_no_credentials_row(sai):
         sai.login_argv("ct1", "nanobot")
 
 
-def test_nanobot_is_marked_not_live_tested_and_still_starts(sai):
-    """The badge is a note: its parts list names nanobot, the presets carry it, and a dry run starts."""
-    assert sai.launcher.EXPERIMENTAL_PARTS["nanobot"] == {"agent": "nanobot"}
+def test_nanobot_is_not_marked(sai):
+    """No list of parts not live-tested in the launcher, no badge on its presets."""
+    assert not hasattr(sai.launcher, "EXPERIMENTAL_PARTS")
     presets = sai.launcher.load_presets_module()
     catalog = presets.catalog()
     for name in ("coding-nanobot", "nanobot-local-llm"):
-        assert presets.experimental(catalog[name]) == {"names": ["nanobot"]}, name
+        assert "experimental" not in presets.public(catalog[name]), name
 
 
 def test_the_help_has_nanobot_in_both_languages():

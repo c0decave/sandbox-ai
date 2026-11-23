@@ -273,8 +273,9 @@ TEMPORARY_PREFIX = "agent-sandbox-"  # the launcher's temporary folders (its ses
 
 def discard(directory):
     """Remove the run directory DIRECTORY of an ended run, its browser directory (RUN.browser), the folder of its
-    sandbox browser's VNC socket (RUN.browser-vnc, browser.vnc_dir) and that of its Cairn relay (RUN.cairn,
-    cairn.relay_dir: the socket and the log of the workers' calls) beside it, and the temporary folders its run.json
+    sandbox browser's VNC socket (RUN.browser-vnc, browser.vnc_dir), that of its Cairn relay (RUN.cairn,
+    cairn.relay_dir: the socket and the log of the workers' calls) and its ARTEX folder (RUN.artex,
+    artex.console_dir: the console's address and password) beside it, and the temporary folders its run.json
     names (a launcher killed with SIGKILL left them for good: the proxy's proxy.json holds the --api-key keys and the
     Git and LLM tokens in plain text, the session's folder the tokens given at run time)."""
     directory = Path(directory)
@@ -287,7 +288,7 @@ def discard(directory):
             remove_temporary(record.get(key))
     release_remote(directory.name)
     shutil.rmtree(directory, ignore_errors=True)
-    for suffix in (".browser", ".browser-vnc", ".cairn"):
+    for suffix in (".browser", ".browser-vnc", ".cairn", ".artex"):
         shutil.rmtree(directory.with_name(directory.name + suffix), ignore_errors=True)
 
 

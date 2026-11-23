@@ -11,7 +11,14 @@ Update and Update all run `sandbox-ai hosts update` (each host's own signed upda
 opens the host's update in a terminal tab, where sudo asks. Update from here (hosts update --from-here) puts this
 machine's copy there instead, as the same kind of installation, asked first like an install; an update that finds no
 published release offers it at once. Adding and testing a host make a key file that others
-can read private (ssh refuses it) and say so.
+can read private (ssh refuses it) and say so. After an update the host's version is read again at once (hosts update
+keeps it): the column never goes empty.
+
+A host may have several installations (the user's own, a system one): the column names the one the host's commands run
+(the user's own first, as a terminal there finds it) and the others; Update asks which when there are two. Uninstall…
+(hosts uninstall) removes the one chosen with its own sandbox-ai uninstall there, after its table of what goes, with
+--purge, --secrets and --mcp-data as choices (unticked); the host stays in the list unless ticked. This machine's row
+names its own version and is never uninstalled from here.
 
 The Web interface tab manages the host's `sandbox-ai web` (WebPanel): its logins (web user list; Add login… and New
 password… run in a terminal, where the password and the TOTP code are typed; Remove… asked first), its certificate's
@@ -55,21 +62,79 @@ def is_remote(entry):
 UPDATE_MODES = backend.UPDATE_MODES
 
 
+def kind_text(kind):
+    """A kind of installation in words: user, system (translated), pip, pipx, package, checkout as they are."""
+    if kind == "user":
+        return tr("user")
+    if kind == "system":
+        return tr("system")
+    return printable(kind) if kind in ("pip", "pipx", "package", "checkout") else tr("unknown")
+
+
+def installations_of(info):
+    """The installations a host's status names (hosts list: user, system, pip, ...), each a dict; [] when not read."""
+    found = (info or {}).get("installations")
+    return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
+
+
+def others_text(info):
+    """The host's other installations beside the one its commands run ("; system 0.1.236"), and a warning when a
+    terminal there runs another one than the app's commands (user report 2026-11-23, coding-101)."""
+    items = installations_of(info)
+    text = "".join("; " + tr("{kind} {version}", kind=kind_text(item.get("kind")),
+                             version=printable(item.get("version") or "?"))
+                   for item in items if not item.get("commands"))
+    if info and info.get("differ"):
+        terminal = next((item for item in items if item.get("terminal")), {})
+        commands = next((item for item in items if item.get("commands")), {})
+        text += "; " + tr("a terminal there runs {terminal}, the app's commands {commands}",
+                          terminal=tr("{kind} {version}", kind=kind_text(terminal.get("kind")),
+                                      version=printable(terminal.get("version") or "?")),
+                          commands=tr("{kind} {version}", kind=kind_text(commands.get("kind")),
+                                      version=printable(commands.get("version") or info.get("version") or "?")))
+    return text
+
+
 def version_text(info):
-    """A host's sandbox-ai in a few words: its version and whether an update is there ("" when not asked yet)."""
+    """A host's sandbox-ai in a few words: its version and whether an update is there ("" when not asked yet), the
+    kind when it has several installations, and the others."""
     if not info:
         return ""
+    others = others_text(info)
     if not info.get("version"):
+        if info.get("missing"):
+            return tr("not installed") + others
         return tr("unreachable") if info.get("error") else ""
     # its own update mode (sandbox-ai update mode; 0.1.122 on, read from its version --verbose)
     mode = "; " + tr("updates: {mode}", mode=info["update_mode"]) if info.get("update_mode") in UPDATE_MODES else ""
     if info.get("kind") in ("checkout", "pip", "package"):
-        return f"{info['version']} ({info['kind']})" + mode
+        return f"{info['version']} ({info['kind']})" + mode + others
+    version = f"{info['version']} ({kind_text(info['kind'])})" if others and info.get("kind") in ("user", "system") \
+        else info["version"]
     if info.get("update"):
-        return tr("{version}, update: {available}", version=info["version"],
-                  available=info.get("available") or "?") + mode
-    return (tr("{version}, up to date", version=info["version"]) if info.get("update") is False
-            else info["version"]) + mode
+        return tr("{version}, update: {available}", version=version,
+                  available=info.get("available") or "?") + mode + others
+    return (tr("{version}, up to date", version=version) if info.get("update") is False
+            else version) + mode + others
+
+
+def uninstall_text(name, result):
+    """One host's uninstall in a line or two."""
+    where = result.get("installation") or {}
+    what = tr("{kind} installation {version}", kind=kind_text(where.get("kind")),
+              version=printable(where.get("version") or "?"))
+    if result.get("error"):
+        lines = [tr("{host}: not removed: {error}", host=name, error=printable(result["error"]))]
+    else:
+        lines = [tr("{host}: removed the {what}", host=name, what=what)]
+        if result.get("removed_from_list"):
+            lines.append("  " + tr("{host} is no longer in the list", host=name))
+        elif result.get("remaining") is not None:
+            left = ", ".join(tr("{kind} {version}", kind=kind_text(item.get("kind")),
+                                version=printable(item.get("version") or "?")) for item in result["remaining"])
+            lines.append("  " + (tr("there now: {left}", left=left) if left else
+                                 tr("no sandbox-ai is left there (install it again: Install…)")))
+    return "\n".join([*lines, *("  " + printable(note) for note in result.get("notes") or [])])
 
 
 def key_lines(result):
@@ -89,6 +154,10 @@ def update_text(name, result):
     else:
         line = tr("{host}: {version}, up to date", host=name,
                   version=result.get("after") or result.get("before") or "?")
+    where = result.get("installation") or {}
+    if where.get("kind") in ("user", "system") and result.get("after"):
+        # (which one: a host may have two)
+        line += " (" + tr("{kind} installation", kind=kind_text(where["kind"])) + ")"
     return "\n".join([line, *("  " + text for text in key_lines(result)),
                       *("  " + note for note in result.get("notes") or [])])
 
@@ -305,6 +374,92 @@ def install_text(name, result):
         line = tr("{host}: sandbox-ai {before} -> {after}", host=name, before=printable(result.get("before") or "-"),
                   after=printable(result.get("after") or "?"))
     return "\n".join([line, *("  " + printable(note) for note in result.get("notes") or [])])
+
+
+class UninstallDialog(QDialog):
+    """Uninstall… of a host: which installation (the user's own or the system one, when it has both), whether also
+    the SSH user's data (--purge), with the secrets and logins (--secrets, which cannot be recovered) and the MCP
+    servers' own folders (--mcp-data), and whether the host leaves the list afterwards - with the host's own table of
+    what its uninstall removes (its --dry-run), asked again at each change. Nothing is ticked at first."""
+
+    def __init__(self, name, items, plan, parent=None):
+        """ITEMS: the host's install.sh installations (its status: installations with an executable); PLAN(values,
+        done): asks the host's table in the background, DONE(text) shows it."""
+        super().__init__(parent)
+        self.name, self.plan, self.asked = name, plan, 0
+        self.setWindowTitle(tr("Uninstall sandbox-ai on {host}", host=printable(name)))
+        form = QFormLayout(self)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.which = QButtonGroup(self)
+        self.choices = []
+        for item in items:
+            words = tr("{kind} installation {version} ({path})", kind=kind_text(item.get("kind")),
+                       version=printable(item.get("version") or "?"), path=printable(item.get("path") or "?"))
+            if item.get("terminal"):
+                words += " - " + tr("a terminal there runs it")
+            radio = QRadioButton(words)
+            radio.setAccessibleName(tr("Uninstall the {kind} installation", kind=kind_text(item.get("kind"))))
+            self.which.addButton(radio)
+            self.choices.append((radio, item))
+            form.addRow(tr("Which") if len(self.choices) == 1 else "", radio)
+            radio.toggled.connect(lambda on, _=None: on and self.changed())
+        if len(self.choices) == 1:
+            self.choices[0][0].setChecked(True)
+        self.purge = QCheckBox(tr("Also the SSH user's sandbox-ai data there (kept starts, logs, kits, settings, "
+                                  "caches, its Podman images)"))
+        self.secrets = QCheckBox(tr("With it, also the secrets and logins there - they cannot be recovered"))
+        self.mcp_data = QCheckBox(tr("With it, also the MCP servers' own folders there"))
+        self.remove = QCheckBox(tr("Remove {host} from the list afterwards", host=printable(name)))
+        self.remove.setToolTip(tr("Unticked, the host stays in the list: install sandbox-ai there again with "
+                                  "Install… or Update from here…"))
+        for box in (self.purge, self.secrets, self.mcp_data, self.remove):
+            box.setAccessibleName(box.text())
+            form.addRow("", box)
+        for box in (self.purge, self.secrets, self.mcp_data):
+            box.toggled.connect(lambda _=False: self.changed())
+        self.table = QPlainTextEdit()
+        self.table.setReadOnly(True)
+        self.table.setFont(MONO)
+        self.table.setAccessibleName(tr("What its uninstall removes there"))
+        self.table.setMinimumHeight(160)
+        form.addRow(tr("What goes"), self.table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.ok = buttons.addButton(tr("Uninstall"), QDialogButtonBox.ButtonRole.AcceptRole)
+        self.ok.setProperty("role", "danger")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setDefault(True)
+        form.addRow(buttons)
+        self.changed()
+
+    def chosen(self):
+        return next((item for radio, item in self.choices if radio.isChecked()), None)
+
+    def values(self):
+        """{installation, purge, secrets, mcp_data, remove} for SandboxAI.host_uninstall."""
+        item = self.chosen() or {}
+        purge = self.purge.isChecked()
+        return {"installation": item.get("kind") if item.get("kind") in ("user", "system") else None,
+                "purge": purge, "secrets": purge and self.secrets.isChecked(),
+                "mcp_data": purge and self.mcp_data.isChecked(), "remove": self.remove.isChecked()}
+
+    def changed(self):
+        self.secrets.setEnabled(self.purge.isChecked())
+        self.mcp_data.setEnabled(self.purge.isChecked())
+        chosen = self.chosen() is not None or not self.choices
+        self.ok.setEnabled(False)
+        if not chosen:
+            self.table.setPlainText(tr("Choose the installation to remove."))
+            return
+        self.asked += 1
+        asked = self.asked
+        self.table.setPlainText(tr("Asking {host} what its uninstall would remove…", host=printable(self.name)))
+        values = {key: value for key, value in self.values().items() if key != "remove"}
+        self.plan(values, lambda text, ok: asked == self.asked and self.planned(text, ok))
+
+    def planned(self, text, ok):
+        self.table.setPlainText(printable_text(text))
+        self.ok.setEnabled(bool(ok))
 
 
 class AddHostDialog(QDialog):
@@ -694,6 +849,12 @@ class HostsPage(QWidget):
                                                         "user, as root, with sudo or without, from this machine's copy "
                                                         "or the signed release (sandbox-ai hosts install)"),
                                      self.install, tr("Install sandbox-ai on the host"))
+        # sandbox-ai hosts uninstall: the host's own sandbox-ai uninstall of the installation chosen (asked first, with
+        # its own table of what goes); the host stays in the list unless ticked
+        self.uninstall_button = button(tr("Uninstall…"), tr(
+            "Remove sandbox-ai on this host - the user's own installation or the system one, when it has both - "
+            "with its own sandbox-ai uninstall there, after its list of what goes (sandbox-ai hosts uninstall)"),
+            self.uninstall, tr("Uninstall sandbox-ai on the host"))
         # With sudo or not, for Update and Update all (default: as set for each host, hosts set --update-sudo).
         self.update_sudo = QComboBox()
         self.update_sudo.setAccessibleName(tr("Update with sudo"))
@@ -714,7 +875,7 @@ class HostsPage(QWidget):
                       (self.add_button, self.edit_button, self.remove_button, self.test_button,
                        self.optimize_button),
                       (self.update_button, self.from_here_button, self.update_sudo, self.update_mode_button),
-                      (self.install_button, self.update_all_button, self.versions_button)):
+                      (self.install_button, self.uninstall_button, self.update_all_button, self.versions_button)):
             left_layout.addWidget(flow(*group))
         # The app's storage check of the host (storage_hosts.py): on or off for it, and what its last one said
         self.storage_box = QCheckBox(tr("Check its storage in the background"))
@@ -732,7 +893,8 @@ class HostsPage(QWidget):
         self.storage_checked, self.storage_used = {}, lambda: []
         widgets.list_menu(self.table, lambda: [
             self.starts_button, self.questions_button, None, self.edit_button, self.test_button, self.optimize_button,
-            self.update_button, self.from_here_button, self.update_mode_button, self.install_button, None,
+            self.update_button, self.from_here_button, self.update_mode_button, self.install_button,
+            self.uninstall_button, None,
             (tr("Stop all starts on this host…"), self.host() not in (None, "local"), tr("Choose a host first"),
              self.stop_all), self.remove_button, None,
             self.add_button, self.update_all_button, self.versions_button, self.refresh_button])
@@ -937,7 +1099,8 @@ class HostsPage(QWidget):
             questions = self.question_counts.get(name)
             rows.append([tr("{name} (this machine)", name=printable(name)) if local else printable(name),
                          "" if local else printable(f"{entry.get('ssh', '')}:{entry.get('port', 22)}"),
-                         tr("yes") if local else reach_text(info), version_text(self.versions.get(name)),
+                         tr("yes") if local else reach_text(info),
+                         self.own_version() if local else version_text(self.versions.get(name)),
                          "" if count is None else str(count), "" if questions is None else str(questions),
                          "" if local else storage_cell(self.storage_checked.get(name),
                                                        storage_hosts.is_on(name, used, settings))])
@@ -1034,6 +1197,10 @@ class HostsPage(QWidget):
         set_enabled(self.install_button, remote and self.sai.host_install_supported(),
                     tr("This machine installs with install.sh (or: sandbox-ai update).") if name == "local" else
                     tr("This sandbox-ai cannot install on hosts yet: update it.") if remote else None)
+        set_enabled(self.uninstall_button, remote and self.sai.host_uninstall_supported(),
+                    tr("This machine's sandbox-ai is the one the app runs from: remove it in a terminal with "
+                       "sandbox-ai uninstall.") if name == "local" else
+                    tr("This sandbox-ai cannot uninstall on hosts yet: update it.") if remote else None)
         set_enabled(self.from_here_button, remote and self.sai.host_update_supported()
                     and self.sai.host_update_from_here_supported(),
                     tr("This machine updates on the page System (or: sandbox-ai update).") if name == "local" else
@@ -1060,7 +1227,7 @@ class HostsPage(QWidget):
             why = tr("Acts on one host: {count} are selected.", count=len(names))
             for widget in (self.edit_button, self.starts_button, self.questions_button, self.test_button,
                            self.doctor_button, self.install_button, self.from_here_button, self.update_button,
-                           self.update_mode_button):
+                           self.update_mode_button, self.uninstall_button):
                 set_enabled(widget, False, why)
             set_enabled(self.remove_button, any(n != "local" for n in names), tr("This machine is always in the list."))
 
@@ -1407,11 +1574,33 @@ class HostsPage(QWidget):
         if name == "local":
             warn(self, tr("Update"), tr("This machine updates on the page System (or: sandbox-ai update)."))
             return
-        self.results, self.queue = [], [name]
+        which = self.which_installation(name)
+        if which is False:
+            return
+        self.results, self.queue = [], [name] if which != "all" else [name, name]
+        self.queue_installations = [which] if which != "all" else ["user", "system"]
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
         self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), False
         self.next_update()
+
+    def which_installation(self, name):
+        """Which installation of host NAME Update takes when it has several (its status: the user's own and a system
+        one): None (the one its commands run: the first choice), "user", "system", "all" - or False (Cancel).
+        One installation (or none known): None, nothing asked."""
+        items = [item for item in installations_of((getattr(self, "versions", None) or {}).get(name))
+                 if item.get("executable") and item.get("kind") in ("user", "system")]
+        if len(items) < 2:
+            return None
+        items.sort(key=lambda item: not item.get("commands"))  # (the one its commands run first: the default)
+        choices = [(item["kind"], tr("{kind} installation {version}", kind=kind_text(item["kind"]),
+                                     version=printable(item.get("version") or "?"))
+                    + (" - " + tr("a terminal there runs it") if item.get("terminal") else ""))
+                   for item in items] + [("all", tr("Both"))]
+        answer = widgets.choose(self, tr("Update"), tr(
+            "{host} has {count} installations of sandbox-ai. Which one is updated?", host=self.label(name),
+            count=len(items)), choices)
+        return False if answer is None else answer
 
     def set_update_mode(self):
         """The host's own update mode: chosen in a small dialog, asked first (update-mode), set in the background
@@ -1458,11 +1647,21 @@ class HostsPage(QWidget):
             self.versions[name]["update_mode"] = result.get("mode")
         self.load_versions(refresh=True)
 
+    def own_version(self):
+        """This machine's sandbox-ai version (the copy the app runs from), for its row: read once."""
+        if getattr(self, "_own_version", None) is None:
+            try:
+                self._own_version = printable(self.sai.version())
+            except Exception as _exc:  # noqa: BLE001 - only shown
+                applog.swallowed("hosts_page", "HostsPage.own_version: not read", _exc)
+                self._own_version = ""
+        return self._own_version
+
     def update_all(self):
         names = [entry["name"] for entry in self.entries if is_remote(entry)]
         if not names or self.busy_updating():
             return
-        self.results, self.queue = [], list(names)
+        self.results, self.queue, self.queue_installations = [], list(names), []
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
         self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), False
@@ -1486,7 +1685,7 @@ class HostsPage(QWidget):
             return
         if not self.sai.host_update_from_here_supported() or not self.ask_from_here(name):
             return
-        self.results, self.queue = [], [name]
+        self.results, self.queue, self.queue_installations = [], [name], []
         self.updates.clear()
         self.tabs.setCurrentWidget(self.updates)
         self.queue_sudo, self.queue_from_here = self.update_sudo.currentData(), True
@@ -1500,8 +1699,12 @@ class HostsPage(QWidget):
         name, total = self.queue[0], len(self.results) + len(self.queue)
         self.status.setText(tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
                                count=total))
-        from_here = [True] if getattr(self, "queue_from_here", False) else []  # host_update's FROM_HERE
-        self.task.call_watched(self.sai, lambda: self.sai.host_update(name, sudo, *from_here),
+        from_here = getattr(self, "queue_from_here", False)  # host_update's FROM_HERE
+        chosen = getattr(self, "queue_installations", None) or []
+        which = chosen[len(self.results)] if len(self.results) < len(chosen) else None
+        extra = {"installation": which} if which else {}
+        self.task.call_watched(self.sai, lambda: self.sai.host_update(name, sudo, *([True] if from_here else []),
+                                                                      **extra),
                                lambda result, error: self.updated(name, result, error),
                                tr("Updating {host} ({index} of {count})…", host=name, index=len(self.results) + 1,
                                   count=total),
@@ -1544,8 +1747,10 @@ class HostsPage(QWidget):
                 mode = result.get("mode") if result.get("mode") in ("system", "user") else \
                     "system" if result.get("kind") == "system" else "user"
                 prefix = (result.get("prefix") or info.get("prefix")) if mode == "system" else None
+                chosen = getattr(self, "queue_installations", None) or []
+                which = chosen[len(self.results) - 1] if len(self.results) - 1 < len(chosen) else None
                 argv = self.sai.host_install_terminal(name, mode, prefix, True, "here") if from_here else \
-                    self.sai.host_update_terminal(name)
+                    self.sai.host_update_terminal(name, *([which] if which else []))
                 self.in_terminal(argv, tr("{host}: update", host=name))
                 self.updates.appendPlainText(printable(tr("  {host}: the update runs in a terminal tab, where sudo "
                                                           "asks for the password", host=name)))
@@ -1561,11 +1766,98 @@ class HostsPage(QWidget):
                      count=len(results), updated=updated, current=len(results) - updated - failed, failed=failed)
         self.updates.appendPlainText(summary)
         self.status.setText(summary)
+        # (hosts update read each host's version again and kept it: no SSH here, and never an empty column)
         try:
             self.versions = self.sai.host_statuses(cached=True)
         except (OSError, ValueError):
             pass
         self.load_hosts()
+
+    # -- removing sandbox-ai on a host --
+
+    def uninstall(self):
+        """`sandbox-ai hosts uninstall NAME ...` after UninstallDialog (the installation, --purge and the rest chosen
+        there, with the host's own table of what goes) and a question naming the host; sudo that wants a password:
+        the same in a terminal tab, where it asks."""
+        name = self.host()
+        if name is None or self.busy_updating():
+            return
+        if name == "local":
+            warn(self, tr("Uninstall"), tr("This machine's sandbox-ai is the one the app runs from: remove it in a "
+                                           "terminal with sandbox-ai uninstall (--purge: also its data)."))
+            return
+        if not self.sai.host_uninstall_supported():
+            return
+        items = [item for item in installations_of((getattr(self, "versions", None) or {}).get(name))
+                 if item.get("executable")]
+
+        def plan(values, done):
+            def answered(result, error):
+                if error is not None:
+                    return done(str(error), False)
+                text = result.get("plan") or ""
+                if result.get("error"):
+                    return done(f"{text}\n\n{result['error']}".strip(), False)
+                if result.get("sudo"):
+                    text += "\n\n" + tr("(with sudo there: the installation is root's)")
+                return done(text, True)
+            background(lambda: self.sai.host_uninstall_plan(name, **values), owner=self, timeout=300, done=answered)
+        dialog = UninstallDialog(name, items, plan, self)
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        item = dialog.chosen() or {}
+        what = tr("{kind} installation {version}", kind=kind_text(item.get("kind")),
+                  version=printable(item.get("version") or "?")) if item else tr("its installation")
+        if not ask_first(self, "host-uninstall", tr("Uninstall sandbox-ai on {host}", host=name), tr(
+                "Remove the {what} on {host}?", what=what, host=self.label(name))
+                + (" " + tr("Also the SSH user's sandbox-ai data there.") if values["purge"] else "")
+                + (" " + tr("With the secrets and logins there - they cannot be recovered.") if values["secrets"]
+                   else ""), tr("Uninstall")):
+            return
+        self.tabs.setCurrentWidget(self.updates)
+        self.updates.appendPlainText(printable(tr("{host}: removing the {what}…", host=name, what=what)))
+        self.status.setText(tr("Uninstalling sandbox-ai on {host}…", host=name))
+        self.task.call_watched(self.sai, lambda: self.sai.host_uninstall(name, **values),
+                               lambda result, error: self.uninstalled(name, values, result, error),
+                               tr("Uninstalling sandbox-ai on {host}…", host=name),
+                               source=[self.uninstall_button, self.install_button, self.update_button,
+                                       self.from_here_button, self.update_all_button], errors_only=True)
+
+    def uninstalled(self, name, values, result, error):
+        if self.task.cancelled:
+            self.updates.appendPlainText(printable(tr("{host}: cancelled", host=name)))
+            self.load_versions(refresh=True)
+            return
+        if error is not None:
+            result = {"name": name, "error": str(error)}
+        text = uninstall_text(name, result)
+        self.updates.appendPlainText(text)
+        self.status.setText(text.splitlines()[0])
+        if result.get("needs_password"):
+            # sudo there wants a password: the same uninstall in a terminal tab, where sudo asks for it.
+            try:
+                self.in_terminal(self.sai.host_uninstall_terminal(name, values.get("installation"), values["purge"],
+                                                                  values["secrets"], values["mcp_data"]),
+                                 tr("{host}: uninstall", host=name))
+                self.updates.appendPlainText(printable(tr("  {host}: the uninstall runs in a terminal tab, where "
+                                                          "sudo asks for the password", host=name)))
+            except (OSError, ValueError) as exc:
+                self.updates.appendPlainText(printable_text(f"  {exc}"))
+            return
+        if result.get("removed_from_list"):
+            self.fleet.pop(name, None)
+            self.question_counts.pop(name, None)
+            self.host_removed.emit(name)  # its starts and questions leave the other pages at once
+        # (hosts uninstall read what is left there and kept it: no SSH here)
+        try:
+            self.versions = self.sai.host_statuses(cached=True)
+        except (OSError, ValueError):
+            pass
+        self.load_hosts()
+        if result.get("error"):
+            warn(self, tr("Uninstall sandbox-ai on {host}", host=name), text,
+                 details=printable(result.get("output") or "") or None, modal=False)
 
     # -- installing sandbox-ai on a host --
 

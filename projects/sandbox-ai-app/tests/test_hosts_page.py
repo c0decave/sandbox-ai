@@ -483,3 +483,205 @@ def test_install_sandbox_ai_on_a_host_for_the_user_or_the_system_and_a_password_
     page.update_host()
     assert updates == [("ct1", False)]
     page.close()
+
+
+# -- the version after an update, a host's installations, Uninstall… (user reports 2026-11-23) --------------------------
+
+FAKE_SSH = r'''#!PYTHON
+import os, subprocess, sys
+args = sys.argv[1:]
+if "-O" in args or "-G" in args or "--" not in args:
+    sys.exit(255)
+home = REMOTE
+env = {"HOME": home, "PATH": os.path.join(home, "rbin") + ":/usr/bin:/bin"}
+sys.exit(subprocess.run(["sh", "-c", args[args.index("--") + 2]], env=env, cwd=home).returncode)
+'''
+# The host's sandbox-ai (the user's own, ~/.local/bin): its version in ~/version, its update writes ~/available
+# there; from 0.1.66 on its claude --help lists --toolchain.
+FAKE_SANDBOX_AI = r'''#!PYTHON
+import os, sys
+args = sys.argv[1:]
+home = os.environ["HOME"]
+def read(name, default):
+    path = os.path.join(home, name)
+    return open(path).read().strip() if os.path.exists(path) else default
+version = read("version", "0.1.30")
+if args == ["--version"]:
+    print("sandbox-ai " + version)
+elif args == ["version", "--verbose"]:
+    print("sandbox-ai " + version)
+    print("installed in: " + home + "/.local/share/sandbox-ai/versions/" + version)
+    print("updates: must be signed by one of these keys (sandbox-ai update)")
+elif args == ["update", "--check"]:
+    print("installed: " + version + " (somewhere)")
+    print("available: 0.1.66 (https://github.com/c0decave/sandbox-ai)")
+elif args[:1] == ["update"]:
+    open(os.path.join(home, "version"), "w").write("0.1.66")
+    print("install.sh: installed sandbox-ai 0.1.66 (was " + version + ")", file=sys.stderr)
+elif args[-1:] == ["--help"]:
+    print("usage: sandbox-ai claude [--mode MODE]" + (" [--toolchain NAME]" if version >= "0.1.66" else ""))
+else:
+    print("{}")
+'''
+
+
+@pytest.fixture
+def ct1(env, monkeypatch):
+    """The host ct1 through a stand-in ssh: its user's own sandbox-ai (FAKE_SANDBOX_AI), version 0.1.30."""
+    import sys
+    remote = env / "remote-home"
+    (remote / ".local/bin").mkdir(parents=True)
+    (remote / "rbin").mkdir()
+    bin_dir = env / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "ssh").write_text(FAKE_SSH.replace("PYTHON", sys.executable, 1).replace("REMOTE", repr(str(remote))))
+    (bin_dir / "ssh").chmod(0o755)
+    (remote / ".local/bin/sandbox-ai").write_text(FAKE_SANDBOX_AI.replace("PYTHON", sys.executable, 1))
+    (remote / ".local/bin/sandbox-ai").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    monkeypatch.setenv("SANDBOX_AI_SSH_MULTIPLEX", "0")
+    monkeypatch.setenv("HOME", str(env / "local-home"))
+    (env / "local-home").mkdir()
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_uninstall_supported():
+        pytest.skip("this sandbox-ai cannot uninstall on hosts")
+    sai.host_add("ct1", "admin@ct1.example", 22, "", "")
+    return sai, remote
+
+
+def version_cell(page, name):
+    return page.table.item(widgets.find_row(page.table, name), 3).text()
+
+
+def test_after_an_update_the_column_shows_the_new_version_at_once(qapp, ct1, monkeypatch):
+    """The user: "wenn man unter Hosts updated hat, verschwindet die Version in der Spalte" - hosts update forgot the
+    host's kept status, and the page then read the kept statuses (no SSH) and found none. Now the update reads the
+    version again: the column names it at once. This machine's own row names its version too ("auf dem Host selber
+    steht auch keine Version": the row of the machine the app runs on was always empty)."""
+    sai, remote = ct1
+    page = HostsPage(sai, lambda argv, title: None)
+    page.load_versions(refresh=True)
+    assert version_cell(page, "ct1").startswith("0.1.30, update: 0.1.66"), version_cell(page, "ct1")
+    assert version_cell(page, "local") == sai.version()
+    choose(page, "ct1")
+    page.update_host()
+    assert "ct1: 0.1.30 -> 0.1.66" in page.updates.toPlainText(), page.updates.toPlainText()
+    assert version_cell(page, "ct1").startswith("0.1.66"), version_cell(page, "ct1")
+    page.close()
+
+
+def test_a_start_option_is_never_refused_by_the_help_of_the_host_before_its_update(qapp, ct1):
+    """coding-101: after its update the Board refused a start with --toolchain ("kennt diese Optionen nicht") - the
+    app had kept the host's claude --help of before. An update drops what was kept, and an option still missing
+    is asked of the host once more before a start is refused (also when it was updated elsewhere)."""
+    sai, remote = ct1
+    with pytest.raises(backend.HostTooOld):
+        sai.require_options("ct1", ("claude",), ["--toolchain"])
+    assert sai.host_update("ct1")["after"] == "0.1.66"
+    sai.require_options("ct1", ("claude",), ["--toolchain"])  # (refused before the fix: the old help was kept)
+    # updated elsewhere (its own update mode, a terminal there): the kept help is old, the host asked again
+    (remote / "version").write_text("0.1.30")
+    sai.host_command_options("ct1", "claude", fresh=True)
+    assert "--toolchain" not in sai.host_command_options("ct1", "claude")  # (kept: the help of before)
+    (remote / "version").write_text("0.1.66")
+    sai.require_options("ct1", ("claude",), ["--toolchain"])
+
+
+TWO = [{"kind": "user", "version": "0.1.188", "path": "/home/u/.local/share/sandbox-ai/versions/0.1.188",
+        "executable": "/home/u/.local/share/sandbox-ai/current/sandbox-ai", "terminal": True, "commands": True},
+       {"kind": "system", "version": "0.1.234", "path": "/usr/local/lib/sandbox-ai/versions/0.1.234",
+        "prefix": "/usr/local", "executable": "/usr/local/lib/sandbox-ai/current/sandbox-ai", "terminal": False,
+        "commands": False}]
+
+
+def test_a_host_with_two_installations_names_both_and_uninstalls_the_one_chosen(qapp, env, monkeypatch):
+    """The user: "unter Hosts sollte es auch Uninstall geben", "uninstall user/root sodass man nachher nur noch eine
+    systemweite Install hat". The version column names both installations; Uninstall… (a button and in the
+    right-click menu) asks which, with the host's own table of what goes, then asks once more; the host stays in the
+    list. This machine's row cannot be uninstalled from here (the app runs from it)."""
+    import sandbox_ai_app.hosts_page as hp
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_uninstall_supported():
+        pytest.skip("this sandbox-ai cannot uninstall on hosts")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    statuses = {"ct1": {"version": "0.1.188", "kind": "user", "update": False, "available": "0.1.188",
+                        "installations": TWO}}
+    monkeypatch.setattr(sai, "host_statuses", lambda refresh=False, cached=True: statuses)
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "{}", ""))
+    plans, removed, opened = [], [], []
+    monkeypatch.setattr(sai, "host_uninstall_plan", lambda name, **values: plans.append((name, values)) or {
+        "plan": "WHAT  SIZE  WHERE\nCommand links  -  ~/.local/bin/sandbox-ai", "sudo": values.get("installation") == "system",
+        "error": None})
+
+    def uninstall(name, **values):
+        removed.append((name, values))
+        statuses["ct1"] = {"version": "0.1.234", "kind": "system", "update": False, "available": "0.1.234",
+                           "installations": [dict(TWO[1], commands=True)]}
+        return {"name": name, "error": None, "installation": TWO[0], "removed": TWO[0],
+                "remaining": [{"kind": "system", "version": "0.1.234"}], "removed_from_list": False}
+    monkeypatch.setattr(sai, "host_uninstall", uninstall)
+
+    class Choosing(hp.UninstallDialog):
+        def exec(self):
+            assert self.ok.isEnabled() is False, "nothing chosen yet: nothing to uninstall"
+            self.choices[0][0].setChecked(True)  # the user's own
+            assert "Command links" in self.table.toPlainText() and self.ok.isEnabled()
+            Choosing.seen = self
+            return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(hp, "UninstallDialog", Choosing)
+    page = HostsPage(sai, lambda argv, title: opened.append((argv, title)))
+    assert version_cell(page, "ct1") == "0.1.188 (user), up to date; system 0.1.234", version_cell(page, "ct1")
+    choose(page, "ct1")
+    assert page.uninstall_button.isEnabled()
+    menu = [action.text() for action in widgets.menu_of(page.table).actions()]
+    assert "Uninstall…" in menu, menu
+    page.uninstall()
+    assert plans[-1] == ("ct1", {"installation": "user", "purge": False, "secrets": False, "mcp_data": False})
+    assert removed == [("ct1", {"installation": "user", "purge": False, "secrets": False, "mcp_data": False,
+                                "remove": False})]
+    assert "ct1: removed the user installation 0.1.188" in page.updates.toPlainText()
+    assert "there now: system 0.1.234" in page.updates.toPlainText()
+    assert version_cell(page, "ct1") == "0.1.234, up to date" and page.table.row_keys == ["local", "ct1"]
+    # sudo there wants a password: the same uninstall in a terminal tab
+    monkeypatch.setattr(sai, "host_uninstall", lambda name, **values: {
+        "name": name, "error": "sudo on ct1 wants a password", "needs_password": True, "installation": TWO[1]})
+    monkeypatch.setattr(sai, "host_uninstall_terminal", lambda name, *args: ["ssh", "-tt", name, "sudo", *map(str, args)])
+
+    class System(hp.UninstallDialog):
+        def exec(self):
+            self.choices[-1][0].setChecked(True)
+            return QtWidgets.QDialog.DialogCode.Accepted
+    monkeypatch.setattr(hp, "UninstallDialog", System)
+    page.uninstall()
+    assert opened and opened[-1][1] == "ct1: uninstall" and opened[-1][0][:4] == ["ssh", "-tt", "ct1", "sudo"]
+    choose(page, "local")
+    assert not page.uninstall_button.isEnabled(), "this machine: sandbox-ai uninstall in a terminal"
+    page.close()
+
+
+def test_update_asks_which_installation_when_a_host_has_two(qapp, env, monkeypatch):
+    """coding-101's Update went to the system installation while a terminal there ran the user's own: with two, the
+    page asks which (the one the host's commands run first), and the update takes that one."""
+    sai = backend.SandboxAI()
+    if not sai.hosts_supported() or not sai.host_uninstall_supported():
+        pytest.skip("this sandbox-ai cannot update a host's installation of choice")
+    sai.host_add("ct1", "admin@192.0.2.10", 22, "", "")
+    monkeypatch.setattr(sai, "host_statuses", lambda refresh=False, cached=True: {
+        "ct1": {"version": "0.1.188", "kind": "user", "installations": TWO}})
+    monkeypatch.setattr(sai, "host_run", lambda name, *args, timeout=120: (0, "{}", ""))
+    asked = []
+    monkeypatch.setattr(sai, "host_update", lambda name, sudo=None, *rest, installation=None: asked.append(
+        (name, installation)) or {"name": name, "before": "0.1.188", "after": "0.1.236", "changed": True,
+                                  "error": None})
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    page = HostsPage(sai, lambda argv, title: None)
+    choose(page, "ct1")
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "system")
+    page.update_host()
+    assert asked == [("ct1", "system")]
+    assert any("has 2 installations" in text for _, text, _ in widgets.SHOWN)
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "all")
+    asked.clear()
+    page.update_host()
+    assert asked == [("ct1", "user"), ("ct1", "system")]
+    page.close()

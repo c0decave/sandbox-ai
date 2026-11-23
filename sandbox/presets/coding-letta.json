@@ -29,6 +29,6 @@
     "Memory: Letta Code's own memory (memory blocks, MemFS, conversations) lives in ~/.letta/lc-local-backend of the start's HOME, kept with the start (sandbox-ai resume NAME); ~/.letta/AGENTS.md holds notes about this project and is kept between runs (not with --no-memory).",
     "Letta Code asks before it changes something; -D lets it go on without asking. Letta Cloud, its update check and skills from GitHub, ClawHub and npm stay off unless --letta-enable names them (cloud, updates, skills-install).",
     "Letta Code's telemetry is always off and cannot be turned on (its opt-out variables are set and the proxy refuses its telemetry paths on api.letta.com).",
-    "Letta Code is not live-tested yet (a start says so); its image first: sandbox-ai build letta."
+    "Its image first: sandbox-ai build letta."
   ]
 }

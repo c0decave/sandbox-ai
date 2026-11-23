@@ -34,6 +34,6 @@
     "DeepSeek Harness gets the server as a route of its own (OpenAI chat completions at the server's /v1) and as its default model in its read-only patch (/etc/dsh/sandbox-ai.patch.yml), the key as a placeholder the connection proxy replaces, the loop guard's instructions in its system prompt.",
     "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
     "DeepSeek Harness talks in the terminal: sandbox-ai's chat (its release has none of its own), each message one run of its headless mode, one conversation kept by its session id (/help lists the commands, Ctrl+C cancels an answer). Approvals cannot be answered in the chat: an action it would ask about is refused (with -D it asks nothing). Add --browser (the app: the Board's Browser part; Podman) and its web UI opens as well, in the session browser beside the terminal, where it asks you; -- web: the web UI alone. One task: sandbox-ai dsh -- headless \"TASK\".",
-    "DeepSeek Harness is not live-tested yet (a start says so); its image first: sandbox-ai build dsh."
+    "Its image first: sandbox-ai build dsh."
   ]
 }

@@ -187,14 +187,18 @@ def test_start_page_workflow(qapp, env, monkeypatch, wait, agent, engine, langua
         assert launch.argv() == expected
         preview = launch.preview.toPlainText()
         assert preview == shlex.join(["sandbox-ai", agent, *expected, "--", "--verbose", "two words"])
-        # The dry run: sandbox-ai AGENT OPTIONS --dry-run, its plan shown.
+        # The same start on the Board (the page's other view): each option on the part that owns it.
+        assert sai.options() and w.board.board.first("limits").props == {"--memory": "4g"}
+        assert w.board.board.first("session").props == {"--tmux": True} and not w.board.board.extra
+        # The dry run: sandbox-ai AGENT OPTIONS --dry-run, its plan shown (the start is exactly what the page shows:
+        # --no-config, the project file is not merged in on top).
         plan = {"agent": agent, "backend": engine, "workspace": str(project)}
         w.commands.replies[(agent,)] = (0, json.dumps(plan), "")
         launch.dry_run()
         title = i18n.tr("Plan (dry run)")
         assert wait(lambda: title in shown_titles(), 10)
         # Started here with its workspace named: --workspaces-as-given (the app's own directory never decides)
-        assert w.commands.argv(agent) == [[agent, *expected, "--workspaces-as-given", "--dry-run"]]
+        assert [agent, *expected, "--no-config", "--workspaces-as-given", "--dry-run"] in w.commands.argv(agent)
         assert json.loads(widgets.SHOWN[-1][1]) == plan
         # Start in the app: one terminal tab running exactly that command line, in the project folder.
         launch.start_in_app()
@@ -203,7 +207,7 @@ def test_start_page_workflow(qapp, env, monkeypatch, wait, agent, engine, langua
         assert tab_title == agent and cwd == str(project)
         parsed_agent, parsed, agent_args = launcher_args(sai, argv)
         assert parsed_agent == agent and agent_args == ["--verbose", "two words"]
-        assert argv[3:] == [agent, *expected, "--workspaces-as-given", "--", "--verbose", "two words"]
+        assert argv[3:] == [agent, *expected, "--no-config", "--workspaces-as-given", "--", "--verbose", "two words"]
         assert parsed.workspaces_as_given
         assert parsed.backend == engine and parsed.workspace == [str(project)]
         for option, _, dest, value in FORM_CHOICES:
@@ -292,6 +296,11 @@ def test_board_from_a_preset_to_apply_and_start(window, env, monkeypatch, wait, 
     choose_in_gallery(monkeypatch, preset_id, typed)
     board = page.open_gallery()
     assert board is page.board
+    # What the preset needs on the host (its MCP servers, an identity) and their catalogs are read in the background,
+    # then asked about: asked before what follows is counted (round 2: under load - after test_main.py's self-tests -
+    # the reads came back during Apply, and their question was counted as Apply's).
+    from sandbox_ai_app.prerequisites import busy_now
+    assert wait(lambda: not busy_now(page) or i18n.tr("What the start lacks") in shown_titles(), 60)
     # Filled in: no placeholder left, nothing the launcher or the policy would refuse.
     assert B.placeholders(board) == []
     assert [p.text for p in B.problems(sai, board, page.policy()) if p.level == "error"] == []
@@ -902,7 +911,7 @@ def all_texts(widget):
 
 def changed_settings(env):
     """A value other than the default for every setting the app knows."""
-    return {"theme": "dark", "ui_font": "Inter", "mono_font": "Hack", "language": "de", "terminal": "window", "tray": False, "notify": False,
+    return {"theme": "dark", "ui_font": "Inter", "mono_font": "Hack", "reading_font": "opendyslexic", "language": "de", "terminal": "window", "tray": False, "notify": False,
             "notify_safeguards": False, "notifications": True, "reopen_terminals": True,
             "notify_seconds": 30, "notify_style": "system", "approvals_interval": 500, "sandboxes_interval": 5000, "connections_interval": 4000,
             "sandbox_ai_home": str(env / "checkout"), "default_agent": "codex", "default_backend": "bwrap",
@@ -965,7 +974,8 @@ def test_every_setting_round_trips_through_a_restart(qapp, env, monkeypatch, age
         assert {key: w.sai.settings()[key] for key in values} == values
         assert oct(backend.settings_file().stat().st_mode & 0o777) == "0o600"
         assert w.sai.sandbox_defaults() == ({"version": 1, "telemetry": "strict"}, None)
-        # The Start page keeps the agent and its options for the next start.
+        # The Start page keeps its start for the next start of the app (the board of no project: a draft), whichever
+        # view it was made in - here the Expert view's fields.
         w.launch.agent.setCurrentText(agent)
         w.launch.form.widgets["--allow-pypi"].setChecked(True)
         w.launch.agent_args.setText("--verbose --api-key=sk-not-kept")
@@ -977,7 +987,7 @@ def test_every_setting_round_trips_through_a_restart(qapp, env, monkeypatch, age
     assert theme.apply(settings["theme"]) == "dark"
     w = make_window(qapp, monkeypatch, language=settings["language"])
     try:
-        assert w.nav.item(2).text() == "Board"
+        assert w.nav.item(1).text() == "Start" and w.view_switch.buttons["board"].text() == "Board"
         dialog = w.settings_dialog()
         assert {key: field_value(dialog.fields[key]) for key in values} == values
         assert {key: backend.setting(key) for key in values} == values

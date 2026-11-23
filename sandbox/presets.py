@@ -19,7 +19,8 @@ win over a built-in one of the same id. Further directories of presets (a privat
 are listed in ~/.config/sandbox-ai/defaults.json as "preset_dirs" (`sandbox-ai presets dirs add DIR`): yours win
 over them, the first listed over the later ones, and they over the built-in presets. A directory inside a folder
 sandboxes can or could write (a workspace, a rw mount, a kept state) is refused and skipped, and so is a preset
-file or ruleset there that is a symlink. The command line wins over the preset, the preset over nothing else:
+file or ruleset there that is a symlink. Such a preset in a built-in one's place, and each secret of yours one hands
+on and where to, is said at the start, by `presets show` and on the app's board (preset_warnings). The command line wins over the preset, the preset over nothing else:
 a project's .sandbox-ai.json, your defaults, the security mode and the administrator's policy apply as always.
 
 A preset never holds a secret: options only name them (--secret-env NAME, --git-token-secret URL=NAME), and
@@ -59,6 +60,10 @@ from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 BUILTIN = HERE / "presets"
+# The live check's results per built-in preset and backend (scripts/import_live_report.py from a report of
+# scripts/live_check.sh --only presets-live): what a preset's live light is shown from; none: no light (no data yet).
+LIVE_EVIDENCE = HERE / "live_evidence.json"
+LIVE_SYMBOLS = {"green": "✓", "red": "✗"}
 FORMAT = "sandbox-ai preset"
 LIMIT = 256 << 10
 ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
@@ -162,6 +167,8 @@ TRANSLATED_KEYS = ("title", "description")
 REFUSED = ("--copy-auth", "--auth-file", "--auth-from-session", "--import-codex-auth", "--git-credentials", "--git-token-file",
            "--workspace", "--config", "--no-config", "--session", "--dry-run", "--tmux-socket-dir", "--pod-name",
            "--mcp-socket-dir", "--mcp-approvals-dir", "--helper-of", "--start-id", "--name", "--rules", "--preset",
+           # (what a start lacks is fixed unasked only where the human said so: never by a preset passed on)
+           "--fix", "--fix-only", "--fix-plan",
            # (the launcher's own word to an MCP server's sandbox: the run whose tunnel it borrows - vpn.validate_lent)
            "--vpn-lent-by",
            "--preset-value", "--")
@@ -235,9 +242,6 @@ DIRS_LIMIT = 32
 # The launcher sets this to its exposed_before() (the trees sandboxes could write in earlier runs) when it loads
 # this module; elsewhere net.py's launcher gives it, together with the workspaces of running sandboxes.
 EXPOSED_BEFORE = None
-# The launcher's experimental_badge (its EXPERIMENTAL_PARTS, the one list of what has not passed its live test yet):
-# set when the launcher loads this module, else read from it here (experimental).
-EXPERIMENTAL_BADGE = None
 
 
 def defaults_path():
@@ -743,8 +747,111 @@ def catalog(out_problems=None):
                 if out_problems is not None:
                     out_problems.append(str(exc))
                 continue
+            before = found.get(document["id"])
+            # An extra directory's preset in a built-in one's place (the same id): said wherever it is shown or
+            # started (preset_warnings) - --preset ID gets it, not the preset that ships with sandbox-ai.
+            shadows = before.get("_shadows") or ("built-in" if before.get("_origin") == "built-in" else None) \
+                if before and origin == "extra" else None
             found[document["id"]] = {**document, "_path": str(path), "_origin": origin,
-                                     **({"_dir": str(directory)} if origin == "extra" else {})}
+                                     **({"_dir": str(directory)} if origin == "extra" else {}),
+                                     **({"_shadows": shadows} if shadows else {})}
+    return found
+
+
+# --- what a preset passed on hands on: your secrets, and where to ---------------------------------------------------
+#
+# A preset of an extra directory (a team's checkout, someone's collection) names secrets by name only, but it says
+# where they go: --api-key HOST=NAME[=SECRET] sends one to a host it chose, --git-token-secret makes one the Git login
+# for a server, --secret-env gives one to the agent, --mcp-env NAME:VAR@SECRET and --service ...,secret=... to a server.
+# Nothing of it is refused (the secret is yours to give, and a preset is meant for that), but each one is said - at
+# the start, by `presets show` and on the app's board - as `board import` says it of a bundle.
+
+SECRET_FLAGS = ("--api-key", "--secret-env", "--git-token-secret", "--mcp-env", "--service")
+def flag_values(options, flags):
+    """[(flag, value)] of FLAGS among OPTIONS (long forms: "--flag value" or "--flag=value")."""
+    found, options = [], [str(token) for token in options]
+    for index, token in enumerate(options):
+        name, equals, value = token.partition("=")
+        if name in flags:
+            given = value if equals else (options[index + 1] if index + 1 < len(options) else None)
+            if given is not None:
+                found.append((name, given))
+    return found
+
+
+def secret_destinations(options):
+    """[{"secret", "option", "target", "as"}] of the secrets OPTIONS (canonical) hand on: SECRET goes by OPTION to
+    TARGET (a host, a URL, a server, a service; for --secret-env the variable the agent reads), AS the variable a
+    server gets it in (--mcp-env), else None."""
+    found = []
+
+    def add(secret, option, target, variable=None):
+        entry = {"secret": secret, "option": option, "target": target, "as": variable}
+        if secret and entry not in found:
+            found.append(entry)
+    for name, value in flag_values(options, SECRET_FLAGS):
+        if name == "--api-key":
+            parts = value.split("=")
+            if len(parts) >= 2:
+                add(parts[2] if len(parts) > 2 else parts[1], name, parts[0])
+        elif name == "--secret-env":
+            variable, _, secret = value.partition("=")
+            add(secret or variable, name, variable)
+        elif name == "--git-token-secret":
+            url, _, secret = value.rpartition("=")
+            add(secret, name, url)
+        elif name == "--mcp-env":
+            server, _, spec = value.partition(":")
+            variable, at, secret = spec.partition("@")
+            if at:
+                add(secret, name, server, variable)
+        elif name == "--service":
+            service, _, rest = value.partition(":")
+            for part in rest.split(","):
+                key, equals, given = part.partition("=")
+                if key == "secret" and equals:
+                    add(given.partition("=")[2] or given.partition("=")[0], name, service)
+    return found
+
+
+def short(text, limit=200):
+    return " ".join(str(text).split())[:limit]
+
+
+def destination_text(entry, show=short):
+    """Where ENTRY (secret_destinations) sends its secret, in words: "goes to HOST (--api-key)"; SHOW(text, limit)
+    makes each value printable."""
+    option, target = entry["option"], show(entry["target"], 200)
+    if option == "--api-key":
+        return f"goes to {target} (--api-key)"
+    if option == "--secret-env":
+        return f"goes into the sandbox as {show(entry['target'], 80)}: the agent reads it (--secret-env)"
+    if option == "--git-token-secret":
+        return f"is the Git login for {target} (--git-token-secret)"
+    if option == "--mcp-env":
+        return f"goes to the MCP server {show(entry['target'], 60)} as {show(entry['as'], 80)} (--mcp-env)"
+    return f"goes to the service {show(entry['target'], 60)} (--service)"
+
+
+def secret_text(secret):
+    """SECRET as a warning names it: a {placeholder} is the secret you give for it (--preset-value)."""
+    return f"the secret you give for {secret}" if PLACEHOLDER.fullmatch(secret) else f"your secret {short(secret, 80)}"
+
+
+def preset_warnings(preset, options=None):
+    """What a preset of an extra directory does that you should know before you start it: [text]. It takes the
+    place of a built-in preset (the same id), and each secret its OPTIONS (default: its own, placeholders unfilled;
+    at a start: as they run, your values filled in) hand on, and where to. Nothing for yours and the built-in ones."""
+    if preset.get("_origin") != "extra":
+        return []
+    where = f"the preset {preset['id']} from {preset.get('_dir')}"
+    found = []
+    if preset.get("_shadows"):
+        found.append(f"{where} takes the place of the built-in preset {preset['id']}: --preset {preset['id']} starts "
+                     "this one")
+    for entry in secret_destinations(preset.get("options", []) if options is None else options):
+        found.append(f"{secret_text(entry['secret'])} {destination_text(entry)}: {where} says so, and whoever wrote "
+                     "it chose where")
     return found
 
 
@@ -875,6 +982,18 @@ def extras_of(preset, values):
     return result
 
 
+def catalog_choices(preset, values=None):
+    """{server: catalog prefix} of PRESET's catalog servers named with their catalog (mcp:binwalk -> {"binwalk":
+    "mcp"}), its values filled in: the entry a start that lacks the server adds (an MCP server's name may be an entry
+    of more than one catalog)."""
+    found = {}
+    for server in preset.get("mcp", []):
+        prefix, _, name = PLACEHOLDER.sub(lambda m: (values or {}).get(m.group(1), m.group(0)), server).rpartition(":")
+        if prefix and name and not PLACEHOLDER.search(name):
+            found[name] = prefix
+    return found
+
+
 def prompt_args(preset, agent, values=None):
     """The agent's arguments that give it the preset's first task (none without one), its values filled in."""
     text = preset.get("prompt")
@@ -981,6 +1100,10 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
     # The image variant it starts (--image-variant): made once from its recipe (android-development: android-dev).
     for variant, _ in option_values(preset, values, "--image-variant"):
         found += variant_missing(variant, agent)
+    # The toolchains it brings (--toolchain): one not in the store yet is added when the start offers it.
+    for name in missing_toolchains([value for value, _ in option_values(preset, values, "--toolchain")]):
+        found.append(f"toolchain {name} is not in the store yet (the start offers to add it): sandbox-ai toolchain add "
+                     f"{name}")
     # What the options name by a value of yours: an MCP server (--mcp), a publishing login (--publish).
     def leave_out(names):
         optional = names and all(preset["values"][n].get("optional") for n in names)
@@ -1139,6 +1262,21 @@ def registered_mcp():
         return set()
 
 
+def missing_toolchains(values):
+    """The --toolchain VALUES (and what they require) that are not in the store (toolchains.missing), each as
+    `toolchain add` takes it; [] when the store cannot be read (the start says what is wrong)."""
+    if not values:
+        return []
+    import importlib.util
+    try:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_toolchains_for_presets", HERE / "toolchains.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.missing(values)
+    except Exception:  # noqa: BLE001 - only for what check says
+        return []
+
+
 def refused_in(options, origin=None):
     """The refused flags among OPTIONS (long forms, as the launcher's canonical_options writes them) for a preset
     from ORIGIN (refused_flags)."""
@@ -1206,7 +1344,7 @@ def vpn_bypasses(options, given=()):
 
 
 def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, private=None, code_env=None,
-          bridges=None):
+          bridges=None, warnings=None, catalogs=None):
     """ARGV (the launcher's: AGENT options... [-- agent args]) with --preset NAME and --preset-value KEY=VALUE
     replaced by the preset's options, placed right after the agent so that the command line wins; and its first
     task added as the agent's arguments unless the command line gives some. ARGV unchanged without --preset. What
@@ -1214,7 +1352,10 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, pr
     a --copy or --mount names is private (the launcher's private_source), else None. CODE_ENV(options, given): the
     --mcp-env values among OPTIONS that change what code runs in an MCP server's sandbox (mcp.code_env_in). BRIDGES
     (a list): the bridge the preset proposes is added to it (bridge_proposal), made only once the start runs, after
-    the human confirmed it (propose_bridge)."""
+    the human confirmed it (propose_bridge). WARNINGS (a list): preset_warnings of the start, said before it runs (a
+    preset of an extra directory in a built-in one's place, the secrets of yours it hands on and where to). CATALOGS
+    (a dict): {server: catalog prefix} of the catalog servers the preset names by their catalog (mcp:binwalk), so that
+    a start that lacks one adds the entry the preset chose where several catalogs have that name (catalog_choices)."""
     if not argv or not any(token == "--preset" or token.startswith("--preset=") for token in argv):
         return (argv, None) if with_mode else argv
     head, tail = list(argv), []
@@ -1293,6 +1434,10 @@ def apply(argv, canonical=None, with_mode=False, notes=None, credential=None, pr
     # line, the project file and your defaults choose (it never lowers a stricter one).
     options, mode = split_mode(options)
     options += extras_of(preset, resolved_values(preset, given))
+    if catalogs is not None:
+        catalogs.update(catalog_choices(preset, resolved_values(preset, given)))
+    if warnings is not None:
+        warnings += preset_warnings(preset, options)
     check_vpn_types(preset, resolved_values(preset, given))
     check_effective_vpn(preset, resolved_values(preset, given), canonical([*options, *rest]) if canonical
                         else [*options, *rest])
@@ -1321,9 +1466,6 @@ def describe(preset, out=print):
     out = lambda line: say(printable(line))  # noqa: E731 - every line of it holds the preset's own texts
     out(f"{preset['id']}: {preset['title']}  ({category_text(category_of(preset))}, {origin_text(preset)})")
     out(f"  {preset['description']}")
-    badge = experimental(preset)
-    if badge:
-        out(f"  {experimental_text(badge)}")
     out(f"  agents: {', '.join(preset.get('agents', AGENTS))}")
     if preset.get("options"):
         out(f"  options: {shlex.join(preset['options'])}")
@@ -1350,31 +1492,107 @@ def describe(preset, out=print):
         out(f"  bridge: proposed once the start runs, made only when you confirm it: {sides} ({'; '.join(parts)})")
     for need in preset.get("needs", []):
         out(f"  needs: {need}")
+    for warning in preset_warnings(preset):
+        out(f"  warning: {warning}")
+    live = live_light(preset)
+    if live:
+        out(f"  live: {live_text(live)}")
+        for run in live["backends"]:
+            out(f"    {run['backend']}: {run['result']} on {run['date']} (sandbox-ai {run['version']}, {run['report']})"
+                + (f": {run['detail']}" if run["detail"] else ""))
     for note in preset.get("notes", []):
         out(f"  note: {note}")
+    cairn = cairn_workers_line(preset)
+    if cairn:
+        out(f"  {cairn}")
     if preset.get("prompt"):
         out(f"  first task: {preset['prompt']}")
 
 
-def experimental(preset):
-    """The badge of PRESET when it starts something not live-tested yet (the launcher's experimental_badge over its
-    agents and options: {"names"}), else None. A badge only: such a preset is listed and starts like any other."""
-    global EXPERIMENTAL_BADGE
-    if EXPERIMENTAL_BADGE is None:
-        EXPERIMENTAL_BADGE = _module("agent_sandbox").experimental_badge
-    return EXPERIMENTAL_BADGE(preset.get("agents") or AGENTS, preset.get("options") or [])
-
-
-def experimental_text(badge):
-    """BADGE (experimental) in words."""
-    return f"not live-tested yet ({', '.join(badge['names'])})"
+def cairn_workers_line(preset):
+    """A preset with Cairn's board (--cairn): its workers' traffic lights (cairn_workers.py), or None. The workers
+    are those of its --cairn-workers, else its --with agents and the lead (the agent it is started with)."""
+    options = [str(word) for word in preset.get("options", [])]
+    if "--cairn" not in options:
+        return None
+    try:
+        table = _module("cairn_workers")
+        given = options[options.index("--cairn-workers") + 1] if "--cairn-workers" in options[:-1] else None
+        named = [item.split("=", 1)[0].strip() for item in given.split(",")] if given else \
+            [agent for index, word in enumerate(options[:-1]) if word == "--with"
+             for agent in options[index + 1].split(",")]
+        rows = table.rows([agent for agent in dict.fromkeys(named) if agent in table.relay().HARNESSES])
+    except (OSError, ValueError):
+        return None
+    shown = ", ".join(f"{row['symbol']} {row['agent']} {row['words']}" for row in rows)
+    lead = "" if given else (", and the lead's" if shown else "the lead's")
+    return f"Cairn's workers' support (sandbox-ai cairn workers): {shown}{lead}"
 
 
 def public(preset):
-    badge = experimental(preset)
+    passed_on = preset.get("_origin") == "extra"
     return ({key: value for key, value in preset.items() if not key.startswith("_")} | {"origin": preset["_origin"]}
             | ({"directory": preset["_dir"]} if preset.get("_dir") else {})
-            | ({"experimental": badge} if badge else {}))
+            | ({"shadows": preset["_shadows"]} if preset.get("_shadows") else {})
+            | ({"secrets_handed_on": secret_destinations(preset.get("options", [])),
+                "warnings": preset_warnings(preset)} if passed_on else {})
+            | {"live": live_light(preset)})
+
+
+_live = {}
+
+
+def live_entries(path=None):
+    """{preset id: [entry]} of LIVE_EVIDENCE (the live check's imported results, kind preset); {} when the file is
+    missing or not as scripts/import_live_report.py writes it (then no light is shown, nothing is refused)."""
+    path = Path(path or LIVE_EVIDENCE)
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return {}
+    if _live.get("key") == (str(path), stamp):
+        return _live["found"]
+    found = {}
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        for entry in document.get("entries") or []:
+            if isinstance(entry, dict) and entry.get("kind") == "preset" and isinstance(entry.get("name"), str) \
+                    and entry.get("result") in ("passed", "failed"):
+                found.setdefault(entry["name"], []).append(
+                    {key: str(entry.get(key) or "") for key in ("backend", "agent", "result", "date", "version",
+                                                                "report", "detail")})
+    except (OSError, ValueError, RecursionError, AttributeError):
+        found = {}
+    _live.update(key=(str(path), stamp), found=found)
+    return found
+
+
+def live_light(preset, path=None):
+    """The live light of a built-in PRESET from the live check's evidence: {light (green: every backend it ran with
+    passed; red: one failed), symbol, date and version (the newest run's), backends [{backend, result, date,
+    version, report, detail}], why (the failed run's reason)}, or None - no data yet: nothing shown. Your own and
+    an extra directory's presets have none (the live check runs the built-in ones)."""
+    if preset.get("_origin", "built-in") != "built-in":
+        return None
+    runs = sorted(live_entries(path).get(preset.get("id"), []), key=lambda e: (e["date"], e["backend"]))
+    if not runs:
+        return None
+    failed = [run for run in runs if run["result"] == "failed"]
+    newest = runs[-1]
+    colour = "red" if failed else "green"
+    return {"light": colour, "symbol": LIVE_SYMBOLS[colour], "date": newest["date"], "version": newest["version"],
+            "backends": runs, "why": f"{failed[-1]['backend']}: {failed[-1]['detail']}" if failed else ""}
+
+
+def live_text(found):
+    """A preset's live light (live_light) in words: "✓ live check passed (podman, bwrap) on 2026-11-23, sandbox-ai
+    0.1.212", "✗ live check failed on 2026-11-23 (bwrap: REASON)"; "" for none."""
+    if not found:
+        return ""
+    if found["light"] == "green":
+        backends = ", ".join(run["backend"] for run in found["backends"])
+        return f"{found['symbol']} live check passed ({backends}) on {found['date']}, sandbox-ai {found['version']}"
+    return f"{found['symbol']} live check failed on {found['date']}, sandbox-ai {found['version']} ({found['why']})"
 
 
 # -- the extra preset directories (defaults.json's preset_dirs) --
@@ -1529,10 +1747,12 @@ def main(argv, out=print):
                         out(f"{category_text(category)} ({category}):")
                         for preset in sorted(group, key=lambda x: x["id"]):
                             mine = ("  (yours)" if preset["_origin"] == "yours" else
-                                    f"  (from {preset['_dir']})" if preset["_origin"] == "extra" else "")
-                            badge = experimental(preset)
-                            out(printable(f"  {preset['id']:<{width}} {preset['title']}{mine}"
-                                          + ("  [not live-tested yet]" if badge else "")))
+                                    f"  (from {preset['_dir']}"
+                                    + (", in place of the built-in one" if preset.get("_shadows") else "") + ")"
+                                    if preset["_origin"] == "extra" else "")
+                            live = live_light(preset)  # the live check's result: nothing without one
+                            shown = f"  {live['symbol']} live {live['date']}" if live else ""
+                            out(printable(f"  {preset['id']:<{width}} {preset['title']}{mine}{shown}"))
             for problem in damaged:
                 print(f"sandbox-ai presets: skipped {printable(problem)}", file=sys.stderr)
             return 0

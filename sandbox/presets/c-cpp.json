@@ -1,0 +1,30 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "c-cpp",
+  "title": "C and C++",
+  "description": "C and C++ projects with CMake: the C toolchain (Clang as zig cc, CMake, Ninja) mounted in; GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "C und C++",
+      "description": "C- und C++-Projekte mit CMake: die C-Toolchain (Clang als zig cc, CMake, Ninja) eingehängt; GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--toolchain",
+    "cc",
+    "--allow-github"
+  ],
+  "notes": [
+    "The C toolchain (cc, c++, gcc, g++, clang as zig cc; CMake and Ninja; it brings zig) comes with the preset (--toolchain cc): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add it (sandbox-ai toolchain add cc: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "It is Clang with Zig's libc headers and libc++: no GNU make (CMake's generator is Ninja), no GNU binutils (nm, objdump), libc++ instead of libstdc++; programs are built against the sandbox's glibc, or static with -target x86_64-linux-musl. GCC and make instead: an image variant, sandbox-ai images new cpp --from claude, sandbox-ai images extend cpp --add-apt build-essential, sandbox-ai build --variant cpp, then --image-variant cpp.",
+    "Dependencies from elsewhere than GitHub (a vcpkg or Conan registry, a project's download host): --allow-host NAME on the command line.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

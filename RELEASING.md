@@ -14,7 +14,7 @@ from it (`tests/test_release_assets.py`):
 | `sandbox-ai-bundle-X.Y.Z.tar.gz` | `make_dist.py` (CI: job `build`) | `install.sh` (the whole tree, reproducible) | install.sh's installations: `sandbox-ai update`, a system one `sudo sandbox-ai update`, other hosts `sandbox-ai hosts update NAME` |
 | `sandbox_ai_app-X.Y.Z-py3-none-any.whl` | `make_dist.py` | PyPI project `sandbox-ai-app` (`pip install sandbox-ai-app`: the command line and the web interface; `pip install 'sandbox-ai-app[gui]'`: with the desktop app) | pip and pipx installations: `sandbox-ai update` installs this file with the environment's own pip |
 | `sandbox_ai_app-X.Y.Z.tar.gz` | `make_dist.py` | PyPI (the source package) | - |
-| `install.sh` | `make_dist.py` | first installs (`curl … | bash`); carries the release keys of `sandbox/release-signers` | - |
+| `install.sh` | `make_dist.py` | first installs (`curl … \| bash`); carries the release keys of `sandbox/release-signers` | - |
 | `sandbox-ai.pyz` | `make_dist.py` (`make_pyz.py`) | the command line in one file (`./sandbox-ai.pyz …` or `python3 -I sandbox-ai.pyz …`) | the `.pyz`: `./sandbox-ai.pyz update` replaces the file |
 | `sandbox-ai-x86_64.AppImage`, `sandbox-ai-aarch64.AppImage` | `release.yml` (jobs `build-appimage`) | the app with sandbox-ai, Python and PySide6 inside, for Linux | the AppImage: `./sandbox-ai-ARCH.AppImage cli update` (the app: Settings › Updates) replaces the file |
 | `sandbox-ai-arm64.dmg`, `sandbox-ai-x86_64.dmg` | `release.yml` (jobs `build-macos`) | `sandbox-ai.app` for macOS (not notarised) | the macOS app: `sandbox-ai.app/Contents/MacOS/sandbox-ai update` (the app: Settings › Updates) replaces `sandbox-ai.app` with the one in the disk image |
@@ -46,7 +46,7 @@ scripts/live_check.py --build
 #    firewall for a login's server, logins given while running, --hide on workspace add, Landlock with a real HOME,
 #    kits and plugins attached live, devices): live-check/REPORT-DATE.md (docs/LIVE_CHECK.md)
 scripts/live_check.sh
-#    and the agents and parts not live-tested before (Hermes, Qwen Code, DSH, Goose, nanobot, Letta Code, Pi, Cairn, the sandbox's own
+#    and the agents and parts with a live test of their own (Hermes, Qwen Code, DSH, Goose, nanobot, Letta Code, Pi, Cairn, the sandbox's own
 #    browser): their images built, each against a scripted model on this host, one MCP tool, its switches' hosts,
 #    no telemetry; send back the report.md it names (CI's job agents-live runs the same)
 scripts/live_check_agents.sh
@@ -193,7 +193,7 @@ AppImage also in `ubuntu:22.04` and `debian:12` containers.
 
 - **`.pyz`:** a zip archive behind a `#!/bin/sh` line that runs `python3 -I` on it, reproducible on any machine
   (sorted, stored entries: deflate's output differs between zlib and zlib-ng, so nothing is compressed, about
-  7 MB; fixed times from `SOURCE_DATE_EPOCH` or the bundle). The bundle `.tar.gz` itself is still gzip: two
+  55 MB in 0.1.226, most of it the app and the tests; fixed times from `SOURCE_DATE_EPOCH` or the bundle). The bundle `.tar.gz` itself is still gzip: two
   machines with different zlib builds can make different bundles from one commit. `scripts/dist_boot.py` is its `__main__.py`: it extracts the tree with its
   `manifest.json` (SHA-256 of every file) into `~/.cache/sandbox-ai/pyz/`, compiles it, makes it read-only and
   records each file's inode and change time; every start checks that record and refuses a changed copy (one

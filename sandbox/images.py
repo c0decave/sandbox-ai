@@ -417,7 +417,7 @@ def variant_dir(name, agent):
 
 
 BUILD_TARGETS = ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi",
-                 "all", "team", "cairn", "vpn", "tor", "browser")  # what `sandbox-ai build NAME` means
+                 "all", "team", "cairn", "artex", "vpn", "tor", "browser")  # what `sandbox-ai build NAME` means
 
 
 def build_command(name):

@@ -218,6 +218,13 @@ def refusal(l, agent, options, name):
 
 # --- what the mode refuses -------------------------------------------------------------------------------------
 
+def defined_servers(a, l):
+    """{name: definition} of the MCP servers the start A can name: yours, the built-in ones, its project's, its
+    helpers'."""
+    return {**l.load_mcp_module().definitions(getattr(a, "project_document", None)),
+            **(getattr(a, "helper_definitions", None) or {})}
+
+
 def mcp_has_network(definition, l):
     """A server definition (mcp.py) whose sandbox or container reaches the network."""
     if "image" in definition or "rootfs" in definition:
@@ -323,12 +330,19 @@ RULES = [
     # without their questions (Cairn's flags): in paranoid nothing acts without asking.
     (("paranoid",), lambda a, l: "--cairn" if getattr(a, "cairn", False) else None,
      "Cairn would start the session's agents as its workers on its own, without their approval questions"),
+    # ARTEX (--artex) runs agents of its own beside the sandbox's, with shell commands, scanners and a browser,
+    # without asking (its design): in paranoid nothing acts without asking.
+    (("paranoid",), lambda a, l: "--artex" if getattr(a, "artex", False) else None,
+     "ARTEX's own agents would run shell commands, scanners and a browser beside the agent without asking"),
     (STRICT, lambda a, l: f"--browser-profile {a.browser_profile}" if getattr(a, "browser", None) and
      getattr(a, "browser_control", None) in ("agent", "both") and getattr(a, "browser_profile", None) not in
      (None, "", "fresh", "session") else None,
      "the agent drives the browser and could write a folder of yours through its profile"),
-    (("paranoid",), lambda a, l: _given([n for n in dict.fromkeys(a.mcp) if mcp_has_network(
-        l.load_mcp_module().definitions(getattr(a, "project_document", None)).get(n, {}), l)], "--mcp"),
+    # (a server not defined yet is judged once it is: the start offers its add - one with network is refused in
+    # high and paranoid then - and checks the mode again after it; journeys round 1: calculator, no network, was
+    # refused here as "reaches the network")
+    (("paranoid",), lambda a, l: _given([n for n in dict.fromkeys(a.mcp) if n in defined_servers(a, l)
+                                         and mcp_has_network(defined_servers(a, l)[n], l)], "--mcp"),
      "the MCP server reaches the network past the agent's firewall and proxy"),
     # paranoid keeps nothing beyond the run: every start discards its HOME (as --no-keep; resolve_keep), so asking
     # to keep it, or for a session (kept by definition), widens the mode. high keeps HOMEs like the laxer modes.
@@ -496,6 +510,7 @@ WEAKENING_OPTIONS = frozenset({
     "--mount", "--copy", "--device", "--gpu", "--gui", "--gui-screen", "--gui-wayland", "--gui-vnc", "--audio",
     "--browser", "--browser-control", "--browser-profile",  # a browser beside the agent, which it may drive
     "--cairn", "--cairn-workers",  # Cairn beside the agent, running the session's agents without their questions
+    "--artex",  # ARTEX beside the agent, its own agents acting without questions
     "--state-dir", "--kit", "--kit-dir", "--mcp", "--mcp-mount",  # --mcp-mount: a host folder an MCP server writes
     "--mcp-limits",  # an MCP server's limits raised (or none), as --memory raises the agent's
     "--mcp-env",  # --mcp-env: an MCP server's variable (ALLOW_PRIVATE_TARGETS=1 widens what it reaches) or secret

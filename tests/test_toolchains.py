@@ -828,3 +828,335 @@ def test_the_command_line_end_to_end(tmp_path, signing_key, data_home):
     assert missing.returncode == 1 and "not in the store" in missing.stderr
     usage = run_cli("--help")
     assert usage.returncode == 0 and "attach" in usage.stdout and "detach" in usage.stdout
+
+
+# --- variables no toolchain sets (round-1 review: nothing of a catalog entry steers sandbox-ai's in-agent hooks) ---
+# A toolchain's env goes into the agent's own environment at the start and into env.sh, which every `bash -c` reads
+# (BASH_ENV): one that decides what code a process loads, where the agents and sandbox-ai read their configuration,
+# what a shell runs first, which program another one starts, or where connections go and what they trust would
+# steer the agent, its hooks (/usr/bin/python3 -I /sandbox/runtime.py), git and every command the agent runs.
+
+REFUSED_NAMES = [
+    # the loader and the C library: which code and which files every process loads
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "GCONV_PATH", "LOCPATH", "GLIBC_TUNABLES",
+    "MALLOC_CHECK_", "MALLOC_ARENA_MAX", "NLSPATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "HOSTALIASES",
+    "RES_OPTIONS", "LOCALDOMAIN", "RESOLV_HOST_CONF",
+    # interpreters: their startup, options and module paths
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONINSPECT", "PYTHONWARNINGS",
+    "PYTHONPYCACHEPREFIX", "PYTHONBREAKPOINT", "PYTHONSAFEPATH", "PERL5OPT", "PERL5LIB", "PERL5DB", "PERLLIB",
+    "RUBYOPT", "RUBYLIB", "NODE_OPTIONS", "NODE_PATH", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
+    "NODE_REPL_EXTERNAL_MODULE", "NODE_COMPILE_CACHE", "BUN_OPTIONS", "DENO_DIR", "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH", "LUA_INIT", "LUA_PATH", "LUA_CPATH", "PHPRC",
+    "PHP_INI_SCAN_DIR", "npm_config_script_shell", "NPM_CONFIG_NODE_OPTIONS", "NPM_CONFIG_USERCONFIG",
+    "NPM_CONFIG_GLOBALCONFIG", "NPM_CONFIG_STRICT_SSL", "NPM_CONFIG_CAFILE", "PIP_CONFIG_FILE", "PIP_TRUSTED_HOST",
+    "PIP_CERT",
+    # shells: what they read and run first
+    "BASH_ENV", "ENV", "ZDOTDIR", "PROMPT_COMMAND", "PS1", "PS4", "IFS", "SHELLOPTS", "BASHOPTS", "CDPATH",
+    "GLOBIGNORE", "FPATH", "BASH_LOADABLES_PATH", "BASH_XTRACEFD",
+    # programs other programs start
+    "PATH", "EDITOR", "VISUAL", "PAGER", "MANPAGER", "LESSOPEN", "LESSCLOSE", "BROWSER", "SUDO_ASKPASS",
+    "SSH_ASKPASS", "SSH_AUTH_SOCK",
+    # git: its hooks, configuration, programs
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_COUNT", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_DIR", "GIT_TEMPLATE_DIR",
+    # where the sandbox, sandbox-ai and the agents keep their configuration (their hooks, managed settings)
+    "HOME", "USER", "SHELL", "TERM", "TERMINFO", "TERMINFO_DIRS", "TMUX", "TMUX_TMPDIR", "XDG_CONFIG_HOME",
+    "XDG_CONFIG_DIRS", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "SANDBOX_AI_HOME",
+    "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENVIRONMENT_KIND", "ANTHROPIC_BASE_URL", "CODEX_HOME", "OPENAI_BASE_URL",
+    "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "OPENCODE_TEST_MANAGED_CONFIG_DIR",
+    "QWEN_CODE_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "HERMES_HOME", "HERMES_MANAGED_DIR",
+    "DSH_HOME", "PI_CODING_AGENT_DIR", "PI_OFFLINE", "LETTA_HOME", "GOOSE_PATH_ROOT", "OPENHANDS_HOME",
+    "OH_TELEMETRY_EXPORTER", "NANOBOT_HOME", "MCP_TIMEOUT",
+    # connections: where they go, what they trust, where their keys are written
+    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+    "FTP_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "SSLKEYLOGFILE",
+    "OPENSSL_CONF", "OPENSSL_MODULES", "OPENSSL_ENGINES", "CURL_HOME", "WGETRC", "GNUPGHOME",
+    # telemetry: on, or an endpoint of its own
+    "OTEL_EXPORTER_OTLP_ENDPOINT", "CLAUDE_CODE_ENABLE_TELEMETRY", "DO_NOT_TRACK",
+]
+
+
+@pytest.mark.parametrize("name", REFUSED_NAMES)
+def test_a_toolchain_may_not_set_a_variable_that_steers_other_code(tmp_path, name):
+    value = "0" if name == "DO_NOT_TRACK" else "{prefix}/x"
+    with pytest.raises(ValueError, match=f"a toolchain may not set {name}: "):
+        t.validated(entry(tmp_path, env={name: value}))
+    with pytest.raises(ValueError, match=f"a toolchain may not set {name}: "):  # not as a cache either
+        t.validated(entry(tmp_path, caches={name: ".cache/x"}))
+    assert t.refused_variable(name, value)
+
+
+@pytest.mark.parametrize("name, value", [
+    ("JAVA_HOME", "{prefix}"), ("GOFLAGS", "-mod=mod"), ("GOPATH", "go"), ("CARGO_HOME", ".cargo"),
+    ("RUSTUP_HOME", ".rustup"), ("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "{prefix}/bin/cc"),
+    ("CMAKE_GENERATOR", "Ninja"), ("DOTNET_ROOT", "{prefix}"), ("DOTNET_NOLOGO", "1"),
+    ("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1"), ("DOTNET_GENERATE_ASPNET_CERTIFICATE", "false"),
+    ("NPM_CONFIG_PREFIX", ".local"), ("NPM_CONFIG_UPDATE_NOTIFIER", "false"), ("GEM_HOME", ".gem"),
+    # an opt-out with sandbox-ai's own value: taken (the dotnet entry of the catalog sets it)
+    ("DOTNET_CLI_TELEMETRY_OPTOUT", "1"), ("DO_NOT_TRACK", "1"),
+    # named like a refused one, but none of it
+    ("OLD_PRELOAD", "x"), ("NODEJS_HOME", "{prefix}"), ("MYPYTHONPATH", "x"), ("PIP_INDEX_URL", "https://x"),
+])
+def test_an_ordinary_toolchain_variable_is_taken(tmp_path, name, value):
+    assert t.validated(entry(tmp_path, env={name: value}))["env"] == {name: value}
+    assert t.refused_variable(name, value) is None
+
+
+def test_the_catalogs_own_toolchains_set_none_of_them():
+    """The published catalog's entries (the checkout beside this tree, where there is one) stay valid."""
+    path = ROOT.parent / "projects" / "sandbox-ai-mcp" / "toolchains.json"
+    path = path if path.is_file() else ROOT / "projects" / "sandbox-ai-mcp" / "toolchains.json"
+    if not path.is_file():
+        pytest.skip("no checkout of sandbox-ai-mcp here")
+    for item in json.loads(path.read_text())["toolchains"]:
+        for name, value in {**item.get("env", {}), **item.get("caches", {})}.items():
+            assert t.refused_variable(name, value) is None, (item["name"], name)
+
+
+def installed_before(tmp_path, signing_key, env):
+    """go in the store as a sandbox-ai before this check left it: its manifest with ENV in installed.json."""
+    stored(tmp_path, signing_key, entry(tmp_path))
+    path = t.store() / "installed.json"
+    document = json.loads(path.read_text())
+    document["toolchains"]["go"]["1.25.4"]["env"] = env
+    path.write_text(json.dumps(document))
+
+
+def test_an_installed_toolchain_that_sets_one_is_listed_and_refused_at_a_start(tmp_path, signing_key, data_home):
+    installed_before(tmp_path, signing_key, {"NODE_PATH": "{prefix}/lib", "JAVA_HOME": "{prefix}"})
+    found = t.installed()
+    assert "may not set NODE_PATH" in found["go"]["1.25.4"]["refused"]  # still in the store: it can be removed
+    row = t.store_listing(runs={})[0]
+    assert row["name"] == "go" and "may not set NODE_PATH" in row["refused"]
+    with pytest.raises(ValueError, match="go 1.25.4: a toolchain may not set NODE_PATH.*sandbox-ai toolchain "
+                                         "remove go@1.25.4"):
+        t.start_plan(["go"], "podman")
+    # A plan built from entries handed in (the app's, the web's) is checked all the same.
+    sneaked = {"go": {"1.25.4": {**{k: v for k, v in found["go"]["1.25.4"].items() if k != "refused"}}}}
+    with pytest.raises(ValueError, match="a toolchain may not set NODE_PATH"):
+        t.start_plan(["go"], "podman", found=sneaked)
+    t.remove("go@1.25.4", out=lambda line: None)
+    assert t.installed() == {}
+
+
+def test_attach_refuses_a_toolchain_that_sets_one(running, tmp_path, signing_key):
+    r = running
+    path = t.store() / "installed.json"
+    document = json.loads(path.read_text())
+    document["toolchains"]["go"]["1.25.4"]["env"] = {"GCONV_PATH": "{prefix}/gconv"}
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="go 1.25.4: a toolchain may not set GCONV_PATH"):
+        t.attach(r.record, "go", **r.options)
+    found = t.installed()
+    sneaked = {name: {version: {k: v for k, v in item.items() if k != "refused"} for version, item in versions.items()}
+               for name, versions in found.items()}
+    with pytest.raises(ValueError, match="a toolchain may not set GCONV_PATH"):
+        t.attach(r.record, "go", **{**r.options, "found": sneaked})
+    assert r.calls == [] and t.run_listing(r.record) == []
+    assert "GCONV_PATH" not in (r.folder / "env.sh").read_text()
+
+
+def test_attach_refuses_while_an_attached_toolchain_sets_one(running):
+    """A sandbox started by a sandbox-ai before this check: its attached manifest sets PYTHONUSERBASE. Another attach
+    is refused (detach it first); env.sh and the wrappers never carry it, a detach still works."""
+    r = running
+    t.attach(r.record, "go", **r.options)
+    entries = t.load(r.record)
+    entries[0]["manifest"]["env"] = {"PYTHONUSERBASE": "/opt/toolchains/go/py", "JAVA_HOME": "/x"}
+    t.save(r.record, entries)
+    with pytest.raises(ValueError, match="go 1.25.4 \\(attached\\): a toolchain may not set PYTHONUSERBASE.*"
+                                         "detach it first"):
+        t.attach(r.record, "cc", **r.options)
+    assert [call["name"] for call in r.calls] == ["go"]
+    t.write_session(r.folder, [entries[0]["manifest"]])
+    text = (r.folder / "env.sh").read_text() + (r.folder / "bin" / "go").read_text()
+    assert "PYTHONUSERBASE" not in text and "JAVA_HOME" in text
+    assert "PYTHONUSERBASE" not in t.environment([entries[0]["manifest"]])
+    t.detach(r.record, "go", **{k: v for k, v in r.options.items() if k in ("out", "runner", "finder", "keeper")})
+    assert t.run_listing(r.record) == []
+
+
+def test_the_catalog_and_add_say_the_toolchains_one_requires(tmp_path, signing_key, data_home, capsys):
+    """Journeys round 1: `toolchain catalog` listed cc as needing "glibc 2.17+, libstdc++.so.6, libgcc_s.so.1" at
+    73 MiB, and `toolchain add cc` then downloaded zig as well (356 MiB more) without a word of why. The catalog's
+    NEEDS names the toolchains an entry requires, and add says it adds them before it does."""
+    key, trusted = signing_key
+    cc = entry(tmp_path, name="cc", version="0.17.1-1", members={"bin": None, "bin/cc": b"c"},
+               commands={"cc": "bin/cc"}, requires=["zig"], hosts=[])
+    zig = entry(tmp_path, name="zig", version="0.17.1", members={"bin": None, "bin/zig": b"z"},
+                commands={"zig": "bin/zig"}, hosts=[], needs={"glibc": None, "libraries": []})
+    path = catalog(tmp_path, [cc, zig], key)
+    assert t.main(["catalog", "--catalog", path]) == 0
+    (row,) = [line for line in capsys.readouterr().out.splitlines() if line.startswith("cc ")]
+    assert "glibc 2.17+; the toolchain zig" in row, row
+    said = []
+    t.add("cc", path, out=said.append, keys=trusted)
+    at = next(i for i, line in enumerate(said) if line.startswith("cc requires the toolchain zig"))
+    assert at < next(i for i, line in enumerate(said) if "zig 0.17.1" in line and "download" in line.lower()
+                     or line.startswith("added zig")), said
+
+
+def test_the_help_gives_the_steps_first_not_a_wall_of_text():
+    """Journeys round 1: `sandbox-ai toolchain --help` ended in 25 lines of how it works inside (open_tree,
+    mount_setattr, move_mount, Firejail ...) and no steps. It gives the steps, what keeps it safe in a few lines, and
+    where the rest is (docs/TOOLCHAINS_DESIGN.md)."""
+    shown = subprocess.run([str(ROOT / "sandbox-ai"), "toolchain", "--help"], capture_output=True, text=True).stdout
+    assert "open_tree" not in shown and "move_mount" not in shown, shown
+    steps = ["1. sandbox-ai toolchain catalog", "2. sandbox-ai toolchain add NAME", "3. sandbox-ai AGENT --toolchain NAME",
+             "4. sandbox-ai toolchain attach RUN NAME", "5. sandbox-ai toolchain detach RUN NAME"]
+    at = [shown.find(step) for step in steps]
+    assert -1 not in at and at == sorted(at), shown
+    assert "docs/TOOLCHAINS_DESIGN.md" in shown
+    assert len(shown.splitlines()) <= 40, len(shown.splitlines())
+
+
+# --- versions side by side (the user 2026-11-23: "add toolchain support for older toolchain versions") -----------
+
+
+JDK = {"bin": None, "bin/java": b"#!/bin/sh\necho java\n"}
+
+
+def jdk(tmp_path, version, **more):
+    return entry(tmp_path, name="jdk", version=version, members={**JDK, "VERSION": version.encode()},
+                 commands={"java": "bin/java"}, hosts=["repo1.maven.org"], **more)
+
+
+def test_a_version_is_picked_by_itself_or_by_a_major_and_the_newest_without_one(tmp_path, signing_key):
+    key, trusted = signing_key
+    versions = ["21.0.13+9", "17.0.20+8", "17.0.21+9", "11.0.33+10"]
+    entries = t.read_catalog(catalog(tmp_path, [jdk(tmp_path, v) for v in versions], key), keys=trusted)[0]
+    assert t.find_entry(entries, "jdk")["version"] == "21.0.13+9"
+    assert t.find_entry(entries, "jdk", "17")["version"] == "17.0.21+9"  # a major: the newest of it
+    assert t.find_entry(entries, "jdk", "17.0.20+8")["version"] == "17.0.20+8"
+    assert t.find_entry(entries, "jdk", "11")["version"] == "11.0.33+10"
+    with pytest.raises(ValueError, match=r"the catalog has jdk 21.0.13\+9, 17.0.21\+9, 17.0.20\+8, 11.0.33\+10, not 1$"):
+        t.find_entry(entries, "jdk", "1")  # a start up to a '.', '+', '-' or '_' only: 1 is not 11 or 17
+    assert t.selects("3.12", "3.12.16") and t.selects("1.26", "1.26.10") and t.selects("0.17", "0.17.1-1")
+    assert not t.selects("1.2", "1.26.0") and not t.selects("3.1", "3.12.16")
+    # what --toolchain takes for each: the name for the newest, the shortest start that picks it for an older one
+    assert [t.selector("jdk", v, versions) for v in versions] == ["jdk", "jdk@17.0.20", "jdk@17", "jdk@11"]
+    rows = t.catalog_listing(entries)
+    assert [(row["version"], row["toolchain"]) for row in rows] == [
+        ("21.0.13+9", "jdk"), ("17.0.21+9", "jdk@17"), ("17.0.20+8", "jdk@17.0.20"), ("11.0.33+10", "jdk@11")]
+    python = ["3.14.10", "3.13.18", "3.12.16"]
+    assert [t.selector("python", v, python) for v in python] == ["python", "python@3.13", "python@3.12"]
+
+
+def test_the_store_keeps_versions_side_by_side_and_a_start_takes_one_of_them(tmp_path, signing_key, data_home):
+    stored(tmp_path, signing_key, jdk(tmp_path, "21.0.13+9"), jdk(tmp_path, "17.0.21+9"),
+           entry(tmp_path, name="cc", version="2.0", members={"bin": None, "bin/cc": b"2"}, commands={"cc": "bin/cc"},
+                 hosts=[]),
+           entry(tmp_path, name="cc", version="1.0", members={"bin": None, "bin/cc": b"1"}, commands={"cc": "bin/cc"},
+                 hosts=[]),
+           entry(tmp_path, name="rust", version="1.98.1", members={"bin": None, "bin/cargo": b"c"},
+                 commands={"cargo": "bin/cargo"}, requires=["cc"], hosts=[]))
+    found = t.installed()
+    assert sorted(found["jdk"]) == ["17.0.21+9", "21.0.13+9"]
+    assert found["jdk"]["17.0.21+9"]["sha256"] != found["jdk"]["21.0.13+9"]["sha256"]
+
+    def versions(values):
+        return [(e["name"], e["version"]) for e in t.start_plan(values, "podman")["entries"]]
+    assert versions(["jdk"]) == [("jdk", "21.0.13+9")]
+    assert versions(["jdk@17"]) == [("jdk", "17.0.21+9")]
+    assert versions(["jdk@17", "jdk@17.0.21+9"]) == [("jdk", "17.0.21+9")]  # the same version twice: one
+    for values in (["jdk@17", "jdk"], ["jdk", "jdk@17"], ["jdk@21", "jdk@17"]):
+        with pytest.raises(ValueError, match=r"one version of a toolchain per sandbox \(both would be "
+                                             r"/opt/toolchains/jdk\)"):
+            t.start_plan(values, "podman")
+    with pytest.raises(ValueError, match=r"--toolchain jdk@17 \(jdk 17.0.21\+9\) and jdk \(jdk 21.0.13\+9\)"):
+        t.start_plan(["jdk@17", "jdk"], "podman")
+    # what a toolchain requires: the version the start names, else the newest
+    assert versions(["rust"]) == [("cc", "2.0"), ("rust", "1.98.1")]
+    assert versions(["cc@1", "rust@1.98"]) == [("cc", "1.0"), ("rust", "1.98.1")]
+    assert versions(["rust@1.98", "cc@1.0"]) == [("cc", "1.0"), ("rust", "1.98.1")]
+    with pytest.raises(ValueError, match=r"the toolchain jdk 11 is not in the store \(installed: 17.0.21\+9, "
+                                         r"21.0.13\+9\): sandbox-ai toolchain add jdk@11"):
+        t.start_plan(["jdk@11"], "podman")
+    assert t.missing(["jdk@17", "jdk@11", "jdk"]) == ["jdk@11"]
+    rows = t.store_listing(runs={})
+    assert [(row["name"], row["version"], row["toolchain"]) for row in rows if row["name"] == "jdk"] == [
+        ("jdk", "17.0.21+9", "jdk@17"), ("jdk", "21.0.13+9", "jdk")]
+    said = []
+    t.remove("jdk@17", out=said.append, runs={})
+    assert said == ["removed jdk 17.0.21+9 from the store"] and sorted(t.installed()["jdk"]) == ["21.0.13+9"]
+    with pytest.raises(ValueError, match=r"jdk@17 is not in the store \(it has jdk 21.0.13\+9\)"):
+        t.remove("jdk@17", runs={})
+
+
+def test_an_older_installation_with_one_version_per_name_keeps_working(tmp_path, signing_key, data_home):
+    """installed.json as a sandbox-ai before versions wrote it: {NAME: {VERSION: manifest}} with one version."""
+    stored(tmp_path, signing_key, jdk(tmp_path, "21.0.9+10"))
+    document = json.loads((t.store() / "installed.json").read_text())
+    assert list(document["toolchains"]) == ["jdk"] and list(document["toolchains"]["jdk"]) == ["21.0.9+10"]
+    for value in ("jdk", "jdk@21", "jdk@21.0.9+10"):
+        assert t.start_plan([value], "podman")["entries"][0]["version"] == "21.0.9+10"
+    assert t.store_listing(runs={})[0]["toolchain"] == "jdk"
+
+
+def test_add_takes_a_major_and_keeps_the_versions_side_by_side(tmp_path, signing_key, data_home):
+    key, trusted = signing_key
+    source = catalog(tmp_path, [jdk(tmp_path, "21.0.13+9"), jdk(tmp_path, "17.0.21+9")], key)
+    said = []
+    t.add("jdk", source, out=said.append, keys=trusted)
+    t.add("jdk@17", source, out=said.append, keys=trusted)
+    assert any("added jdk 17.0.21+9 (java): sandbox-ai AGENT --toolchain jdk@17, or into a running sandbox: "
+               "sandbox-ai toolchain attach RUN jdk@17" in line for line in said), said
+    assert any("the store has jdk 21.0.13+9 too: one version of it per sandbox" in line for line in said)
+    assert sorted(t.installed()["jdk"]) == ["17.0.21+9", "21.0.13+9"]
+    said.clear()
+    t.add("jdk@17", source, out=said.append, keys=trusted)
+    assert said == ["jdk 17.0.21+9 is in the store already"]
+
+
+def test_attach_of_another_version_than_the_attached_one_is_refused(running, tmp_path, signing_key):
+    r = running
+    stored(tmp_path, signing_key, jdk(tmp_path, "21.0.13+9"), jdk(tmp_path, "17.0.21+9"))
+    assert t.attach(r.record, "jdk@17", **r.options) == ["jdk"]
+    assert r.calls[-1]["source"] == str(t.tree(t.installed()["jdk"]["17.0.21+9"]["sha256"]))
+    assert t.run_listing(r.record)[0]["version"] == "17.0.21+9"
+    with pytest.raises(ValueError, match=r"jdk 17.0.21\+9 is attached to claude-1 already"):
+        t.attach(r.record, "jdk@17.0", **r.options)
+    with pytest.raises(ValueError, match=r"jdk 17.0.21\+9 is attached to claude-1, not jdk: one version of a "
+                                         r"toolchain per sandbox \(both would be /opt/toolchains/jdk\) - detach it "
+                                         r"first \(sandbox-ai toolchain detach claude-1 jdk\)"):
+        t.attach(r.record, "jdk", **r.options)
+    with pytest.raises(ValueError, match="not jdk@21"):
+        t.attach(r.record, "jdk@21", **r.options)
+    assert len(r.calls) == 1
+
+
+def test_the_command_line_shows_and_takes_versions_end_to_end(tmp_path, data_home):
+    """./sandbox-ai toolchain catalog, add NAME@MAJOR, list, show, remove against a stand-in catalog with two versions
+    of jdk (unsigned: the installation's signers file is not this test's)."""
+    source = catalog(tmp_path, [jdk(tmp_path, "21.0.13+9"), jdk(tmp_path, "17.0.21+9"), jdk(tmp_path, "11.0.33+10")])
+    env = {"XDG_DATA_HOME": str(data_home), "XDG_STATE_HOME": str(tmp_path / "state"),
+           "XDG_RUNTIME_DIR": str(tmp_path / "runtime")}
+    (tmp_path / "runtime").mkdir(mode=0o700)
+    shown = run_cli("catalog", "--catalog", source, env=env)
+    assert shown.returncode == 0, shown.stderr
+    lines = shown.stdout.splitlines()
+    assert [line.split()[:2] for line in lines if line.startswith("jdk")] == [
+        ["jdk", "21.0.13+9"], ["jdk@17", "17.0.21+9"], ["jdk@11", "11.0.33+10"]]
+    assert "take: jdk for its newest, jdk@17 for 17.0.21+9" in shown.stdout
+    listed = json.loads(run_cli("catalog", "--json", "--catalog", source, env=env).stdout)
+    assert [row["toolchain"] for row in listed["toolchains"]] == ["jdk", "jdk@17", "jdk@11"]
+    for value in ("jdk@17", "jdk"):
+        added = run_cli("add", value, "--catalog", source, "--unsigned", env=env)
+        assert added.returncode == 0, added.stderr
+    assert "added jdk 11.0.33+10 (java): sandbox-ai AGENT --toolchain jdk@11, or into a running sandbox: sandbox-ai " \
+        "toolchain attach RUN jdk@11" in run_cli("add", "jdk@11", "--catalog", source, "--unsigned", env=env).stdout
+    rows = json.loads(run_cli("list", "--json", env=env).stdout)
+    assert [(row["version"], row["toolchain"]) for row in rows] == [
+        ("11.0.33+10", "jdk@11"), ("17.0.21+9", "jdk@17"), ("21.0.13+9", "jdk")]
+    table = run_cli("list", env=env).stdout
+    assert [line.split()[:2] for line in table.splitlines()[1:]] == [
+        ["jdk@11", "11.0.33+10"], ["jdk@17", "17.0.21+9"], ["jdk", "21.0.13+9"]]
+    assert run_cli("show", "jdk@17", env=env).stdout.startswith("jdk 17.0.21+9 (")
+    assert run_cli("show", "jdk", env=env).stdout.startswith("jdk 21.0.13+9 (")
+    assert "installed: jdk" not in run_cli("catalog", "--catalog", source, env=env).stderr
+    assert [row["installed"] for row in json.loads(run_cli("catalog", "--json", "--catalog", source,
+                                                          env=env).stdout)["toolchains"]] == [True, True, True]
+    removed = run_cli("remove", "jdk@11", env=env)
+    assert removed.returncode == 0 and "removed jdk 11.0.33+10 from the store" in removed.stdout
+    nothing = run_cli("remove", "jdk@9", env=env)
+    assert nothing.returncode == 1 and "jdk@9 is not in the store (it has jdk 21.0.13+9, 17.0.21+9)" in nothing.stderr
+    assert "NAME@VERSION: another version (jdk@17" in run_cli("--help").stdout

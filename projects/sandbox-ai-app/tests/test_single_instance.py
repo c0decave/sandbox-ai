@@ -81,9 +81,10 @@ CURRENT = instance_probe.__version__
 
 # A running app of the new protocol: single_instance.Instance as the app has it, VERSION and LOCATION as given, its
 # quit_handler as the window's (MODE quit: it quits; decline: the human kept the window; linger: says it quits and
-# never ends).
+# never ends; busy: quits, but its GUI thread is busy for 3.5 s first, as an app that has just started).
 NEW_APP = """
 import sys
+import time
 sys.path.insert(0, sys.argv[1])
 from PySide6.QtCore import QCoreApplication, QTimer
 from sandbox_ai_app import single_instance
@@ -95,10 +96,12 @@ instance.asked.connect(lambda word: print("asked", word, flush=True))
 def handler():
     if mode == "decline":
         return False
-    if mode == "quit":
+    if mode in ("quit", "busy"):
         QTimer.singleShot(0, app.quit)
     return True
 instance.quit_handler = handler
+if mode == "busy":
+    QTimer.singleShot(0, lambda: time.sleep(3.5))
 print("ready", flush=True)
 app.exec()
 instance.release()
@@ -227,6 +230,21 @@ def test_an_older_app_makes_way_for_the_new_start(qapp, short_dir):
         assert start.claim() is True, start.notice
         assert running.process.wait(10) == 0 and "ended" in running.lines()
         assert start.server is not None and start.lock_fd is not None, "the new start is the app now"
+        assert start.notice is None
+    finally:
+        start.release()
+        running.stop()
+
+
+def test_an_older_app_busy_for_a_while_still_makes_way(qapp, short_dir):
+    """An older app whose GUI thread is busy past the answer's 2 s (it has just started, as the AppImage's after an
+    update: test_update_github_e2e) said nothing in time - "silent", so the new start only asked it to show its
+    window and ended: the older version stayed. It is asked again for a while; once it answers, it makes way."""
+    running = new_app(short_dir, "0.1.97", mode="busy")
+    start = single_instance.Instance(short_dir / "app.sock")
+    try:
+        assert start.claim() is True, start.notice
+        assert running.process.wait(10) == 0 and "ended" in running.lines()
         assert start.notice is None
     finally:
         start.release()

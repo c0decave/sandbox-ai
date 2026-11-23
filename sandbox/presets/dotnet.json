@@ -3,11 +3,11 @@
   "version": 1,
   "id": "dotnet",
   "title": ".NET",
-  "description": ".NET projects: NuGet, the .NET downloads and GitHub open, everything else closed.",
+  "description": ".NET projects: the .NET SDK mounted in; NuGet, the .NET downloads and GitHub open, everything else closed.",
   "translations": {
     "de": {
       "title": ".NET",
-      "description": ".NET-Projekte: NuGet, die .NET-Downloads und GitHub offen, alles andere zu."
+      "description": ".NET-Projekte: das .NET-SDK eingehängt; NuGet, die .NET-Downloads und GitHub offen, alles andere zu."
     }
   },
   "category": "development",
@@ -17,6 +17,8 @@
     "opencode"
   ],
   "options": [
+    "--toolchain",
+    "dotnet",
     "--allow-github",
     "--allow-host",
     "api.nuget.org",
@@ -32,9 +34,9 @@
     "12g"
   ],
   "notes": [
-    "The SDK (.NET 10): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox): sandbox-ai toolchain add dotnet once, then --toolchain dotnet on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN dotnet. Its registries are the ones this preset opens.",
-    "Without it: the SDK: Microsoft's dotnet-install.sh (https://dot.net/v1/dotnet-install.sh) into the sandbox's HOME, kept with the start; Debian has no .NET.",
-    "Telemetry: set DOTNET_CLI_TELEMETRY_OPTOUT=1 in your environment and pass it with --env DOTNET_CLI_TELEMETRY_OPTOUT (its collector is not opened anyway).",
+    "The SDK (.NET 10) comes with the preset (--toolchain dotnet): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add it (sandbox-ai toolchain add dotnet: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "Telemetry is off (the toolchain sets DOTNET_CLI_TELEMETRY_OPTOUT=1; its collector is not opened anyway). Workloads (dotnet workload install) cannot be added to the read-only toolchain.",
+    "Another SDK version: Microsoft's dotnet-install.sh (https://dot.net/v1/dotnet-install.sh) into the sandbox's HOME, kept with the start.",
     "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
   ]
 }

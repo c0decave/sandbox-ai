@@ -179,6 +179,9 @@ def test_the_backend_names_only_valid_runs_and_toolchains(sai):
     found = sai.host_toolchains("local")
     assert [row["name"] for row in found["installed"]] == ["go"] and found["catalog"] == []
     assert "not published" in found["problem"]
+    # A refusal of several lines keeps them (a message, printable_text), not "\\x0a"
+    sai.answers[("toolchain", "catalog")] = (1, "", "sandbox-ai toolchain: not read:\n  - no network")
+    assert "not read:\n  - no network" in sai.host_toolchains("local")["problem"]
 
 
 def test_the_actions_are_on_the_rows_right_click_and_in_a_terminal_tabs_menu(window, monkeypatch):
@@ -194,11 +197,93 @@ def test_the_actions_are_on_the_rows_right_click_and_in_a_terminal_tabs_menu(win
     page.run_named["add-toolchain"].setEnabled(True)
     page.run_named["remove-toolchain"].setEnabled(False)
     menu = window.run_menu_for(window, instance)
-    entries = {action.text(): action for action in menu.actions()}
+    # (under Add… and Remove…, one level down since 0.1.234: the user's shorter menu)
+    entries = {action.text(): action for top in menu.actions()
+               for action in ([top] + (top.menu().actions() if top.menu() is not None else []))}
     assert entries["Add toolchain…"].isEnabled() and not entries["Remove toolchain…"].isEnabled()
     assert entries["Add toolchain…"].toolTip() == page.run_named["add-toolchain"].toolTip()  # with its reason
     # ... and the right click on a row of the Sandboxes page offers the same two buttons
-    offered = page.table.menu_entries()
+    from sandbox_ai_app import widgets
+    offered = [inner for entry in page.table.menu_entries()
+               for inner in (entry.entries if isinstance(entry, widgets.MenuGroup) else [entry])]
     assert page.run_named["add-toolchain"] in offered and page.run_named["remove-toolchain"] in offered
     entries["Add toolchain…"].trigger()
     assert clicked == ["add"]
+
+
+# --- versions (the user 2026-11-23: "add toolchain support for older toolchain versions") -------------------------
+
+
+def jdk_row(version, toolchain=None, **more):
+    row = {"name": "jdk", "version": version, "commands": ["java"], "hosts": [], "allow": [], "size": 300 << 20,
+           **more}
+    if toolchain:
+        row["toolchain"] = toolchain
+    return row
+
+
+STORE_TWO = [jdk_row("17.0.21+9", "jdk@17"), jdk_row("21.0.13+9", "jdk")]
+CATALOG_THREE = [jdk_row("21.0.13+9", "jdk"), jdk_row("17.0.21+9", "jdk@17"), jdk_row("11.0.33+10", "jdk@11")]
+
+
+def test_every_version_is_offered_by_what_the_host_takes_for_it():
+    choices = backend.toolchain_choices({"installed": STORE_TWO, "catalog": CATALOG_THREE})
+    assert [(c["value"], c["version"], c["stored"]) for c in choices] == [
+        ("jdk", "21.0.13+9", True), ("jdk@17", "17.0.21+9", True), ("jdk@11", "11.0.33+10", False)]
+    # a toolchain attached is left out with all its versions (one version of a toolchain per sandbox)
+    assert backend.toolchain_choices({"installed": STORE_TWO, "catalog": CATALOG_THREE}, attached={"jdk"}) == []
+    # the catalog's newest while the store has an older one: never NAME alone (at a start that is the store's newest)
+    only_17 = backend.toolchain_choices({"installed": [jdk_row("17.0.21+9", "jdk")], "catalog": CATALOG_THREE})
+    assert [(c["value"], c["version"], c["stored"]) for c in only_17] == [
+        ("jdk@17", "17.0.21+9", True), ("jdk@21", "21.0.13+9", False), ("jdk@11", "11.0.33+10", False)]
+    # a host's sandbox-ai before versions names no "toolchain" and takes exact versions only: the store's newest by
+    # its name, every other by its exact version
+    old = backend.toolchain_choices({"installed": [jdk_row("21.0.9+10")],
+                                     "catalog": [jdk_row("21.0.13+9"), jdk_row("17.0.21+9")]})
+    assert [(c["value"], c["stored"]) for c in old] == [("jdk", True), ("jdk@21.0.13+9", False),
+                                                        ("jdk@17.0.21+9", False)]
+    assert [c["value"] for c in backend.toolchain_choices({"installed": [], "catalog": [jdk_row("21.0.13+9"),
+                                                                                        jdk_row("17.0.21+9")]})] == \
+        ["jdk", "jdk@17.0.21+9"]
+
+
+def test_the_boards_toolchains_field_lists_every_version(sai, qapp, monkeypatch):
+    from conftest import wait_until
+    from sandbox_ai_app.board_view import BoardPage
+    view = BoardPage(sai, lambda *a, **k: None, lambda: {"board_grid": 20})
+    monkeypatch.setattr(sai, "host_toolchains", lambda host="local": {
+        "installed": STORE_TWO, "catalog": CATALOG_THREE, "signed": True, "problem": None})
+    filled = []
+    view.value_provider("--toolchain")(lambda items, note=None: filled.append((items, note)))
+    wait_until(qapp, lambda: filled, 10.0)
+    assert filled[0] == ([("jdk 21.0.13+9 (in the store)", "jdk"), ("jdk 17.0.21+9 (in the store)", "jdk@17"),
+                          ("jdk 11.0.33+10 (add it first: sandbox-ai toolchain add jdk@11)", "jdk@11")], None)
+    assert i18n.TEXTS["{name} {version} (add it first: sandbox-ai toolchain add {value})"]["de"] == \
+        "{name} {version} (erst hinzufügen: sandbox-ai toolchain add {value})"
+    view.deleteLater()
+
+
+def test_add_toolchain_offers_each_version_and_attaches_the_one_chosen(ui, sai, picked, monkeypatch):
+    page = page_on(ui, sai, monkeypatch, running())
+    sai.answers[("toolchain", "list", "--json")] = (0, json.dumps(STORE_TWO), "")
+    sai.answers[("toolchain", "catalog")] = catalog(*CATALOG_THREE)
+    sai.answers[("toolchain", "list", "--run")] = (0, "[]", "")
+    sai.answers[("toolchain", "attach")] = (0, "attached jdk 17.0.21+9", "")
+    sai.answers[("toolchain", "add")] = (0, "added jdk 11.0.33+10", "")
+    picked.want = "jdk 17.0.21+9"
+    page.add_toolchain()
+    assert picked.seen[0][1] == ["jdk 21.0.13+9: java", "jdk 17.0.21+9: java",
+                                 "jdk 11.0.33+10 (downloaded from the signed catalog first)"]
+    assert ran(sai, "local", "toolchain", "attach") == ("local", "toolchain", "attach", "claude-1", "jdk@17")
+    assert ran(sai, "local", "toolchain", "add") is None
+    sai.asked.clear()
+    picked.want = "jdk 11"
+    page.add_toolchain()
+    assert ran(sai, "local", "toolchain", "add") == ("local", "toolchain", "add", "jdk@11")
+    assert ran(sai, "local", "toolchain", "attach") == ("local", "toolchain", "attach", "claude-1", "jdk@11")
+    # one version is attached: no other version of it is offered
+    sai.answers[("toolchain", "list", "--run")] = (0, json.dumps([{"name": "jdk", "version": "17.0.21+9",
+                                                                  "source": "added"}]), "")
+    picked.seen.clear()
+    page.add_toolchain()
+    assert picked.seen == [] and "attached to it already" in picked.notices[-1][1]

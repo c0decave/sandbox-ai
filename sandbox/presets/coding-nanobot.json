@@ -27,6 +27,6 @@
     "Memory: ~/.nanobot/workspace/memory/MEMORY.md (nanobot's long-term memory) belongs to this project only and is kept between runs (not with --no-memory).",
     "nanobot runs its commands without asking (its exec tool has no approvals); this sandbox is the boundary, its own bubblewrap sandbox stays off. Its scheduled turns (heartbeat, Dream), Telegram channel, keyless web search, Jina Reader and update check stay off unless --nanobot-enable names them.",
     "nanobot sends no telemetry; its tracing stays off and the proxy refuses Langfuse, PostHog and Sentry.",
-    "nanobot is not live-tested yet (a start says so); its image first: sandbox-ai build nanobot."
+    "Its image first: sandbox-ai build nanobot."
   ]
 }

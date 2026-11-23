@@ -28,21 +28,31 @@ class Step:
 
 
 TOUR = (
+    # The Start page: one start in two views, with the switch above the page (Board | Expert). Its two steps are its
+    # two views (each a page key of the window): the Expert view first, as the pages' order has it; the page itself
+    # opens as the Board.
     Step("launch", N_("Start"),
-         N_("Start an agent in a sandbox: pick the project folder and the agent, see what the start will do, "
-            "and start it in the app, in a terminal window or as a session that keeps running."),
-         N_("Choose a project folder, then press Dry run to see the launcher's verdict without starting.")),
-    Step("board", N_("Board"),
-         N_("One sandbox as nodes: the agent, its folders, the proxy, the network and everything else. The checks "
-            "below follow every change; Apply writes .sandbox-ai.json after showing it."),
-         N_("Double-click a part in the list on the left to add it: the guide helps you set it up.")),
+         N_("Start an agent in a sandbox. The page shows one start in two views, with a switch above it: Board (the "
+            "start as parts and connections; the page opens with it) and Expert, shown here - the project folder, "
+            "the agent, every option a field and the whole command line as text to edit or paste. Both are always "
+            "the same start: what you change in one is in the other at once, Undo covers both, and Start runs the "
+            "same command from either."),
+         N_("Type --offline into the command line, then press Dry run to see the launcher's verdict without "
+            "starting.")),
+    Step("board", N_("Start: the Board"),
+         N_("The Board view of the Start page: the same start as nodes - the agent, its folders, the proxy, the "
+            "network and everything else; options no part shows are on the part Other options. The checks below "
+            "follow every change; Apply writes .sandbox-ai.json after showing it. The Expert view shows this very "
+            "start as fields and its command line."),
+         N_("Double-click a part in the list on the left to add it: the guide helps you set it up. Then choose "
+            "Expert above the page (or F6) and find it in the command line.")),
     Step("sandboxes", N_("Sandboxes & sessions"),
          N_("Everything that runs or is kept: one-off runs, sessions, MCP servers, with pause, resume, stop and "
-            "attach."),
+            "attach; a running one gets folders, MCP servers and toolchains without a restart."),
          N_("Select a session to see its options and history.")),
     Step("terminals", N_("Terminals"),
-         N_("The terminals of builds, logins and sandboxes started in the app, and every running start to attach "
-            "to, however it was started."),
+         N_("The terminals of builds, logins and sandboxes started in the app, and every running start to attach to, "
+            "however it was started. A tab's right-click menu has its session's actions."),
          N_("Ctrl-b d detaches from a session; it keeps running.")),
     Step("approvals", N_("Approvals"),
          N_("Questions of running sandboxes: a connection that is not allowed waits here for your answer, once, "
@@ -56,13 +66,13 @@ TOUR = (
             "--kit."),
          N_("Create a kit of your own, add a skill, and use it in the current project.")),
     Step("mcp", N_("MCP servers"),
-         N_("MCP servers in sandboxes of their own, from your definitions and the catalogs, with their network "
-            "and folders."),
+         N_("MCP servers in sandboxes of their own, from your definitions and the catalogs, with their network and "
+            "folders; From another host… copies one of another host here."),
          N_("Add a search server from the catalog and connect it on the board.")),
     Step("llm", N_("LLM servers"),
          N_("Model servers of your own, kept by name on this machine or a host: Ollama, LM Studio, llama.cpp, vLLM "
             "or another OpenAI-compatible one, local or behind a VPN. A start with --llm NAME reaches only that "
-            "server; its key stays with the proxy."),
+            "server; its key stays with the proxy. For all hosts… makes one reachable from every host."),
          N_("Add the server you run, then Check it for the agent you use.")),
     Step("images", N_("Images"),
          N_("The agents' images: build, update, and extend them with packages of your own."),
@@ -285,6 +295,14 @@ NODE_QUESTIONS = {
         Question("--gpu", N_("GPU"), N_("A GPU for the agent."), "choice",
                  (("", N_("none")), ("nvidia", "NVIDIA"), ("dri", "DRI (Intel, AMD)"), ("rocm", "ROCm"))),
     ),
+    "toolchains": (
+        Question("--toolchain", N_("Toolchains"), N_("Build tools from the signed catalog, one per line (go, rust, "
+                                                     "jdk, node ...): mounted read-only at /opt/toolchains/NAME."),
+                 "list"),
+        Question("--toolchain-offline", N_("Without their registries"),
+                 N_("Mount them, but keep the registries they name (the Go module proxy, crates.io ...) closed."),
+                 "flag"),
+    ),
     "limits": (
         Question("--memory", N_("Memory"), N_("At most this much, e.g. 8g."), "text", placeholder="8g"),
         Question("--cpus", N_("CPUs"), N_("At most this many CPUs, e.g. 4."), "text", placeholder="4"),
@@ -309,9 +327,10 @@ NODE_QUESTIONS = {
     "cairn": (
         Question("--cairn", N_("Cairn's board"), N_("Cairn beside the agent (its image: sandbox-ai build cairn); its "
                                                     "board opens in the sandbox's browser."), "flag", needed=True),
-        Question("--cairn-workers", N_("Workers"), N_("The session's agents that work for Cairn, each with a model of "
-                                                      "its own if you like: claude=sonnet,codex. Empty: every agent "
-                                                      "of the session, with its own model."), "text",
+        Question("--cairn-workers", N_("Workers"), N_("The session's agents that work for Cairn - any harness - each "
+                                                      "with a model of its own if you like: claude=sonnet,codex. "
+                                                      "Empty: every agent of the session, with its own model, the "
+                                                      "best supported first."), "text",
                  placeholder="claude,codex"),
         Question("--cairn-origin", N_("Starting point"), N_("What is given: the target and the scope. With a goal, the "
                                                     "project is made at the start."), "text",
@@ -320,6 +339,17 @@ NODE_QUESTIONS = {
         Question("--cairn-hint", N_("First hint"), N_("A first hint for the workers."), "text"),
         Question("--cairn-board", N_("Board data"), N_("Its database: new at every start, or kept with the session."),
                  "choice", (("", N_("new at every start")), ("session", N_("kept with the session")))),
+    ),
+    "artex": (
+        Question("--artex", N_("ARTEX"), N_("ARTEX beside the agent (its image: sandbox-ai build artex); its console "
+                                            "on this computer's 127.0.0.1, its password: sandbox-ai artex console."),
+                 "flag", needed=True),
+        Question("--artex-data", N_("ARTEX's data"), N_("Its database and findings: new at every start, or kept with "
+                                                        "the session."),
+                 "choice", (("", N_("new at every start")), ("session", N_("kept with the session")))),
+        Question("--artex-port", N_("Console port"), N_("The port of this computer's 127.0.0.1 for its console. "
+                                                        "Empty: 8787, or the next free one."), "text",
+                 placeholder="8787"),
     ),
     "session": (
         Question("tmux", N_("tmux"), N_("Run the agent in tmux inside the sandbox (detach and attach again)."),
@@ -335,6 +365,15 @@ NODE_QUESTIONS = {
                  "choice", (("podman", "Podman"), ("bwrap", "Bubblewrap"))),
         Question("--image-variant", N_("Image variant"), N_("An image of your own with more packages (Images "
                                                             "page)."), "text"),
+    ),
+    # Other options: what no other part shows, an option per line as the command line has it ("tokens": each line
+    # read as a shell reads it - option_lines, line_tokens).
+    "other": (
+        Question("tokens", N_("Options"),
+                 N_("Options of the start that no other part shows, one per line as on the command line: the "
+                    "security mode (--mode high), a name (--name night), canaries, checkpoints. The Expert view of "
+                    "the Start page has a field for each."),
+                 "list", placeholder="--mode high"),
     ),
 }
 
@@ -353,6 +392,8 @@ def answer_of(node, question):
         if question.key == "enabled":  # the proxy is on unless turned off
             return value is not False
         return bool(value)
+    if question.form == "list" and question.key == "tokens":
+        return option_lines(value if isinstance(value, list) else [])
     if question.form == "list":
         return [str(v) for v in value] if isinstance(value, list) else []
     if question.form == "choice":
@@ -361,6 +402,35 @@ def answer_of(node, question):
                                               "--backend": "podman", "--vpn-check": "stop",
                                               "agent": "claude"}.get(question.key, known[0] if known else ""))
     return "" if value is None else str(value)
+
+
+def option_lines(tokens):
+    """Command-line TOKENS as lines, an option with its value on each (quoted as a shell needs it): what the part
+    Other options shows of its tokens."""
+    import shlex
+    lines = []
+    for token in (str(token) for token in tokens):
+        if lines and not token.startswith("-") and lines[-1][0].startswith("-") and len(lines[-1]) == 1 \
+                and "=" not in lines[-1][0]:
+            lines[-1].append(token)
+        else:
+            lines.append([token])
+    return [shlex.join(line) for line in lines]
+
+
+def line_tokens(lines):
+    """The tokens of LINES (option_lines' form: each line read as a shell reads it; a line whose quotes are not
+    closed is one token, as it is)."""
+    import shlex
+    tokens = []
+    for line in (str(line).strip() for line in lines):
+        if not line:
+            continue
+        try:
+            tokens += shlex.split(line)
+        except ValueError:
+            tokens.append(line)
+    return tokens
 
 
 def props_of(kind, answers):
@@ -382,6 +452,8 @@ def props_of(kind, answers):
                 found["readonly"] = bool(answer)
             else:
                 found[question.key] = True if answer else None
+        elif question.form == "list" and question.key == "tokens":
+            found[question.key] = line_tokens(answer if isinstance(answer, list) else str(answer).splitlines()) or None
         elif question.form == "list":
             lines = answer if isinstance(answer, list) else str(answer).splitlines()
             if question.key in LIST_OPTIONS:  # a line may list several (commas or spaces), each once

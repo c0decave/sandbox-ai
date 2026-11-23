@@ -123,8 +123,8 @@ def test_with_takes_a_comma_list_and_repeats_alike(capsys):
         s.parse_args(["claude", "--with", "hermes,gemini"])
     said = capsys.readouterr().err
     assert "gemini" in said and "qwen" in said, "the bad name and the choices"
-    assert s.experimental_needs(["claude"], ["--with", "hermes,qwen"]) == \
-        s.experimental_needs(["claude"], ["--with", "hermes", "--with", "qwen"])
+    assert s.companions(s.parse_args(["claude", "--with", "hermes,qwen"])) == \
+        s.companions(s.parse_args(["claude", "--with", "hermes", "--with", "qwen"])) == ["hermes", "qwen"]
 
 
 def test_with_comma_list_end_to_end_through_the_command(tmp_path):

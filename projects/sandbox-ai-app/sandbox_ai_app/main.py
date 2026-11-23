@@ -217,7 +217,8 @@ def main(argv=None):
         applog.set_debug(True)
     i18n.set_language(settings.get("language", "system"))
     qt_translations(app)  # (Qt's own words too: its dialogs' buttons, a field's context menu)
-    from . import fonts
+    from . import fonts, reading_fonts
+    reading_fonts.register()  # the fonts that come with the app (Help, the reading font): checked, then loaded
     fonts.use(settings, app)  # the fonts chosen in the settings, when installed; theme.apply() applies them
     theme.apply(settings.get("theme", "system"), app)
     from .widgets import fitting_dialogs, nonblocking_dialogs, window_close_controls

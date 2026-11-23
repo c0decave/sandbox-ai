@@ -248,7 +248,13 @@ def limits_prefix(definition, launcher):
     cpus = float(cpus) if cpus is not None else max(1, (os.cpu_count() or 1) // 2)
     controllers = launcher.delegated_controllers() if hasattr(launcher, "delegated_controllers") else None
     quota = ["-p", f"CPUQuota={int(round(cpus * 100))}%"] if controllers is None or "cpu" in controllers else []
-    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", f"MemoryMax={memory}",
+    # systemd-run finds the user manager through XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS: given as the launcher's
+    # user_bus_environment gives them, whatever the caller's are (a live check's own runtime folder, an app started
+    # without them: "Failed to connect to user scope bus via local transport"). The wrapper starts bwrap with a bare
+    # environment of its own, so none of this reaches the server.
+    runtime = f"/run/user/{os.getuid()}"
+    return ["env", f"XDG_RUNTIME_DIR={runtime}", f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus",
+            "systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", f"MemoryMax={memory}",
             "-p", f"MemorySwapMax={memory}", *quota, "-p", f"TasksMax={definition.get('pids', 128)}", "--"]
 
 
@@ -281,6 +287,8 @@ def bwrap_args(definition, environ=None, hosts_file=None):
     if hosts_file is not None:
         args += ["--ro-bind", str(hosts_file), "/etc/hosts"]
     for mount in definition.get("mounts", []):
+        if not os.path.isabs(os.path.expanduser(str(mount["host"]))):  # (the start's workspace, bound at a start only)
+            raise ValueError(f"the folder {mount['target']} is the start's workspace, bound only for a start")
         host = str(Path(os.path.expanduser(mount["host"])).resolve())
         args += ["--bind" if mount.get("mode") == "rw" else "--ro-bind", host, mount["target"]]
     for key, value in sorted(rootfs.get("env", {}).items()):

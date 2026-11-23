@@ -35,22 +35,22 @@ SPEC.loader.exec_module(s)
 AGENTS = ("claude", "codex", "opencode")
 BACKENDS = ("podman", "bwrap")
 COMBOS = [(agent, backend) for agent in AGENTS for backend in BACKENDS]
-# Hermes (not live-tested yet): its own scenarios on both backends (HERMES below).
+# Hermes: its own scenarios on both backends (HERMES below).
 HERMES_COMBOS = [("hermes", backend) for backend in BACKENDS]
-# DeepSeek Harness and Qwen Code (not live-tested yet): their own scenarios (DSH, QWEN).
+# DeepSeek Harness and Qwen Code: their own scenarios (DSH, QWEN).
 DSH_COMBOS = [("dsh", backend) for backend in BACKENDS]
 QWEN_COMBOS = [("qwen", backend) for backend in BACKENDS]
-# Goose (not live-tested yet): its own scenarios (GOOSE).
+# Goose: its own scenarios (GOOSE).
 GOOSE_COMBOS = [("goose", backend) for backend in BACKENDS]
-# OpenHands (not live-tested yet): its own scenarios (OPENHANDS).
+# OpenHands: its own scenarios (OPENHANDS).
 OPENHANDS_COMBOS = [("openhands", backend) for backend in BACKENDS]
-# nanobot (not live-tested yet): its own scenarios (NANOBOT).
+# nanobot: its own scenarios (NANOBOT).
 NANOBOT_COMBOS = [("nanobot", backend) for backend in BACKENDS]
-# Letta Code (not live-tested yet): its own scenarios (LETTA).
+# Letta Code: its own scenarios (LETTA).
 LETTA_COMBOS = [("letta", backend) for backend in BACKENDS]
-# OpenCode 2 (not live-tested yet): its own scenarios (OPENCODE2).
+# OpenCode 2: its own scenarios (OPENCODE2).
 OPENCODE2_COMBOS = [("opencode2", backend) for backend in BACKENDS]
-# Pi (not live-tested yet): its own scenarios (PI).
+# Pi: its own scenarios (PI).
 PI_COMBOS = [("pi", backend) for backend in BACKENDS]
 # The launcher loads its helper modules afresh for every call; once is enough here (they read the environment
 # when called, not when loaded), and keeps the matrix fast. (Not the parser: parse_args extends its list defaults.)
@@ -2665,9 +2665,10 @@ def every_builtin_preset_starts(m, dev):
         if m.backend == "bwrap" and ("--allow-host-port" in preset.get("options", [])
                                      or "--service" in preset.get("options", [])
                                      or "--browser" in preset.get("options", [])
-                                     or "--cairn" in preset.get("options", [])):
-            # pasta forwards the host's ports, a service, the sandbox's browser and Cairn's board are containers of the
-            # pod: Podman only, as the start option says (the preset's note too).
+                                     or "--cairn" in preset.get("options", [])
+                                     or "--artex" in preset.get("options", [])):
+            # pasta forwards the host's ports, a service, the sandbox's browser, Cairn's board and ARTEX are containers
+            # of the pod: Podman only, as the start option says (the preset's note too).
             m.refused("--preset", preset["id"], *preset_values(m, preset, dev), match="needs the Podman backend")
             continue
         plan = m.plan("--preset", preset["id"], *preset_values(m, preset, dev))
@@ -2822,7 +2823,7 @@ def hermes_starts_with_its_managed_configuration(hm):
     mounted read-only at /etc/hermes, every switch of the review in it, the terminal local, no installs at run time."""
     plan = hm.plan()
     assert plan["https_hosts"] == s.PROVIDERS["hermes"] and plan["image"] == "localhost/hermes-sandbox:latest"
-    assert plan["hermes"]["experimental"] and plan["hermes"]["enabled"] == [] and plan["hermes"]["gateway"] is False
+    assert "experimental" not in plan["hermes"] and plan["hermes"]["enabled"] == [] and plan["hermes"]["gateway"] is False
     assert set(plan["hermes"]["off"]) == set(HERMES_MODULE.FEATURES)
     run = hm.run()
     config = hermes_config(run)
@@ -2842,7 +2843,7 @@ def hermes_starts_with_its_managed_configuration(hm):
     assert command[:2] == ["/bin/sh", "-c"] and command[3].endswith("hermes")
     assert f"/etc/hermes/{HERMES_MODULE.TELEMETRY_ANSWER}" in command[2] and command[2].endswith('exec "$0" "$@"')
     assert run.hermes[HERMES_MODULE.TELEMETRY_ANSWER] == HERMES_MODULE.TELEMETRY_ANSWER_SCRIPT
-    assert "note: Hermes: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
 
 
 @hermes_scenario
@@ -2873,9 +2874,9 @@ def hermes_refuses_what_it_cannot_do_here(hm):
     # A feature that opens a host widens the security mode high like --allow-host; kanban opens none.
     hm.refused("--mode", "high", "--hermes-enable", "gateway:telegram", match="widens the security mode high")
     assert hm.plan("--mode", "high", "--hermes-enable", "kanban")["hermes"]["gateway"]
-    # Not live-tested yet: choosing it starts it, with a one-line note (no opt-in).
-    assert hm.plan()["hermes"]["experimental"]
-    assert hm.run().err.count("not live-tested yet") == 1
+    # No opt-in and no "not live-tested yet" note (the user, 2026-11-22): choosing it starts it.
+    assert "experimental" not in hm.plan()["hermes"]
+    assert "live-tested" not in hm.run().err
 
 
 @hermes_scenario
@@ -3022,7 +3023,7 @@ def qwen_starts_with_its_system_settings(qm):
     update check, no model catalog download, telemetry pinned off."""
     plan = qm.plan()
     assert plan["https_hosts"] == s.PROVIDERS["qwen"] and plan["image"] == "localhost/qwen-sandbox:latest"
-    assert plan["qwen"]["experimental"] and plan["qwen"]["enabled"] == [] and plan["qwen"]["own_sandbox"] is False
+    assert "experimental" not in plan["qwen"] and plan["qwen"]["enabled"] == [] and plan["qwen"]["own_sandbox"] is False
     assert set(plan["qwen"]["off"]) == set(QWEN_MODULE.FEATURES) and plan["qwen"]["version"] == QWEN_MODULE.VERSION
     run = qm.run()
     settings = qwen_settings(run)
@@ -3034,7 +3035,7 @@ def qwen_starts_with_its_system_settings(qm):
     assert run.env["QWEN_CODE_MODELS_DEV_REFRESH"] == "off" and run.env["QWEN_USAGE_STATISTICS_ENABLED"] == "false"
     assert ("dst=/etc/qwen-code,ro" if qm.backend == "podman" else "/qwen /etc/qwen-code") in run.joined
     assert run.config["command"][0].endswith("qwen") and "--yolo" not in run.config["command"]
-    assert "note: Qwen Code: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
 
 
 @qwen_scenario
@@ -3057,7 +3058,7 @@ def qwen_features_open_only_their_hosts(qm):
 @qwen_scenario
 def qwen_refuses_what_it_cannot_do_here(qm):
     """Rules for its own tools (so the mode paranoid), its own sandbox, --qwen-enable for another agent; a real start
-    needs no opt-in (a note: not live-tested yet)."""
+    needs no opt-in."""
     assert qm.plan("--with", "claude")["companions"] == ["claude"]  # a layer of the team image since 0.1.98
     rules = qm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
     run = qm.run("--rules", str(rules))  # rules for its own tools: its hooks in its system settings
@@ -3074,8 +3075,8 @@ def qwen_refuses_what_it_cannot_do_here(qm):
         with pytest.raises(ValueError, match="own sandbox"):
             qm.run(agent_args=args)
     qm.run(agent_args=["--model", "qwen3-coder-plus"])  # an argument of its own is fine
-    assert qm.plan()["qwen"]["experimental"]
-    assert qm.run().err.count("not live-tested yet") == 1
+    assert "experimental" not in qm.plan()["qwen"]
+    assert "live-tested" not in qm.run().err
 
 
 @qwen_scenario
@@ -3227,7 +3228,7 @@ def dsh_starts_its_chat_with_the_patch(dm):
     loopback through its window's script (/etc/dsh/web.py), which says how to reach it (--browser)."""
     plan = dm.plan()
     assert plan["https_hosts"] == s.PROVIDERS["dsh"] and plan["image"] == "localhost/dsh-sandbox:latest"
-    assert plan["dsh"]["experimental"] and plan["dsh"]["profile"] == "chat" and plan["dsh"]["web_ui"] is None
+    assert "experimental" not in plan["dsh"] and plan["dsh"]["profile"] == "chat" and plan["dsh"]["web_ui"] is None
     assert plan["dsh"]["terminal_ui"] is True and plan["dsh"]["note"] == DSH_MODULE.CHAT_NOTE
     run = dm.run()
     command = run.config["command"]
@@ -3253,7 +3254,7 @@ def dsh_starts_its_chat_with_the_patch(dm):
     assert run.env["DSH_TELEMETRY_DISABLED"] == "1" and run.env["DSH_HOME"] == "/root/.dsh"
     assert "DSH_PERMISSION_MODE" not in run.env
     assert ("dst=/etc/dsh,ro" if dm.backend == "podman" else "/dsh /etc/dsh") in run.joined
-    assert "note: DeepSeek Harness: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
     headless = dm.run(agent_args=["headless", "run the tests"]).config["command"]
     assert headless[1:] == ["headless", "--patch", DSH_MODULE.PATCH, "run the tests"]
     profile = dm.run(agent_args=["--profile", "acp"]).config["command"]
@@ -3274,8 +3275,8 @@ def dsh_refuses_what_it_cannot_do_here(dm):
             dm.run(agent_args=args)
     dm.refused("--effort", "high", match="reasoningEfforts")
     dm.refused("--qwen-enable", "updates", match="is for Qwen Code")
-    assert dm.plan()["dsh"]["experimental"]
-    assert dm.run().err.count("not live-tested yet") == 1
+    assert "experimental" not in dm.plan()["dsh"]
+    assert "live-tested" not in dm.run().err
 
 
 @dsh_scenario
@@ -3366,7 +3367,7 @@ def goose_starts_with_its_system_configuration(gm):
     (no background part), the model catalog's download refused quietly by the proxy."""
     plan = gm.plan()
     assert plan["https_hosts"] == [] and plan["image"] == "localhost/goose-sandbox:latest"
-    assert plan["goose"]["experimental"] and plan["goose"]["enabled"] == [] and plan["goose"]["background"] == []
+    assert "experimental" not in plan["goose"] and plan["goose"]["enabled"] == [] and plan["goose"]["background"] == []
     assert set(plan["goose"]["off"]) == set(GOOSE_MODULE.FEATURES) and plan["goose"]["version"] == GOOSE_MODULE.VERSION
     run = gm.run()
     config = goose_config(run)
@@ -3378,7 +3379,7 @@ def goose_starts_with_its_system_configuration(gm):
     command = run.config["command"]
     assert command[0].endswith("goose") and command[1:] == []
     assert "models.dev" in goose_denied(run), "its model catalog's download: refused quietly"
-    assert "note: Goose: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
 
 
 @goose_scenario
@@ -3413,7 +3414,7 @@ def goose_runs_its_scheduler_and_gateway_in_the_background(gm):
 @goose_scenario
 def goose_refuses_what_it_cannot_do_here(gm):
     """Rules for its own tools (the mode paranoid), --goose-enable for another agent, a subcommand of a feature that
-    is off, goose serve on another address; a real start needs no opt-in (a note: not live-tested yet)."""
+    is off, goose serve on another address; a real start needs no opt-in."""
     rules = gm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
     run = gm.run("--rules", str(rules))  # rules for its own tools: sandbox-ai's plugin in /etc/goose
     hooks = json.loads(run.managed["goose"]["sandbox-ai-hooks/hooks/hooks.json"])["hooks"]
@@ -3427,8 +3428,8 @@ def goose_refuses_what_it_cannot_do_here(gm):
             gm.run(agent_args=args)
     gm.run(agent_args=["run", "--text", "update the readme"])  # a word of the task is no subcommand
     gm.run("--goose-enable", "updates", agent_args=["update"])
-    assert gm.plan()["goose"]["experimental"]
-    assert gm.run().err.count("not live-tested yet") == 1
+    assert "experimental" not in gm.plan()["goose"]
+    assert "live-tested" not in gm.run().err
 
 
 @goose_scenario
@@ -3551,7 +3552,7 @@ def openhands_starts_its_canvas_with_its_settings(om):
     telemetry, and the Canvas on the sandbox's loopback as the command."""
     plan = om.plan()
     assert plan["https_hosts"] == [] and plan["image"] == "localhost/openhands-sandbox:latest"
-    assert plan["openhands"]["experimental"] and plan["openhands"]["enabled"] == []
+    assert "experimental" not in plan["openhands"] and plan["openhands"]["enabled"] == []
     assert set(plan["openhands"]["off"]) == set(OPENHANDS_MODULE.FEATURES)
     assert plan["openhands"]["web_ui"] == "http://127.0.0.1:8000/" and plan["openhands"]["runtime"] == "local"
     run = om.run()
@@ -3565,7 +3566,7 @@ def openhands_starts_its_canvas_with_its_settings(om):
     assert ("dst=/etc/openhands,ro" if om.backend == "podman" else "/openhands /etc/openhands") in run.joined
     command = run.config["command"]
     assert command[0].endswith("openhands") and command[1:] == ["--host", "127.0.0.1", "--port", "8000"]
-    assert "note: OpenHands: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
     task = om.run(agent_args=["task", "--text=fix the tests"])
     assert task.config["command"][1:] == ["task", "--text=fix the tests"]
 
@@ -3588,15 +3589,15 @@ def openhands_features_open_only_their_hosts(om):
 @openhands_scenario
 def openhands_refuses_what_it_cannot_do_here(om):
     """Rules for its own tools (the mode paranoid), --openhands-enable for another agent, the Canvas' public mode or
-    another address, another automation source; a real start needs no opt-in (a note: not live-tested yet)."""
+    another address, another automation source; a real start needs no opt-in."""
     om.refused("--mode", "paranoid", match="cannot be enforced for OpenHands: its agent server 1.58.1 takes hooks only with each conversation")
     for args, why in ((["--public"], "no public mode"), (["--host", "0.0.0.0"], "loopback only"),
                       (["--automation-ref", "main"], "reviewed release only")):
         with pytest.raises(ValueError, match=why):
             om.run(agent_args=args)
     om.run(agent_args=["task", "--text=--public is not an option here"])  # a task's text is no option
-    assert om.plan()["openhands"]["experimental"]
-    assert om.run().err.count("not live-tested yet") == 1
+    assert "experimental" not in om.plan()["openhands"]
+    assert "live-tested" not in om.run().err
 
 
 @openhands_scenario
@@ -3728,7 +3729,7 @@ def nanobot_starts_with_its_settings(nm):
     telemetry variables set, nanobot itself as the command, its update check refused quietly by the proxy."""
     plan = nm.plan()
     assert plan["https_hosts"] == [] and plan["image"] == "localhost/nanobot-sandbox:latest"
-    assert plan["nanobot"]["experimental"] and plan["nanobot"]["enabled"] == []
+    assert "experimental" not in plan["nanobot"] and plan["nanobot"]["enabled"] == []
     assert set(plan["nanobot"]["off"]) == set(NANOBOT_MODULE.FEATURES)
     assert plan["nanobot"]["version"] == NANOBOT_MODULE.VERSION and plan["nanobot"]["own_sandbox"] == "off"
     run = nm.run()
@@ -3743,7 +3744,7 @@ def nanobot_starts_with_its_settings(nm):
     assert command[0].endswith("nanobot") and command[1:] == []
     denied = goose_denied(run, "nanobot-updates-")
     assert denied == ["raw.githubusercontent.com", "pypi.org"], "its update check: refused quietly"
-    assert "note: nanobot: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
 
 
 @nanobot_scenario
@@ -3778,7 +3779,7 @@ def nanobot_telegram_channel_gets_its_token_from_a_secret(nm):
 @nanobot_scenario
 def nanobot_refuses_what_it_cannot_do_here(nm):
     """Rules for its own tools (the mode paranoid), a subcommand of a feature that is off, a server on another
-    address, another configuration file; a real start needs no opt-in (a note: not live-tested yet)."""
+    address, another configuration file; a real start needs no opt-in."""
     nm.refused("--mode", "paranoid", match="cannot be enforced for nanobot: version 0.4.0 has hooks only for Python programs")
     for args, why in ((["update"], "needs --nanobot-enable updates"), (["gateway", "--background"], "scheduler"),
                       (["serve", "--host", "0.0.0.0"], "loopback only"), (["--config", "/work/x.json"], "laid over")):
@@ -3787,7 +3788,7 @@ def nanobot_refuses_what_it_cannot_do_here(nm):
     nm.run(agent_args=["agent", "-m", "update the readme"])  # a word of the task is no subcommand
     nm.run("--nanobot-enable", "updates", agent_args=["update", "--check"])
     assert nm.run(agent_args=["webui"]).config["command"][1:] == ["webui", "--no-open"]
-    assert nm.run().err.count("not live-tested yet") == 1
+    assert "live-tested" not in nm.run().err
 
 
 @nanobot_scenario
@@ -3918,7 +3919,7 @@ def letta_starts_local_with_its_start_script(lm):
     becoming Letta Code, the proxy's telemetry rules."""
     plan = lm.plan()
     assert plan["https_hosts"] == [] and plan["image"] == "localhost/letta-sandbox:latest"
-    assert plan["letta"]["experimental"] and plan["letta"]["enabled"] == [] and plan["letta"]["backend"] == "local"
+    assert "experimental" not in plan["letta"] and plan["letta"]["enabled"] == [] and plan["letta"]["backend"] == "local"
     assert set(plan["letta"]["off"]) == set(LETTA_MODULE.FEATURES) and plan["letta"]["version"] == LETTA_MODULE.VERSION
     run = lm.run()
     assert run.env["LETTA_LOCAL_BACKEND_EXPERIMENTAL"] == "1" and run.env["LETTA_BASE_URL"] == "http://127.0.0.1:9"
@@ -3931,7 +3932,7 @@ def letta_starts_local_with_its_start_script(lm):
     command = run.config["command"]
     assert command[:3] == ["python3", "-I", LETTA_MODULE.START] and command[3].endswith("letta") and command[4:] == []
     assert "api.letta.com" in goose_denied(run, "telemetry-letta-path-")
-    assert "note: Letta Code: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
 
 
 @letta_scenario
@@ -3953,8 +3954,7 @@ def letta_features_open_only_their_hosts(lm):
 @letta_scenario
 def letta_refuses_what_it_cannot_do_here(lm):
     """Rules for its own tools (the mode paranoid), --letta-enable for another agent, an argument of a feature that
-    is off, channels and an App Server off the loopback; a real start needs no opt-in (a note: not live-tested
-    yet)."""
+    is off, channels and an App Server off the loopback; a real start needs no opt-in."""
     rules = lm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
     run = lm.run("--rules", str(rules))  # rules for its own tools: hooks its start lays into the user's settings
     pre = letta_start(run)["hooks"]["PreToolUse"]
@@ -3968,8 +3968,8 @@ def letta_refuses_what_it_cannot_do_here(lm):
             lm.run(agent_args=args)
     lm.run(agent_args=["-p", "--", "update the readme"])  # a word of the task is no subcommand
     lm.run("--letta-enable", "cloud", agent_args=["--backend", "cloud"])
-    assert lm.plan()["letta"]["experimental"]
-    assert lm.run().err.count("not live-tested yet") == 1
+    assert "experimental" not in lm.plan()["letta"]
+    assert "live-tested" not in lm.run().err
 
 
 @letta_scenario
@@ -4079,7 +4079,7 @@ def pi_starts_with_sandbox_ai_s_extension(pm):
     the extension), the proxy's telemetry rules and the refusal of gists."""
     plan = pm.plan()
     assert plan["https_hosts"] == [] and plan["image"] == "localhost/pi-sandbox:latest"
-    assert plan["pi"]["experimental"] and plan["pi"]["enabled"] == [] and plan["pi"]["approvals"] is False
+    assert "experimental" not in plan["pi"] and plan["pi"]["enabled"] == [] and plan["pi"]["approvals"] is False
     assert set(plan["pi"]["off"]) == set(PI_MODULE.FEATURES) and plan["pi"]["version"] == PI_MODULE.VERSION
     run = pm.run()
     assert run.env["PI_OFFLINE"] == "1" and run.env["PI_SKIP_VERSION_CHECK"] == "1" and run.env["PI_TELEMETRY"] == "0"
@@ -4090,7 +4090,7 @@ def pi_starts_with_sandbox_ai_s_extension(pm):
     assert command[0].endswith("pi") and command[1:] == []
     denied = goose_denied(run, "telemetry-pi-path-")
     assert "pi.dev" in denied and "radius.pi.dev" in denied and "api.github.com" in goose_denied(run, "pi-share")
-    assert "note: Pi: not live-tested yet" in run.err
+    assert "live-tested" not in run.err
 
 
 @pi_scenario
@@ -4115,7 +4115,7 @@ def pi_features_open_only_their_hosts(pm):
 @pi_scenario
 def pi_refuses_what_it_cannot_do_here(pm):
     """An argument of a feature that is off, Pi updating itself; rules for its own tools hold through sandbox-ai's
-    extension (the mode paranoid starts); a real start needs no opt-in (a note: not live-tested yet)."""
+    extension (the mode paranoid starts); a real start needs no opt-in."""
     rules = pm.private_file("rules.json", json.dumps({"version": 1, "defaults": {"tool": "ask"}}))
     run = pm.run("--rules", str(rules))
     assert pi_extension(run)["hooks"] == {"rules": True, "modules": []} and run.config["hooks"]["agent"] == "pi"
@@ -4126,8 +4126,8 @@ def pi_refuses_what_it_cannot_do_here(pm):
     pm.run(agent_args=["-p", "--", "update the readme"])  # a word of the task is no subcommand
     pm.run("--pi-enable", "packages", agent_args=["install", "npm:@x/y"])
     assert pm.plan("--with", "codex")["companions"] == ["codex"]  # a layer of the team image since 0.1.98
-    assert pm.plan()["pi"]["experimental"]
-    assert pm.run().err.count("not live-tested yet") == 1
+    assert "experimental" not in pm.plan()["pi"]
+    assert "live-tested" not in pm.run().err
 
 
 @pi_scenario
@@ -4287,7 +4287,7 @@ def opencode2_starts_quiet_with_its_layer(om2):
     opentunnel.xyz and the update check's path."""
     plan = om2.plan()
     assert plan["https_hosts"] == ["opencode.ai"] and plan["image"] == "localhost/opencode2-sandbox:latest"
-    assert plan["opencode2"]["experimental"] and plan["opencode2"]["enabled"] == []
+    assert "experimental" not in plan["opencode2"] and plan["opencode2"]["enabled"] == []
     assert set(plan["opencode2"]["off"]) == set(OPENCODE2_MODULE.FEATURES)
     assert plan["opencode2"]["version"] == OPENCODE2_MODULE.VERSION and plan["opencode2"]["background_service"] is False
     run = om2.run()
@@ -4301,7 +4301,7 @@ def opencode2_starts_quiet_with_its_layer(om2):
     assert command[0].endswith("opencode2") and command[1:] == []
     denied = goose_denied(run)
     assert "bun.report" in denied and "opentunnel.xyz" in denied and "opencode.ai" in denied
-    assert run.err.count("not live-tested yet") == 1
+    assert "live-tested" not in run.err
 
 
 @opencode2_scenario
@@ -4327,7 +4327,7 @@ def opencode2_features_open_only_their_hosts(om2):
 def opencode2_refuses_what_it_cannot_do_here(om2):
     """OpenCode 1's options, an argument that installs OpenCode or a plugin without its feature, remote pairing and a
     server off the loopback; rules for its own tools hold through sandbox-ai's V2 plugin (the mode paranoid starts);
-    a real start needs no opt-in (a note: not live-tested yet)."""
+    a real start needs no opt-in."""
     run = om2.run("--mode", "paranoid", "--no-keep")
     assert json.loads(run.env["OPENCODE_CONFIG_CONTENT"])["plugins"] == ["/etc/opencode2/sandbox-ai-hooks"]
     assert run.managed["opencode2"]["sandbox-ai-hooks/server.js"] and run.config["hooks"]["agent"] == "opencode2"

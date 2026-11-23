@@ -100,7 +100,7 @@ def test_the_agent_offers_every_use_case_with_its_status(page):
     shown = dict(items(page.use_case_combo))
     assert shown[""] == "none: choose the agent and the model yourself"
     assert shown["coding"] == "Coding and debugging — measured on this use case's tasks"
-    assert shown["code-review"] == "Code review — not tested yet"
+    assert shown["code-review"] == "Code review — no data yet"
     assert shown["small-jobs"] == "Small fast jobs — from other tasks than this use case's own"
     assert page.use_case_combo.isEnabled()
 

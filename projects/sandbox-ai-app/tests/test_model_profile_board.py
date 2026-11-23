@@ -111,12 +111,18 @@ def test_the_switch_turns_it_off_and_the_real_launcher_takes_it(page):
 def test_same_model_other_agent_and_a_pair_known_bad(page):
     with_model(page, "hermes", QCN)  # round 8: 14 graded runs, mean 0.80 (round 1 had a smoke test only)
     assert page.profile_label.text() == "Model profile: qwen3-coder-next × hermes (partly working)"
-    with_model(page, "codex", "qwen/qwen3.8-27b")
-    assert page.profile_label.text() == "Model profile: qwen3.8-27b × codex (known not to work)"
+    # a pair measured not to work (Seed-OSS-36B x Claude Code: 0 of 4 graded runs, round 3): warned, never refused
+    page.llm_servers[0]["models"] = ["seed-oss-36b-instruct-mlx", "qwen/qwen3.8-27b"]
+    with_model(page, "claude", "seed-oss-36b-instruct-mlx")
+    assert page.profile_label.text() == "Model profile: seed-oss-36b × claude (known not to work)"
     warnings = [w.text() for w in page.inspector_holder.findChildren(QtWidgets.QLabel)
                 if w.property("role") == "notice-warn"]
-    assert any("prefill" in text for text in warnings), warnings
+    assert any("Workflow tool" in text for text in warnings), warnings
     assert page.profile_badge().startswith("! ")
+    # a model never run in this agent: no data yet, no warning; its family's settings still apply (2026-11-22)
+    with_model(page, "codex", "qwen/qwen3.8-27b")
+    assert page.profile_label.text() == "Model profile: qwen3.8-27b × codex (no data yet in this agent)"
+    assert not page.profile_badge().startswith("! ")
     assert "context length (num_ctx): 49152" in page.profile_values.text()
 
 
@@ -157,8 +163,8 @@ def test_the_start_page_says_it_below_the_model(qapp, homes, monkeypatch):
     launch.form.changed.emit()
     note = launch.model_profile_note
     assert not note.isHidden()
-    assert note.text().startswith("! Model profile: qwen3.8-27b × codex (known not to work)")
-    assert "prefill" in note.text() and "49152" in note.toolTip()
+    assert note.text().startswith("Model profile: qwen3.8-27b × codex (no data yet in this agent)")
+    assert "WARNING" not in note.text() and "49152" in note.toolTip()
     launch.form.widgets["--no-llm-profile"].setChecked(True)
     launch.form.changed.emit()
     assert note.text().startswith("Model profile off: qwen3.8-27b × codex")
@@ -234,18 +240,21 @@ def test_the_box_for_a_pair_without_an_entry(page):
     with_model(page, "goose", "google/gemma-4-31b-qat")
     lines = box_lines(page.knowledge_box)
     assert lines[0] == "What we know: gemma-4 × goose"
-    assert lines[1] == "This pair was not tested: the model's settings for every agent apply."
+    assert lines[1] == "No data yet for this pair: the model's settings for every agent apply."
     assert "measured: gemma-4-31b-qat (GGUF)" in lines
     assert "  • vision perfect on all three APIs" in lines and "? Not known yet" in lines
     assert not any("smoke test passed (78 s)" in line for line in lines), "another agent's result is not shown"
 
 
-def test_the_box_for_a_model_known_not_to_work(page):
+def test_the_box_for_a_model_measured_elsewhere_only(page):
+    """Qwen3.8-27B ran in Claude Code only: in Codex no data yet, no verdict of another agent; phase 1's finding is
+    a note with its source (2026-11-22)."""
     with_model(page, "codex", "qwen/qwen3.8-27b")
     lines = box_lines(page.knowledge_box)
-    assert lines[1] == "This pair was not tested: the model's settings for every agent apply."
-    assert lines[2].startswith("Known not to work: too slow for big agent contexts")
-    assert "  • no run in a real agent" in lines
+    assert lines[1] == "No data yet for this pair: the model's settings for every agent apply."
+    assert lines[2].startswith("phase 1 (API probe and a toy run, no harness): too slow for big agent contexts")
+    assert not any(line.startswith("Known not to work") for line in lines)
+    assert "  • no run in any harness but Claude Code (round 7)" in lines
 
 
 def test_the_box_for_a_model_of_no_family(page):
@@ -292,7 +301,7 @@ def test_the_start_page_shows_the_box_below_the_model(qapp, homes, monkeypatch):
     assert "  • smoke test: 2 of 2 passed (23-27 s)" in box_lines(box)
     box = choose("codex", "studio:qwen/qwen3.8-27b")
     assert box.title() == "What we know: qwen3.8-27b × codex"
-    assert "This pair was not tested: the model's settings for every agent apply." in box_lines(box)
+    assert "No data yet for this pair: the model's settings for every agent apply." in box_lines(box)
     box = choose("opencode", "studio:llama3:8b")
     assert not box.isHidden() and box_lines(box)[1].startswith("Nothing is known about this model")
     assert launch.model_profile_note.isHidden()

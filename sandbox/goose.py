@@ -33,7 +33,6 @@ MANAGED_DIR = "/etc/goose"
 CONFIG = MANAGED_DIR + "/config.yaml"  # Goose's system configuration (the lowest layer, read-only here)
 LOOP_FILE = MANAGED_DIR + "/sandbox-ai-loop-guard.md"  # the loop guard's text, every turn (GOOSE_MOIM_MESSAGE_FILE)
 SESSION_DIR = "goose"  # in the session directory, mounted read-only at MANAGED_DIR
-EXPERIMENTAL = "goose"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "Goose"
 SERVE_PORT = 3284  # goose serve's own default port, on the sandbox's loopback (--goose-enable scheduler)
 LOG_DIR = "$HOME/.local/state/goose/logs"  # Goose's own log folder, where the background parts write theirs
@@ -274,10 +273,6 @@ def telemetry_rules(a=None):
     return rules
 
 
-def experimental_note():
-    return ("Goose: not live-tested yet (its image and a real start have not passed their live test)")
-
-
 def extensions(names, bridge_args, timeouts=None, timeout=300):
     """Goose's extensions for the --mcp servers NAMES: each a stdio extension that runs the launcher's bridge
     (BRIDGE_ARGS(name)), with its wait for one call (seconds) from TIMEOUTS ({name: seconds}, the launcher's
@@ -417,10 +412,9 @@ def command(a, binary, args):
 
 
 def plan(a):
-    """The dry run's "goose": the reviewed release, the configuration's place, what is on and what stays off, and
-    whether it is experimental here."""
+    """The dry run's "goose": the reviewed release, the configuration's place, what is on and what stays off."""
     names = features(a)
-    return {"version": VERSION, "commit": COMMIT, "repository": REPOSITORY, "experimental": True,
+    return {"version": VERSION, "commit": COMMIT, "repository": REPOSITORY,
             "system_config": CONFIG, "mode": MODE,
             # Never switchable: opt-out variables set, these hosts never opened and refused by the proxy.
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),

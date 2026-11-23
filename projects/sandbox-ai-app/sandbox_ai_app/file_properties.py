@@ -199,6 +199,7 @@ class PropertiesDialog(QDialog):
                                      lambda: owner(self.root, [(name, relative) for name, relative, _, _ in self.infos],
                                                    bool(self.folders))))
         self.apply_button = button(tr("Apply"), tr("Set these permission bits"), lambda: self.apply())
+        self.apply_button.setDefault(True)  # (Enter applies the bits changed; Esc closes)
         buttons.addWidget(self.apply_button)
         buttons.addWidget(button(tr("Close"), tr("Close the window"), self.close))
         layout.addLayout(buttons)

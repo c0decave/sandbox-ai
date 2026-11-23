@@ -77,6 +77,17 @@ def load_modes():
 MODES = load_modes()
 
 
+def load_fixes():
+    """fixes.py: the fix plan - what a start lacks and what makes each, offered instead of only refused."""
+    spec = importlib.util.spec_from_file_location("sandbox_ai_fixes", HERE / "fixes.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+FIXES = load_fixes()
+
+
 def load_telemetry_guard():
     """telemetry_guard.py: the guard of the agents' own commands in their images (and the opt-out variables it pins),
     loaded by path like the runtime."""
@@ -204,62 +215,6 @@ PRESETS = {
                    "api.duckduckgo.com"],
     "npm": ["registry.npmjs.org"],
 }
-# What has not passed its live test yet (tests/test_*_live.py, scripts/live_check_agents.sh): the agents, Cairn's image
-# and --nested-containers. Nothing is gated by it: every badge reads it (experimental_badge: `presets list` and `show`,
-# the web's presets, the app's preset gallery, its Board's agent choice and wizard) and says "not live-tested yet".
-EXPERIMENTAL_PARTS = {
-    "opencode2": {"agent": "opencode2"},
-    "hermes": {"agent": "hermes"},
-    "dsh": {"agent": "dsh"},
-    "qwen": {"agent": "qwen"},
-    "goose": {"agent": "goose"},
-    "openhands": {"agent": "openhands"},
-    "nanobot": {"agent": "nanobot"},
-    "letta": {"agent": "letta"},
-    "pi": {"agent": "pi"},
-    "cairn": {"option": "--cairn"},  # Cairn's board beside the agent (cairn.py; sandbox-ai build cairn)
-    "nested-containers": {"option": "--nested-containers"},
-}
-
-
-def image_base(image):
-    """IMAGE without its tag or digest (localhost/cairn-sandbox:latest: localhost/cairn-sandbox)."""
-    name = str(image).split("@", 1)[0]
-    head, _, last = name.rpartition("/")
-    return f"{head}/{last.split(':', 1)[0]}" if head else last.split(":", 1)[0]
-
-
-def experimental_needs(agents=(), options=()):
-    """[NAME] of EXPERIMENTAL_PARTS a start of AGENTS with OPTIONS uses, in that list's order: a preset's agents (its
-    "agents": all of them not live-tested, else only a start with one of those is) or a start's agent, and of OPTIONS
-    --helper/--with AGENT, --image of such an image, --nested-containers (long or short, NAME=VALUE or two words)."""
-    by_agent = {part["agent"]: name for name, part in EXPERIMENTAL_PARTS.items() if "agent" in part}
-    by_image = {part["image"]: name for name, part in EXPERIMENTAL_PARTS.items() if "image" in part}
-    by_option = {part["option"]: name for name, part in EXPERIMENTAL_PARTS.items() if "option" in part}
-    agents = [str(agent) for agent in agents or ()]
-    found = {by_agent[agent] for agent in agents} if agents and all(a in by_agent for a in agents) else set()
-    longs = {SHORT_OPTIONS.get(flag, flag): flag for flag in ("--helper", "--with", "--image", *by_option)}
-    options = [str(option) for option in options or ()]
-    for index, option in enumerate(options):
-        flag, given, value = option.partition("=")
-        flag = longs.get(flag, flag)
-        value = value if given else (options[index + 1] if index + 1 < len(options) else "")
-        if flag in by_option:
-            found.add(by_option[flag])
-        elif flag == "--helper" and value in by_agent:
-            found.add(by_agent[value])
-        elif flag == "--with":
-            found.update(by_agent[name.strip()] for name in value.split(",") if name.strip() in by_agent)
-        elif flag == "--image" and image_base(value) in by_image:
-            found.add(by_image[image_base(value)])
-    return [name for name in EXPERIMENTAL_PARTS if name in found]
-
-
-def experimental_badge(agents=(), options=()):
-    """The badge of a start of AGENTS with OPTIONS (a preset's, an agent's): {"names": what it uses that has not
-    passed its live test yet} (experimental_needs), or None. A badge only: nothing is gated by it."""
-    names = experimental_needs(agents, options)
-    return {"names": names} if names else None
 
 
 # Published, stable ingress ranges (TCP/443 only). They keep the API reachable
@@ -558,7 +513,9 @@ DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days"
                  "update_window", "update_source", "hide_secrets",
                  # the storage check and its automatic rules (storage.py: Settings > Storage in the app)
                  "storage_check", "storage_threshold_gb", "storage_growth_gb", "storage_caches_days",
-                 "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days"}
+                 "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days",
+                 # what a start lacks (fixes.py): one question for everything (all, the default) or one per fix (each)
+                 "fix_questions"}
 # The update mode's keys of your defaults (updates.py: `sandbox-ai update mode` sets them and its timer).
 UPDATE_KEYS = ("update_mode", "update_window", "update_source")
 # The workspace checkpoints' keys of your defaults (checkpoints.py SETTINGS: what each means, its default).
@@ -601,7 +558,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.207"
+__version__ = "0.1.240"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -628,6 +585,9 @@ MANAGED_DIRS = {"claude": "/etc/claude-code", "codex": "/etc/codex"}
 OPENCODE_HOOK_PLUGIN = "/sandbox/session/opencode-hooks.js"
 OPENCODE_HOOK_RECHECK = "/sandbox/session/opencode-hooks-recheck.js"  # after the kits' plugins: changed args
 KIT_HOOKS_TARGET = "/sandbox/session/kits/hooks"  # the approved kits' hook folders, copied for the run
+# The approved Claude plugins' folders, copied for the run: their hooks run from there (${CLAUDE_PLUGIN_ROOT}), never
+# from the plugin store, which can change after the start checked it (kits.checked_copy).
+PLUGIN_HOOKS_TARGET = "/sandbox/session/kits/plugin-hooks"
 OPENCODE_HOOKS_JS = r'''// sandbox-ai: the rules for the agent's own tools (README, Rulesets: "The agent's own tools").
 // Installed by the launcher. Each tool call asks the sandbox's supervisor first; a refusal, or anything that
 // goes wrong on the way, stops the call (the hook client exits with status 2 for both).
@@ -694,6 +654,8 @@ CONFIG_FORBIDDEN = ("--config", "--no-config", "--tmux-socket-dir", "--pod-name"
                     "--vpn-lent-by",
                     "--workspace", "--workspace-name", "--workspaces-as-given",
                     "--session", "--dry-run", "--mcp-approvals-dir", "--rules", "--mode", "--name", "--project-name",
+                    # what a start lacks is fixed unasked only where the human said so on the command line
+                    "--fix", "--fix-only", "--fix-plan",
                     # another session's login is this machine's, never a project's choice (the Board passes it with
                     # the start, as --name)
                     "--auth-from-session",
@@ -742,9 +704,11 @@ SHORT_OPTIONS = {
     "--gui-screen": "-gs", "--audio": "-au", "--gui-vnc": "-gv", "--gui-wayland": "-gw",
     "--browser": "-bw", "--browser-control": "-bc", "--browser-profile": "-bp",
     "--cairn": "-cr", "--cairn-workers": "-cw", "--cairn-origin": "-co", "--cairn-goal": "-cg", "--cairn-hint": "-ch",
-    "--cairn-board": "-cb", "--tmux": "-T", "--no-tmux": "-nt",
+    "--cairn-board": "-cb", "--artex": "-ax", "--artex-data": "-xd", "--artex-port": "-xp",
+    "--tmux": "-T", "--no-tmux": "-nt",
     "--mcp": "-M", "--mcp-limits": "-mx", "--mcp-mount": "-mt", "--mcp-env": "-mv", "--helper": "-hl", "--with": "-wa", "--session": "-s", "--name": "-N", "--name-style": "-nv", "--project-name": "-pn", "--keep": "-kp",
     "--no-keep": "-nkp", "--config": "-c", "--no-config": "-nc", "--dry-run": "-n",
+    "--fix": "-fx", "--fix-only": "-fo", "--fix-plan": "-fp",
     "--probe": "-pb", "--memory": "-me", "--cpus": "-cu", "--pids": "-pi", "--tmp-size": "-ts", "--ask": "-Q", "--ask-timeout": "-at",
     "--secret-env": "-se", "--api-key": "-ky", "--model": "-mm", "--effort": "-ef", "--show-thinking": "-sk", "--publish": "-pl", "--git-token-secret": "-gk", "--token-proxy": "-tp", "--git-logins": "-gn", "--rules": "-ru",
     "--log-debug": "-ld", "--llm": "-lm", "--llm-param": "-lp", "--no-llm-profile": "-nl", "--use-case": "-uc", "--llm-models": "-lo", "--llm-tools": "-lw", "--vpn": "-vp", "--vpn-check": "-vc",
@@ -830,11 +794,13 @@ HELP_GROUPS = [  # --help: options by topic, in this order
                                     "--browser-control", "--browser-profile"]),
     ("Cairn (task board)", ["--cairn", "--cairn-workers", "--cairn-origin", "--cairn-goal", "--cairn-hint",
                             "--cairn-board"]),
+    ("ARTEX (pentest platform)", ["--artex", "--artex-data", "--artex-port"]),
     ("Hardware and limits", ["--device", "--gpu", "--memory", "--cpus", "--pids", "--tmp-size"]),
     ("Engine", ["--backend", "--image", "--image-variant", "--service", "--nested-containers", "--podman-url", "--binary",
                 "--runtime"]),
     ("Toolchains", ["--toolchain", "--toolchain-offline"]),
-    ("Logs and checks", ["--log-dir", "--log-debug", "--dry-run", "--probe", "--version", "--help"]),
+    ("Logs and checks", ["--log-dir", "--log-debug", "--dry-run", "--fix", "--fix-only", "--fix-plan", "--probe",
+                         "--version", "--help"]),
 ]
 
 
@@ -1286,7 +1252,7 @@ def build_parser(agent=None):
                         "Tor's, /dev/fuse and /dev/net/tun, and fewer system calls blocked. What its containers send "
                         "leaves through the sandbox's firewall and connection proxy like its own connections. Weakens "
                         "the isolation: more of your host's kernel is reachable (not in the modes high and paranoid, "
-                        "not behind Tor). Not live-tested yet")
+                        "not behind Tor)")
     p.add_argument("--podman-url", metavar="URL", help="Podman service URL, e.g. unix:///example/podman.sock")
     p.add_argument("--binary", metavar="PATH", help="Agent executable (host path with bwrap; image path with podman)")
     p.add_argument("--runtime", action="append", default=[], metavar="DIR", help="bwrap: expose runtime directory read-only at same path")
@@ -1294,8 +1260,10 @@ def build_parser(agent=None):
                    help="Mount a build toolchain of your store (sandbox-ai toolchain add NAME: Go, Rust, a JDK, Node, "
                         "Python ... from the signed catalog) read-only at /opt/toolchains/NAME, its commands on the "
                         "agent's PATH, and open the registries it names (as --allow-host; not in the modes high and "
-                        "paranoid, which mount it and keep them closed). Repeatable. Into a running sandbox: "
-                        "sandbox-ai toolchain attach RUN NAME")
+                        "paranoid, which mount it and keep them closed). NAME is the newest in the store, "
+                        "NAME@VERSION that version or the newest it starts (jdk@17, python@3.12); one version of a "
+                        "toolchain per sandbox. Repeatable. Into a running sandbox: sandbox-ai toolchain attach RUN "
+                        "NAME")
     p.add_argument("--toolchain-offline", action="store_true",
                    help="Mount the toolchains without opening their registries")
     p.add_argument("--copy-auth", action="store_true",
@@ -1409,11 +1377,12 @@ def build_parser(agent=None):
     p.add_argument("--cairn", action="store_true",
                    help="Podman: Cairn's board (a blackboard of facts, intents and hints for several agents) in its "
                         "own container beside the agent, on the agent's network, at http://127.0.0.1:8000 in the pod; "
-                        "the sandbox's browser starts on it, and the session's agents (claude, codex) are its workers. "
+                        "the sandbox's browser starts on it, and the session's agents are its workers. "
                         "Build its image once: sandbox-ai build cairn")
     p.add_argument("--cairn-workers", dest="cairn_workers_text", metavar="AGENT[=MODEL],...",
-                   help="Which of the session's agents work for --cairn: claude and codex, the lead or --with (default: "
-                        "each of them the session has), each with a model of its own if given")
+                   help="Which of the session's agents work for --cairn: any harness, the lead or --with (default: "
+                        "each of them the session has, the best supported first), each with a model of its own if "
+                        "given; how far each is supported: sandbox-ai cairn workers")
     p.add_argument("--cairn-origin", metavar="TEXT",
                    help="Cairn's project: what is given, the target and the scope (with --cairn-goal the project is "
                         "made at the start)")
@@ -1421,6 +1390,16 @@ def build_parser(agent=None):
     p.add_argument("--cairn-hint", metavar="TEXT", help="Cairn's project: the first hint for its workers")
     p.add_argument("--cairn-board", choices=("fresh", "session"),
                    help="Cairn's database: fresh (the default: new at every start) or session (kept with the session)")
+    p.add_argument("--artex", action="store_true",
+                   help="Podman: ARTEX (an AI penetration-testing platform, AGPL-3.0) in its own container beside the "
+                        "agent, on the agent's network: its targets only what the allow-list opens; its console "
+                        "forwarded to this computer's 127.0.0.1 (sandbox-ai artex console: address and password). "
+                        "Build its image once: sandbox-ai build artex")
+    p.add_argument("--artex-data", choices=("fresh", "session"),
+                   help="ARTEX's data: fresh (the default: new at every start) or session (kept with the session)")
+    p.add_argument("--artex-port", metavar="PORT",
+                   help="The port of this computer's 127.0.0.1 that --artex's console is forwarded to (default: 8787, "
+                        "or the next free one after it)")
     p.add_argument("--tmux", action="store_const", const=True, default=None,
                    help="Run in tmux inside the sandbox: window 'agent' plus window 'shell' (bash). The default "
                         "whenever stdin and stdout are a terminal and the agent runs interactively; --tmux insists "
@@ -1507,6 +1486,19 @@ def build_parser(agent=None):
                    help=f"Project configuration (default: {CONFIG_NAME} in the main workspace, if trusted)")
     p.add_argument("--no-config", action="store_true", help=f"Ignore {CONFIG_NAME}")
     p.add_argument("--dry-run", action="store_true", help="Print plan; no DNS, auth reads, copies, pods or processes")
+    p.add_argument("--fix", action="store_true",
+                   help="What this start lacks and sandbox-ai can provide - its image not built, an MCP server not "
+                        "added, a toolchain not in the store, an identity - is done first, without asking, then it "
+                        "starts (for scripts; on a terminal a start asks: your default fix_questions, all or each). "
+                        "Never what the security mode refuses (in high and paranoid nothing unsigned), never a "
+                        "command that needs root. Not kept by a session, not allowed in a project configuration")
+    p.add_argument("--fix-only", action=ListOption, default=[], metavar="ID",
+                   help="As --fix, but exactly these fixes (their ids as --fix-plan names them, image:claude, "
+                        f"mcp:jadx); what else the start lacks is refused; {LIST_HELP}")
+    p.add_argument("--fix-plan", action="store_true",
+                   help="Print as JSON what this start lacks and what would fix each (its commands, how long, "
+                        "unsigned or security-relevant, what the security mode does not take); nothing is made or "
+                        "started. What the app and the web interface ask about before a start")
     p.add_argument("--probe", action="store_true", help="Verify both sandbox layers and firewall, then exit without agent")
     group_help(p, agent)
     return p
@@ -1856,7 +1848,26 @@ def check_image_variant(a):
             a.image = own
         return
     before = {name for name, agent in images.variants() if agent == a.agent}
-    wanted = images.variant_image(a.agent, a.image_variant, adopt=True)
+    try:
+        wanted = images.variant_image(a.agent, a.image_variant, adopt=True)
+    except ValueError as exc:
+        if not images.valid_name(a.image_variant) or a.backend != "podman":
+            raise
+        # A variant that is not there: one sandbox-ai has a recipe for is made from it and built (offered); another
+        # is yours to define (what goes into it is your choice).
+        name, lacking = a.image_variant, f"the image variant {a.image_variant} of {a.agent} is not there"
+        target = images.shown_target(name, a.agent, images.variants() + [(name, a.agent)])
+        if name in images.RECIPES:
+            item = FIXES.fix("variant", name, lacking, "make it from its recipe and build it",
+                             [["sandbox-ai", "images", "recipe", name, "--from", a.agent],
+                              images.build_command(target).split()], duration="some minutes")
+        else:
+            item = FIXES.fix("variant", name, lacking, "define it, then build it",
+                             [["sandbox-ai", "images", "new", name, "--from", a.agent],
+                              images.build_command(target).split()],
+                             manual="sandbox-ai has no recipe of that name: what goes into the variant is yours to "
+                                    "say (sandbox-ai images --help)")
+        raise FIXES.Missing(str(exc), [item]) from None
     if a.image_variant not in before:
         print(f"agent-sandbox: made the variant {a.image_variant} of {a.agent} from "
               f"{images.adopted_from(a.image_variant, a.agent)}'s (the same packages and files; its image is built "
@@ -1937,10 +1948,17 @@ def plan_toolchains(a):
     if a.podman_url:
         raise ValueError("--toolchain mounts a folder of this host's store, which another Podman service "
                          "(--podman-url) does not have")
-    plan = load_toolchains_module().start_plan(
-        a.toolchain, a.backend, own_image=own_image(a), strict=strict_mode(a),
-        offline=bool(getattr(a, "toolchain_offline", False) or a.offline), mode=getattr(a, "mode", None),
-        presets=tuple(PRESETS))
+    try:
+        plan = load_toolchains_module().start_plan(
+            a.toolchain, a.backend, own_image=own_image(a), strict=strict_mode(a),
+            offline=bool(getattr(a, "toolchain_offline", False) or a.offline), mode=getattr(a, "mode", None),
+            presets=tuple(PRESETS), policy_refuses=lambda kind, value: policy_refuses_registry(a, kind, value))
+    except ValueError as exc:
+        # One that is not in the store: offered to be added from the signed catalog (fixes.py), not only refused.
+        lacking = load_toolchains_module().missing(a.toolchain)
+        if not lacking:
+            raise
+        raise FIXES.Missing(str(exc), [toolchain_fix(value) for value in lacking]) from None
     a.allow_host = list(dict.fromkeys([*a.allow_host, *plan["hosts"]]))
     a.presets = list(dict.fromkeys([*a.presets, *plan["presets"]]))
     a.toolchain_plan = plan
@@ -1949,6 +1967,32 @@ def plan_toolchains(a):
     LOG.info("toolchains", f"mounted read-only: {mounted}; registries opened: {opened or 'none'}"
                            + (f"; left closed: {', '.join(plan['closed'])}" if plan["closed"] else ""))
     return plan["notes"]
+
+
+def policy_refuses_registry(a, kind, value):
+    """Whether the administrator's policy (a.policy, as check_policy kept it) does not take a toolchain's registry:
+    KIND "host" (a name) or "preset" (NAME of --allow-NAME). The toolchains are planned after check_policy, so what
+    their manifests open is held to the same rules as the options it checked: the forbidden --allow-host (or one
+    value of it), --allow-PRESET, --allow-shared-wildcard, and the ceiling of names (allow_hosts)."""
+    forbid = set((getattr(a, "policy", {}) or {}).get("forbid", []))
+    if kind == "preset":
+        return f"--allow-{value}" in forbid or not all(within_ceiling(a, host=host) for host in PRESETS.get(value, ()))
+    if "--allow-host" in forbid or f"--allow-host={value}" in forbid or not within_ceiling(a, host=value):
+        return True
+    if value.startswith("*.") and "--allow-shared-wildcard" in forbid:
+        try:
+            return bool(RUNTIME.shared_wildcard(value))
+        except ValueError:
+            return True
+    return False
+
+
+def toolchain_fix(value):
+    """The fix for the toolchain VALUE (NAME[@VERSION]) that is not in the store: added from the signed catalog (its
+    archive downloaded, its hash and signature checked - `toolchain add` refuses anything else)."""
+    return FIXES.fix("toolchain", value, f"the toolchain {value} is not in the store",
+                     "add it from the signed catalog", [["sandbox-ai", "toolchain", "add", value]],
+                     duration="a download")
 
 
 def toolchain_entries(a):
@@ -1963,6 +2007,22 @@ def load_cairn_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_artex_module():
+    """artex.py: ARTEX (--artex), a container of sandbox-ai's ARTEX image in the pod; its console forwarded to this
+    computer's loopback."""
+    spec = importlib.util.spec_from_file_location("sandbox_artex", HERE / "artex.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_artex(a):
+    """--artex and its options (artex.check: the Podman backend, this machine's engine, its ports free, its data);
+    a.artex_container gets its container, None without one."""
+    a.artex_container = None
+    return load_artex_module().check(a, launcher_namespace())
 
 
 def check_cairn(a):
@@ -2164,7 +2224,10 @@ def image_mount_hosts(project_document=None):
     hosts = []
     for definition in servers.values():
         for mount in definition.get("mounts", []) if isinstance(definition, dict) else []:
-            if isinstance(mount, dict) and isinstance(mount.get("host"), str):
+            # (an absolute folder only: "@workspace", the start's workspace, is bound at each start - never a path
+            # resolved against the folder the launcher runs in)
+            if isinstance(mount, dict) and isinstance(mount.get("host"), str) and \
+                    os.path.isabs(os.path.expanduser(mount["host"])):
                 with contextlib.suppress(OSError, RuntimeError):
                     hosts.append(Path(os.path.expanduser(mount["host"])).resolve())
     return hosts
@@ -3152,6 +3215,9 @@ def load_user_defaults(a):
         raise ValueError(f"{path}: llm_traffic is one of {', '.join(RUNTIME.LLM_TRAFFIC_MODES)}")
     if "llm_traffic_limit" in document:
         check_traffic_limit(document["llm_traffic_limit"], f"{path}: llm_traffic_limit")
+    if "fix_questions" in document and document["fix_questions"] not in FIXES.QUESTIONS:
+        raise ValueError(f"{path}: fix_questions is one of {', '.join(FIXES.QUESTIONS)} (what a start lacks: one "
+                         "question for everything, or one per fix)")
     if "file_reads" in document and document["file_reads"] not in RUNTIME.FILE_READS:
         raise ValueError(f"{path}: file_reads is one of {', '.join(RUNTIME.FILE_READS)} (how the file log of --log-dir "
                          "keeps reads: summed per folder, each file, none)")
@@ -3676,7 +3742,17 @@ def identity_of(a):
             if name == module.DEFAULT:
                 return None, None  # the same as no --identity
             raise ValueError(f"--identity {name!r}: lower-case letters, digits, - and _")
-        cached = a._identity = (name, module.get(name))
+        try:
+            cached = a._identity = (name, module.get(name))
+        except ValueError as exc:
+            if name in module.load():
+                raise
+            # An identity that is not there: offered to be made (empty: no logins, a commit name of its own to set).
+            raise FIXES.Missing(str(exc), [FIXES.fix(
+                "identity", name, f"the identity {name} is not on this host",
+                "make it, empty (no logins; give it a commit name and logins later: sandbox-ai identities)",
+                [["sandbox-ai", "identities", "add", "--description=made for a start (no logins)", "--", name]],
+                duration="seconds")]) from None
     return cached
 
 
@@ -4486,24 +4562,35 @@ def check_mcp_names(a):
         if mcp is not None and not names:
             for parse in ("start_limits", "start_mounts", "start_env"):
                 getattr(mcp, parse)(a)  # a value that is not valid is refused all the same
+        a.image_fixes = []
         images = [] if a.mcp_socket_dir else start_image_problems(a)
         if images:
-            raise ValueError(load_mcp_module().problems_text(images, about="this start"))
+            raise missing_error(load_mcp_module().problems_text(images, about="this start"), a.image_fixes)
         return
     servers = {**mcp.definitions(getattr(a, "project_document", None)),
                **(getattr(a, "helper_definitions", None) or {})}
     missing = [name for name in names if name not in servers]
-    hints = []
-    if missing and not a.dry_run:
+    hints, fixes = [], []
+    if missing and (not a.dry_run or getattr(a, "fix_plan", False)):
         # One that its catalog lists without a signed image yet (pending): built here from its source, asked first
         # on a terminal - else the refusal names the command that builds it (mcp_build_offers). Not in a dry run:
         # the app's and the Board's checks are dry runs, often, and must not wait for the catalogs' download (the
         # app reads them itself before a start and asks there).
-        added, hints = mcp_build_offers(a, mcp, missing)
-        if added:
-            servers = {**mcp.definitions(getattr(a, "project_document", None)),
-                       **(getattr(a, "helper_definitions", None) or {})}
-            missing = [name for name in missing if name not in servers]
+        read = {}
+
+        def catalogs():  # (the catalogs read once - over the network - for the hints and for the fixes)
+            if not read:
+                try:
+                    read["entries"] = mcp.catalog_entries()
+                except Exception as exc:  # noqa: BLE001 - said by who asked
+                    read["error"] = exc
+            if "error" in read:
+                raise read["error"]
+            return read["entries"]
+        _added, hints = mcp_build_offers(a, mcp, missing, catalogs=catalogs)
+        # What adds each (fixes.py): from its signed catalog, or built here unsigned - offered with everything else
+        # the start lacks (asked once on a terminal, done by --fix), each as its security mode takes it.
+        fixes = mcp_fixes(a, mcp, missing, catalogs=catalogs)
     problems = [unknown_mcp_message(a, missing, servers) + "".join(f". {hint}" for hint in hints)] if missing else []
     # Every image is asked of Podman at once, each `podman image exists` in a thread of its own (one after another,
     # a start with three image servers waited for four Podman starts): the agent's own (asked meanwhile, answered
@@ -4512,6 +4599,7 @@ def check_mcp_names(a):
         servers[name]["image"] for name in names if isinstance(servers.get(name), dict) and
         isinstance(servers[name].get("image"), str) and not ("rootfs" in servers[name] and a.backend == "bwrap"))] \
         if os.environ.get(IMAGE_CHECK_OFF) != "1" and shutil.which("podman") else []  # (else: none asked)
+    a.image_fixes = []  # (what makes each image that is not there: start_image_problems notes it)
     agent_images = in_background(start_image_problems, a, what="whether Podman has the start's own images") \
         if asked else (lambda: start_image_problems(a))
     answers = in_threads({image: (lambda image=image: mcp.image_present(image)) for image in asked})
@@ -4519,13 +4607,20 @@ def check_mcp_names(a):
     def present(image):
         answer = answers.get(image, present)  # (present: not asked; an exception: asked again, to raise it here)
         return answer if answer is None or isinstance(answer, bool) else mcp.image_present(image)
-    found, instances, notes = mcp.start_problems(a, names, servers, present=present)
+    found, instances, notes = mcp.start_problems(a, names, servers, present=present, fixes=fixes)
     problems += found
+    if any(mcp.hostinit_module().MISSING in problem for problem in found):
+        # A server Podman would start with --init on a host without its init binary: the package, with the rest.
+        fixes.append(FIXES.init_fix("an MCP server of this start"))
     images = agent_images()  # the agent's own image too: before any MCP server is started
     if problems or images:
-        raise ValueError(mcp.problems_text(problems + images,
-                                           **({"about": "this start"} if images else {})))
+        error = missing_error(mcp.problems_text(problems + images, **({"about": "this start"} if images else {})),
+                              [*a.image_fixes, *fixes])
+        error.checked = "mcp"  # (launch: this check has said all it finds - looking ahead does not run it again)
+        raise error
     a.mcp_instances = instances
+    with contextlib.suppress(Exception):  # (a newer image its catalog pins: said, the start goes on with its own)
+        notes = [*notes, *mcp_update_notes(a)]
     for note in notes:
         print(f"agent-sandbox: {note}", file=sys.stderr)
 
@@ -4553,6 +4648,8 @@ def image_fix(a, agent, image):
         return load_team_image_module().build_command(team_image_agents(image))
     if image == CAIRN_IMAGE:
         return "sandbox-ai build cairn"
+    if image == ARTEX_IMAGE:
+        return "sandbox-ai build artex"
     if image == BROWSER_IMAGE:
         return "sandbox-ai build browser"
     if image in OWN_VPN_IMAGES:  # (a VPN's container: vpn.agent_up builds a missing one as the agent's is built)
@@ -4566,7 +4663,10 @@ def start_image_problems(a):
     `podman image exists` before anything is made: nothing is pulled at a start, and a start used to start its MCP
     servers first and fail at Podman's "image not known" afterwards. [] with Bubblewrap, without Podman here (the
     start says so later), for an MCP server's own sandbox, and with SANDBOX_AI_MCP_NO_IMAGE_CHECK=1."""
-    return start_image_checks(a)()
+    checks = start_image_checks(a)
+    found = checks()
+    a.image_fixes = list(checks.fixes)  # (fixes.py: what makes each one - the refusal carries them)
+    return found
 
 
 def in_background(function, *args, what=None):
@@ -4640,12 +4740,17 @@ def start_image_checks(a):
     by the function given back, once they are answered: other checks run meanwhile."""
     if a.backend != "podman" or os.environ.get(IMAGE_CHECK_OFF) == "1" or getattr(a, "mcp_socket_dir", None) or \
             not shutil.which("podman"):
-        return lambda: []
+        def none():
+            return []
+        none.fixes = []
+        return none
     wanted = {a.image: a.agent} if a.image else {}
     for helper in dict.fromkeys(getattr(a, "helper", None) or []):
         wanted.setdefault(f"localhost/{helper}-sandbox:latest", helper)
     if getattr(a, "cairn", False):
         wanted.setdefault(CAIRN_IMAGE, "Cairn's board")
+    if getattr(a, "artex", False):
+        wanted.setdefault(ARTEX_IMAGE, "ARTEX")
     if getattr(a, "browser", None) or (getattr(a, "cairn", False) and not on_machine(a)):
         wanted.setdefault(BROWSER_IMAGE, "the browser")
     for name, image in start_vpn_images(a).items():  # (before the MCP servers behind it start: built here too)
@@ -4702,7 +4807,9 @@ def start_image_checks(a):
                 answers[image] = True
             elif answers.get(image) is False:
                 outcome = {}
-                if build_missing_image(a, agent, image, outcome):
+                # Where the start asks first what it may make (a terminal, --fix: fixes_first), the image is built
+                # by the fix plan after the human's yes - with everything else that is missing, in one question.
+                if not fixes_first(a) and build_missing_image(a, agent, image, outcome):
                     answers[image] = True
                 elif outcome.get("failed"):
                     build_failed.add(image)  # (its build ran just now and failed: said with the fix below)
@@ -4727,7 +4834,17 @@ def start_image_checks(a):
                 f"status {failed[image][0]}{': ' + failed[image][1] if failed[image][1] else ''}); "
                 "check the host with: sandbox-ai doctor"
                 for image, agent in wanted.items() if answers.get(image) is False or image in failed]
-    return problems
+
+    def checked():
+        found = problems()
+        # What makes each image that is not there (fixes.py): none with SANDBOX_AI_NO_AUTO_BUILD=1 (nothing is
+        # made then, the refusal names the command as before), none for one whose build failed just now.
+        checked.fixes = [] if os.environ.get(AUTO_BUILD_OFF) == "1" else \
+            [image_fix_item(a, agent, image) for image, agent in wanted.items()
+             if answers.get(image) is False and image not in build_failed]
+        return found
+    checked.fixes = []
+    return checked
 
 
 AUTO_BUILD_OFF = "SANDBOX_AI_NO_AUTO_BUILD"  # =1: a start builds no missing image of its own (tests)
@@ -4748,9 +4865,49 @@ def team_images_present(a):
 
 
 def will_build(a, agent, image):
-    """In a dry run: the start without --dry-run would build IMAGE itself (build_missing_image)."""
+    """In a dry run: the start without --dry-run would build IMAGE itself (build_missing_image) - not in the dry
+    run of --fix-plan, which lists it as what the start lacks."""
     return bool(a.dry_run) and image_fix(a, agent, image).startswith("sandbox-ai build ") and not a.podman_url \
-        and os.environ.get(AUTO_BUILD_OFF) != "1"
+        and os.environ.get(AUTO_BUILD_OFF) != "1" and not getattr(a, "fix_plan", False)
+
+
+def internal_start(a):
+    """A start nobody typed: a session's supervisor, an MCP server's own sandbox, a helper's - they ask nothing and
+    fix nothing by themselves (the start that made them did)."""
+    return bool(getattr(a, "tmux_socket_dir", None) or getattr(a, "mcp_socket_dir", None)
+                or getattr(a, "helper_of", None))
+
+
+def fixes_first(a):
+    """What this start lacks is made by its fix plan (fixes.py: asked on a terminal, or --fix, or only listed for
+    --fix-plan), not silently on the way: a start typed on a terminal, or with --fix or --fix-only. Elsewhere (a
+    script without --fix, a session's supervisor) the start builds its own missing image itself, as before."""
+    if internal_start(a) or os.environ.get(AUTO_BUILD_OFF) == "1":
+        return False
+    return bool(getattr(a, "fix", False) or getattr(a, "fix_only", None) or getattr(a, "fix_plan", False)
+                or getattr(a, "fix_collect", False) or (not a.dry_run and FIXES.on_terminal()))
+
+
+def image_fix_item(a, agent, image):
+    """The fix for IMAGE, which the start A needs for AGENT and Podman does not have: sandbox-ai's own images are
+    built (the pinned, checked build of `sandbox-ai build`); an image you named from a registry is pulled - nobody
+    reviewed it, said so; a local image of yours is yours to build. Its id: image:AGENT for the agent's own image,
+    else image:REFERENCE."""
+    how = image_fix(a, agent, image)
+    lacking = f"the image of {agent} ({image}) is not built on this host"
+    name = agent if image == f"localhost/{agent}-sandbox:latest" else image  # (image:claude; another by its name)
+    if a.podman_url:
+        return FIXES.fix("image", name, lacking, "build it where that Podman runs",
+                         manual=f"the start uses another Podman service ({a.podman_url}), which builds nothing here")
+    if how.startswith("sandbox-ai build "):
+        return FIXES.fix("image", name, lacking, "build it", [how.split()],
+                         duration="~5 min" if image == f"localhost/{agent}-sandbox:latest" else "some minutes")
+    if image.startswith("localhost/"):
+        return FIXES.fix("image", name, f"the image {image} is not on this host", "build it",
+                         manual="an image of your own: build it as you made it")
+    return FIXES.fix("image", name, f"the image {image} is not on this host", "pull it from its registry",
+                     [["podman", "pull", image]], duration="a download", unsigned=True,
+                     security="an image nobody reviewed is pulled, and the agent runs in it")
 
 
 def build_missing_image(a, agent, image, outcome=None):
@@ -4826,11 +4983,13 @@ def mcp_mode_refusal(a, name, definition):
     l.load_mcp_module = Planned
     for given, why in MODES.widening(l, a, a.mode):
         if given.startswith("--mcp ") and name in given.split()[1::2]:
-            return f"the security mode {a.mode} refuses it ({why})"
+            other = MODES.laxer(l, a, given, a.mode, None)  # (an offer never widens the mode: the laxer one is named)
+            return f"the security mode {a.mode} refuses it ({why})" + (
+                f"; the mode {other} takes it (--mode {other})" if other else "")
     return None
 
 
-def mcp_build_offers(a, mcp, missing, ask=None):
+def mcp_build_offers(a, mcp, missing, ask=None, catalogs=None):
     """(names added, hints) for the MCP servers MISSING of the start A that a catalog lists without a signed image yet
     (pending: reviewed, not published): on a terminal (ASK: the question, for tests) each is offered to be built here
     from its source at the catalog's exact commit and added unsigned (mcp add NAME --build: what, which commit, the
@@ -4839,14 +4998,15 @@ def mcp_build_offers(a, mcp, missing, ask=None):
     the command that builds each one not built (or why it cannot be). A server in no catalog gets no hint
     (unknown_mcp_message says how to add one)."""
     try:
-        entries, _problems = mcp.catalog_entries()
+        entries, _problems = (catalogs or mcp.catalog_entries)()
         builder = mcp.build_module()
         pending = {name: builder.pending_entry(entries, name) for name in missing}
     except Exception as exc:  # noqa: BLE001 - only for the offer: the refusal stands as it is without it
         LOG.debug("mcp", "the MCP catalogs could not be read for the missing servers", exc)
         return [], []
     added, hints = [], []
-    terminal = ask is not None or (sys.stdin.isatty() and sys.stderr.isatty())
+    # (asked only where a question is given: a start asks about everything it lacks at once - mcp_fixes, fixes.py)
+    terminal = ask is not None
     mounts = mcp.start_mounts(a) if getattr(a, "mcp_mount", None) else {}
     for name in missing:
         if not isinstance(pending.get(name), tuple):
@@ -4862,6 +5022,13 @@ def mcp_build_offers(a, mcp, missing, ask=None):
                                              str(entry.get("network") or "none")})
         if refused:
             hints.append(f"{name}: its catalog has no signed image of it yet, and {refused}")
+            continue
+        if getattr(a, "mode", None) in FIXES.STRICT:
+            # An offer never widens the mode: built here it would be an unsigned server (fixes.judge).
+            hints.append(f"{name}: its catalog ({mcp.catalog_label(entry.get('_catalog') or prefix)}) lists it, but "
+                         f"has no signed image of it yet; built here it would be an unsigned server, which is not "
+                         f"offered in the security mode {a.mode} - the mode {FIXES.LAXER} takes it (--mode "
+                         f"{FIXES.LAXER})")
             continue
         hint = (f"{name}: its catalog ({mcp.catalog_label(entry.get('_catalog') or prefix)}) lists it, but has no "
                 f"signed image of it yet - `{command}` builds it here from its reviewed source (the commit asked "
@@ -4888,6 +5055,154 @@ def mcp_build_offers(a, mcp, missing, ask=None):
             continue
         added.append(name)
     return added, hints
+
+
+def fix_questions_default():
+    """Your default fix_questions (fixes.QUESTIONS: all, each) for a live action's question; "all" when it is not
+    set or the defaults file cannot be read (a start says why)."""
+    try:
+        document = json.loads(read_config_bytes(defaults_file(), 1 << 16).decode())
+        value = document.get("fix_questions") if isinstance(document, dict) else None
+    except (OSError, ValueError, RecursionError, AttributeError):
+        value = None
+    return value if value in FIXES.QUESTIONS else FIXES.QUESTIONS[0]
+
+
+def offer_fixes(error, mode=None, about="this command", again="run it again", terminal=None, read=None):
+    """What a live action (mcp attach, toolchain attach, kits attach) does with the refusal ERROR that carries fixes
+    (fixes.py), as a start does: on a terminal the fixes are listed and asked about (your fix_questions), done with
+    their output, and the ids done returned - the action is then tried again; declined, without a terminal, or with
+    only what sandbox-ai cannot do: a ValueError with the commands that fix it. MODE: the security mode of the run it
+    acts on (an offer never widens it). READ: the answers (tests)."""
+    return FIXES.resolve(str(error), getattr(error, "fixes", None) or [], mode=mode or MODES.NAMES[2],
+                         questions=fix_questions_default(), terminal=terminal, read=read, printable=printable,
+                         about=about, again=again, flag=None)
+
+
+def bwrap_agent_fixes(a, binary):
+    """The fixes (fixes.py) for an agent's executable BINARY that this host does not have, with Bubblewrap (which
+    runs the host's own agent): a choice - the same start with Podman instead (the agent comes with its image: built
+    when it is not), or the agent installed on this host (its npm package where sandbox-ai knows it: shown, never
+    run - a global npm install is yours to do)."""
+    name = Path(str(binary)).name
+    found = []
+    if shutil.which("podman") and not getattr(a, "probe", False):
+        found.append(FIXES.fix("option", "backend-podman", f"{name}, the agent's executable, is not installed on "
+                                                           "this host (Bubblewrap runs the host's own agent)",
+                               "start it with Podman instead: the agent comes with its image",
+                               options={"add": ["--backend", "podman"], "remove": ["--backend"]},
+                               choice=f"executable:{name}"))
+    try:
+        spec = importlib.util.spec_from_file_location("images_for_executable", HERE / "images.py")
+        images = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(images)
+        package = images.AGENT_PACKAGES.get(name)
+    except Exception as exc:  # noqa: BLE001 - the package not named then
+        LOG.debug("fixes", "the agents' npm packages were not read", exc)
+        package = None
+    found.append(FIXES.fix("tool", name, f"{name}, the agent's executable, is not installed on this host",
+                           "install it on this host", [["npm", "install", "-g", package]] if package else [],
+                           manual="an agent on this host is yours to install" + ("" if package else
+                                                                                  f" (its own installer: see {name}'s "
+                                                                                  "documentation)"),
+                           choice=f"executable:{name}" if found else ""))
+    return found
+
+
+def missing_error(message, fixes):
+    """The refusal MESSAGE as a FIXES.Missing when something makes what it lacks (FIXES), else as the ValueError it
+    always was."""
+    return FIXES.Missing(message, fixes) if fixes else ValueError(message)
+
+
+def mcp_fixes(a, mcp, missing, catalogs=None):
+    """The fixes (fixes.py) for the MCP servers MISSING of the start A, by the catalogs: one a signed catalog has
+    with its image is added from it; one it lists without a signed image yet (pending) is built here from its
+    reviewed source and added UNSIGNED; one of an unsigned catalog is added --unsigned (said so); each with the
+    folders the start gives it (--mcp-mount; a folder it does not give is the server's default: /work the start's
+    workspace, any other a folder of its own - said), the variables its entry requires declared (--env NAME), and
+    refused where the security mode would not take the server. One `mcp add` would refuse otherwise is shown with
+    its command and why, not done; one in several catalogs or in none likewise. [] when the catalogs cannot be read, or with a
+    remote Podman (--podman-url)."""
+    if getattr(a, "podman_url", None):
+        return []
+    try:
+        entries, _problems = (catalogs or mcp.catalog_entries)()
+        builder = mcp.build_module()
+        mounts = mcp.start_mounts(a) if getattr(a, "mcp_mount", None) else {}
+    except Exception as exc:  # noqa: BLE001 - only for the offer: the refusal stands as it is without it
+        LOG.debug("mcp", "the MCP catalogs could not be read for what adds the missing servers", exc)
+        return []
+    found = []
+    for name in missing:
+        lacking = f"the MCP server {name} is not added on this host"
+        matches = [(prefix, entry) for prefix, entry in entries if entry.get("name") == name]
+        chosen = (getattr(a, "preset_catalogs", None) or {}).get(name)
+        named = name
+        if len(matches) > 1 and any(prefix == chosen for prefix, _ in matches):
+            # In several catalogs, and the preset named the one it means (mcp:binwalk): that one, by that name.
+            matches, named = [(prefix, entry) for prefix, entry in matches if prefix == chosen], f"{chosen}:{name}"
+        if not matches:
+            found.append(FIXES.fix("mcp", name, lacking, "define it yourself, or start without it",
+                                   manual="no catalog lists it (sandbox-ai mcp catalog)"))
+            continue
+        if len(matches) > 1:
+            choices = " | ".join(f"sandbox-ai mcp add {prefix}:{name}" for prefix, _ in matches)
+            found.append(FIXES.fix("mcp", name, lacking, "add the one you want",
+                                   manual=f"it is in several catalogs, choose one: {choices}"))
+            continue
+        prefix, entry = matches[0]
+        state = (entry.get("_signature") or {}).get("state")
+        label = mcp.catalog_label(entry.get("_catalog") or prefix)
+        if state == "bad":
+            found.append(FIXES.fix("mcp", name, lacking, "nothing of that catalog is used",
+                                   manual=f"the signature of its catalog ({label}) does not verify"))
+            continue
+        pending = isinstance(builder.pending_entry(entries, named), tuple)
+        given = [f"{target}={value['host']}" + (f":{value['mode']}" if value.get("mode") else "")
+                 for target, value in mounts.get(name, {}).items()]
+        # A folder the start does not give needs no --mount: `mcp add` gives it its default (/work: the start's
+        # workspace, any other a folder of the server's own), said in the fix. A variable its entry requires is
+        # declared with it (--env NAME: read from your environment or the secret NAME when the server starts).
+        required = [v["name"] for v in entry.get("env", []) if isinstance(v, dict) and v.get("required")
+                    and isinstance(v.get("name"), str)]
+        command = ["sandbox-ai", "mcp", "add", named, *(["--build", "--yes"] if pending else []),
+                   *(["--unsigned"] if state != "good" else []),
+                   *(word for value in given for word in ("--mount", value)),
+                   *(word for variable in required for word in ("--env", variable))]
+        network = str(entry.get("network") or "none")
+        refused = mcp_mode_refusal(a, name, {"image": MCP_BUILD_PLACEHOLDER,
+                                             "network": "full" if network in ("full", "lan") else network})
+        problem, folders = None, ""
+        if not refused:
+            try:  # (what `mcp add` would refuse before anything is pulled or built - shown then, never guessed)
+                planned = mcp.definition_from_entry(
+                    {**entry, "kind": "oci", "image": entry.get("image") or MCP_BUILD_PLACEHOLDER,
+                     **({"digest": "sha256:" + "0" * 64} if pending else {})}, given, required)
+                folders = mcp.folders_text(name, planned)
+            except ValueError as exc:
+                problem = str(exc)
+        if pending:
+            title = "build it here from its reviewed source (the catalog's repository at the catalog's commit) and add it"
+            security = "nobody signed the image that is built here; it is shown as unsigned wherever it appears"
+        elif state != "good":
+            title = f"add it from its catalog ({label}), which is not signed"
+            security = "nobody vouched for that catalog's entry"
+        else:
+            title = f"add it from its signed catalog ({label}; its image is pulled by digest)"
+            security = ""
+        if network != "none" and not refused:
+            title += f", with network ({network}" + (f": {', '.join(map(str, entry.get('hosts') or []))}"
+                                                       if network == "allowlist" else "") + ")"
+        if folders:  # (where its folders are: the start's own --mcp-mount, else their defaults)
+            title += f"; its folders - {folders}"
+        if required:
+            title += (f"; its variable{'s' if len(required) > 1 else ''} {', '.join(required)} from your environment "
+                      "or the secret of that name")
+        found.append(FIXES.fix("mcp", name, lacking, title, [command], duration="minutes" if pending else "a download",
+                               unsigned=pending or state != "good", security=security,
+                               refused=refused or "", manual="" if refused or not problem else problem))
+    return found
 
 
 def unknown_mcp_message(a, missing, servers):
@@ -5517,6 +5832,7 @@ def validate(a):
     devices(a)
     for name in a.kit:
         load_kits_module().kit_path(name, a.agent)
+    check_kits_there(a)
     for value in a.copy:
         if ":" in value:
             dest = PurePosixPath(os.path.normpath(value.rsplit(":", 1)[1]))
@@ -5542,8 +5858,7 @@ def validate(a):
         if a.state_dir or a.probe or a.tmux_socket_dir or a.pod_name:
             raise ValueError("--session manages its own state; drop --state-dir/--probe")
     for name in a.mcp:
-        if not re.fullmatch(MCP_NAME, name):
-            raise ValueError(f"--mcp NAME: 1-32 letters, digits, '_' or '-': {name!r}")
+        check_mcp_name(name)
     if a.pod_name and not re.fullmatch(r"agent-[A-Za-z0-9_.-]{1,60}", a.pod_name):
         raise ValueError("Invalid pod name")
     for value in a.no_inspect:
@@ -5657,9 +5972,11 @@ def validate(a):
     check_nested(a)  # after the VPN's: never behind Tor
     check_services(a)  # after the VPN's too: never behind Tor
     check_cairn(a)  # after the services' too (their names and ports); it may bring the browser
+    check_artex(a)  # after the services' too: their names and ports
     check_browser(a)  # after the services': their names and ports
     check_tmp_size(a)
     check_agent_hooks(a)
+    check_enable_agents(a)
     if a.agent == "hermes" or "hermes" in companions(a) or getattr(a, "hermes_enable", None):
         load_hermes_module().check(a, hooks_active(a), companions(a))
     if a.agent == "qwen" or "qwen" in companions(a) or getattr(a, "qwen_enable", None):
@@ -6644,6 +6961,7 @@ def auth_source_candidates(agent):
 TEAM_IMAGE = "localhost/team-sandbox:latest"  # Claude Code, Codex and OpenCode in one image (--with)
 # The other agents --with: layers on it, one image per set of them (team_image.py: localhost/team-A-B-sandbox).
 CAIRN_IMAGE = "localhost/sandbox-ai-cairn:latest"  # --cairn's own container, cairn.py's IMAGE (sandbox-ai build cairn)
+ARTEX_IMAGE = "localhost/sandbox-ai-artex:latest"  # --artex's own container, artex.py's IMAGE (sandbox-ai build artex)
 BROWSER_IMAGE = "localhost/sandbox-ai-browser:latest"  # --browser's own container (sandbox-ai build browser)
 # The VPN's and Tor's containers (vpn.VPN_IMAGE, vpn.TOR_IMAGE): sandbox-ai's own images, built as the agent's are.
 OWN_VPN_IMAGES = {"localhost/sandbox-ai-tor:latest": "sandbox-ai build tor",
@@ -8290,19 +8608,48 @@ def login_state(agent):
     return where, None
 
 
-def check_login(a):
-    """Before the start: say when the login sandboxes would get is missing or expired, and in a terminal
-    offer to log in now inside a sandbox (sandbox-ai login), stored for all later sandboxes."""
-    if (auth_mode(a) not in ("auto", "copy") or a.probe or a.dry_run or a.local_config or a.tmux_socket_dir
+RUNTIME_KEY_VARIABLE = re.compile(r"API_KEY|AUTH_TOKEN|OAUTH_TOKEN|ACCESS_TOKEN")  # a variable that holds a login
+
+
+def login_problem(a):
+    """(where, problem) of the login the start A would get: problem "missing" or "expired", None when it has one or
+    needs none here (another way to sign in was chosen, a probe, a HOME that keeps its own, an agent without a login
+    command); where: "store" or "host"."""
+    if (auth_mode(a) not in ("auto", "copy") or a.probe or a.local_config or a.tmux_socket_dir
             or a.mcp_socket_dir or a.agent in LOGIN_COMMANDLESS):
-        return
+        return None, None
     home = (Path(a.state_dir).expanduser() if a.state_dir else
             load_sessions_module().session_dir(a.session) / "home" if a.session is not None else None)
     if home and (home / AUTH_TARGETS[a.agent]).exists():
-        return  # a persistent HOME keeps its own login
+        return None, None  # a persistent HOME keeps its own login
     if a.agent == "pi" and (getattr(a, "llm", None) or getattr(a, "api_key", None)):
-        return  # Pi's model comes with --llm or --api-key: its login (/login's providers) is not needed
-    where, problem = login_state(a.agent)
+        return None, None  # Pi's model comes with --llm or --api-key: its login (/login's providers) is not needed
+    return login_state(a.agent)
+
+
+def login_fix(a):
+    """The fix (fixes.py) for the login the start A would get and the host does not have (or that expired): logged
+    in now inside a sandbox, in this terminal, kept for every later sandbox of that agent. Not needed - the start
+    goes on without it and the agent asks for it itself - so it is offered with what else the start lacks, never a
+    reason to stop. None when there is a login, or the agent runs without a terminal of its own."""
+    if getattr(a, "llm", None) or getattr(a, "api_key", None) or getattr(a, "offline", False) or \
+            any(RUNTIME_KEY_VARIABLE.search(str(name).partition("=")[0]) for name in [*a.env, *a.secret_env]):
+        return None  # (its model comes another way - a server of yours, a key: no login is offered)
+    where, problem = login_problem(a)
+    if problem is None or not interactive_args(a.agent, a.agent_args):
+        return None
+    place = "sandbox-ai's login store" if where == "store" else "the host"
+    return FIXES.fix("login", a.agent, f"{place} has {'no' if problem == 'missing' else 'an expired'} {a.agent} login",
+                     "log in now inside a sandbox, in this terminal (kept for all its sandboxes)",
+                     [["sandbox-ai", "login", a.agent, "--backend", a.backend]], terminal=True, needed=False)
+
+
+def check_login(a):
+    """Before the start: say when the login sandboxes would get is missing or expired, and in a terminal
+    offer to log in now inside a sandbox (sandbox-ai login), stored for all later sandboxes."""
+    if a.dry_run:
+        return
+    where, problem = login_problem(a)
     if problem is None:
         return
     place = "sandbox-ai's login store" if where == "store" else "the host"
@@ -8846,6 +9193,30 @@ def publish_environment(a):
     return env
 
 
+def publish_login_fix(a, kind):
+    """The fix (fixes.py) for --publish KIND without a login (yours, or the identity's with --identity): its token
+    kept as the secret KIND_TOKEN (asked in this terminal, never shown; one kept already is taken) and the login
+    added with it. Security-relevant, said: the agent can publish as you (the proxy adds the token on the wire, each
+    upload is asked first)."""
+    secret = f"{kind.upper()}_TOKEN"
+    try:
+        kept = load_secret_store_module().get(secret) is not None
+    except Exception as exc:  # noqa: BLE001 - not read: asked for
+        LOG.debug("fixes", f"whether the secret {secret} is kept was not read", exc)
+        kept = False
+    name, _identity = identity_of(a)
+    add = (["sandbox-ai", "identities", "publish", name, kind, "--secret", secret] if name else
+           ["sandbox-ai", "publish-logins", "add", kind, "--secret", secret])
+    return FIXES.fix("publish", kind, f"there is no publish login for {kind}" + (f" of the identity {name}" if name
+                                                                                   else ""),
+                     ("add it with your token, kept as the secret " + secret
+                      + (" (kept already)" if kept else " (its value is asked in this terminal, never shown)")),
+                     [*([] if kept else [["sandbox-ai", "secrets", "set", secret]]), add], duration="seconds",
+                     terminal=not kept,
+                     security=f"the agent can publish to {kind} as you: the connection proxy adds the token on the "
+                              "wire (the agent never sees it), each upload is asked first")
+
+
 def check_publish(a, get=None):
     """--publish: known kinds with a login each, the proxy to add the tokens, their hosts inspected, no variable
     given twice, never in an MCP server's sandbox, and each token kept (GET reads the store; False skips that)."""
@@ -8857,11 +9228,15 @@ def check_publish(a, get=None):
     try:
         found = module.plan(kinds, logins)
     except ValueError as exc:
-        if logins is None:
+        have = {entry["kind"] for entry in (module.load() if logins is None else logins)}
+        lacking = [kind for kind in kinds if kind not in have]
+        if not lacking:
             raise
-        missing = next(kind for kind in kinds if kind not in {entry["kind"] for entry in logins})
-        raise ValueError(f"--publish {missing}: the identity {a.identity} has no login for it; add one with: "
-                         f"sandbox-ai identities publish {a.identity} {missing} --secret NAME") from exc
+        fixes = [publish_login_fix(a, kind) for kind in lacking]
+        if logins is None:
+            raise FIXES.Missing(str(exc), fixes) from None
+        raise FIXES.Missing(f"--publish {lacking[0]}: the identity {a.identity} has no login for it; add one with: "
+                            f"sandbox-ai identities publish {a.identity} {lacking[0]} --secret NAME", fixes) from exc
     if a.no_proxy:
         raise ValueError("--publish needs the connection proxy (it adds the tokens on the wire); drop --no-proxy")
     if getattr(a, "mcp_socket_dir", None):
@@ -9590,6 +9965,17 @@ def secret_guard_notes(a):
         notes = [*notes, f"note: the secret guard does not see requests to {', '.join(a.no_inspect)}: their TLS "
                          "passes unopened (--no-inspect)"]
     return notes
+
+
+def no_inspect_notes(a):
+    """What the start says of hosts whose TLS passes unopened (--no-inspect): the proxy holds such a connection to
+    the name the program gives (SNI, proven by that host's certificate), but cannot see the request inside, and a
+    front end that serves other sites too (a CDN) routes it by the Host the request names - any of its sites."""
+    if not a.no_inspect or not proxy_enabled(a):
+        return []
+    return [f"note: --no-inspect {', '.join(a.no_inspect)}: TLS passes unopened - nothing the proxy checks (rules, the "
+            "push check, its guards, canaries) sees what goes there, and a front end that serves other sites too (a CDN) can carry the "
+            "connection on to any of them: only the name the program gives is checked"]
 
 
 def package_guard_mount(a):
@@ -10542,6 +10928,8 @@ def register_run(a, run, session):
         if getattr(a, "browser_container", None) else None,
         # --cairn: Cairn's board beside the agent (its address, its container, its workers).
         "cairn": load_cairn_module().record(a, pod_name(a, run)) if getattr(a, "cairn_container", None) else None,
+        # --artex: ARTEX beside the agent (its container; its console's address: sandbox-ai artex console).
+        "artex": load_artex_module().record(a, pod_name(a, run)) if getattr(a, "artex_container", None) else None,
         # A HOME of your own (--state-dir) stays when the run ends; sandbox-ai list says so.
         "own_home": bool(a.state_dir) and not (getattr(a, "start_key", None) or a.tmux_socket_dir or a.mcp_socket_dir),
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "proxy": proxy_enabled(a),
@@ -10794,6 +11182,63 @@ def kit_managed_paths(a):
     return [PurePosixPath(path) for path in paths]
 
 
+ENABLE_AGENTS = ("hermes", "qwen", "goose", "openhands", "nanobot", "letta", "opencode2", "pi")
+
+
+def check_enable_agents(a):
+    """--AGENT-enable for an agent that is not of this start (not its lead, not --with): refused as that agent's own
+    check refuses it ("--hermes-enable is for Hermes ..."), with what would let the start go on (fixes.py) - the
+    agent added beside the lead, or the option left out: a choice of the human's, asked on a terminal, shown as whole
+    command lines elsewhere, never taken by --fix."""
+    for agent in ENABLE_AGENTS:
+        if not getattr(a, f"{agent}_enable", None) or a.agent == agent or agent in companions(a):
+            continue
+        try:
+            globals()[f"load_{agent}_module"]().check(a, hooks_active(a), companions(a))
+        except ValueError as exc:
+            lacking = f"--{agent}-enable sets a feature of {agent}, which is no agent of this start (the lead {a.agent})"
+            raise FIXES.Missing(str(exc), [
+                FIXES.fix("option", f"with-{agent}", lacking, f"add {agent} beside the lead (the team image with both "
+                          "is built when it is not there)", options={"add": ["--with", agent]},
+                          choice=f"{agent}-enable",
+                          security=f"{agent} runs in the same sandbox, with its own login and its provider's hosts"),
+                FIXES.fix("option", f"without-{agent}-enable", lacking, f"start without --{agent}-enable",
+                          options={"remove": [f"--{agent}-enable"]}, choice=f"{agent}-enable")]) from None
+
+
+def check_kits_there(a):
+    """--kit NAME: a kit that is not in the kits folder (for this agent) is refused as kits.sources refuses it, with
+    what makes it (fixes.py): an empty kit of that name for the agent - its skills are yours to add."""
+    kits = load_kits_module()
+    lacking = [name for name in dict.fromkeys(a.kit) if not kits.kit_path(name, a.agent).is_dir()
+               and name not in kits.kit_names(kits.BUILTIN_KITS)]
+    if not lacking or not kits_apply(a):
+        return
+    try:
+        kits.sources(a)
+    except ValueError as exc:
+        raise FIXES.Missing(str(exc), [FIXES.fix(
+            "kit", name, f"the kit {name} is not in the kits folder for {a.agent}",
+            "make it, empty (add its skills later: sandbox-ai kits add-skill)",
+            [["sandbox-ai", "kits", "new", name, "--agent", a.agent]], duration="seconds")
+            for name in lacking]) from None
+
+
+def plugin_fix(a):
+    """The fix (fixes.py) for the plugins the start's kits declare that the plugin store does not have: installed
+    by the plugin installer's sandbox, in this terminal. Not needed - the start goes on without them, said in a
+    note - so it joins what else the start lacks. None when none is missing."""
+    plan = kit_plan(a)
+    missing = (plan or {}).get("plugins", {}).get("missing") if isinstance((plan or {}).get("plugins"), dict) else None
+    if not missing:
+        return None
+    return FIXES.fix("plugin", ",".join(missing), f"the plugins {', '.join(missing)} of the start's kits are not in "
+                     "the plugin store", "install them (the plugin installer's sandbox, in this terminal)",
+                     [load_kits_module().install_command(missing, a.agent if a.agent in load_kits_module().STORE_AGENTS
+                                                         else "claude").split()],
+                     duration="minutes", terminal=True, needed=False)
+
+
 def kit_plan(a):
     """What the kits, the project memory and the plugin store give this run, without changing anything."""
     if not kits_apply(a):
@@ -10895,12 +11340,13 @@ def codex_plugin_marketplace(name):
     return f"/sandbox/session/{CODEX_PLUGIN_MARKETPLACES}/{name}"
 
 
-def codex_plugins(a, home, plugins, notes):
+def codex_plugins(a, home, plugins, notes, staging=None):
     """The kits' plugins for Codex from sandbox-ai's plugin store: [read-only mounts] of each plugin's installed folder
     at ~/.codex/plugins/cache/MARKETPLACE/NAME/local, the run's a.codex_plugins ({"id", "marketplace", "mcp"}) for its
     managed configuration and requirements, a.plugin_hooks (the hooks of those plugins: they run only once approved).
     A plugin that brings ChatGPT apps, comes from a marketplace name Codex keeps for OpenAI, or cannot be read is not
-    given (NOTES say why). Off with --telemetry strict, which turns Codex's plugin system off."""
+    given (NOTES say why). Off with --telemetry strict, which turns Codex's plugin system off. STAGING (a start): an
+    approved plugin with hooks is given as a copy made and checked there (kits.checked_copy), not the live store."""
     kits = load_kits_module()
     a.codex_plugins, a.plugin_hooks = [], []
     if not plugins:
@@ -10915,7 +11361,8 @@ def codex_plugins(a, home, plugins, notes):
         notes.append(f"plugins not in the plugin store yet: {', '.join(missing)}; install them with: "
                      f"{kits.install_command(missing, 'codex')}")
     mounts = []
-    for info in kits.stage_store_plugins("codex", [p for p in plugins if p in installed], installed):
+    for info in kits.stage_store_plugins("codex", [p for p in plugins if p in installed], installed,
+                                         staging=staging):
         plugin = info["plugin"]
         name, marketplace = plugin.split("@")
         if kits.CODEX_RESERVED_MARKETPLACE.fullmatch(marketplace):
@@ -10947,11 +11394,12 @@ def codex_plugins(a, home, plugins, notes):
     return mounts
 
 
-def opencode2_plugins(a, plugins, notes):
+def opencode2_plugins(a, plugins, notes, staging=None):
     """The kits' plugins for OpenCode 2 from sandbox-ai's plugin store: [read-only mounts] of each approved plugin's
     installed folder at /sandbox/plugins/MARKETPLACE/NAME, and a.opencode2_plugins (those folders), which its
     configuration layer names after sandbox-ai's rule plugin. A plugin is code in OpenCode 2's own process: it runs
-    only once approved (sandbox-ai plugins opencode2 trust-hooks), never when it cannot be read."""
+    only once approved (sandbox-ai plugins opencode2 trust-hooks), never when it cannot be read. STAGING (a start):
+    the approved plugin is given as a copy made and checked there (kits.checked_copy), not the live store."""
     kits = load_kits_module()
     a.opencode2_plugins = []
     if not plugins:
@@ -10962,7 +11410,8 @@ def opencode2_plugins(a, plugins, notes):
         notes.append(f"plugins not in the plugin store yet: {', '.join(missing)}; install them with: "
                      f"{kits.install_command(missing, 'opencode2')}")
     mounts = []
-    for info in kits.stage_store_plugins("opencode2", [p for p in plugins if p in installed], installed):
+    for info in kits.stage_store_plugins("opencode2", [p for p in plugins if p in installed], installed,
+                                         staging=staging):
         if info["errors"]:
             notes.append(f"{info['label']}: not given to OpenCode 2: {info['errors'][0]}")
             continue
@@ -11079,12 +11528,16 @@ def prepare_kits(a, home, staging):
             mounts += store_mounts
             # `sandbox-ai plugins attach`: a plugin installed into the store now is in the running sandbox at once.
             a.kits_live["plugin_store"] = any(dest == "/root/.claude/plugins/cache" for _, dest, _ in store_mounts)
-            a.plugin_hooks = kits.stage_plugin_hooks(plugins, kits.installed("claude")[1])
+            # The approved ones are copied for the run where managed hooks run them (without managed hooks Claude
+            # Code runs a plugin's hooks itself, as always: nothing is copied for that).
+            a.plugin_hooks = kits.stage_plugin_hooks(plugins, kits.installed("claude")[1],
+                                                     staging=staging / "plugin-hooks" if managed_hooks(a) else None,
+                                                     target_root=PLUGIN_HOOKS_TARGET)
             notes += plugin_hook_notes(a)
         elif a.agent == "codex":
-            mounts += codex_plugins(a, home, plugins, notes)
+            mounts += codex_plugins(a, home, plugins, notes, staging=staging / "plugins")
         elif a.agent == "opencode2":
-            mounts += opencode2_plugins(a, plugins, notes)
+            mounts += opencode2_plugins(a, plugins, notes, staging=staging / "plugins")
         elif a.agent == "opencode" and plugins:
             a.opencode_plugins = plugins
             if not a.egress_all_allow and "registry.npmjs.org" not in allowed_hosts(a):
@@ -11213,6 +11666,8 @@ def agent_environment(a):
         env.update(load_browser_module().agent_environment(a))
     if getattr(a, "cairn_container", None):  # Cairn's board (--cairn): its address
         env.update(load_cairn_module().agent_environment(a))
+    if getattr(a, "artex_container", None):  # ARTEX (--artex): its API's address in the pod
+        env.update(load_artex_module().agent_environment(a))
     if a.tmux_socket_dir:
         env["TMUX_TMPDIR"] = TMUX_DIR
     if nested(a):
@@ -11500,6 +11955,13 @@ def agent_command(a, binary):
 
 
 AGENT_RESTART_FILE = "agent-restart.sh"  # in the session directory: /sandbox/session/agent-restart.sh, read-only
+# The agents whose MCP servers are on their command line only (Codex: -c mcp_servers...): a server attached while the
+# run goes on (sandbox-ai mcp attach --live) is on the command line of its restart inside the sandbox through the
+# session's AGENT_LIVE_MCP_FILE (written by mcp.py, one word per line; read by the restart script). Reported live: a
+# Codex session given a server while it ran was restarted with `resume --restart` - its sandbox ended (exit 143).
+LIVE_MCP_ARG_AGENTS = ("codex",)
+AGENT_LIVE_MCP_FILE = "agent-live-mcp.args"
+AGENT_LIVE_MCP_TARGET = f"/sandbox/session/{AGENT_LIVE_MCP_FILE}"
 
 
 def agent_restart_script(a, binary):
@@ -11509,15 +11971,23 @@ def agent_restart_script(a, binary):
     continues (sessions.restart_args: the agent's continue flags, its options kept, a one-shot task or a first prompt
     not given again). The agent's command as the start built it (agent_command, companion_prelude) with those
     arguments, and its exit status written for the session's end as the start's window writes it. Only for a
-    detached tmux session (a kept start's terminal) that runs the agent itself."""
+    detached tmux session (a kept start's terminal) that runs the agent itself. For LIVE_MCP_ARG_AGENTS the words of
+    the servers attached live (AGENT_LIVE_MCP_TARGET, one per line, when there is one) come right after the agent's
+    program: Codex's -c options are global, before its subcommand."""
     if not a.tmux_socket_dir or not runs_agent(a) or getattr(a, "helper_of", None) or a.probe:
         return None
     again = copy.copy(a)
     again.agent_args = load_sessions_module().restart_args(
         {"agent": a.agent, "agent_args": list(a.agent_args), "options": [], "ready": True})
     command = with_companion_prelude(again, agent_command(again, binary))
+    line, live = shlex.join(command), ""
+    if a.agent in LIVE_MCP_ARG_AGENTS and binary in command:
+        at = command.index(binary) + 1
+        live = (f"set --\nif [ -f {AGENT_LIVE_MCP_TARGET} ]; then\n"
+                f'  while IFS= read -r word; do set -- "$@" "$word"; done < {AGENT_LIVE_MCP_TARGET}\nfi\n')
+        line = shlex.join(command[:at]) + ' "$@"' + (" " + shlex.join(command[at:]) if command[at:] else "")
     return ("# sandbox-ai: the agent started again in its tmux window (sandbox-ai kits restart-agent); its conversation "
-            "continues\n" + shlex.join(command) + f'\nprintf "%s %s" "$?" "$(date +%s)" > {RUNTIME.AGENT_EXIT}\n')
+            "continues\n" + live + line + f'\nprintf "%s %s" "$?" "$(date +%s)" > {RUNTIME.AGENT_EXIT}\n')
 
 
 def toolchain_mounts(a, session):
@@ -11855,13 +12325,9 @@ def nested_storage(a):
 
 
 def check_nested(a):
-    """--nested-containers: experimental (a note, never a refusal), Podman only, never behind Tor, and /dev/net/tun
-    for the containers' networks."""
+    """--nested-containers: Podman only, never behind Tor, and /dev/net/tun for the containers' networks."""
     if not nested(a):
         return
-    # (experimental: its live test has not passed yet; giving the option is the decision - the start says so)
-    print("agent-sandbox: note: --nested-containers: not live-tested yet (Podman inside a sandbox has not passed its "
-          "live test)", file=sys.stderr)
     if a.backend != "podman":
         raise ValueError("--nested-containers needs the Podman backend (the agent's user namespace is made in the "
                          "pod's container)")
@@ -11914,8 +12380,7 @@ def nested_plan(a):
     """The dry run's account of --nested-containers, or None."""
     if not nested(a):
         return None
-    return {"experimental": True,
-            "user_namespace": "the agent is root of a user namespace of its own (its capabilities count only there)",
+    return {"user_namespace": "the agent is root of a user namespace of its own (its capabilities count only there)",
             "reserved_ids": nested_reserved_ids(), "capabilities_added": ["SETFCAP"], "devices": nested_devices(a),
             "seccomp": "Firejail's default filter but " + ", ".join(
                 name.lstrip("!") for name in RUNTIME.NESTED_SECCOMP.partition("=")[2].split(",")),
@@ -11937,8 +12402,7 @@ USERNS_RESTRICTION = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_usern
 def nested_notes(a):
     if not nested(a):
         return []
-    notes = ["--nested-containers: not live-tested yet (Podman inside a sandbox has not passed its live test)",
-             "--nested-containers: the agent may run containers (podman, buildah, unshare -rn); it is root of a user "
+    notes = ["--nested-containers: the agent may run containers (podman, buildah, unshare -rn); it is root of a user "
              "namespace of its own, which reaches more of your host's kernel; its containers' connections pass the "
              "sandbox's firewall and connection proxy; their images live in /tmp (--tmp-size) and go with the run",
              "--nested-containers: it can leave files owned by your subordinate IDs (setuid ones included) in the "
@@ -13169,6 +13633,10 @@ def run_pod(a, session, home):
             # run's directory).
             threading.Thread(target=load_services_module().launch, daemon=True,
                              args=(a, name, session, lambda: child.poll() is None, launcher_namespace())).start()
+            if getattr(a, "artex_container", None):
+                # --artex: its console on this computer's 127.0.0.1 once it started, as long as the run lives.
+                threading.Thread(target=load_artex_module().forward, daemon=True,
+                                 args=(a, name, lambda: child.poll() is None, launcher_namespace())).start()
         status = wait_child(child)
         LOG.log(*sandbox_ended(name, status, time.monotonic() - begun))
         note = engine_bind_note(a, "Podman") if status == 125 and time.monotonic() - begun < AT_ONCE_SECONDS \
@@ -14374,14 +14842,6 @@ def hermes_files(a):
     return hermes.files(a, config, loop_text, note)
 
 
-def check_experimental_hermes(a):
-    """Hermes (as the agent or a helper) has not passed its live test yet: choosing it is the decision, the start
-    only says so (a note, never a refusal)."""
-    if "hermes" not in team(a) and "hermes" not in (getattr(a, "helper", None) or []):
-        return
-    print(f"agent-sandbox: note: {load_hermes_module().experimental_note()}", file=sys.stderr)
-
-
 _dsh_module = None
 _qwen_module = None
 _goose_module = None
@@ -14574,15 +15034,9 @@ def agent_files(a):
                                                managed_hook_groups(a)))
 
 
-def check_experimental_agents(a):
-    """DSH, Qwen Code, Goose, OpenHands, nanobot, Letta Code, OpenCode 2 and Pi (as the agent or a helper) have not
-    passed their live tests yet: choosing one is the decision, the start only says so (a note, never a refusal)."""
-    for agent in ("dsh", "qwen", "goose", "openhands", "nanobot", "letta", "opencode2", "pi"):
-        if agent not in team(a) and agent not in (getattr(a, "helper", None) or []):
-            continue
-        print(f"agent-sandbox: note: {agent_module(agent).experimental_note()}", file=sys.stderr)
+def openhands_canvas_note(a):
+    """OpenHands' UI is a web page on the sandbox's loopback: without the sandbox's own browser nothing shows it."""
     if a.agent == "openhands":
-        # Its UI is a web page on the sandbox's loopback: without the sandbox's own browser nothing shows it.
         note = load_openhands_module().canvas_note(a)
         if note:
             print(f"agent-sandbox: note: {note}", file=sys.stderr)
@@ -14625,26 +15079,298 @@ def load_presets_module():
                 loaded = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(loaded)
                 loaded.EXPOSED_BEFORE = exposed_before  # where sandboxes wrote: no preset directory there
-                loaded.EXPERIMENTAL_BADGE = experimental_badge  # a preset's badge (EXPERIMENTAL_PARTS)
                 _presets_module = loaded
     return _presets_module
 
 
-def launch(argv, floor_by=None, preset_bridge=None):
+FIX_ROUNDS = 4  # how often one start is tried again after its fixes (each round fixes what the last one found)
+
+
+def launch(argv, floor_by=None, preset_bridge=None, preset_catalogs=None):
+    """The start ARGV (launch_once), with what it lacks offered instead of only refused (fixes.py): a refusal that
+    carries fixes - its image not built, an MCP server not added, a toolchain not in the store, an identity - is
+    put together with everything else the start lacks (missing_ahead) into one plan; on a terminal the human is
+    asked (your default fix_questions: all at once, or each), --fix and --fix-only do it without asking, and the
+    start is tried again when everything it needs was done. Without a terminal and without --fix, declined, or
+    with only what sandbox-ai cannot do: the refusal as before, ending with the commands that fix it. --fix-plan
+    prints the plan as JSON and starts nothing. A fix is never tried twice. PRESET_CATALOGS: launch_once's."""
+    attempted, state = [], {}
+    for _round in range(FIX_ROUNDS + 1):
+        state.clear()
+        try:
+            return launch_once(argv, floor_by, preset_bridge, state, preset_catalogs)
+        except ValueError as exc:
+            a = state.get("a")
+            if not getattr(exc, "fixes", None) and a is not None:
+                # A refusal of a module that names its own fix (a secret not kept: "keep one with: sandbox-ai
+                # secrets set NAME") carries it here (fixes.recognised): offered like every other.
+                with contextlib.suppress(AttributeError, TypeError):
+                    exc.fixes = FIXES.recognised(str(exc))
+            if not getattr(exc, "fixes", None) or a is None:
+                raise
+            if a.dry_run and not getattr(a, "fix_plan", False):
+                # Nothing is made, asked or looked up in a dry run, and its refusal is as it was: the app's and the
+                # web interface's checks read it, often (--fix-plan is the plan for them).
+                raise
+            message = str(exc)
+            mode = getattr(a, "mode", None) or MODES.NAMES[2]
+            if internal_start(a):
+                # A session's supervisor, an MCP server's own sandbox: nobody to ask, nothing fixed by itself - the
+                # refusal with its commands (the start that made it relays what it says).
+                raise ValueError(FIXES.refusal(message, FIXES.judge(exc.fixes, mode), flag=None)) from None
+            # A name no start takes is said first: nothing is fixed (a build of minutes) for a start refused then.
+            for name in getattr(a, "mcp", None) or []:
+                check_mcp_name(name)
+            # (the start's options in their long forms: a fix that changes them - add --with claude - names them so)
+            argv = canonical_options(list(argv))
+            fixes = FIXES.with_starts(start_fixes(a, exc.fixes, getattr(exc, "checked", None)),
+                                      FIXES.without_options(argv))
+            questions = state.get("defaults", {}).get("fix_questions") or FIXES.QUESTIONS[0]
+            if getattr(a, "fix_plan", False):
+                print(json.dumps(FIXES.plan_json(fixes, mode, questions), indent=1))
+                return 0
+            LOG.info("fixes", "the start lacks: " + "; ".join(
+                f"{item['id']} ({item['verdict']})" for item in FIXES.judge(fixes, mode)))
+            done = FIXES.resolve(message, fixes, mode=mode, questions=questions, fix_all=bool(a.fix),
+                                 only=list(a.fix_only or []), attempted=attempted, printable=printable)
+            attempted += done
+            LOG.info("fixes", f"done: {', '.join(done)}; the start is tried again")
+            forget_planned_remote()
+            argv = confirmed_argv(a, argv)  # (a wildcard confirmed on the way is not asked about again)
+            changed = [item for item in fixes if item["id"] in done and item.get("options")]
+            if changed:  # a way to go on that was chosen: the start's own options, as the session keeps them too
+                argv = FIXES.start_options(argv, changed)
+                print("agent-sandbox: going on as: " + printable(FIXES.command_text(["sandbox-ai", *argv])),
+                      file=sys.stderr)
+            else:
+                print("agent-sandbox: what the start lacked is there now: it goes on", file=sys.stderr)
+    raise ValueError("the start still lacks something after its fixes ran; see what it said above")
+
+
+KIND_ORDER = ("option", "tool", "image", "variant", "service", "toolchain", "identity", "vpn", "llm", "mcp-image",
+              "mcp", "mcp-update", "kit", "host", "secret", "publish", "plugin", "device", "login")
+
+
+def check_mcp_name(name):
+    """ValueError for an --mcp NAME no start takes; a catalog's PREFIX:NAME (what `mcp add` takes) is told the name
+    a start takes and the add."""
+    if re.fullmatch(MCP_NAME, str(name)):
+        return
+    prefix, _, bare = str(name).partition(":")
+    hint = (f" - a start takes the server's name: --mcp {bare} (added with: sandbox-ai mcp add {name})"
+            if prefix and re.fullmatch(MCP_NAME, prefix) and re.fullmatch(MCP_NAME, bare) else "")
+    raise ValueError(f"--mcp NAME: 1-32 letters, digits, '_' or '-': {name!r}{hint}")
+
+
+def start_fixes(a, known, checked=None):
+    """Everything the start A lacks, as one plan: KNOWN (the fixes of the refusal that stopped it) and what the
+    checks after it would have refused too (missing_ahead; CHECKED: the check that refused, not run again), each
+    once, in the order they are done - what others need first (an image before a login in it)."""
+    fixes = FIXES.unique([*known, *missing_ahead(a, {item["id"] for item in known}, checked)])
+    return sorted(fixes, key=lambda item: KIND_ORDER.index(item["kind"]) if item["kind"] in KIND_ORDER
+                  else len(KIND_ORDER))
+
+
+def missing_ahead(a, known=(), checked=None):
+    """The fixes of what the start A lacks beyond the refusal that stopped it: the launcher's own checks, each run
+    on A now and asked only for the fixes its refusal carries (a start refuses the first thing it finds; the plan
+    lists everything at once). A check that fails otherwise says so when the start is tried again; nothing is made
+    here (a.fix_collect: no image is built on the way). The login of the start's agent joins it when the host has
+    none (not needed: the start goes on without it)."""
+    found = []
+    a.fix_collect = True
+
+    def mcp_servers():
+        if checked == "mcp":  # (the refusal that stopped the start is this check's own: it said all it finds)
+            return
+        if not getattr(a, "helper_definitions", None):
+            add_helpers(a)
+        check_mcp_names(a)
+    for check in (plan_toolchains, check_identity, check_image_variant, check_kits_there, check_enable_agents,
+                  check_cairn, mcp_servers,
+                  lambda _a: load_vpn_module().load_profile(a.vpn) if getattr(a, "vpn", None) else None,
+                  lambda _a: load_llm_module().endpoint(a.llm) if getattr(a, "llm", None) else None,
+                  check_services, check_publish):
+        try:
+            check(a) if check is not mcp_servers else check()
+        except ValueError as exc:
+            fixes = getattr(exc, "fixes", None) or FIXES.recognised(str(exc))
+            found += [item for item in fixes if item["id"] not in known]
+            if not fixes:
+                LOG.debug("fixes", f"looking ahead: {str(exc).splitlines()[0][:300]}")
+        except Exception as exc:  # noqa: BLE001 - only for the plan: the start itself says what is wrong
+            LOG.debug("fixes", "looking ahead for what the start lacks failed", exc)
+    return found + late_fixes(a, known) + optional_fixes(a)
+
+
+def late_fixes(a, known=()):
+    """The fixes of what a start finds only once it is checked and about to run - the services' images in Podman's
+    store and their secrets (services.ready_fixes) - looked at now: listed with the rest, and by --fix-plan, whose
+    dry run gets that far never."""
+    found = []
+    if getattr(a, "services", None) and not getattr(a, "probe", False):
+        with contextlib.suppress(Exception):
+            found += [item for item in load_services_module().ready_fixes(a, launcher_namespace())
+                      if item["id"] not in known]
+    for value in getattr(a, "secret_env", None) or []:
+        # --secret-env NAME[=SECRET]: read when the sandbox is made (a session's supervisor: no terminal to ask on)
+        name, _, secret = str(value).partition("=")
+        secret = secret or name
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", secret) or f"secret:{secret}" in known:
+            continue
+        try:
+            kept = load_secret_store_module().get(secret, ask=False) is not None
+        except Exception:  # noqa: BLE001 - locked, or not readable: the start says why when it reads it
+            kept = True
+        if not kept and all(item["id"] != f"secret:{secret}" for item in found):
+            found.append(FIXES.secret_fix(secret, f"--secret-env {value}"))
+    return found
+
+
+def llm_fix(a):
+    """The fix (fixes.py) for the --llm server of a start that did not answer (llm.unreachable_fix): not needed, said
+    with its command; never asked for by a dry run (no request is made for one)."""
+    if getattr(a, "dry_run", False) or not getattr(a, "llm", None):
+        return None
+    return load_llm_module().unreachable_fix(a)
+
+
+UDEV_RULES = "/etc/udev/rules.d/70-sandbox-ai.rules"
+
+
+def udev_fix(path):
+    """The fix (fixes.py) for the device PATH your user cannot open directly (the sandbox keeps no supplementary
+    groups): a udev rule that gives your user the device (TAG+="uaccess", by its USB IDs), udev told and the
+    device triggered - root's commands, shown, never run. None where no rule can be named (no USB IDs)."""
+    rule = udev_hint(path)
+    if rule is None:
+        return None
+    return FIXES.fix("device", str(path), f"your user cannot open {path} directly, so the agent cannot either",
+                     "give your user the device with a udev rule, then replug it",
+                     [["sudo", "sh", "-c", f"echo {shlex.quote(rule)} >> {UDEV_RULES}"],
+                      ["sudo", "udevadm", "control", "--reload"], ["sudo", "udevadm", "trigger"]],
+                     needed=False, manual="it needs root: sandbox-ai never runs sudo for you")
+
+
+def device_fixes(a):
+    """The fixes (fixes.py) for the --device nodes of the start A your user cannot open (udev_fix): not needed - the
+    start goes on, the agent cannot open them until the rule is there."""
+    found = []
+    for path, kind in devices(a):
+        if kind in ("cdi", "dir"):
+            continue
+        with contextlib.suppress(OSError):
+            if not device_access(path):
+                item = udev_fix(path)
+                if item is not None:
+                    found.append(item)
+    return found
+
+
+def mcp_newer(a):
+    """[(name, newer)] of the --mcp servers of the start A (of your mcp.json, from a catalog) whose catalog pins a
+    newer image than they run, as that catalog was last read here (mcp.newer_pin: nothing downloaded)."""
+    names = [name for name in dict.fromkeys(getattr(a, "mcp", None) or []) if re.fullmatch(MCP_NAME, str(name))]
+    if not names:
+        return []
+    mcp = load_mcp_module()
+    try:
+        mine = mcp.read_config()[1]
+        servers = mcp.validated({name: mine[name] for name in names if name in mine}, mcp.config_file())
+    except (OSError, ValueError):
+        return []
+    project = getattr(a, "project_document", None)
+    named = (project.get("mcp_servers") or {}) if isinstance(project, dict) else {}
+    found = []
+    for name, definition in servers.items():
+        if name in named:  # (a project file's server of the name is the one the start runs)
+            continue
+        newer = mcp.newer_pin(definition)
+        if newer:
+            found.append((name, newer))
+    return found
+
+
+def mcp_update_notes(a):
+    """What a start says of its MCP servers whose catalog pins a newer image (mcp_newer): the command that takes it."""
+    return [load_mcp_module().newer_text(name, newer) for name, newer in mcp_newer(a)]
+
+
+def mcp_update_fixes(a):
+    """The fixes (fixes.py) of the start A's MCP servers whose catalog pins a newer image (mcp_newer): `mcp update
+    NAME --yes` - the catalog read again and its signature checked, the image pulled by its digest, its folders,
+    variables, limits and network kept. Not needed: the start goes on with the image it has. One of an unsigned
+    catalog is unsigned (refused in the modes high and paranoid: fixes.judge)."""
+    found = []
+    for name, newer in mcp_newer(a):
+        parts = [f"{key} {load_mcp_module().short_pin(newer[key][0])}" for key in ("image", "rootfs") if key in newer]
+        found.append(FIXES.fix("mcp-update", name, f"the MCP server {name} runs an older " + " and ".join(parts)
+                               + f" than its {'signed ' if newer['signed'] else 'unsigned '}catalog pins",
+                               "take the newer image (its signature checked again; its folders, variables, limits "
+                               "and network stay)",
+                               [["sandbox-ai", "mcp", "update", name, "--yes",
+                                 *([] if newer["signed"] else ["--unsigned"])]],
+                               duration="a download", unsigned=not newer["signed"], needed=False))
+    return found
+
+
+def optional_fixes(a):
+    """The fixes of what the start A goes on without, offered with what it needs (never a reason to stop): a Git
+    login left out because its secret is no access token, the plugins its kits declare, the agent's login, a newer
+    image of its MCP servers."""
+    found = []
+    for check in (git_login_fixes, plugin_fix, login_fix, device_fixes, llm_fix, mcp_update_fixes):
+        with contextlib.suppress(Exception):
+            items = check(a)
+            found += items if isinstance(items, list) else [items] if items is not None else []
+    return found
+
+
+GIT_LOGIN_SECRET = re.compile(r"left out: (?:the secret (?P<bad>[A-Za-z0-9_.-]+) is no access token - (?P<why>.*) "
+                              r"\(enter it again|no secret (?P<none>[A-Za-z0-9_.-]+) \()")
+
+
+def git_login_fixes(a):
+    """The fixes (fixes.py) for the Git logins this start leaves out because their secret is no access token, or is
+    not there (registry_git_tokens' notes): the secret entered again, in this terminal. Not needed: the start goes
+    on without that login (a push there is refused)."""
+    found = []
+    for note in registry_git_tokens(a)[1]:
+        match = GIT_LOGIN_SECRET.search(note)
+        if not match:
+            continue
+        name = match["bad"] or match["none"]
+        what = (f"the secret {name} is no access token ({match['why']}): its Git login is left out" if match["bad"]
+                else f"there is no secret {name}: its Git login is left out")
+        found.append(FIXES.fix("secret", name, what, "enter it again, in this terminal (a line break or a blank "
+                               "pasted with it is the usual cause)" if match["bad"] else
+                               "keep it, in this terminal", [["sandbox-ai", "secrets", "set", name]],
+                               terminal=True, needed=False))
+    return found
+
+
+def launch_once(argv, floor_by=None, preset_bridge=None, state=None, preset_catalogs=None):
+    # STATE (launch's): gets "a", the start's options as far as they were read, and "defaults", your defaults.
     # FLOOR_BY: the floor that chose the mode of this start (the launch below), for MODES.check (--ask allow).
     # --preset NAME: its options right after the agent (the command line wins), its first task as the agent's
     # arguments; then everything is checked as if typed. PRESET_BRIDGE: the bridge the preset proposes (the launch
     # below: its options are the preset's already), made only once the start runs and the human confirms it.
+    # PRESET_CATALOGS: {server: catalog prefix} the preset chose (the launch below: its options are the preset's).
     import uuid
-    preset_notes, bridges = [], []
+    preset_notes, bridges, preset_warnings, catalogs = [], [], [], {}
     argv, preset_mode = load_presets_module().apply(canonical_options(list(argv)), canonical=canonical_options,
                                                     with_mode=True, notes=preset_notes,
                                                     credential=copies_credential, private=private_source,
                                                     code_env=lambda options, given: load_mcp_module().code_env_in(
-                                                        options, given), bridges=bridges)
+                                                        options, given), bridges=bridges,
+                                                    warnings=preset_warnings, catalogs=catalogs)
     preset_bridge = bridges[0] if bridges else preset_bridge
+    preset_catalogs = catalogs or preset_catalogs or {}
     for note in preset_notes:
         print(f"agent-sandbox: note: {printable(note)}", file=sys.stderr)
+    # A preset of an extra directory: in a built-in one's place, the secrets of yours it hands on and where to.
+    for warning in preset_warnings:
+        print(f"agent-sandbox: warning: {printable(warning)}", file=sys.stderr)
     argv = canonical_options(argv)
     if preset_mode:
         MODES.check_name(preset_mode, "the preset's --mode")
@@ -14653,9 +15379,19 @@ def launch(argv, floor_by=None, preset_bridge=None):
     merged = merge_config(argv, a, document) if document else argv
     if document:
         a = parse_args(merged)
+    if a.fix_plan:
+        a.dry_run = True  # (--fix-plan: the checks of a dry run, then what they lack as JSON; nothing is made)
     user_defaults, policy = load_user_defaults(a), load_policy()
+    if state is not None:
+        state.update(a=a, defaults=user_defaults)
     # The security mode's defaults join the options (modes.py); medium, the default, adds none.
     a = MODES.apply(launcher_namespace(), merged, a, document, config_path, user_defaults, policy)
+    if a.fix_plan:
+        a.dry_run = True
+    # The catalogs the preset chose for its servers (mcp:binwalk): what a missing one is added from (mcp_fixes).
+    a.preset_catalogs = dict(preset_catalogs)
+    if state is not None:
+        state["a"] = a
     floors = [m for m in (preset_mode, getattr(a, "mode_at_least", None)) if m]
     floor = max(floors, key=MODES.rank) if floors else None
     if floor and a.mode_origin != "--mode" and MODES.rank(floor) > MODES.rank(a.mode):
@@ -14671,7 +15407,7 @@ def launch(argv, floor_by=None, preset_bridge=None):
                 rest.append(token)
         return launch([argv[0], "--mode", floor, *rest],
                       floor_by=f"the preset's mode {floor}" if preset_mode == floor else f"--mode-at-least {floor}",
-                      preset_bridge=preset_bridge)
+                      preset_bridge=preset_bridge, preset_catalogs=preset_catalogs)
     a.mode_floor = floor_by  # a mode a floor chose is not the human's own choice (MODES.check: --ask allow)
     a.preset_bridge = preset_bridge  # (never from a project file, a kept start or a session's saved options)
     # The checked document is passed on; nothing re-reads the file later.
@@ -14725,12 +15461,11 @@ def launch(argv, floor_by=None, preset_bridge=None):
     # Remote folders (sshfs://): a mount point of sandbox-ai's own for each, in their place - checked as any folder.
     plan_remote_mounts(a)
     validate(a)
-    check_experimental_hermes(a)
     # The notes about the run itself: a session's (or a tmux start's) supervisor says them, and its terminal shows
     # what it says (sessions.wait_ready) - said here too, they came twice.
     relayed = detachable(a) and not a.dry_run
     if not relayed:
-        check_experimental_agents(a)
+        openhands_canvas_note(a)
     if not relayed and a.agent == "dsh" and a.binary is None and not a.probe and not getattr(a, "helper_of", None) \
             and load_dsh_module().note(a, dsh_session_browser(a)):
         # The chat in the terminal (sandbox-ai's) or the web UI: what it is and how to reach the other (its window
@@ -14744,7 +15479,25 @@ def launch(argv, floor_by=None, preset_bridge=None):
     a.run_id = getattr(a, "run_id", None) or (a.pod_name[len("agent-"):] if a.pod_name
                                               else f"{a.agent}-{uuid.uuid4().hex[:8]}")
     LOG.info("start", f"checked: {start_summary(a)}")
+    if a.fix_plan:
+        # --fix-plan of a start whose checks found nothing it needs: what it finds only when it runs (a service's
+        # image gone, its secret), and what it could still use (a login), as JSON; nothing made.
+        print(json.dumps(FIXES.plan_json(late_fixes(a) + optional_fixes(a), a.mode,
+                                         user_defaults.get("fix_questions") or FIXES.QUESTIONS[0]), indent=1))
+        return 0
+    late = late_fixes(a) if not a.dry_run and not a.probe else []
+    if late:
+        # (what prepare() below would refuse one at a time - a service's image gone, its secret - offered at once)
+        raise FIXES.Missing("Not started: " + "; ".join(item["missing"] for item in late), late)
     check_login(a)
+    if getattr(a, "llm", None) and not relayed and not a.probe:
+        # Its LLM server asked now (as the start asks it anyway): one that does not answer is said with what makes it
+        # answer - the start goes on (fixes.py: not needed; the agent's requests fail until it answers).
+        with contextlib.suppress(Exception):
+            item = llm_fix(a)
+            if item is not None:
+                print(f"agent-sandbox: note: {printable(item['missing'])}: {printable(item['why'])}; then: "
+                      + FIXES.command_text(item["commands"][0]), file=sys.stderr)
     for note in git_credentials_file(a)[1] + ([a.llm_vpn_note] if getattr(a, "llm_vpn_note", None) else []) + \
             registry_git_tokens(a)[1]:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
@@ -14758,6 +15511,8 @@ def launch(argv, floor_by=None, preset_bridge=None):
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     for note in load_cairn_module().notes(a) if getattr(a, "cairn_container", None) and not relayed else []:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
+    for note in load_artex_module().notes(a) if getattr(a, "artex_container", None) and not relayed else []:
+        print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     for note in [] if relayed else enforced_limits(a)[1]:
         print(f"agent-sandbox: {printable(note)}", file=sys.stderr)
     if a.backend == "bwrap" and resource_limits(a) and not limits_prefix(a) and not relayed:
@@ -14769,14 +15524,21 @@ def launch(argv, floor_by=None, preset_bridge=None):
     if getattr(a, "services", None) and not a.probe and not a.dry_run:
         # Each service's image there with its recorded ID (never pulled now), its secrets and variables at hand:
         # before a session detaches too, so that what is missing is said here.
-        load_services_module().prepare(a, launcher_namespace())
+        try:
+            load_services_module().prepare(a, launcher_namespace())
+        except ValueError as exc:
+            if FIXES.hostinit().MISSING not in str(exc):
+                raise
+            raise FIXES.Missing(str(exc), [FIXES.init_fix("a service of this start")]) from None
     if getattr(a, "browser_container", None) and not a.probe and not a.dry_run:
         load_browser_module().prepare(a, launcher_namespace())  # its image there (sandbox-ai build browser)
     if getattr(a, "cairn_container", None) and not a.probe and not a.dry_run:
         load_cairn_module().prepare(a, launcher_namespace())  # its image there (sandbox-ai build cairn)
+    if getattr(a, "artex_container", None) and not a.probe and not a.dry_run:
+        load_artex_module().prepare(a, launcher_namespace())  # its image there (sandbox-ai build artex)
     if detachable(a) and not a.dry_run:
         if a.backend == "bwrap" and not shutil.which("tmux"):
-            raise ValueError("Required tool missing: tmux")
+            raise FIXES.Missing("Required tool missing: tmux", [FIXES.tool_fix(["tmux"])])
         LOG.info("start", f"{printable(a.start_name)}: started as a session (a background supervisor runs it; its "
                           "output: its supervisor.log, named below)")
         # A background supervisor runs the sandbox; this terminal attaches (and may detach). It mounts the remote
@@ -14787,7 +15549,8 @@ def launch(argv, floor_by=None, preset_bridge=None):
             # the model --use-case picked is named in the session's options: its later runs keep that model
             argv = load_llm_module().pinned_argv(a, argv)
         # A wildcard below a shared service confirmed here (its question, --yes): kept as that confirmation.
-        return load_sessions_module().start(a, confirmed_argv(a, argv))
+        # (--fix and --fix-only are this start's: a session's later runs fix nothing unasked)
+        return load_sessions_module().start(a, FIXES.without_options(confirmed_argv(a, argv)))
     if a.dry_run:
         print(json.dumps({"agent": a.agent, "backend": a.backend, "mode": MODES.plan(a),
                           "workspace": str(Path(a.workspace).resolve()),
@@ -14826,6 +15589,9 @@ def launch(argv, floor_by=None, preset_bridge=None):
                           # --cairn: its container, its workers through the relay, the dispatcher's configuration
                           "cairn": load_cairn_module().plan(a, launcher_namespace())
                           if getattr(a, "cairn_container", None) else None,
+                          # --artex: its container, its listeners, the console's forward, its LLM, its data
+                          "artex": load_artex_module().plan(a, launcher_namespace())
+                          if getattr(a, "artex_container", None) else None,
                           "image_base": getattr(a, "image_base", None),
                           "allow": a.allow, "https_hosts": allowed_hosts(a), "host_wildcards": host_wildcards(a),
                           "shared_wildcards": shared_wildcards(a),
@@ -14910,9 +15676,10 @@ def launch(argv, floor_by=None, preset_bridge=None):
     required = ["podman"] if a.backend == "podman" else ["bwrap", "firejail", "nft", "setpriv", "newuidmap", "newgidmap"] + ([] if a.offline else ["slirp4netns"])
     if (a.tmux or a.tmux_socket_dir) and not a.probe and a.backend == "bwrap":
         required.append("tmux")
-    for tool in required:
-        if not shutil.which(tool):
-            raise ValueError(f"Required tool missing: {tool}")
+    lacking = [tool for tool in required if not shutil.which(tool)]
+    if lacking:
+        # A tool of the host: its distribution's package command is said with the refusal (never run: it needs root).
+        raise FIXES.Missing(f"Required tool missing: {lacking[0]}", [FIXES.tool_fix(lacking)])
     if a.backend == "bwrap" and not a.dry_run and (any(os.isatty(fd) for fd in (0, 1, 2))
                                                    or has_controlling_terminal()):
         check_tiocsti()
@@ -14920,7 +15687,7 @@ def launch(argv, floor_by=None, preset_bridge=None):
     if a.backend == "bwrap" and not a.probe:
         found = shutil.which(binary)
         if not found:
-            raise ValueError(f"Agent executable missing: {binary}")
+            raise FIXES.Missing(f"Agent executable missing: {binary}", bwrap_agent_fixes(a, binary))
         binary = str(Path(found).resolve(strict=True))
         if not binary.startswith("/usr/"):
             a.runtime.append(str(Path(binary).parent))
@@ -14928,8 +15695,9 @@ def launch(argv, floor_by=None, preset_bridge=None):
         for agent in [*companions(a), *([a.agent] if getattr(a, "helper_of", None) else [])]:
             found = shutil.which(agent)
             if not found:
-                raise ValueError(f"Agent executable missing: {agent} "
-                                 f"({'the helper' if agent == a.agent else '--with ' + agent})")
+                raise FIXES.Missing(f"Agent executable missing: {agent} "
+                                    f"({'the helper' if agent == a.agent else '--with ' + agent})",
+                                    bwrap_agent_fixes(a, agent))
             where = str(Path(found).resolve(strict=True).parent)
             if not where.startswith("/usr/") and where not in a.runtime:
                 a.runtime.append(where)
@@ -15072,6 +15840,8 @@ def launch(argv, floor_by=None, preset_bridge=None):
                 print(f"agent-sandbox: {line}", file=sys.stderr)
             for line in secret_guard_notes(a):
                 print(f"agent-sandbox: {line}", file=sys.stderr)
+            for line in no_inspect_notes(a):
+                print(f"agent-sandbox: {line}", file=sys.stderr)
             daily_compaction(a)
             a.proxy_dir = Path(tempfile.mkdtemp(prefix="agent-sandbox-proxy-"))
             cleanup.callback(unless_outlived, a, shutil.rmtree, a.proxy_dir, True)
@@ -15194,6 +15964,13 @@ def launch(argv, floor_by=None, preset_bridge=None):
                 cleanup.callback(unless_outlived, a, shutil.rmtree, relay, True)
             else:
                 cleanup.callback(remove_volume, a, cairn.relay_volume(a))
+        if getattr(a, "artex_container", None) and not a.probe:
+            # --artex: its runtime's configuration (no secret: its LLM's placeholders), the run's ARTEX folder
+            # (beside the run's directory, only yours: the console's address and this start's admin password) and
+            # the password itself, which reaches its container only through podman's environment.
+            artex = load_artex_module()
+            files[artex.CONFIG_FILE] = json.dumps(artex.config(a, launcher_namespace()))
+            cleanup.callback(unless_outlived, a, shutil.rmtree, artex.prepare_folders(a, launcher_namespace()), True)
         if getattr(a, "audio", None) == "virtual":
             files["audio.json"] = json.dumps({"kind": "virtual"})
         if nested(a):
@@ -15218,6 +15995,9 @@ def launch(argv, floor_by=None, preset_bridge=None):
         restart_script = agent_restart_script(a, binary)
         if restart_script:  # `sandbox-ai kits restart-agent`: the agent again in its tmux window, its conversation on
             files[AGENT_RESTART_FILE] = restart_script
+        # What an earlier run attached live (a launcher killed on the way): this start names its servers itself.
+        with contextlib.suppress(FileNotFoundError):
+            (session / AGENT_LIVE_MCP_FILE).unlink()
         for name, content in files.items():
             path = session / name
             path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)  # hermes/skills/NAME/SKILL.md

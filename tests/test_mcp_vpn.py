@@ -90,6 +90,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setattr(m, "PROC", tmp_path / "proc")
     (tmp_path / "proc").mkdir()
+    # A host whose rootless Podman sets limits (a systemd user session, the controllers delegated): its run lines
+    # carry them (tests/test_mcp_live_start.py: a host where it cannot).
+    monkeypatch.setattr(m.launcher(), "user_manager_running", lambda: True)
+    monkeypatch.setattr(m.launcher(), "delegated_controllers", lambda: None)
 
 
 class World:
@@ -488,7 +492,7 @@ def test_every_call_that_brings_a_server_up_hands_it_its_vpn():
     text = (SANDBOX / "agent_sandbox.py").read_text()
     assert "behind = mcp.vpn_for_servers(a, names)" in text
     # check_mcp_names, before anything starts: start_problems checks each server behind the start's VPN.
-    assert "found, instances, notes = mcp.start_problems(a, names, servers, present=present)" in text
+    assert "found, instances, notes = mcp.start_problems(a, names, servers, present=present, fixes=fixes)" in text
     assert "vpn_for_servers(a, [name])" in ast.get_source_segment(
         (SANDBOX / "mcp.py").read_text(), next(node for node in ast.parse((SANDBOX / "mcp.py").read_text()).body
                                                if isinstance(node, ast.FunctionDef) and node.name == "start_problems"))

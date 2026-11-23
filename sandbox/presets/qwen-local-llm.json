@@ -33,6 +33,6 @@
     "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent qwen asks it for the API Qwen Code uses.",
     "Qwen Code gets the server in its read-only system settings (/etc/qwen-code/settings.json): OpenAI-compatible auth, the server's /v1 URL, the model and its context window, the key as a placeholder the connection proxy replaces; its own loop protection is on (stop), the loop guard's instructions are appended to its system prompt; a session ends after 120 turns (model.maxSessionTurns: the loop guard's steps where you set them), a slow model is waited for 20 minutes without a byte (60 per answer). LM Studio, Ollama, vLLM and llama.cpp all work.",
     "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
-    "Qwen Code is not live-tested yet (a start says so); its image first: sandbox-ai build qwen."
+    "Its image first: sandbox-ai build qwen."
   ]
 }

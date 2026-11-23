@@ -203,7 +203,7 @@ def test_from_another_host_into_a_running_session(ui, sai, monkeypatch, tmp_path
     def resolve(dialog):
         ok = dialog.buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
         assert dialog.source.currentData() == ("local", "own") and "lab1" in dialog.unread.text()
-        assert not ok.isEnabled(), "nothing checked yet"
+        assert ok.isEnabled(), "nothing checked yet: Copy checks first (it was greyed out: 'immer ausgegraut')"
         dialog.check()
         states.append(ok.isEnabled())
         field, leave = dialog.folder_fields["/home/me/data"]
@@ -212,7 +212,7 @@ def test_from_another_host_into_a_running_session(ui, sai, monkeypatch, tmp_path
         keep = [b for b in dialog.secrets_holder.findChildren(QtWidgets.QPushButton) if "OWN_TOKEN" in b.text()]
         keep[0].click()  # typed here, kept on ct1 only; then checked again
         field.set_value("/srv/data")
-        assert not ok.isEnabled(), "the choices changed: checked again first"
+        assert ok.isEnabled() and dialog.checked_with is None, "the choices changed: Copy checks them again first"
         dialog.check()
         states.append(ok.isEnabled())
         return QtWidgets.QDialog.DialogCode.Accepted
@@ -226,6 +226,74 @@ def test_from_another_host_into_a_running_session(ui, sai, monkeypatch, tmp_path
     assert seen[-1][3]["dry_run"] is False and seen[-1][3]["attach"] == "api"
     assert seen[-1][3]["paths"] == {"/home/me/data": "/srv/data"}
     assert notices == ["api reaches own now"], "sandbox-ai's message of the attach, as it is"
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_a_dropped_folder_is_the_servers_default_folder_there(ui, sai, monkeypatch, language):
+    """(2026-11-22) A folder of the source dropped is a path of that machine that means nothing on the target: the
+    server gets its default folder there (sandbox-ai mcp copy --drop-path). The box says so, and the plan says
+    "the default folder on HOST" - never "left out" while a folder is mounted there after all."""
+    from sandbox_ai_app import i18n, mcp_copy_view
+    dropped = {**PLAN_PATH, "problems": [], "secrets": {**PLAN_PATH["secrets"], "missing": []},
+               "paths": [{**PLAN_PATH["paths"][0], "to": "default", "dropped": True}]}
+    seen = copy_answers(sai, monkeypatch, [PLAN_PATH, dropped])
+    i18n.set_language(language)
+    try:
+        words = {"box": "its default folder there", "said": "folder /home/me/data: the default folder on ct1"} \
+            if language == "en" else {"box": "sein Standardordner dort",
+                                      "said": "Ordner /home/me/data: der Standardordner auf ct1"}
+        dialog = ui.McpCopyDialog(None, sai, target="ct1")
+        try:
+            dialog.check()
+            _field, box = dialog.folder_fields["/home/me/data"]
+            assert box.text() == words["box"] and "/work" in box.toolTip()
+            box.setChecked(True)
+            dialog.check()
+            assert seen[-1][3]["drop_paths"] == ["/home/me/data"]
+            assert words["said"] in dialog.plan.toPlainText(), dialog.plan.toPlainText()
+        finally:
+            dialog.close()
+        lines = mcp_copy_view.plan_lines({"to": "ct1", "servers": [
+            {**dropped, "kind": "command", "paths": [{"kind": "option", "path": "/etc", "dropped": True}]}]})
+        assert any(line.strip() == ("folder /etc: left out" if language == "en" else "Ordner /etc: weggelassen")
+                   for line in lines), lines
+    finally:
+        i18n.set_language("en")
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_folder_defaults_of_the_source_are_said_and_ticked_as_defaults(ui, sai, monkeypatch, language):
+    """Journeys round 1: a server added without --mount (/work: the start's workspace, /out: its own folder) - the
+    check's plan said "folder @workspace: @workspace" and ".../mcp-folders/binwalk/out: default", and the dialog's
+    folder fields held the words "@workspace" and "default" as if they were folders of the target. They are the
+    server's defaults there: said so, the box "its default folder there" ticked, the field empty."""
+    from sandbox_ai_app import i18n, mcp_copy_view
+    own = "/home/me/.local/share/sandbox-ai/mcp-folders/binwalk/out"
+    plan = {**PLAN_PATH, "problems": [], "secrets": {**PLAN_PATH["secrets"], "missing": []}, "paths": [
+        {"kind": "mount", "target": "/work", "path": "@workspace", "mode": "ro", "to": "@workspace", "dropped": False},
+        {"kind": "mount", "target": "/out", "path": own, "mode": "rw", "to": "default", "dropped": False}]}
+    copy_answers(sai, monkeypatch, [plan])
+    i18n.set_language(language)
+    try:
+        dialog = ui.McpCopyDialog(None, sai, target="ct1")
+        try:
+            dialog.check()
+            text = dialog.plan.toPlainText()
+            assert "@workspace" not in text and ": default" not in text, text
+            if language == "en":
+                assert "folder the start's workspace: the workspace of the start that uses it on ct1" in text, text
+                assert f"folder {own}: a folder of its own on ct1, new and empty" in text, text
+            else:
+                assert "Ordner der Arbeitsordner des Starts: der Arbeitsordner des Starts, der ihn nutzt, auf ct1" \
+                    in text, text
+                assert f"Ordner {own}: ein eigener Ordner auf ct1, neu und leer" in text, text
+            for old in ("@workspace", own):
+                field, box = dialog.folder_fields[old]
+                assert field.value() == "" and box.isChecked(), (old, field.value())
+        finally:
+            dialog.close()
+    finally:
+        i18n.set_language("en")
 
 
 def test_from_another_host_on_the_mcp_page_and_declined(ui, sai, monkeypatch):
@@ -323,3 +391,167 @@ def test_e2e_the_entry_of_another_hosts_catalog_and_a_copy_to_it(fleet, tmp_path
     assert result["written"], result
     defined = json.loads((fleet["there"] / ".config/sandbox-ai/mcp.json").read_text())["own"]
     assert defined["mounts"] == [{"target": "/data", "host": str(there_data), "mode": "ro"}]
+
+
+# -- 0.1.212, reported live: "mcpserver kopieren auf anderen host funktioniert nicht, prüfen funktioniert manchmal
+# noch, aber kopieren ist immer ausgegraut"; "es sollte, wenn man einen MCP markiert hat, dann heißen: zu einem
+# anderen host". The page only had From another host…: it lists the servers of the OTHER hosts (never the one
+# selected), its Copy stayed greyed until a clean check of the very same choices (a folder typed after a check: greyed
+# again), and a check's late answer was shown for the server chosen since. --
+
+OK = QtWidgets.QDialogButtonBox.StandardButton.Ok
+CLEAN_FETCH = {**PLAN_PATH, "server": "fetch", "from_name": "fetch", "problems": [], "paths": [],
+               "secrets": {"needed": [], "missing": [], "known": True}}
+
+
+def copy_to_entry(page):
+    """The right-click menu's entry of Copy … to another host…, for the row selected."""
+    menu = widgets.menu_of(page.servers)
+    return next(action for action in menu.actions() if "another host" in action.text().replace("&", "")
+                and action.text().replace("&", "").startswith("Copy"))
+
+
+def test_the_selected_server_is_copied_to_another_host(ui, sai, monkeypatch):
+    seen = copy_answers(sai, monkeypatch, [CLEAN_FETCH])
+    page = ui.McpPage(sai)
+    button = page.copy_to_button
+    assert button.text() == "Copy to another host…" and not button.isEnabled()
+    assert "Select a server" in button.toolTip(), "greyed out, saying why"
+    page.servers.selectRow(0)
+    assert button.isEnabled() and button.text() == "Copy fetch to another host…", "the action names the server"
+    entry = copy_to_entry(page)
+    assert entry.isEnabled() and entry.text().replace("&", "") == "Copy fetch to another host…", "on right-click too"
+    page.servers.selectAll()
+    assert not button.isEnabled(), "one server at a time"
+    page.servers.clearSelection()
+    page.servers.selectRow(1)
+    assert button.text() == "Copy web to another host…"
+    page.servers.selectRow(0)
+    offered = []
+
+    def accept(dialog):
+        offered.append([dialog.target_choice.itemData(i) for i in range(dialog.target_choice.count())])
+        assert dialog.chosen() == ("local", "fetch") and dialog.target == "ct1"
+        assert dialog.buttons.button(OK).isEnabled(), "Copy checks first: never greyed out while a host is chosen"
+        dialog.buttons.button(OK).click()  # the check runs, clean: accepted
+        assert dialog.result() == QtWidgets.QDialog.DialogCode.Accepted
+        return dialog.result()
+    monkeypatch.setattr(ui.McpCopyDialog, "exec", accept)
+    page.copy_to_host()
+    assert offered == [["ct1"]], "every host but the server's own"
+    assert [dry for *_, choices in seen for dry in [choices.get("dry_run")]] == [True, False], "checked, then copied"
+    assert seen[-1][:3] == ("local", "ct1", ["fetch"])
+    assert [action for action, *_ in ui.asked] == ["mcp-copy"]
+    assert "ct1" in page.catalog_status.toPlainText() and "fetch" in page.catalog_status.toPlainText()
+
+
+def test_copy_to_another_host_in_german(ui, sai, monkeypatch):
+    from sandbox_ai_app import i18n
+    i18n.set_language("de")
+    try:
+        page = ui.McpPage(sai)
+        assert page.copy_to_button.text() == "Auf einen anderen Host kopieren…"
+        page.servers.selectRow(0)
+        assert page.copy_to_button.text() == "fetch auf einen anderen Host kopieren…"
+    finally:
+        i18n.set_language("en")
+
+
+def test_copy_checks_first_and_is_greyed_only_by_what_a_check_found(ui, sai, monkeypatch):
+    """From another host… with a folder to resolve: Copy runs the check; greyed only while the very choices checked
+    are blocked (its tooltip says why); a folder typed since makes Copy check again and copy."""
+    clean = {**PLAN_PATH, "problems": [], "secrets": {**PLAN_PATH["secrets"], "missing": []},
+             "paths": [{**PLAN_PATH["paths"][0], "to": "/srv/data"}]}
+    seen = copy_answers(sai, monkeypatch, [PLAN_PATH, clean])
+    dialog = ui.McpCopyDialog(None, sai, "ct1")
+    ok = dialog.buttons.button(OK)
+    assert dialog.chosen() == ("local", "own") and ok.isEnabled()
+    ok.click()
+    assert dialog.result() != QtWidgets.QDialog.DialogCode.Accepted, "the check found what to resolve: not copied"
+    assert not ok.isEnabled() and "resolve" in ok.toolTip().lower()
+    field, _leave = dialog.folder_fields["/home/me/data"]
+    field.set_value("/srv/data")
+    assert ok.isEnabled(), "the choices changed: Copy checks them"
+    ok.click()
+    assert dialog.result() == QtWidgets.QDialog.DialogCode.Accepted
+    assert seen[-1][3]["paths"] == {"/home/me/data": "/srv/data"} and seen[-1][3]["dry_run"] is True
+    dialog.deleteLater()
+
+
+def test_a_late_check_never_answers_for_the_server_chosen_since(ui, sai, monkeypatch):
+    """The race behind "prüfen funktioniert manchmal": a check's answer that comes after another server was chosen
+    (or another check was started) put the old server's plan and folder fields up; a folder typed there then made the
+    next check fail ("the source names no folder ...")."""
+    from sandbox_ai_app import mcp_copy_view
+    monkeypatch.setattr(sai, "host_mcp_elsewhere", lambda target: [
+        ("local", [{"name": "own", "kind": "image", "catalog": "own (mcp.json)"},
+                   {"name": "other", "kind": "image", "catalog": "own (mcp.json)"}], None)])
+    pending = []
+
+    def later(function, *args, done, **kw):
+        if args:  # the other hosts' servers (host_mcp_elsewhere, TARGET): at once
+            return at_once(function, *args, done=done)
+        pending.append((function, done))
+    monkeypatch.setattr(mcp_copy_view, "background", later)
+    monkeypatch.setattr(sai, "host_mcp_copy", lambda source, target, names, **choices: {
+        "from": source, "to": target, "servers": [{**PLAN_PATH, "server": names[0]}], "attached": [],
+        "written": False, "dry_run": True, "status": 1})
+    dialog = ui.McpCopyDialog(None, sai, "ct1")
+    dialog.check()  # own
+    dialog.source.setCurrentIndex(1)
+    assert dialog.chosen() == ("local", "other")
+    function, done = pending.pop(0)
+    done(function(), None)  # own's answer, late
+    assert dialog.folder_fields == {} and dialog.plan.toPlainText() == "", "own's plan is not other's"
+    dialog.check()
+    function, done = pending.pop(0)
+    done(function(), None)
+    assert "other" in dialog.plan.toPlainText() and dialog.folder_fields
+    dialog.deleteLater()
+
+
+def test_e2e_the_page_copies_its_server_to_another_host(fleet, tmp_path, qapp, monkeypatch):
+    """The real ./sandbox-ai of this machine and of ct1 (fake ssh): Copy own to another host… of the MCP servers page
+    of this machine, checked (its folder resolved in the dialog) and copied to ct1."""
+    from sandbox_ai_app import mcp_copy_view, ui as module
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    monkeypatch.setattr(module, "ask_first", lambda *a, **k: True)
+    for target in (module, mcp_copy_view):
+        monkeypatch.setattr(target, "background", at_once)
+    data, there_data = tmp_path / "data", fleet["there"] / "data"
+    data.mkdir()
+    there_data.mkdir()
+    (fleet["config"] / "mcp.json").write_text(json.dumps({"own": {
+        "image": f"registry.example.org/me/own@{DIGEST}", "mounts": [{"target": "/data", "host": str(data),
+                                                                      "mode": "ro"}]}}))
+    sai = backend.SandboxAI()
+    page = module.McpPage(sai)
+    rows = [page.servers.item(row, 0).text() for row in range(page.servers.rowCount())]
+    page.servers.selectRow(rows.index("own"))
+    assert page.copy_to_button.text() == "Copy own to another host…" and page.copy_to_button.isEnabled()
+
+    def resolve(dialog):
+        assert dialog.target == "ct1"
+        dialog.buttons.button(OK).click()
+        assert "to resolve" in dialog.plan.toPlainText(), dialog.plan.toPlainText()
+        dialog.folder_fields[str(data)][0].set_value(str(there_data))
+        dialog.buttons.button(OK).click()
+        return dialog.result()
+    monkeypatch.setattr(module.McpCopyDialog, "exec", resolve)
+    page.copy_to_host()
+    defined = json.loads((fleet["there"] / ".config/sandbox-ai/mcp.json").read_text())["own"]
+    assert defined["mounts"] == [{"target": "/data", "host": str(there_data), "mode": "ro"}]
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_a_folder_capped_to_its_catalog_entrys_mode_is_said(language):
+    """Round-1 review: a catalog server's folder is never more writable than its entry declares (mcp copy caps the
+    source's mode): the plan's "capped" lines are shown with the rest."""
+    from sandbox_ai_app import i18n, mcp_copy_view
+    capped = "/work: read-only, as its catalog entry declares (the source has it writable; ...)"
+    i18n.set_language(language)
+    try:
+        lines = mcp_copy_view.plan_lines({"to": "ct1", "servers": [{**PLAN_PATH, "problems": [], "capped": [capped]}]})
+        assert ("  capped: " if language == "en" else "  begrenzt: ") + capped in lines, lines
+    finally:
+        i18n.set_language("en")

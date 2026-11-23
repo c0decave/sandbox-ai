@@ -353,7 +353,7 @@ def test_the_start_script_refuses_letta_when_the_hooks_cannot_be_laid_in(tmp_pat
 
 def test_plan_says_what_is_on_and_off():
     plan = letta.plan(ns("letta", "updates"))
-    assert plan["version"] == letta.VERSION and plan["commit"] == letta.COMMIT and plan["experimental"]
+    assert plan["version"] == letta.VERSION and plan["commit"] == letta.COMMIT and "experimental" not in plan
     assert plan["telemetry"]["switchable"] is False and plan["backend"] == "local"
     assert plan["enabled"] == [{"feature": "updates", "hosts": ["registry.npmjs.org"]}]
     assert plan["off"] == ["cloud", "skills-install", "project-hooks"] and plan["own_sandbox"] is False
@@ -452,7 +452,6 @@ def test_the_option_counts_as_weakening_and_the_launcher_knows_letta():
     assert s.PROVIDERS["letta"] == [] and s.DANGER_ARGS["letta"] == letta.DANGER_ARGS
     assert s.UNSWITCHABLE_TELEMETRY["letta"] == "Letta Code" and "letta" in s.COMPANION_AGENTS
     assert s.pinned_telemetry_environment("letta") == letta.TELEMETRY_ENV
-    assert s.EXPERIMENTAL_PARTS["letta"] == {"agent": "letta"} and s.experimental_needs(["letta"]) == ["letta"]
 
 
 def test_letta_has_no_login_to_keep(tmp_path):
@@ -485,7 +484,8 @@ def test_a_presets_first_task_runs_headless():
     for name in ("coding-letta", "letta-local-llm"):
         preset = json.loads((ROOT / f"sandbox/presets/{name}.json").read_text())
         assert preset["agents"] == ["letta"] and preset["category"] == "agents" and preset["translations"]["de"]
-        assert any("not live-tested yet" in note for note in preset["notes"])
+        assert any("sandbox-ai build letta" in note for note in preset["notes"])
+        assert not any("live-tested" in note for note in preset["notes"])
 
 
 def test_kits_and_memory_for_letta():

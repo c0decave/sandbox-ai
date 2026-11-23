@@ -24,8 +24,7 @@ of every host, variable and switch named below), and runs of the binary against 
 with every other connection sent to a logging proxy that refuses it, while every non-loopback socket of the process
 was sampled every 0.1 s: with upstream's defaults, and with sandbox-ai's settings (below); the developer extension's
 shell tool ran a command in each. Not verified here: the image build (no Podman in this sandbox: the image builds in
-CI or on the host) and a start in a real sandbox; hence the release ships Goose as not live-tested yet
-(the start says so in one line; no opt-in).
+CI or on the host) and a start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (goose)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -79,8 +78,8 @@ own hosts and shows in the dry run's `"goose"`.
 | OpenTelemetry export (`otel_exporter_otlp_endpoint`, `OTEL_EXPORTER_OTLP_*`) | off unless configured | **always off, not switchable** | none |
 | Model catalog (`models.dev/api.json`, `model_catalog.rs`) | at every start of the CLI, ACP and `serve`, no setting turns it off | closed; the proxy refuses it quietly (a rule of the ruleset telemetry), so `--ask` never asks; the catalog Goose keeps serves | `model-catalog` (models.dev) |
 | Updates (`goose update`: the release from GitHub, its Sigstore provenance through GitHub's attestation API) | manual only; no automatic check (none in the source, none measured) | closed; `goose update` in the agent's arguments is refused; the install is read-only in the sandbox, so an update can never be applied | `updates` (github.com, api.github.com, objects.githubusercontent.com, release-assets.githubusercontent.com, tmaproduction.blob.core.windows.net): it fetches and checks; replacing the binary fails. A new Goose is a new review, then `sandbox-ai build goose` |
-| Local inference (`goose local-models search|download`: GGUF models from Hugging Face, llama.cpp in the binary) | on demand | closed; `goose local-models` in the agent's arguments is refused. This build has no GPU support (not the `-vulkan` asset): a model runs on the sandbox's processors within its memory limit | `local-inference` (huggingface.co, cdn-lfs.hf.co, cdn-lfs-us-1.hf.co, cdn-lfs-eu-1.hf.co, cas-bridge.xethub.hf.co) |
-| Scheduler (`goose schedule add|list|run-now`: cron-run recipes) | the jobs run inside `goose serve` (or the desktop app) | the jobs can be set up, nothing runs them | `scheduler`: `goose serve` in the background on 127.0.0.1:3284 with a key of its own per start (`GOOSE_SERVER__SECRET_KEY`), log `~/.local/state/goose/logs/sandbox-ai-serve.log`; the recipes run while the sandbox runs, reaching only what it lets through. `goose serve` on another address or without its key is refused |
+| Local inference (`goose local-models search\|download`: GGUF models from Hugging Face, llama.cpp in the binary) | on demand | closed; `goose local-models` in the agent's arguments is refused. This build has no GPU support (not the `-vulkan` asset): a model runs on the sandbox's processors within its memory limit | `local-inference` (huggingface.co, cdn-lfs.hf.co, cdn-lfs-us-1.hf.co, cdn-lfs-eu-1.hf.co, cas-bridge.xethub.hf.co) |
+| Scheduler (`goose schedule add\|list\|run-now`: cron-run recipes) | the jobs run inside `goose serve` (or the desktop app) | the jobs can be set up, nothing runs them | `scheduler`: `goose serve` in the background on 127.0.0.1:3284 with a key of its own per start (`GOOSE_SERVER__SECRET_KEY`), log `~/.local/state/goose/logs/sandbox-ai-serve.log`; the recipes run while the sandbox runs, reaching only what it lets through. `goose serve` on another address or without its key is refused |
 | Gateways (`goose gateway start --bot-token TOKEN telegram`; Telegram is the only one in 1.57.0) | on demand | closed; `goose gateway` in the agent's arguments is refused | `gateway:telegram` (api.telegram.org): the bot token of the secret `goose_telegram` as `TELEGRAM_BOT_TOKEN` (`sandbox-ai secrets set goose_telegram`), the gateway in the background (log `sandbox-ai-gateway-telegram.log`); who may talk to it: `goose gateway pair telegram` |
 | Recipes (`goose run --recipe FILE`, sub-recipes, `goose recipe`) | local files; a GitHub repository when `GOOSE_RECIPE_GITHUB_REPO` is set | local files work; a recipe repository needs its host (`--allow-github`) | - |
 | Subagents (`delegate`, the Summon extension) | on | on: they use the same provider and run inside the sandbox | - |
@@ -203,7 +202,7 @@ agent starts (`HookManager::load`).
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - With its telemetry off, Goose contacts nothing by default beyond its model and the model catalog, which the proxy
   refuses quietly; every other outbound part (updates, local models, gateways, the scheduler's server) is on demand,
@@ -216,5 +215,4 @@ agent starts (`HookManager::load`).
 - MCP-native, local models first-class (an OpenAI-compatible base URL, a model, a context limit, a turn limit).
 - Against: the consent dialog preselects Yes upstream (never shown here); the model catalog download has no switch
   (refused at the proxy instead); a large code base that releases weekly (about 1,128 crates); its scheduler and
-  gateway are long-running servers (off here, on the loopback when on); not live-tested in a sandbox yet. Hence
-  experimental, and the review is repeated for every release taken in.
+  gateway are long-running servers (off here, on the loopback when on); not live-tested in a sandbox when reviewed; it has been since (see above). The review is repeated for every release taken in.

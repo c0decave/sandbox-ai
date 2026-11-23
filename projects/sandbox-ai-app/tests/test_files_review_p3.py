@@ -543,3 +543,4 @@ def test_the_known_hosts_file_is_found_off_the_gui_thread(setup, tmp_path, monke
     assert wait(lambda: known.exists(), 10), page.message.text()
     assert asked_on and not any(asked_on), "ssh -G ran on the GUI thread"
     assert known.read_text() == "fake ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA\n"
+    assert wait(lambda: page.remotes, 10), page.message.text()  # (connected: the fixture ends the connection)

@@ -62,7 +62,7 @@ package-dir = { "sandbox_ai" = "sandbox", "sandbox_ai_app" = "projects/sandbox-a
 packages = ["sandbox_ai", "sandbox_ai_app"]
 
 [tool.setuptools.package-data]
-sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signers", "public_suffix_list.dat", "model_profiles.json", "model_usecases.json", "model_evidence.json", "mcp_catalog_tools.json", "prices.json", "cloud_models.json", "web/*",
+sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signers", "public_suffix_list.dat", "model_profiles.json", "model_usecases.json", "model_evidence.json", "live_evidence.json", "cairn_workers.json", "mcp_catalog_tools.json", "prices.json", "cloud_models.json", "web/*", "web/fonts/*",
               "launcher/*.py",
               "presets/*.json", "rulesets/*.json",
               "templates/*/*.md", "templates/*/*.json",
@@ -73,13 +73,17 @@ sandbox_ai = ["Containerfile.*", "build_image.sh", "release-signers", "mcp-signe
               "recipes/*/*.json", "recipes/*/*.txt", "recipes/*/*.yaml", "service-images/*/*",
               # the recipe android-dev: its lock, scripts, license acceptance and the SDK packages' package.xml
               "recipes/*/*.lock", "recipes/*/*.sh", "recipes/*/package-xml/*.xml",
+              # ARTEX's build: the files it removes from the pinned source, its patches, its tools' locks
+              "artex-build/*", "artex-build/patches/*", "artex-build/tools/*",
               "recipes/android-dev/android-sdk-license", "recipes/android-dev/android-emulator",
               "marketplace/.claude-plugin/*",
               "marketplace/plugins/*/.claude-plugin/*", "marketplace/plugins/*/commands/*"]
 # The same as projects/sandbox-ai-app/pyproject.toml's (tests/test_pypi_package.py).
 sandbox_ai_app = ["web/*.html", "web/*.js", "web/vendor/*.js", "web/vendor/*.css", "web/vendor/LICENSE.*",
                   "web/vendor/manifest.json",
-                  "icons/board/*.svg"]
+                  "icons/board/*.svg",
+                  # the fonts that come with the app (reading_fonts.py) and their licences
+                  "typefaces/*.ttf", "typefaces/*.otf", "typefaces/*.txt", "typefaces/fonts.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "sandbox_ai.agent_sandbox.__version__" }

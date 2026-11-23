@@ -219,8 +219,10 @@ def test_create_command_runs_in_the_pods_network_without_a_port(tmp_path):
                                  {"memory", "cpus", "pids"})
     joined = " ".join(argv)
     assert argv[:2] == ["podman", "create"] and "--pull=never" in argv and env == {}
-    for flag in ("--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--init"):
+    for flag in ("--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only"):
         assert flag in argv
+    # (no --init: that would be the host's catatonit - its PID 1 is sandbox-ai's own init, mounted with the runtime)
+    assert "--init" not in argv and "dst=/sandbox-browser/pid1.py,ro" in joined
     assert "--pod agent-claude-1234abcd" in joined and "--name agent-claude-1234abcd-service-browser" in joined
     assert "--user 0:0" in joined and "--memory 2g" in joined and "--pids-limit 1024" in joined
     # the pod's network: no network of its own, no port published, no host network
@@ -233,7 +235,9 @@ def test_create_command_runs_in_the_pods_network_without_a_port(tmp_path):
     assert "dst=/sandbox-browser/runtime.py,ro" in joined and "dst=/sandbox-browser/browser_runtime.py,ro" in joined
     assert "ca.pem" not in joined  # no CA shared (no proxy): nothing mounted
     assert "dst=/sandbox-browser/profile" not in joined  # fresh: a tmpfs in its container
-    assert argv[-3:] == [IMAGE_ID, "-I", "/sandbox-browser/browser_runtime.py"]
+    assert argv[-6:] == [IMAGE_ID, "-I", "/sandbox-browser/pid1.py", "/usr/bin/python3", "-I",
+                         "/sandbox-browser/browser_runtime.py"]
+    assert argv[argv.index("--entrypoint") + 1] == "/usr/bin/python3"
     argv, _ = b.create_command(a, "pod", a.browser_container, tmp_path, s, set())
     assert "--memory" not in argv and "--cpus" not in argv
 

@@ -170,7 +170,7 @@ def test_the_construct_tour_ticks_steps_off_as_they_are_done(window, qapp, tmp_p
     window.show()
     window.help.tour_requested.emit("own-construct")  # from the Help page
     panel = window.task_tour
-    assert panel.where.text() == "Your own construct, saved as a preset · 1 of 11"
+    assert panel.where.text() == "Your own construct, saved as a preset · 1 of 12"
     assert window.current_page() == "board" and window.tour_dock.isVisible()
     panel.go(1)  # add a mount
     qapp.processEvents()

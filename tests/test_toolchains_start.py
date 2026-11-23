@@ -103,6 +103,43 @@ def test_the_administrators_policy_can_forbid_toolchains(store):
     s.check_policy(parsed(), {"forbid": ["--toolchain"]})
 
 
+@pytest.mark.parametrize("policy, closed", [
+    # the ceiling: only the hosts the administrator allows (proxy.golang.org is not among them)
+    ({"version": 1, "allow_within": ["10.0.0.0/8"], "allow_hosts": ["pypi.org", "sum.golang.org"]},
+     ["proxy.golang.org", "--allow-github"]),
+    # --allow-host forbidden: no host of a toolchain either; its preset is another option
+    ({"version": 1, "forbid": ["--allow-host"]}, ["proxy.golang.org", "sum.golang.org"]),
+    # one preset forbidden
+    ({"version": 1, "forbid": ["--allow-github"]}, ["--allow-github"]),
+    # one host forbidden by its value
+    ({"version": 1, "forbid": ["--allow-host=proxy.golang.org"]}, ["proxy.golang.org"])])
+def test_the_administrators_policy_binds_a_toolchains_registries(store, policy, closed):
+    """Security review 2026-11-22: the policy is checked before the toolchains are planned, so the registries a
+    toolchain names joined --allow-host and the presets past the policy's ceiling (allow_hosts) and its forbidden
+    options. What the policy does not take stays closed (the toolchain is mounted all the same, said in a note)."""
+    a = parsed("--toolchain", "go")
+    s.check_policy(a, policy)
+    notes = s.plan_toolchains(a)
+    opened = [*a.allow_host, *(f"--allow-{p}" for p in a.presets)]
+    assert not set(closed) & set(opened), opened
+    assert [e["name"] for e in s.toolchain_entries(a)] == ["go"]
+    assert a.toolchain_plan["closed"] == closed
+    assert any("the administrator's policy" in note and "stay closed" in note for note in notes), notes
+    s.check_ceiling(a)  # what is opened stays inside the ceiling
+
+
+def test_the_policy_binds_a_toolchain_at_a_start_through_main(store, monkeypatch, capsys, tmp_path):
+    """The same through the launcher's main (a dry run): the plan opens nothing the policy's ceiling leaves out."""
+    monkeypatch.setattr(s, "load_policy", lambda *args: {"version": 1, "allow_within": ["10.0.0.0/8"],
+                                                         "allow_hosts": ["sum.golang.org"]})
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    assert s.main(["claude", "--toolchain", "go", "--workspace", str(workspace), "--no-config", "--dry-run"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["toolchain_hosts"] == {"opened": ["sum.golang.org"],
+                                       "closed": ["proxy.golang.org", "--allow-github"]}
+
+
 def mounts_of(run):
     return [run[i + 1] for i, value in enumerate(run) if value == "--mount"]
 
@@ -229,3 +266,27 @@ def test_the_dry_run_shows_the_toolchains_and_what_they_open(store, data_home, t
     missing = dry_run("--toolchain", "zig", env=env)
     assert missing.returncode != 0 and "zig is not in the store: sandbox-ai toolchain add zig" in missing.stderr
     assert "Traceback" not in missing.stderr
+
+
+def test_the_dry_run_takes_a_version_by_its_major_and_refuses_two_of_one_toolchain(tmp_path, signing_key, data_home):
+    """./sandbox-ai claude --toolchain jdk@17: the newest 17.x of the store, beside jdk 21 there; two versions of
+    one toolchain at a start are refused with the reason (one mount point)."""
+    key, trusted = signing_key
+    entries = [tt.entry(tmp_path, name="jdk", version=version, members={"bin": None, "bin/java": b"j",
+                                                                       "VERSION": version.encode()},
+                        commands={"java": "bin/java"}, hosts=[]) for version in ("21.0.13+9", "17.0.21+9")]
+    source = tt.catalog(tmp_path, entries, key)
+    for value in ("jdk", "jdk@17"):
+        tt.t.add(value, source, out=lambda line: None, keys=trusted)
+    env = {"XDG_DATA_HOME": str(data_home)}
+    for value, version in (("jdk@17", "17.0.21+9"), ("jdk", "21.0.13+9"), ("jdk@21.0.13+9", "21.0.13+9")):
+        result = dry_run("--toolchain", value, env=env)
+        assert result.returncode == 0, result.stderr
+        assert [(e["name"], e["version"], e["sandbox"]) for e in json.loads(result.stdout)["toolchains"]] == [
+            ("jdk", version, "/opt/toolchains/jdk")]
+    both = dry_run("--toolchain", "jdk", "--toolchain", "jdk@17", env=env)
+    assert both.returncode != 0 and "Traceback" not in both.stderr
+    assert "--toolchain jdk (jdk 21.0.13+9) and jdk@17 (jdk 17.0.21+9): one version of a toolchain per sandbox " \
+           "(both would be /opt/toolchains/jdk)" in both.stderr
+    missing = dry_run("--toolchain", "jdk@11", env=env)
+    assert missing.returncode != 0 and "sandbox-ai toolchain add jdk@11" in missing.stderr

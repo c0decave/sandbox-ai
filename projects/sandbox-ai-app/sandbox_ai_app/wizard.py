@@ -33,7 +33,7 @@ from . import list_fields as LF
 from . import widgets
 from . import wizard_llm as WL
 from . import model_profile_view as MPV
-from .board_view import LinesEdit, PathEdit, RulesEdit, choose_agent, combo_agent, experimental_note, fill_agent_combo
+from .board_view import LinesEdit, PathEdit, RulesEdit, choose_agent, combo_agent, fill_agent_combo
 from .preset_gallery import PlaceholderForm
 from .files import printable, printable_text
 from .model_combo import searchable
@@ -252,24 +252,15 @@ class AgentPage(Page):
         super().__init__(wizard, tr("Agent"), tr("Which coding agent runs in the sandbox."))
         self.agent = QComboBox()
         self.agent.setAccessibleName(tr("Agent"))
-        # Agents not live-tested yet are listed, marked and said so below the choice: board_view.fill_agent_combo.
         fill_agent_combo(self.agent, wizard.sai, wizard.settings().get("default_agent", "claude"))
-        self.experimental = plain_label("", role="secondary")
-        self.agent.currentIndexChanged.connect(self.agent_chosen)
         self.danger = QCheckBox(tr("without the agent's own approval prompts (-D; the sandbox stays in force)"))
         self.forbid(self.danger, "--dangerously-skip-permissions")
         self.form.addRow(tr("Agent"), self.agent)
-        self.form.addRow("", self.experimental)
         self.form.addRow("", self.danger)
-        self.agent_chosen()
 
     def chosen(self):
-        """The agent chosen (its name, never the badge shown with it)."""
+        """The agent chosen (its name)."""
         return combo_agent(self.agent)
-
-    def agent_chosen(self, _index=None):
-        self.experimental.setText(experimental_note(self.wizard_.sai, self.chosen()))
-        self.experimental.setVisible(bool(self.experimental.text()))
 
     def initializePage(self):  # noqa: N802
         existing = self.wizard_.existing
@@ -991,10 +982,10 @@ def fill_model_combo(combo, only, endpoints, agent, sai, value="", only_checked=
                 tip += "\n" + " ".join(f"[{tr(dict(WL.TAGS)[t])}]" for t in tags[item])
             combo.setItemData(index, widgets.safe_tooltip(tip), Qt.ItemDataRole.ToolTipRole)
             if hint:
-                combo.model().item(index).setEnabled(False)
+                widgets.set_row_enabled(combo, index, False)
         if value and combo.findData(value) < 0:  # typed into the options, a placeholder, or no longer registered
             combo.addItem(value, value)
-        MPV.mark_combo(combo, sai)  # each model's traffic light: how far the research supports it, per agent
+        MPV.mark_combo(combo, sai, agent=agent)  # each model's traffic light for this agent (the others named)
         combo.setCurrentIndex(max(0, combo.findData(value or "")))
         only.setChecked(bool(value) and bool(only_checked))
         only.setEnabled(bool(value))
@@ -1364,7 +1355,7 @@ class ProxyPage(Page):
         for value in ("public", "always", "off"):
             self.privacy.addItem(value, value)
             if value in wizard.forbidden.get("--privacy-check", set()):
-                self.privacy.model().item(self.privacy.count() - 1).setEnabled(False)
+                widgets.set_row_enabled(self.privacy, self.privacy.count() - 1, False)
         self.form.addRow(tr("Privacy check of pushes"), self.privacy)
 
     def initializePage(self):  # noqa: N802

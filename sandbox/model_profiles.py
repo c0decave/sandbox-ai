@@ -36,13 +36,18 @@ family's "all" may name its class ("tool_class"); a model of no class is classed
 (params_of: "gemma-4-12b-it" 12B), a model without either has no budget. tool_budget() says it; mcp_budget.py
 counts a start's MCP tools against it (a warning when they are more, never a refusal).
 
-The status of a measured pair is derived from the research's graded runs (model_evidence.py's RULES, written by
-scripts/profile_status.py with the numbers into the pair's "evidence" block; a hand-written evidence text stays as
-the block's "summary"); a pair without data keeps the status the research gave it by hand. evidence_text() says the
-block in words, evidence_short() in a few ("49 runs, 13 use cases, rounds 4-6") where a status is shown.
+A status comes only from measured runs: a pair's status is derived from the research's graded runs
+(model_evidence.py's RULES, written by scripts/profile_status.py with the numbers and the run ids into the pair's
+"evidence" block, the same numbers in model_evidence.json; a hand-written evidence text stays as the block's
+"summary"). A family has no status of its own, and a pair without that block shows none: a harness without its own
+measured pair is grey ("no data yet in OpenCode") whatever the model did in other harnesses, and a model's light is
+the best of its measured harnesses only (the user, 2026-11-22: "it says opencode verified" for a model never run in
+OpenCode). scripts/profile_status.py --check and tests/test_profile_status.py hold every status to the snapshot.
+evidence_text() says the block in words, evidence_short() in a few ("49 runs, 13 use cases, rounds 4-6") where a
+status is shown.
 
 What we know (KNOWLEDGE, information only, nothing applied): a family's "all" and a pair's entry may list short bullets
-of what was verified to work ("works"), what is known not to work ("fails") and what was not tested ("unknown"); a
+of what was verified to work ("works"), what is known not to work ("fails") and what is not known yet ("unknown"); a
 profile has the pair's first, then the family's. `llm profiles MODEL` and the app's "What we know" box show them.
 
 Standard library only; Python 3.9.
@@ -57,20 +62,20 @@ HERE = Path(__file__).resolve().parent
 TABLE = HERE / "model_profiles.json"
 SCHEMA = 1
 TABLE_LIMIT = 1 << 20
-# The research's statuses (profiles/index.json) and one of this table's own: known-bad, a pair (or a model) found not
-# to work, with the reason. "untested": no entry for the pair, the family's settings for every harness apply.
+# The research's statuses (profiles/index.json) and one of this table's own: known-bad, a pair found not to work, with
+# the reason. "untested": no measured pair (no data yet), the family's settings for every harness apply.
 STATUSES = ("verified", "smoke-only", "partial", "failing", "known-bad")
 WARNING_STATUSES = ("failing", "known-bad")
 UNTESTED = "untested"
 # What a status means: derived from the research's graded runs (model_evidence.RULES, scripts/profile_status.py;
-# docs/LOCAL_MODELS.md "How a status is derived"), a pair without data keeps the status the research gave it by hand.
+# docs/LOCAL_MODELS.md "How a status is derived"); a pair without measured runs has none (UNTESTED: no data yet).
 STATUS_TEXT = {"verified": "verified: at least 10 graded runs over 5 use cases incl. the sandbox's own (1a-1c), mean "
                            "at least 0.85, no use case below 0.50, no canary",
                "smoke-only": "only the smoke test ran",
                "partial": "something passed, short of verified (the evidence says what is missing)",
                "failing": "nothing passed",
                "known-bad": "known not to work",
-               UNTESTED: "this pair was not measured: the model's settings for every harness"}
+               UNTESTED: "no data yet for this harness: the model's settings for every harness apply"}
 # The launcher's agents (llm.AGENTS; a test keeps both the same).
 HARNESSES = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot",
              "letta", "pi")
@@ -112,7 +117,7 @@ SIGNS = {"works": "✓", "fails": "✗", "unknown": "?"}
 BULLET_LIMIT = 120
 BULLETS_MAX = 12
 FAMILY_KEYS = {"id", "label", "pattern", "examples", "all", "harnesses"}
-ALL_KEYS = {"status", "reason", "params", "loop_guard", "reasoning", "notes", "warnings", "mcp_max", "tools", "speed",
+ALL_KEYS = {"params", "loop_guard", "reasoning", "notes", "warnings", "mcp_max", "tools", "speed",
             "tool_class", *KNOWLEDGE}
 PAIR_KEYS = {"status", "reason", "evidence", "runs", "solved", "params", "loop_guard", "env", "notes", "warnings",
              "mcp_max", "tools", "speed", "round", "date", *KNOWLEDGE}
@@ -131,12 +136,12 @@ BUDGET_KEYS = {"tools", "params_below", "evidence", "short"}
 # a mixture of experts ("a4b", after a letter) nor a version ("v3") or a context length ("128k").
 PARAMS = re.compile(r"(?<![a-z0-9.])(?:(\d{1,3})x)?(\d{1,4}(?:\.\d{1,2})?)([bm])(?![a-z0-9])")
 # The traffic light: a status's colour, each colour's symbol (a shape of its own: readable without the colour) and
-# words, the colours from best to worst (a model's overall colour is its best harness's).
+# words, the colours from best to worst (a model's overall colour is its best measured harness's).
 LIGHTS = {"verified": "green", "smoke-only": "yellow", "partial": "yellow", "failing": "red", "known-bad": "red",
           UNTESTED: "grey"}
 LIGHT_ORDER = ("green", "yellow", "red", "grey")
 SYMBOLS = {"green": "✓", "yellow": "~", "red": "✗", "grey": "?"}
-LIGHT_WORDS = {"green": "verified", "yellow": "partly working", "red": "does not work", "grey": "not tested"}
+LIGHT_WORDS = {"green": "verified", "yellow": "partly working", "red": "does not work", "grey": "no data yet"}
 NO_DATA = "no data yet"
 HARNESS_NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "opencode2": "OpenCode 2",
                  "hermes": "Hermes", "dsh": "DeepSeek Harness", "qwen": "Qwen Code", "goose": "Goose",
@@ -318,6 +323,17 @@ def _block(entry):
     return evidence if isinstance(evidence, dict) else None
 
 
+def measured(entry):
+    """Whether the pair ENTRY's status comes from measured runs: a status with the derived evidence block
+    (scripts/profile_status.py's numbers). A status without it is shown as none (grey: no data yet)."""
+    return bool(entry) and entry.get("status") in STATUSES and _block(entry) is not None
+
+
+def status_of(entry):
+    """The status a pair ENTRY (None: none) is shown with: its own when it was measured, else UNTESTED."""
+    return entry["status"] if measured(entry) else UNTESTED
+
+
 def evidence_short(entry):
     """A derived pair's evidence in a few words, for where its status is shown: "13 runs, 5 use cases, rounds 4-6"
     (None: a hand-written evidence or none)."""
@@ -408,6 +424,9 @@ def check_table(document, check_param=None, check_layer=None):
             if not pattern.search(example) or earlier is not None:
                 raise ValueError(f"{where}: the example {example!r} does not match the pattern" if earlier is None
                                  else f"{where}: the example {example!r} matches {earlier['id']} before it")
+        if isinstance(family["all"], dict) and {"status", "reason"} & set(family["all"]):
+            raise ValueError(f"{where}: all has no status (or its reason): a status is a measured pair's, from its "
+                             "runs (scripts/profile_status.py); what is known of the model goes into works/fails")
         check_settings(family["all"], f"{where}: all", ALL_KEYS, None, check_param, check_layer)
         harnesses = family.get("harnesses", {})
         if not isinstance(harnesses, dict):
@@ -563,7 +582,7 @@ def match(model, agent, table):
     """The profile for MODEL in the harness AGENT ({id, name, family, label, agent, pair, status, reason, evidence,
     runs, solved, params, loop_guard, env, reasoning, notes, warnings, mcp_max, tools, tool_class, builtin, works,
     fails, unknown}), or None for a model of no family. The family's settings for every harness, the pair's own over them;
-    without an entry for the pair its status is the family's own (known-bad) or "untested"."""
+    its status is the pair's own measured one (measured_pair), else "untested" (no data yet in that harness)."""
     return _profile(family_of(model, table), agent, table)
 
 
@@ -573,17 +592,18 @@ def _profile(family, agent, table):
         return None
     every, pair = family["all"], family.get("harnesses", {}).get(agent)
     own = pair or {}
-    status = own.get("status") or every.get("status") or UNTESTED
-    reason = own.get("reason") or every.get("reason")
-    # A model known not to work says so whatever a pair's entry says; then the pair's own reason and warnings.
-    warnings = [entry["reason"] for entry in (every, own) if entry.get("status") in WARNING_STATUSES]
+    # Only this pair's own measured runs give it a status: never the family's, never another harness's.
+    status = status_of(pair)
+    reason = own.get("reason") if status != UNTESTED else None
+    warnings = [own["reason"]] if status in WARNING_STATUSES and own.get("reason") else []
     warnings += list(every.get("warnings", [])) + list(own.get("warnings", []))
     if (_block(own) or {}).get("warning"):  # a derived pair of a model whose injection canary fired
         warnings.append(_block(own)["warning"])
     builtin = [text for name, text in BUILTIN.get("*", ()) + BUILTIN.get(agent, ())]
     return {"id": f"{family['id']}/{agent}", "name": f"{family['id']} × {agent}", "family": family["id"],
             "label": family.get("label", family["id"]), "pattern": family["pattern"], "agent": agent,
-            "pair": pair is not None, "status": status, "status_text": STATUS_TEXT[status],
+            "pair": pair is not None, "measured_pair": status != UNTESTED, "status": status,
+            "status_text": STATUS_TEXT[status],
             "light": light(status), "symbol": SYMBOLS[light(status)], "reason": reason,
             "evidence": evidence_text(own), "measured": evidence_short(own),
             "measured_counts": evidence_counts(own), "runs": own.get("runs"),
@@ -620,7 +640,10 @@ def values_text(values):
 
 
 def headline(profile):
-    """"profile qwen3-coder-next x opencode (verified)" - with "this pair untested" for the family's settings."""
+    """"profile qwen3-coder-next x opencode (verified)"; "(no data yet in OpenCode)" for a pair without measured
+    runs (the family's settings)."""
+    if profile["status"] == UNTESTED:
+        return f"profile {profile['name']} ({NO_DATA} in {HARNESS_NAMES.get(profile['agent'], profile['agent'])})"
     return f"profile {profile['name']} ({profile['status'].replace('-', ' ')})"
 
 
@@ -636,10 +659,9 @@ def rows(table, model=None, agent=None):
             every = family["all"]
             found.append({"id": f"{family['id']}/*", "name": f"{family['id']} × *", "family": family["id"],
                           "label": family.get("label", family["id"]), "pattern": family["pattern"], "agent": "*",
-                          "pair": False, "status": every.get("status") or UNTESTED,
-                          "status_text": STATUS_TEXT[every.get("status") or UNTESTED],
-                          "light": light(every.get("status")), "symbol": SYMBOLS[light(every.get("status"))],
-                          "reason": every.get("reason"),
+                          "pair": False, "measured_pair": False, "status": UNTESTED,
+                          "status_text": STATUS_TEXT[UNTESTED], "light": "grey", "symbol": SYMBOLS["grey"],
+                          "reason": None,
                           "evidence": None, "measured": None, "measured_counts": None, "runs": None, "solved": None,
                           "params": dict(every.get("params", {})),
                           "loop_guard": dict(every.get("loop_guard", {})), "env": {},
@@ -655,7 +677,7 @@ def rows(table, model=None, agent=None):
 # --- the traffic light: how far a model is supported, per harness (support) ------------------------------------------
 
 def light(status):
-    """The colour of STATUS: green, yellow, red, or grey (not tested, or a status this module does not know)."""
+    """The colour of STATUS: green, yellow, red, or grey (no data yet, or a status this module does not know)."""
     return LIGHTS.get(status, "grey")
 
 
@@ -702,7 +724,7 @@ def _harness_support(family, agent, table):
     values = settings(profile)
     return {"agent": agent, "harness": HARNESS_NAMES.get(agent, agent), "status": profile["status"],
             "status_text": profile["status_text"], "light": profile["light"], "symbol": profile["symbol"],
-            "reason": entry.get("reason"), "evidence": evidence_text(entry), "measured": evidence_short(entry),
+            "reason": profile["reason"], "evidence": evidence_text(entry), "measured": evidence_short(entry),
             "measured_counts": evidence_counts(entry), "runs": entry.get("runs"), "solved": entry.get("solved"),
             "rounds": rounds, "date": _date(entry, rounds, table),
             "speed": _speed(entry, every), "works": list(entry.get("works", [])), "fails": list(entry.get("fails", [])),
@@ -715,11 +737,11 @@ def _harness_support(family, agent, table):
 def support(model, table):
     """How far MODEL is supported, from TABLE (read at run time: nothing here names a model): {model, family (None:
     no family matches, nothing known), label, names (each harness's name to show), light (the best colour of its
-    harnesses), symbol, light_text, text
-    ("green in OpenCode, Claude Code; red in Codex", "not tested: no data yet"), by_light {colour: [agent]} (the
-    measured pairs), harnesses [the measured pairs' details, in the table's order], untested [agents without an
-    entry], status and reason (the family's own, for every harness), speed, settings and settings_text (the family's
-    for every harness), works, fails, unknown and notes (the family's)}."""
+    measured harnesses, grey without one), symbol, light_text, text
+    ("green in OpenCode, Claude Code; red in Codex", "no data yet"), by_light {colour: [agent]} (the measured
+    pairs), harnesses [the measured pairs' details, in the table's order], untested [agents without a measured pair:
+    no data yet there, whatever the others say], status and reason (None: a family has no status of its own), speed,
+    settings and settings_text (the family's for every harness), works, fails, unknown and notes (the family's)}."""
     return family_support(family_of(model, table), model, table)
 
 
@@ -728,53 +750,50 @@ def family_support(family, model, table):
     if family is None:
         return {"model": model, "family": None, "label": None, "names": dict(HARNESS_NAMES), "light": "grey",
                 "symbol": SYMBOLS["grey"],
-                "light_text": LIGHT_WORDS["grey"], "text": f"{LIGHT_WORDS['grey']}: {NO_DATA}",
+                "light_text": LIGHT_WORDS["grey"], "text": NO_DATA,
                 "by_light": {colour: [] for colour in LIGHT_ORDER[:3]}, "harnesses": [], "untested": list(HARNESSES),
                 "status": None, "reason": None, "speed": None, "settings": {}, "settings_text": "", "works": [],
                 "fails": [], "unknown": [], "notes": []}
     every = family["all"]
-    harnesses = [_harness_support(family, agent, table) for agent in family.get("harnesses", {})]
+    # Only measured pairs have a light; every other harness is grey (no data yet), never the family's or a
+    # neighbour's colour.
+    pairs = family.get("harnesses", {})
+    harnesses = [_harness_support(family, agent, table) for agent in pairs if measured(pairs[agent])]
     by_light = {colour: [h["agent"] for h in harnesses if h["light"] == colour] for colour in LIGHT_ORDER[:3]}
-    own = light(every.get("status"))  # the family's own status: every harness without an entry
-    untested = [agent for agent in HARNESSES if agent not in family.get("harnesses", {})]
+    done = {h["agent"] for h in harnesses}
+    untested = [agent for agent in HARNESSES if agent not in done]
     shown = [colour for colour in LIGHT_ORDER[:3] if by_light[colour]]
-    colour = next((c for c in LIGHT_ORDER if c in shown or (c == own and untested)), "grey")
+    colour = shown[0] if shown else "grey"
     parts = [f"{c} in {', '.join(HARNESS_NAMES.get(a, a) for a in by_light[c])}" for c in shown]
-    if own != "grey" and untested:
-        parts.append(f"{own} in every {'other ' if harnesses else ''}harness: {STATUS_TEXT[every['status']]}")
     values = {**every.get("params", {}), **{f"loop_guard.{k}": v for k, v in every.get("loop_guard", {}).items()}}
     if every.get("tools") is not None:
         values["tools"] = every["tools"]
     return {"model": model, "family": family["id"], "label": family.get("label", family["id"]),
             "names": dict(HARNESS_NAMES), "light": colour,
             "symbol": SYMBOLS[colour], "light_text": LIGHT_WORDS[colour],
-            "text": "; ".join(parts) or f"{LIGHT_WORDS['grey']}: {NO_DATA}", "by_light": by_light,
-            "harnesses": harnesses, "untested": untested, "status": every.get("status"), "reason": every.get("reason"),
+            "text": "; ".join(parts) or NO_DATA, "by_light": by_light,
+            "harnesses": harnesses, "untested": untested, "status": None, "reason": None,
             "speed": _speed(every), "settings": values, "settings_text": values_text(values),
             "works": list(every.get("works", [])), "fails": list(every.get("fails", [])),
             "unknown": list(every.get("unknown", [])), "notes": list(every.get("notes", []))}
 
 
 def support_cell(found):
-    """FOUND (support()) in a table's cell: "✓ green: opencode, codex, claude +4", "✗ red: every harness",
-    "? not tested"."""
+    """FOUND (support()) in a table's cell: "✓ green: opencode, codex, claude +4", "? no data yet"."""
     colour = found["light"]
     agents = found["by_light"].get(colour) or []
     if not agents:
-        return f"{SYMBOLS[colour]} {colour}: every harness" if colour != "grey" else \
-            f"{SYMBOLS['grey']} {LIGHT_WORDS['grey']}"
+        return f"{SYMBOLS['grey']} {LIGHT_WORDS['grey']}"
     more = f" +{len(agents) - 3}" if len(agents) > 3 else ""
     return f"{SYMBOLS[colour]} {colour}: {', '.join(agents[:3])}{more}"
 
 
 def support_lines(found):
     """FOUND (support()) as lines: the light, then per measured harness its status, evidence, round and date, what
-    worked (✓) and failed (✗), the recommended settings and the speed; the harnesses not tested."""
+    worked (✓) and failed (✗), the recommended settings and the speed; the harnesses with no data yet."""
     lines = [f"{found['symbol']} {found['text']}"]
     if found["family"] is None:
         return lines
-    if found.get("reason") and found.get("status") in WARNING_STATUSES:
-        lines.append(f"  {found['reason']}")
     for pair in found["harnesses"]:
         when = ", ".join(filter(None, [pair.get("measured") or ", ".join(pair["rounds"]), pair["date"]]))
         lines.append(f"  {pair['symbol']} {pair['harness']}: {pair['status'].replace('-', ' ')}"
@@ -788,5 +807,5 @@ def support_lines(found):
             lines.append(f"      speed: {pair['speed']}")
     if found["untested"]:
         names = ", ".join(HARNESS_NAMES.get(agent, agent) for agent in found["untested"])
-        lines.append(f"  {SYMBOLS['grey']} not tested in: {names}" + ("" if found.get("status") else f" ({NO_DATA})"))
+        lines.append(f"  {SYMBOLS['grey']} {NO_DATA} in: {names}")
     return lines

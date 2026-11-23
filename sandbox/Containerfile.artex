@@ -1,0 +1,143 @@
+# ARTEX's own container of sandbox-ai (`sandbox-ai build artex`; --artex, sandbox/artex.py, docs/ARTEX.md):
+# ARTEX (RuoJi6/ARTEX v0.3.15, AGPL-3.0) - an AI penetration-testing platform, its Go server with the web console
+# embedded - beside the agent in its pod. Built here from the reviewed source only: never a prebuilt image, a
+# release zip, upstream's install.sh/update.sh or its Dockerfile.
+# - Its source: GitHub's archive of the reviewed commit, its git tree checked (ARTEX_TREE); then sandbox-ai's changes,
+#   each a file beside this one: artex-build/REMOVE (the self-update: the selfupdate package, its routes, its tests)
+#   and artex-build/patches/*.patch (the start-time self-update install gone, loopback-only listeners, the admin
+#   password set by sandbox-ai before ARTEX listens, no first-caller setup, no cross-origin access, a token in the
+#   URL only for event streams, the system's DNS instead of public resolvers, the pinned browser MCP). Checked after
+#   they apply, and again in the built binary.
+# - Its console: `npm ci --ignore-scripts` of its own package-lock.json (every package's integrity checked by npm),
+#   Next.js's telemetry off, a static export embedded into the binary.
+# - Its server: Go modules downloaded through proxy.golang.org, checked against go.sum and the checksum database
+#   (GOSUMDB on, go mod verify), vetted, sandbox-ai's own Go tests of its patches run, built without cgo, no
+#   toolchain download (GOTOOLCHAIN=local), Go's telemetry off.
+# - What it runs on: Debian 12 at a fixed snapshot (snapshot.debian.org, apt's signatures checked) with exactly the
+#   versions named below - PostgreSQL 15 (its database), Chromium (its browser), nmap, ripgrep, python3 (sandbox-ai's
+#   runtime, ARTEX's script tools); Node 22 of the pinned image (no npm: nothing is installed at run time); Playwright's
+#   MCP and CLI hash-locked (artex-build/tools/package-lock.json). Every base image by its digest; every version at
+#   least 14 days old when pinned (the dates beside them).
+# No agent of sandbox-ai is in this image. sandbox-ai's runtime (artex_runtime.py) is mounted read-only at every start.
+
+# debian:bookworm-20261104-slim (pushed 2026-11-05), node:22.23.4-bookworm-slim (2026-11-05),
+# golang:1.26.10-bookworm (2026-11-05; ARTEX's go.mod asks go 1.26.3): multi-architecture digests.
+ARG DEBIAN_IMAGE=docker.io/library/debian:bookworm-20261104-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+ARG NODE_IMAGE=docker.io/library/node:22.23.4-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
+ARG GO_IMAGE=docker.io/library/golang:1.26.10-bookworm@sha256:5de7c99eb78ca5e515a4c340235d0955ec5964a5071c492c15503d7c267da473
+# The Debian archive as it was then (the base image's own date): every package version fixed.
+ARG DEBIAN_SNAPSHOT=20261104T000000Z
+
+# -- the source: the reviewed commit, its tree checked, sandbox-ai's changes applied and checked --
+FROM ${DEBIAN_IMAGE} AS source
+ARG DEBIAN_SNAPSHOT
+# The reviewed commit (tag v0.3.15) and its git tree; another one fails the check below.
+ARG ARTEX_COMMIT=a91b27feb7168c1486f827559bc48a589a920012
+ARG ARTEX_TREE=22083e0bb9db66b76b94814f368d0d1dc5c3adbb
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s bookworm main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s bookworm-security main\n' \
+       "${DEBIAN_SNAPSHOT}" "${DEBIAN_SNAPSHOT}" > /etc/apt/sources.list \
+    && apt-get -o Acquire::Retries=5 update && apt-get install -y --no-install-recommends git ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL --proto '=https' --tlsv1.2 --retry 5 -o /tmp/artex.tar.gz \
+       "https://codeload.github.com/RuoJi6/ARTEX/tar.gz/${ARTEX_COMMIT}" \
+    && test "$(gzip -dc /tmp/artex.tar.gz | git get-tar-commit-id)" = "${ARTEX_COMMIT}" \
+    && mkdir /src && tar -xzf /tmp/artex.tar.gz -C /src --strip-components=1 --no-same-owner \
+    && git -C /src init --quiet && git -C /src add --all --force . \
+    && test "$(git -C /src write-tree)" = "${ARTEX_TREE}" \
+    && rm -rf /src/.git /tmp/artex.tar.gz
+COPY artex-build/REMOVE /sandbox-ai/REMOVE
+COPY artex-build/patches/ /sandbox-ai/patches/
+RUN cd /src \
+    && grep -v '^#' /sandbox-ai/REMOVE | grep . | while read -r path; do test -e "$path" && rm -r -- "$path" || exit 1; done \
+    && for patch in /sandbox-ai/patches/*.patch; do git apply --verbose "$patch" || exit 1; done \
+    && test ! -e selfupdate && test ! -e server/update.go \
+    && ! grep -rIq --include='*.go' -e 'artex/selfupdate' -e 'HandleFunc("[A-Z]* /api/update/' \
+         -e 'HandleFunc("POST /api/auth/init"' -e 'Set("Access-Control-Allow-Origin"' -e 'dnsx.DefaultResolvers' . \
+    && grep -q 'admin-password-file' cmd/artex/main.go && grep -q 'loopbackOnly("-addr"' cmd/artex/main.go \
+    && grep -q 'return sandboxOrigin(root)' server/server.go && grep -q 'func SetAdminPassword' server/auth.go \
+    && grep -q "'playwright-mcp'" db/db.go
+
+# -- the console: its own lock, no install scripts, no telemetry; a static export --
+FROM ${NODE_IMAGE} AS web
+COPY --from=source /src/web /web
+WORKDIR /web
+ENV NEXT_TELEMETRY_DISABLED=1 NEXT_EXPORT=1 npm_config_ignore_scripts=true npm_config_audit=false \
+    npm_config_fund=false npm_config_update_notifier=false
+# webpack, not Next 16's default Turbopack: Turbopack's production build was killed at about 5 GB of memory where
+# webpack's built the same console (sandbox-ai's check of 2026-11-23); NODE_OPTIONS bounds its heap.
+RUN npm ci --ignore-scripts \
+    && NODE_OPTIONS=--max-old-space-size=3072 node node_modules/next/dist/bin/next build --webpack \
+    && test -f out/index.html && rm -rf node_modules
+
+# -- the server: go.sum and the checksum database, no cgo, the console embedded --
+FROM ${GO_IMAGE} AS build
+COPY --from=source /src /src
+COPY --from=web /web/out /src/server/webui/dist
+WORKDIR /src
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly GOTOOLCHAIN=local GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+    GONOSUMDB= GONOSUMCHECK= GOPRIVATE= GOINSECURE=
+RUN go telemetry off \
+    && go mod download && go mod verify \
+    && go vet ./cmd/artex ./server ./enrich ./db \
+    && go test -count=1 -run 'TestLoopbackOnly' ./cmd/artex && go test -count=1 -run 'TestSystemResolvers' ./enrich \
+    && go test -count=1 -run 'TestLoopbackHost|TestSameOrigin|TestSandboxOrigin|TestCorsAddsNoHeader|TestExtractToken|TestAuthInitAlwaysRefuses|TestSetAdminPassword' ./server \
+    && go build -trimpath -tags embedui -ldflags "-s -w -X main.version=v0.3.15+sandbox-ai" -o /out/artex ./cmd/artex \
+    && test -z "$(go list -deps ./cmd/artex | grep -e '/selfupdate$')" \
+    && ! grep -aq -e 'GET /api/update/' -e 'POST /api/update/' -e 'POST /api/auth/init' /out/artex \
+    && grep -aq 'sandbox-ai' /out/artex \
+    && /out/artex -h 2>&1 | grep -q -- '-admin-password-file' \
+    && ! /out/artex -addr 0.0.0.0:8787 -admin-password-file /dev/null 2>/tmp/addr.log \
+    && grep -q 'listens on the loopback only' /tmp/addr.log \
+    && ! /out/artex -addr 127.0.0.1:8787 -proxy :8788 -admin-password-file /dev/null 2>/tmp/proxy.log \
+    && grep -q 'listens on the loopback only' /tmp/proxy.log \
+    && ! /out/artex 2>/tmp/password.log && grep -q 'admin-password-file is required' /tmp/password.log
+
+# -- Playwright's MCP and CLI: hash-locked, no install scripts, no browser download (the image's Chromium) --
+FROM ${NODE_IMAGE} AS tools
+COPY artex-build/tools/package.json artex-build/tools/package-lock.json /opt/artex/tools/
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN cd /opt/artex/tools && npm ci --ignore-scripts --omit=dev --no-audit --no-fund \
+    && node node_modules/@playwright/mcp/cli.js --version
+
+# -- what runs --
+FROM ${DEBIAN_IMAGE}
+ARG DEBIAN_IMAGE
+ARG DEBIAN_SNAPSHOT
+ARG ARTEX_COMMIT=a91b27feb7168c1486f827559bc48a589a920012
+ARG ARTEX_TREE=22083e0bb9db66b76b94814f368d0d1dc5c3adbb
+# Exactly these versions (the snapshot's): PostgreSQL 15.19, Chromium 156.0.8078.79, nmap 7.93.
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s bookworm main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s bookworm-security main\n' \
+       "${DEBIAN_SNAPSHOT}" "${DEBIAN_SNAPSHOT}" > /etc/apt/sources.list \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get install -y --no-install-recommends ca-certificates python3 \
+       postgresql-15=15.19-0+deb12u1 chromium=156.0.8078.79-1~deb12u1 nmap=7.93+dfsg1-1 \
+       ripgrep curl git jq unzip bind9-dnsutils whois netcat-openbsd fonts-liberation libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* /var/lib/postgresql/15/main /etc/postgresql/15/main
+COPY --from=tools /usr/local/bin/node /usr/local/bin/node
+COPY --from=tools /opt/artex/tools /opt/artex/tools
+COPY --from=build /out/artex /opt/artex/bin/artex
+COPY --from=source /src/skills /opt/artex/skills
+COPY --from=source /src/LICENSE /src/README.md /opt/artex/
+# sandbox-ai's changes beside it (the AGPL's offer of the source of what runs: upstream's commit plus these).
+COPY artex-build/ /opt/artex/sandbox-ai/
+RUN ln -s /opt/artex/tools/node_modules/@playwright/mcp/cli.js /usr/local/bin/playwright-mcp \
+    && ln -s /opt/artex/tools/node_modules/@playwright/cli/playwright-cli.js /usr/local/bin/playwright-cli \
+    && printf 'ARTEX %s\nsource: https://github.com/RuoJi6/ARTEX commit %s (git tree %s)\nchanges: /opt/artex/sandbox-ai (REMOVE, patches/)\nlicence: AGPL-3.0 (/opt/artex/LICENSE)\n' \
+       "v0.3.15" "${ARTEX_COMMIT}" "${ARTEX_TREE}" > /opt/artex/SOURCE \
+    && useradd --uid 1000 --user-group --no-create-home --home-dir /var/lib/artex/home --shell /usr/sbin/nologin artex \
+    && mkdir -p /var/lib/artex /sandbox-artex && chown 1000:1000 /var/lib/artex && chmod 700 /var/lib/artex
+RUN /opt/artex/bin/artex -h 2>&1 | grep -q -- '-admin-password-file' \
+    && node --version && playwright-mcp --version && playwright-cli --help >/dev/null \
+    && /usr/lib/chromium/chromium --version && nmap --version && rg --version \
+    && /usr/lib/postgresql/15/bin/postgres --version && python3 --version \
+    && ! command -v npm && ! command -v npx
+LABEL sandbox-ai.role=artex
+LABEL sandbox-ai.base=${DEBIAN_IMAGE}
+LABEL sandbox-ai.artex-commit=${ARTEX_COMMIT}
+ENV HOME=/tmp/home NORMA_RIPGREP_NO_INSTALL=1 NEXT_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1
+USER 1000:1000
+WORKDIR /tmp
+ENTRYPOINT ["/usr/bin/python3", "-I", "/sandbox-artex/artex_runtime.py"]
+CMD ["serve"]

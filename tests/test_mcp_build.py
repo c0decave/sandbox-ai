@@ -414,9 +414,10 @@ def test_nothing_is_built_without_a_yes(host):
                           f"/work={host.apps}", "--yes", option, value)
         assert result.returncode == 1 and "nothing is built" in result.stderr, result.stderr
     assert host.build_calls() == []
-    # A folder its entry needs is asked for before anything is downloaded or built.
-    result = host.run("mcp", "add", "jadx", "--build", "--unsigned", "--catalog", host.catalog, "--yes")
-    assert result.returncode == 1 and "needs --mount /work" in result.stderr and host.build_calls() == []
+    # A folder that is not there is said before anything is downloaded or built (none given: its default, 0.1.212).
+    result = host.run("mcp", "add", "jadx", "--build", "--unsigned", "--catalog", host.catalog, "--yes", "--mount",
+                      f"/work={host.apps}/not-there")
+    assert result.returncode == 1 and "a read-only folder must be there" in result.stderr and host.build_calls() == []
 
 
 def test_a_signed_image_is_never_built_over(host):
@@ -457,8 +458,12 @@ def test_only_what_is_committed_is_built(host):
 
 # --- a start that names such a server ------------------------------------------------------------------------------
 
+QUESTION = b"[Y]es, all / [c]hoose / [n]o:"  # the start's one question about everything it lacks (sandbox/fixes.py)
+
+
 def on_terminal(host, *args, answer="y", timeout=120, env=None):
-    """`sandbox-ai ARGS` on a pseudo-terminal, ANSWER given to the build question: (exit status, what it said)."""
+    """`sandbox-ai ARGS` on a pseudo-terminal, ANSWER given to the start's question about what it lacks: (exit
+    status, what it said)."""
     controller, terminal = pty.openpty()
     process = subprocess.Popen(host.command(*args), cwd=host.workspace, env={**host.env, **(env or {})},
                                stdin=terminal, stdout=terminal, stderr=terminal, close_fds=True)
@@ -474,7 +479,7 @@ def on_terminal(host, *args, answer="y", timeout=120, env=None):
             if not more:
                 break
             said += more
-            if not answered and b"build it? [y/N]" in said:
+            if not answered and QUESTION in said:
                 os.write(controller, answer.encode() + b"\n")
                 answered = True
         elif process.poll() is not None:
@@ -508,11 +513,15 @@ def test_a_start_on_a_terminal_asks_builds_and_goes_on(host):
     host.add_image("localhost/codex-sandbox:latest")
     status, said = on_terminal(host, *START, "--mcp-mount", f"jadx:/work={host.apps}", "--dry-run", answer="y")
     # A dry run (the app's and the Board's checks, often) neither asks nor reads the catalogs for it: refused as before.
-    assert "build it? [y/N]" not in said and "Unknown MCP server: jadx" in said and host.build_calls() == []
+    asked = QUESTION.decode()
+    assert asked not in said and "Unknown MCP server: jadx" in said and host.build_calls() == []
+    # The start's one question about everything it lacks (sandbox/fixes.py; before 0.1.208 a question of its own,
+    # "build it? [y/N]"): the server named as built here from its source, UNSIGNED.
     status, said = on_terminal(host, *START, "--mcp-mount", f"jadx:/work={host.apps}", answer="n")
-    assert "build it? [y/N]" in said and host.commit in said and "UNSIGNED" in said
+    assert asked in said and "UNSIGNED" in said and "build it here from its reviewed source" in said
     assert status != 0 and "Unknown MCP server: jadx" in said and host.build_calls() == []
     status, said = on_terminal(host, *START, "--mcp-mount", f"jadx:/work={host.apps}", answer="y")
+    assert host.commit[:12] in said, "the commit that is built is said as it is built"
     assert "smoke: list_files: ok" in said and "jadx" in host.definitions(), said
     assert host.definitions()["jadx"]["signed_by"] is None
     assert "Unknown MCP server" not in said and host.stopped_at() is not None, said  # (the start went on: its pod)
@@ -521,17 +530,21 @@ def test_a_start_on_a_terminal_asks_builds_and_goes_on(host):
 
 @pytest.mark.parametrize("mode", ["high", "paranoid"])
 def test_the_security_modes_take_it_as_any_unsigned_server(host, mode):
-    """high and paranoid take a server to be built here as they take any server not added yet: high asks (the
-    question is the human's, as for --unsigned); paranoid refuses a start with a server it cannot see to have no
-    network before anything is asked or built (its rule for --mcp) - `mcp add NAME --build` first, then the start."""
+    """An offer never widens the security mode (the user's decision, 2026-11-22): in high a server that would be
+    built here - unsigned - is not offered, and the refusal names the laxer mode that takes it; paranoid refuses a
+    start with it too - judged by its catalog's entry (journeys round 1: a server not added yet is no longer taken
+    for one with network): fetcher's network refused, jadx's unsigned build not offered - nothing asked or built."""
     host.add_image("localhost/codex-sandbox:latest")
     for server in ("fetcher", "jadx"):
         status, said = on_terminal(host, "codex", "--backend", "podman", "--mode", mode, "--mcp", server,
                                    "--mcp-mount", f"jadx:/work={host.apps}:ro", answer="n")
         if mode == "paranoid":
-            assert "build it? [y/N]" not in said and f"--mcp {server} widens the security mode paranoid" in said
+            assert "build it? [y/N]" not in said and status != 0, said
+            assert ("the security mode paranoid refuses it (the MCP server reaches the network" if server == "fetcher"
+                    else "not offered in the security mode paranoid") in " ".join(said.split()), said
         else:
-            assert "build it? [y/N]" in said and status != 0, said
+            assert QUESTION.decode() not in said and status != 0, said
+            assert "not offered in the security mode high" in said and "--mode medium" in said, said
     assert host.build_calls() == []
 
 

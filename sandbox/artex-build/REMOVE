@@ -1,0 +1,5 @@
+# Removed from ARTEX v0.3.15 before sandbox-ai's patches apply (Containerfile.artex): the self-update
+# (download and execute of GitHub releases), its HTTP routes and their tests.
+selfupdate
+server/update.go
+server/update_test.go

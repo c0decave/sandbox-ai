@@ -521,9 +521,7 @@ class NewVariantDialog(QDialog):
             index = self.base.count()
             if entry.get("base_problem"):
                 self.base.addItem(tr("{name} (cannot be a base)", name=entry["name"]), "")
-                item = self.base.model().item(index)
-                if item is not None:
-                    item.setEnabled(False)
+                widgets.set_row_enabled(self.base, index, False)
                 # (the reason names the image's own os-release, which whoever built the image chose)
                 self.base.setItemData(index, safe_tooltip(entry["base_problem"]), Qt.ItemDataRole.ToolTipRole)
             else:
@@ -531,7 +529,7 @@ class NewVariantDialog(QDialog):
                 self.base.setItemData(index, unchecked_text(), Qt.ItemDataRole.ToolTipRole)
         if not bases:  # none yet: where one is added (greyed)
             self.base.addItem(tr("None yet - Your images (this page) adds one"), "")
-            self.base.model().item(self.base.count() - 1).setEnabled(False)
+            widgets.set_row_enabled(self.base, self.base.count() - 1, False)
         self.base.setCurrentIndex(0)
         self.base_note = plain_label(role="notice-error")
         self.base.currentIndexChanged.connect(self.check)

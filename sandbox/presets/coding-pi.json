@@ -29,6 +29,6 @@
     "Memory: ~/.pi/agent/AGENTS.md holds notes about this project, read by Pi at every start and kept between runs (not with --no-memory); its sessions (~/.pi/agent/sessions) are kept with the start (sandbox-ai resume NAME goes on with the last one).",
     "Pi asks before nothing (its design): the sandbox is the boundary. Its model catalogs, version check, packages from npm and GitHub (pi install) and /share stay off unless --pi-enable names them (model-catalog, updates, packages, share).",
     "Pi's telemetry is always off and cannot be turned on (PI_TELEMETRY=0, and the proxy refuses its install report and bug report paths).",
-    "Pi is not live-tested yet (a start says so); its image first: sandbox-ai build pi."
+    "Its image first: sandbox-ai build pi."
   ]
 }

@@ -53,7 +53,9 @@ def test_other_models_per_worker_reach_the_relay(host):
     found, _ = plan(host, "claude", "--with", "codex", "--model", "sonnet", "--cairn", "--cairn-workers",
                     "codex=gpt-5.2-codex,claude")
     workers = {w["agent"]: w for w in found["cairn"]["workers"]}
-    assert workers["codex"]["arguments"] == ["--model", "gpt-5.2-codex"] and workers["codex"]["model"] == "gpt-5.2-codex"
+    assert workers["codex"]["arguments"][-2:] == ["--model", "gpt-5.2-codex"] and \
+        workers["codex"]["model"] == "gpt-5.2-codex"
+    assert "analytics.enabled=false" in " ".join(workers["codex"]["arguments"]), "Codex's telemetry off as the lead's"
     assert workers["claude"]["arguments"] == ["--model", "sonnet"], "the lead's own model, as it was started"
     assert [w["type"] for w in found["cairn"]["dispatch"]["workers"]] == ["codex", "claudecode"]
 
@@ -80,8 +82,13 @@ def test_the_start_makes_cairn_s_files_and_the_relay_s_folder_and_removes_them(h
                                   "goal": "Its services", "hints": [{"content": "Port 80", "creator": "human"}]}
         assert own["dispatch"]["local"] == {"workspace_root": "/work/cairn/runs", "completed_action": "keep"}
         supervisor = json.loads((session / "config.json").read_text())
-        assert supervisor["cairn"] == {"socket": "/sandbox/cairn/relay.sock", "workspace": "/work/cairn/runs",
-                                       "workers": {"claude": [], "codex": []}}
+        assert {k: supervisor["cairn"][k] for k in ("socket", "workspace")} == {
+            "socket": "/sandbox/cairn/relay.sock", "workspace": "/work/cairn/runs"}
+        assert supervisor["cairn"]["workers"]["claude"] == [] and \
+            all(word.startswith("-c") or "=" in word for word in supervisor["cairn"]["workers"]["codex"]), \
+            "Codex: only its telemetry overrides"
+        assert [w["env"] for w in own["dispatch"]["workers"]] == [{"SANDBOX_AI_CAIRN_WORKER": "claude"},
+                                                                {"SANDBOX_AI_CAIRN_WORKER": "codex"}]
         assert [s["name"] for s in supervisor["services"]] == ["cairn", "browser"]
         assert supervisor["env"]["SANDBOX_AI_CAIRN"] == "http://127.0.0.1:8000"
         assert json.loads((session / "browser.json").read_text())["start_url"] == "http://127.0.0.1:8000/"
@@ -115,7 +122,8 @@ def test_the_local_preset_runs_the_workers_on_your_model(host):
     (("claude", "--cairn", "--backend", "bwrap"), "--cairn needs the Podman backend"),
     (("claude", "--cairn-goal", "x"), "add --cairn"),
     (("claude", "--cairn", "--cairn-workers", "codex"), "add --with codex"),
-    (("claude", "--cairn", "--cairn-workers", "pi"), "pi driver"),
+    (("claude", "--cairn", "--cairn-workers", "pi"), "add --with pi"),
+    (("claude", "--cairn", "--cairn-workers", "goose=m1", "--with", "goose"), "no model option"),
     (("claude", "--cairn", "--mode", "paranoid"), "--cairn"),
 ])
 def test_what_is_refused_is_said(host, args, said):

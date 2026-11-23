@@ -2,7 +2,7 @@
 """sandbox-ai uninstall: remove this installation; with --purge also the data sandbox-ai keeps for you.
 
   sandbox-ai uninstall [--dry-run] [--yes]                 the installation, as install.sh --uninstall removes it
-  sandbox-ai uninstall --purge [--secrets] [--stop-running] [--dry-run] [--yes]
+  sandbox-ai uninstall --purge [--secrets] [--mcp-data] [--stop-running] [--dry-run] [--yes]
 
 First a table of what goes, where and how much space it takes, then a question (y/N, typed; --yes answers it for a
 script, and without a terminal nothing is removed unless --yes); --dry-run shows the table only.
@@ -21,6 +21,8 @@ script, and without a terminal nothing is removed unless --yes); --dry-run shows
   --secrets  with --purge, also the secrets and logins, which cannot be recovered: sandbox-ai's entries in the
              keyring (macOS: the Keychain) and its file store, the Git and registry logins, the agents' logins
              (sandbox-ai login), the VPN profiles and keys, the app's login browser
+  --mcp-data with --purge, also the MCP servers' own folders (~/.local/share/sandbox-ai/mcp-folders, which
+             `mcp add` makes for a server's folders: a memory server's graph, its uploads); kept otherwise
 
 Never touched: your workspaces and the folders you mounted, anything outside sandbox-ai's own folders (one of its
 folders that holds a mounted folder, or is a link elsewhere, is left and named), other users' data, and other hosts
@@ -53,6 +55,9 @@ INSTALL_NAMES = ("versions", "current", "app-env", "release-state.json")
 # The secrets and logins below sandbox-ai's folders: kept unless --secrets.
 SECRET_PATHS = {"data": ("secrets", "auth", "vpn", "app/login-browser"),
                 "config": ("git-logins.json", "publish-logins.json", "vpn")}
+# The MCP servers' own folders (`mcp add` makes one per folder a server keeps: a memory server's graph, its uploads):
+# the user's data, kept unless --mcp-data.
+MCP_DATA_PATHS = {"data": ("mcp-folders",)}
 INSTALL_TITLES = {"link": "Command links", "installation": "The installation", "menu": "Menu entry",
                   "login": "The app's login entry", "rc": "PATH block", "completion": "Tab completion"}
 PACKAGE_HOW = {"pyz": "this sandbox-ai runs from sandbox-ai.pyz: delete that file to uninstall it",
@@ -269,6 +274,7 @@ GROUPS = {
     ("data", "plugins"): "Kits, plugins and default kits", ("data", "web-vendor"): "The web interface's files",
     ("data", "secrets"): "Secrets (file store)", ("data", "auth"): "Agent logins (sandbox-ai login)",
     ("data", "vpn"): "VPN profiles and keys", ("data", "app/login-browser"): "The app's login browser",
+    ("data", "mcp-folders"): "The MCP servers' own folders",
     ("data", ""): "Data: MCP root file systems, the app's files",
     ("config", "web"): "The web interface's files", ("config", "git-logins.json"): "Git and registry logins",
     ("config", "publish-logins.json"): "Git and registry logins", ("config", "vpn"): "VPN profiles and keys",
@@ -280,12 +286,12 @@ def group(part, relative):
     return GROUPS.get((part, relative)) or GROUPS[(part, "")]
 
 
-def purge_targets(secrets=False, env=None, platform=None, uid=None):
+def purge_targets(secrets=False, env=None, platform=None, uid=None, mcp_data=False):
     """What --purge removes: {"remove": [{"group", "path", "secret"}], "kept": the secrets and logins that stay
-    (without SECRETS), "links": sandbox-ai's folders that are links elsewhere (left), "roots": the folders removed
+    (without SECRETS), "kept_mcp": the MCP servers' own folders that stay (without MCP_DATA), "links": sandbox-ai's folders that are links elsewhere (left), "roots": the folders removed
     from (only below them is anything removed), "folders": those looked into for a secret in them, "login": the app's
     login entry, when there is one}."""
-    found = {"remove": [], "kept": [], "links": [], "roots": [], "folders": [], "login": None}
+    found = {"remove": [], "kept": [], "kept_mcp": [], "links": [], "roots": [], "folders": [], "login": None}
     seen = set()
     for part, root in places(env, platform, uid):
         if str(root) in seen:
@@ -310,7 +316,9 @@ def purge_targets(secrets=False, env=None, platform=None, uid=None):
                     continue  # install.sh's
                 path = str(Path(folder) / name)
                 secret = relative in keeps
-                if secret and not secrets:
+                if relative in MCP_DATA_PATHS.get(part, ()) and not mcp_data:
+                    found["kept_mcp"].append({"group": group(part, relative), "path": path, "secret": False})
+                elif secret and not secrets:
                     found["kept"].append({"group": group(part, relative), "path": path, "secret": True})
                 elif any(keep.startswith(relative + "/") for keep in keeps) and os.path.isdir(path) and \
                         not os.path.islink(path):
@@ -577,7 +585,7 @@ def plan(copy, args):
              "podman": None, "keyring": (None, []), "hosts": host_names(), "timer": schedule_timer(),
              "update_timer": update_timer()}
     if args.purge:
-        found["purge"] = purge_targets(secrets=args.secrets)
+        found["purge"] = purge_targets(secrets=args.secrets, mcp_data=args.mcp_data)
         installed = {path for _, path in found["install"]}
         found["purge"]["remove"] = [target for target in found["purge"]["remove"] if target["path"] not in installed]
         found["podman"] = podman_objects()
@@ -726,6 +734,10 @@ def show(found, args, copy, running, out, colour):
         if kept:
             stays.append("your secrets and logins: " + ", ".join(kept) + " (--secrets with --purge removes them; "
                          "they cannot be recovered)")
+    if purge and purge.get("kept_mcp"):
+        stays.append("the MCP servers' own folders (" + ", ".join(t.home_short(k["path"]) for k in purge["kept_mcp"])
+                     + "): what your servers keep there, a memory server's graph, their uploads (--mcp-data with "
+                       "--purge removes them)")
     if purge:
         for link in purge["links"]:
             stays.append(f"{t.home_short(link)}: a link to {os.path.realpath(link)} - left as it is (remove it "
@@ -771,7 +783,7 @@ def purge(found, args, out):
             problems.append(why)
     # What sandbox-ai wrote there since the table was made (stopping the starts: their ends in the histories, the
     # lines of launcher.log): the same folders' own, gone too - never what stays (the secrets and logins).
-    again = purge_targets(args.secrets)
+    again = purge_targets(args.secrets, mcp_data=args.mcp_data)
     for target in again["remove"]:
         if not target.get("login") and target["path"] not in {t["path"] for t in targets["remove"]}:
             why = remove_path(target["path"], again["roots"], mounts)
@@ -816,6 +828,9 @@ def main(argv, out=print, ask=None, isatty=None):
     parser.add_argument("--secrets", action="store_true",
                         help="with --purge: also the secrets and logins (keyring and file store, Git logins); they "
                              "cannot be recovered")
+    parser.add_argument("--mcp-data", action="store_true",
+                        help="with --purge: also the MCP servers' own folders (mcp-folders: what the servers keep "
+                             "there, a memory server's graph, their uploads)")
     parser.add_argument("--stop-running", action="store_true",
                         help="stop the running starts first (else they refuse the uninstall)")
     parser.add_argument("-n", "--dry-run", action="store_true", help="show what would go; remove nothing")
@@ -823,6 +838,8 @@ def main(argv, out=print, ask=None, isatty=None):
     args = parser.parse_args(argv)
     if args.secrets and not args.purge:
         parser.error("--secrets goes with --purge (sandbox-ai uninstall --purge --secrets)")
+    if args.mcp_data and not args.purge:
+        parser.error("--mcp-data goes with --purge (sandbox-ai uninstall --purge --mcp-data)")
     copy = copy_kind()
     installed = copy["kind"] in ("user", "system")
     if not installed and not (args.purge and copy["kind"] in PURGEABLE):
@@ -830,7 +847,7 @@ def main(argv, out=print, ask=None, isatty=None):
             "~/.local/share/sandbox-ai, ~/.config/sandbox-ai"
             + ("; sandbox-ai uninstall --purge removes it, the program stays)" if copy["kind"] in PURGEABLE else ")"))
         return 1
-    if copy["refused"]:
+    if copy["refused"] and not args.dry_run:  # (--dry-run only lists: as anyone)
         say(copy["refused"])
         return 1
     try:

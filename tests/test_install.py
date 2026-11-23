@@ -1114,6 +1114,9 @@ def test_any_user_may_check_a_system_installation_and_only_root_changes_it(tmp_p
     for args in (["--from", str(ROOT), "--no-app"], ["--uninstall"], ["--fetch", str(tmp_path / "fetched")]):
         refused = run(*args)
         assert refused.returncode != 0 and "--system needs root" in refused.stderr, (args, refused.stderr)
+    # --uninstall --dry-run only lists (sandbox-ai hosts uninstall shows it before sudo asks for a password)
+    listed = run("--uninstall", "--dry-run")
+    assert listed.returncode == 0 and "needs root" not in listed.stderr, listed.stderr
     assert not prefix.exists() and not (tmp_path / "fetched").exists()
 
 
@@ -1187,7 +1190,7 @@ def installer_helper():
     import types
     text = (ROOT / "install.sh").read_text()
     code = text.split("python3 -I - \"$@\" <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    code = code.split('\n{"', 1)[0]  # without the command dispatch (the dict and its call, over several lines)
+    code = code.split('\nrun_command(sys.argv)', 1)[0]  # without the command's run (run_command(sys.argv))
     module = types.ModuleType("install_helper")
     exec(compile(code, "install.sh helper", "exec"), module.__dict__)
     return module
@@ -1593,3 +1596,51 @@ def test_update_mode_notify_download_apply_and_rollback_through_sandbox_ai(tmp_p
     off = sai("update", "mode", "off")
     assert off.returncode == 0 and not (units / "sandbox-ai-update.timer").exists(), off.stderr
     assert "systemctl --user disable --now sandbox-ai-update.timer" in (tmp_path / "fake.log").read_text()
+
+
+@pytest.mark.parametrize("error, said", [
+    (OSError(28, "No space left on device", "/tmp/w/bundle.tar.gz"), "the disk is full (/tmp/w/bundle.tar.gz)"),
+    (OSError(30, "Read-only file system", "/usr/local/lib/sandbox-ai"),
+     "the file system is read-only (/usr/local/lib/sandbox-ai)"),
+    (PermissionError(13, "Permission denied", "/usr/local/lib/sandbox-ai/versions"),
+     "permission denied (/usr/local/lib/sandbox-ai/versions)"),
+])
+def test_what_the_system_refuses_is_one_line_never_a_traceback(error, said):
+    """A full disk, a read-only prefix, a folder of someone else's during an update or a fetch: install.sh says it in
+    one line and switches nothing (it ended in a Python traceback)."""
+    helper = installer_helper()
+
+    def refused(*args):
+        raise error
+    helper.cmd_download = refused
+    with pytest.raises(SystemExit) as ended:
+        helper.run_command(["-", "download", "https://github.com/c0decave/sandbox-ai"])
+    assert ended.value.code == f"install.sh: {said}; nothing installed"
+
+
+def test_a_release_seen_at_one_source_is_no_reason_to_distrust_another(tmp_path, capsys):
+    """The user's system installation (2026-11-22): 0.1.193 from the local Gitea, checked against GitHub, whose
+    newest release is 0.1.188 - "an old release served again?" and a failed update. Seen releases are kept per
+    source: another source's older newest is "nothing to update" (status 3, said plainly); the same source's older
+    newest after a newer one of its own is still refused as a replay."""
+    helper = installer_helper()
+    state = tmp_path / "release-state.json"
+    gitea, github = "http://gitea.local:3000/u/sandbox-ai", "https://github.com/c0decave/sandbox-ai"
+    helper.cmd_record(str(state), "0.1.193", gitea + ".git")
+    assert helper.highest_seen(str(state), gitea) == "0.1.193" and helper.highest_seen(str(state), github) == ""
+    with pytest.raises(SystemExit) as ended:
+        helper.check_version("0.1.188", "0.1.193", str(state), "0", False, github)
+    assert ended.value.code == helper.NEWER_INSTALLED
+    said = capsys.readouterr().err
+    assert "sandbox-ai 0.1.193 is newer than the newest release 0.1.188: nothing to update" in said
+    with pytest.raises(SystemExit) as ended:
+        helper.check_version("0.1.190", "0.1.193", str(state), "0", False, gitea)
+    assert "has seen 0.1.193 there before (an old release served again?)" in str(ended.value.code)
+    helper.cmd_record(str(state), "0.1.188", github)
+    document = json.loads(state.read_text())
+    assert document["highest_seen"] == "0.1.193" and document["by_source"] == {gitea: "0.1.193", github: "0.1.188"}
+    # a state of before (no sources): its newest is said, the update not refused for it
+    state.write_text(json.dumps({"highest_seen": "0.1.193"}))
+    with pytest.raises(SystemExit) as ended:
+        helper.check_version("0.1.188", "0.1.193", str(state), "0", False, github)
+    assert ended.value.code == helper.NEWER_INSTALLED and "has seen 0.1.193 before" in capsys.readouterr().err

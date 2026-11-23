@@ -177,7 +177,7 @@ def test_e2e_the_dialogs_command_runs_and_sandbox_ai_refuses_one_wireguard_key_t
     """The real ./sandbox-ai runs the argv the app built: refused with the reason; nothing started."""
     sai, _ = env
     root = Path(os.environ["SANDBOX_AI_HOME"])
-    sys.path.insert(0, str(root / "tests"))
+    sys.path.append(str(root / "tests"))  # (after the app's own tests: conftest.app_tests_first)
     from live_fakes import Host
     host = Host(tmp_path / "host")
     host.env["SANDBOX_AI_SECRETS"] = "file"

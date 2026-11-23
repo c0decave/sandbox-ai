@@ -1,0 +1,31 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "python",
+  "title": "Python",
+  "description": "Python projects: a current Python with pip and uv mounted in; PyPI and GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Python",
+      "description": "Python-Projekte: ein aktuelles Python mit pip und uv eingehängt; PyPI und GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--toolchain",
+    "python",
+    "--allow-pypi",
+    "--allow-github"
+  ],
+  "notes": [
+    "Python (3.14, with pip and uv) comes with the preset (--toolchain python): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox); it comes before the image's own python3. Not in the store yet, the start offers to add it (sandbox-ai toolchain add python: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "The interpreter is marked externally managed: install into a virtual environment (uv venv, python3 -m venv .venv). uv fetches another Python version it is asked for from GitHub (python-build-standalone) into the sandbox's HOME.",
+    "Data and machine learning (Hugging Face, more memory, a GPU): the preset data-ml.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

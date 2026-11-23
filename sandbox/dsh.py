@@ -31,7 +31,6 @@ REPOSITORY = "https://github.com/deepseek-ai/deepseek-harness"
 MANAGED_DIR = "/etc/dsh"
 SESSION_DIR = "dsh"  # in the session directory, mounted read-only at MANAGED_DIR
 PATCH = MANAGED_DIR + "/sandbox-ai.patch.yml"
-EXPERIMENTAL = "dsh"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "DeepSeek Harness"
 HOME = "/root/.dsh"  # DSH_HOME: sessions, profiles, its credentials, AGENTS.md, skills
 # The profiles DSH ships (dsh --profile NAME); desktop is the Electron app's, refused by the npm CLI.
@@ -181,11 +180,6 @@ def telemetry_rules():
     """The proxy's rules for every DSH run (the ruleset "telemetry"): its collector refused (rule_hosts())."""
     return [{"id": f"telemetry-dsh-{number}", "host": host, "path": "/**", "decision": "deny",
              "reason": "DeepSeek Harness' telemetry is always off"} for number, host in enumerate(rule_hosts(), 1)]
-
-
-def experimental_note():
-    return ("DeepSeek Harness: not live-tested yet (its image and a real start have not passed their "
-            "live test)")
 
 
 def mcp_rows(names, bridge_args, timeouts=None):
@@ -475,12 +469,12 @@ def session_opener(request_open, opens=BROWSER_OPENS, log=None):
 
 
 def plan(a, opens=False, port=WEB_PORT):
-    """The dry run's "dsh": the reviewed release, the patch's place, the telemetry, and that it is experimental."""
+    """The dry run's "dsh": the reviewed release, the patch's place, and the telemetry."""
     args = profile_words(getattr(a, "agent_args", None) or [])
     chat = chat_profile(args)
     loopback = f"http://127.0.0.1:{port}/" if args in ([], ["web"], ["--profile", "web"]) else WEB_URL
     return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}", "repository": REPOSITORY,
-            "experimental": True, "patch": PATCH, "home": HOME,
+            "patch": PATCH, "home": HOME,
             "profile": CHAT if chat else args[1] if args[:1] == ["--profile"] and len(args) > 1 else args[0],
             "web_ui": loopback if web_profile(args) or chat and opens else None,
             "terminal_ui": chat, "chat": {"script": CHAT_SCRIPT, "patch": CHAT_PATCH, "runs": chat_args(),

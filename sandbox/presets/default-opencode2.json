@@ -19,6 +19,6 @@
     "The model: OpenCode Zen on opencode.ai (its free models need no account; /connect in OpenCode 2 signs in, kept in the start's HOME). Another provider: --api-key api.anthropic.com=ANTHROPIC_API_KEY (or api.openai.com=OPENAI_API_KEY, openrouter.ai=OPENROUTER_API_KEY) with --model PROVIDER/MODEL, or a model server of yours with --llm (the preset opencode2-local-llm).",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-opencode2 or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on; its update check, model catalog download and shared background service are off.",
-    "OpenCode 2 is not live-tested yet (a start says so); its image first: sandbox-ai build opencode2 (a start builds it when it is missing). sandbox-ai opencode stays OpenCode 1."
+    "Its image first: sandbox-ai build opencode2 (a start builds it when it is missing). sandbox-ai opencode stays OpenCode 1."
   ]
 }

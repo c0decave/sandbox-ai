@@ -248,7 +248,7 @@ def test_the_provider_hosts_hold_no_telemetry_host():
 
 def test_plan_says_what_is_on_and_off():
     plan = openhands.plan(ns("openhands", "automations"))
-    assert plan["version"] == openhands.VERSION and plan["commit"] == openhands.COMMIT and plan["experimental"]
+    assert plan["version"] == openhands.VERSION and plan["commit"] == openhands.COMMIT and "experimental" not in plan
     assert plan["agent_server"]["version"] == openhands.SERVER_VERSION and plan["runtime"] == "local"
     assert plan["telemetry"]["switchable"] is False and plan["web_ui"] == openhands.WEB_URL
     assert plan["enabled"] == [{"feature": "automations", "hosts": []}] and plan["off"] == ["model-catalog"]
@@ -535,7 +535,8 @@ def test_the_presets_name_the_agent_and_its_notes():
         preset = json.loads((ROOT / f"sandbox/presets/{name}.json").read_text())
         assert preset["agents"] == ["openhands"] and preset["category"] == "agents" and preset["id"] == name
         assert "--browser" not in preset["options"] and any("--browser" in note for note in preset["notes"])
-        assert any("not live-tested yet" in note for note in preset["notes"])
+        assert any("sandbox-ai build openhands" in note for note in preset["notes"])
+        assert not any("live-tested" in note for note in preset["notes"])
         assert preset["translations"]["de"]["title"]
     local = json.loads((ROOT / "sandbox/presets/openhands-local-llm.json").read_text())
     assert local["options"][:2] == ["--llm", "{llm}"] and "loop_guard=on" in local["options"]

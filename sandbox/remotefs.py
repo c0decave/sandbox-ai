@@ -43,8 +43,9 @@ terminal; without one (a session's supervisor, the app) `sudo -n` never asks: a 
 else the start says what to do. Unmounted the same way (sudo umount).
 
 macOS: the same with the Mac's sshfs (macFUSE or FUSE-T): the folder is mounted in your HOME, which podman machine
-shares with its VM (NFS and SMB: not on macOS yet). Whether the VM's file sharing passes a FUSE mount through depends on its provider (not tested
-on a Mac yet; when the sandbox sees an empty folder, mount it in the VM yourself: podman machine ssh).
+shares with its VM (NFS and SMB: not on macOS yet). Whether the VM's file sharing passes a FUSE mount through depends on its provider (no data
+yet: no live check step covers it; when the sandbox sees an empty folder, mount it in the VM yourself: podman machine
+ssh).
 
 Standard library only.
 """
@@ -273,12 +274,25 @@ def method(spec, which=shutil.which):
     return "sudo"
 
 
+def sshfs_fixes(missing=None, needed=True):
+    """The fix (fixes.py) for sshfs that is not installed: the distribution's package command (shown, never run: it
+    needs root), or on a Mac what brings macFUSE and sshfs."""
+    item = module("fixes").tool_fix(["sshfs"], missing=missing or
+                                    "sshfs is not installed on this host (remote folders: sshfs://)")
+    if not item["commands"] and sys.platform == "darwin":
+        item["why"] = install_hint("sshfs", "darwin")
+    item["needed"] = needed
+    return [item]
+
+
 def tool(scheme="sshfs", which=shutil.which, how=None):
     """The path of SCHEME's mount program (HOW: method's choice), or ValueError with how to install it."""
     if how in (None, "sshfs"):
         found = which("sshfs")
         if not found:
-            raise ValueError(f"{scheme}:// needs sshfs on this host, which is not installed: {install_hint(scheme)}")
+            error = ValueError(f"{scheme}:// needs sshfs on this host, which is not installed: {install_hint(scheme)}")
+            error.fixes = sshfs_fixes()  # (fixes.py: the distribution's package command, shown - it needs root)
+            raise error
         return found
     if how == "fuse-nfs":
         found = which("fuse-nfs")

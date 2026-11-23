@@ -282,8 +282,10 @@ def test_second_start_attaches(qapp, user, monkeypatch):
 
 def test_exiftool_needs_folder(board_page, user, monkeypatch):
     """User: the Board's adding exiftool failed with 'sandbox-ai mcp: exiftool needs --mount /work=HOST'. Read from
-    sandbox-ai's real catalogs, the folder it needs is asked for (the start's workspace offered) and passed as
-    --mount; the server is added with it."""
+    sandbox-ai's real catalogs; since the folder defaults (0.1.214) its /work is the start's workspace by default:
+    nothing is asked, and `mcp add exiftool` goes without --mount - never refused for the folder. With the default
+    cleared by the start (--mcp-mount exiftool:/work=), the folder is asked for (the start's workspace offered) and
+    passed as --mount."""
     page = board_page
     monkeypatch.setattr(widgets, "AUTO_CHOICE", "workspace")
     page.prerequisite_argv = lambda: ["--workspace", str(user.workspace), "--mcp", "exiftool"]
@@ -291,6 +293,14 @@ def test_exiftool_needs_folder(board_page, user, monkeypatch):
     ran = []
     real = page.sai.host_run
     monkeypatch.setattr(page.sai, "host_run", lambda host, *args, **kw: ran.append(args) or real(host, *args, **kw))
+    page.provide({"--mcp": ["exiftool"]}, [], "local", ("local", "{}"), None, "start",
+                 context=page.prerequisite_context(), agent="claude")
+    assert ("mcp", "add", "exiftool") in ran, (ran, widgets.SHOWN)
+    assert not [text for title, text, _ in widgets.SHOWN if title == "MCP server exiftool"], widgets.SHOWN
+    assert not [text for _title, text, _ in widgets.SHOWN if "needs --mount" in str(text)], widgets.SHOWN
+    ran.clear()
+    page.prerequisite_argv = lambda: ["--workspace", str(user.workspace), "--mcp", "exiftool", "--mcp-mount",
+                                      "exiftool:/work="]
     page.provide({"--mcp": ["exiftool"]}, [], "local", ("local", "{}"), None, "start",
                  context=page.prerequisite_context(), agent="claude")
     assert ("mcp", "add", "exiftool", "--mount", f"/work={user.workspace}") in ran, (ran, widgets.SHOWN)

@@ -29,6 +29,7 @@ Standard library only.
 """
 import argparse
 import base64
+import bisect
 import contextlib
 import hashlib
 import importlib.util
@@ -1392,14 +1393,43 @@ def process_text(process):
 
 def activity_records(log_dir, run):
     """The run's activity records (the last version of each id), in time order."""
+    return activity_by_run(log_dir, [run]).get(run, [])
+
+
+def activity_by_run(log_dir, runs):
+    """{run: its activity records (the last version of each id), in time order} for RUNS: activity.jsonl (it holds
+    every run, up to activity.ACTIVITY_LIMIT) read once for all of them, each record's time parsed once."""
     activity = module("activity")
     if not log_dir:
-        return []
-    records = {}
-    for record in activity.read_records(Path(log_dir) / activity.ACTIVITY_FILE, keep=lambda r: r.get("run") == run):
+        return {}
+    wanted = {run for run in runs if isinstance(run, str)}
+    found = {run: {} for run in wanted}
+
+    def keep(record):
+        run = record.get("run")
+        return isinstance(run, str) and run in wanted
+    for record in activity.read_records(Path(log_dir) / activity.ACTIVITY_FILE, keep=keep):
         if isinstance(record.get("id"), str):
-            records[record["id"]] = record
-    return sorted(records.values(), key=lambda r: activity.epoch(r.get("time")) or 0)
+            found[record["run"]][record["id"]] = record
+    result = {}
+    for run, records in found.items():
+        timed = sorted(((activity.epoch(r.get("time")), r) for r in records.values()), key=lambda item: item[0] or 0)
+        result[run] = Timeline(timed)
+    return result
+
+
+class Timeline(list):
+    """A run's activity records in time order (a list of them), with what correlate looks up for every event made
+    once: each record's time, the tool calls and the prompts with their times for bisection, the ids. (Done per
+    event, a log of many events and a long timeline took minutes: user 2026-11-22, the app gave up after 60 s.)"""
+
+    def __init__(self, timed=()):
+        super().__init__(record for _, record in timed)
+        self.ids = {record.get("id") for record in self}
+        self.tools = [(t, r) for t, r in timed if t is not None and r.get("kind") in ("tool", "command", "mcp")]
+        self.tool_times = [t for t, _ in self.tools]
+        self.prompts = [(t, r) for t, r in timed if t is not None and r.get("kind") == "prompt"]
+        self.prompt_times = [t for t, _ in self.prompts]
 
 
 def request_host(record):
@@ -1489,17 +1519,20 @@ def tool_entry(record, match):
 
 def correlate(event, records, requests):
     """{"tool_calls", "turn", "requests"} of EVENT: the tool calls in its time window (those that name the file
-    first, then the nearest), the prompt turn before it, the model requests just before and after it."""
+    first, then the nearest), the prompt turn before it, the model requests just before and after it. RECORDS: the
+    run's Timeline (a plain list of records is made one); REQUESTS: model_requests, in time order."""
     activity = module("activity")
     at = activity.epoch(event.get("time"))
     result = {"tool_calls": [], "turn": None, "requests": []}
     if at is None:
         return result
+    if not isinstance(records, Timeline):
+        records = Timeline(sorted(((activity.epoch(r.get("time")), r) for r in records),
+                                  key=lambda item: item[0] or 0))
     path = str(event.get("path") or "")
     needles = [n for n in {path, os.path.basename(path), path.replace("/root/", "~/", 1)} if len(n) >= 3]
-    timed = [(activity.epoch(r.get("time")), r) for r in records]
-    window = [(t, r) for t, r in timed if t is not None and r.get("kind") in ("tool", "command", "mcp")
-              and at - TOOL_BEFORE <= t <= at + TOOL_AFTER]
+    window = records.tools[bisect.bisect_left(records.tool_times, at - TOOL_BEFORE):
+                           bisect.bisect_right(records.tool_times, at + TOOL_AFTER)]
     named = [(t, r) for t, r in window if mentions(r, needles)]
     if named:
         chosen = sorted(named, key=lambda item: abs(at - item[0]))[:3]
@@ -1508,12 +1541,13 @@ def correlate(event, records, requests):
         before = [(t, r) for t, r in window if t <= at + 1]
         t, r = max(before, key=lambda item: item[0]) if before else min(window, key=lambda item: item[0])
         result["tool_calls"] = [tool_entry(r, "same time")]
-    prompts = [(t, r) for t, r in timed if t is not None and r.get("kind") == "prompt" and t <= at + 1]
-    if prompts:
-        t, r = prompts[-1]
+    last = bisect.bisect_right(records.prompt_times, at + 1)
+    if last:
+        t, r = records.prompts[last - 1]
         result["turn"] = {"id": r.get("id"), "time": r.get("time"), "agent": r.get("agent"), "summary": r.get("summary")}
-    ids = {r.get("id") for r in records}
-    near = [q for q in requests if abs(q["epoch"] - at) <= REQUEST_WINDOW]
+    ids = records.ids
+    times = [q["epoch"] for q in requests] if not isinstance(requests, Requests) else requests.times
+    near = requests[bisect.bisect_left(times, at - REQUEST_WINDOW):bisect.bisect_right(times, at + REQUEST_WINDOW)]
     # A request that carried this canary's token: the one the event is about (a token that left, or entered the
     # agent's conversation: the same second), or after a read, the first that took the file's content on.
     own = [q for q in near if q.get("canary") and str(q["canary"].get("canary")) == str(event.get("canary"))]
@@ -1533,8 +1567,17 @@ def correlate(event, records, requests):
     return result
 
 
-def log_entries(run):
-    """The canary log of RUN: [entry] in time order (see the comment above)."""
+class Requests(list):
+    """model_requests (in time order) with their times, for bisection."""
+
+    def __init__(self, requests=()):
+        super().__init__(requests)
+        self.times = [q["epoch"] for q in self]
+
+
+def log_entries(run, events=None, timelines=None):
+    """The canary log of RUN: [entry] in time order (see the comment above). EVENTS: its events when read already;
+    TIMELINES: activity_by_run of its log directory when read already (for many runs: activity.jsonl once)."""
     record = read_json(run_state(run))
     if record is None:
         raise ValueError(f"no canaries recorded for run {shown(run)}; see sandbox-ai canaries list")
@@ -1543,11 +1586,13 @@ def log_entries(run):
               if isinstance(token, str)]
     redact = activity.Redactor(tokens)
     log_dir = record.get("log_dir")
-    records = activity_records(log_dir, run)
+    if timelines is None:
+        timelines = activity_by_run(log_dir, [run])
+    records = timelines.get(run) or Timeline()
     hosts = record.get("model_hosts") or DEFAULT_MODEL_HOSTS
-    requests = model_requests(log_dir, run, hosts)
+    requests = Requests(model_requests(log_dir, run, hosts))
     entries = []
-    for event in read_events(run):
+    for event in (read_events(run) if events is None else events):
         entry = {key: event.get(key) for key in ("time", "canary", "category", "path", "host_path", "event", "source",
                                                  "where", "url", "host", "encoding", "action", "summary", "error")
                  if event.get(key) is not None}
@@ -1577,13 +1622,23 @@ def show_log(run=None, out=print, as_json=False):
     if run:
         logs = [log_entries(resolve_run(run))]
     else:
-        logs = []
+        logs, found = [], []
         for path in sorted((state_root() / "runs").glob("*.json"), key=changed, reverse=True):
             if path.name.endswith(".events.jsonl") or not RUN_NAME.fullmatch(path.stem):
                 continue
-            if read_events(path.stem):
-                with contextlib.suppress(ValueError):
-                    logs.append(log_entries(path.stem))
+            events = read_events(path.stem)
+            if events:
+                record = read_json(path) or {}
+                log_dir = record.get("log_dir")
+                found.append((path.stem, events, log_dir if isinstance(log_dir, str) else None))
+        # activity.jsonl holds every run of its log directory: read once for all of them, not once per run
+        directories = {}
+        for name, _events, log_dir in found:
+            directories.setdefault(log_dir, []).append(name)
+        timelines = {log_dir: activity_by_run(log_dir, runs) for log_dir, runs in directories.items()}
+        for name, events, log_dir in found:
+            with contextlib.suppress(ValueError):
+                logs.append(log_entries(name, events, timelines[log_dir]))
     if as_json:
         out(json.dumps(logs if not run else logs[0], indent=2, ensure_ascii=False))
         return 0

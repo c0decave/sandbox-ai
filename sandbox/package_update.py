@@ -368,7 +368,15 @@ def release(source, version=None, environ=None):
     host = "api.github.com" if github else url.netloc
     try:
         if version:
-            data = json.loads(fetch(f"{api}/releases/tags/v{version}", host, environ=environ))
+            try:
+                data = json.loads(fetch(f"{api}/releases/tags/v{version}", host, environ=environ))
+            except UpdateError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+                # (a version never published there - one installed from a checkout, a rollback to it -, or removed)
+                raise UpdateError(f"{printable(source)} has no release {version} (HTTP 404: never published there, "
+                                  "or removed" + ("" if environ.get("SANDBOX_AI_TOKEN") else
+                                                  "; a private repository needs SANDBOX_AI_TOKEN") + ")") from None
         else:
             try:
                 with open_url(f"{api}/releases/latest", host, environ=environ) as response:
@@ -453,6 +461,42 @@ def signed_version(sums, claimed, what):
     return listed, version
 
 
+def source_key(source):
+    return re.sub(r"\.git$", "", str(source or "").rstrip("/"))
+
+
+def seen_file(environ=None, create=False):
+    return cache_folder("update-seen", "releases", environ, create=create) / "seen.json"
+
+
+def seen_at(source, environ=None):
+    """The newest release of SOURCE this user's copies have seen signed by a trusted key (a check, an update), or
+    None: an older newest from the same source afterwards may be an old release served again."""
+    try:
+        value = json.loads(seen_file(environ).read_text()).get(source_key(source))
+    except (UpdateError, OSError, ValueError, AttributeError, RecursionError):
+        return None
+    return value if isinstance(value, str) and re.fullmatch(load("release_assets").VERSION, value) else None
+
+
+def record_seen(source, version, environ=None):
+    """Remember VERSION as seen signed at SOURCE (when newer than what was seen there). Never an error."""
+    with contextlib.suppress(UpdateError, OSError, ValueError, RecursionError):
+        known = seen_at(source, environ)
+        if known and version_key(known) >= version_key(version):
+            return
+        path = seen_file(environ, create=True)
+        try:
+            document = json.loads(path.read_text())
+        except (OSError, ValueError, RecursionError):
+            document = {}
+        document = document if isinstance(document, dict) else {}
+        document[source_key(source)] = version
+        temporary = path.with_name(f".seen.json.{os.getpid()}")
+        temporary.write_text(json.dumps(document, indent=1))
+        os.replace(temporary, path)
+
+
 def check(source, environ=None):
     """{"available", "signature" ("good", "bad", "none", "unchecked"), "signer", "error"} of the newest release of
     SOURCE, its signature checked with this copy's release keys (what updates.check records)."""
@@ -474,6 +518,7 @@ def check(source, environ=None):
                 signed_version(sums, found["version"], f"release {found['version']}")
             except UpdateError as exc:
                 return {**nothing, "available": found["version"], "signature": "bad", "error": str(exc)}
+            record_seen(source, found["version"], environ)
         return {**nothing, "available": found["version"], "signature": verdict,
                 "signer": detail if verdict == "good" else None}
     except (UpdateError, RuntimeError, OSError) as exc:
@@ -495,6 +540,14 @@ def fetch_release(info, source, version=None, allow_downgrade=False, force=False
     status = judge(sums, signature, what)
     listed, release_version = signed_version(sums, found["version"], what)
     installed = current_version(info, environ, machine)
+    seen = seen_at(source, environ)
+    if status.startswith("good"):
+        record_seen(source, release_version, environ)
+    if not version and not allow_downgrade and version_key(release_version) < version_key(installed) and \
+            not (seen and version_key(seen) > version_key(release_version)):
+        # (newer than the newest release - a copy from a checkout, another source, a release not published there
+        # yet: nothing to update; after a newer release of this source was seen, an older newest is refused)
+        raise UpToDate(installed, release_version)
     refuse_older(release_version, installed, allow_downgrade, explicit=bool(version))
     if release_version == installed and not force:
         raise UpToDate(installed)
@@ -517,14 +570,19 @@ def fetch_release(info, source, version=None, allow_downgrade=False, force=False
 
 
 class UpToDate(UpdateError):
-    def __init__(self, version):
-        super().__init__(f"sandbox-ai {version} is already installed and up to date")
-        self.version = version
+    """Nothing to update: VERSION is installed - the newest release, or newer than it (NEWEST: the newest release,
+    older than the installed one: installed from a checkout, another source, a release not published here yet)."""
+    def __init__(self, version, newest=None):
+        super().__init__(f"sandbox-ai {version} is newer than the newest release {newest}: nothing to update (an "
+                         "older release is installed only with --allow-downgrade)" if newest else
+                         f"sandbox-ai {version} is already installed and up to date")
+        self.version, self.newest = version, newest
 
 
 def refuse_older(found, installed, allow_downgrade=False, explicit=False):
     if version_key(found) < version_key(installed) and not allow_downgrade:
-        why = "" if explicit else ", although the source lists it as the newest release (an old release served again?)"
+        why = "" if explicit else (", although the source lists it as the newest release and a newer one was seen "
+                                   "there before (an old release served again?)")
         raise UpdateError(f"sandbox-ai {found} is older than the installed {installed}{why}; nothing updated. "
                           "--allow-downgrade installs it anyway")
 

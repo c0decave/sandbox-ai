@@ -32,7 +32,6 @@ MANAGED_DIR = "/etc/letta"
 SESSION_DIR = "letta"  # in the session directory, mounted read-only at MANAGED_DIR
 START = MANAGED_DIR + "/sandbox-ai-start.py"  # sandbox-ai's start: the --mcp servers into the agents, then Letta
 START_CONFIG = MANAGED_DIR + "/sandbox-ai-start.json"  # what the start script lays in ({"servers": [...], "model"})
-EXPERIMENTAL = "letta"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "Letta Code"
 STORAGE = ".letta/lc-local-backend"  # the local backend's agents, memory (MemFS) and conversations in the HOME
 MEMORY_NOTES = ".letta/AGENTS.md"  # sandbox-ai's project notes for Letta Code (kits.MEMORY_FILE)
@@ -279,10 +278,6 @@ def telemetry_rules(a=None):
                "reason": "Letta Code's telemetry is always off"}
               for number, (host, path) in enumerate(TELEMETRY_PATHS, 1)]
     return rules
-
-
-def experimental_note():
-    return "Letta Code: not live-tested yet (its image and a real start have not passed their live test)"
 
 
 def mcp_servers(names, bridge_args):
@@ -675,11 +670,10 @@ def model_args(a):
 
 
 def plan(a):
-    """The dry run's "letta": the reviewed release, its backend, what is on and what stays off, and whether it is
-    experimental here."""
+    """The dry run's "letta": the reviewed release, its backend, what is on and what stays off."""
     names = features(a)
     return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}", "repository": REPOSITORY,
-            "experimental": True, "backend": "cloud" if "cloud" in names else "local",
+            "backend": "cloud" if "cloud" in names else "local",
             # Where its agents, memory and conversations are: the cloud feature drops the local backend.
             "storage": "Letta Cloud (your Letta account, api.letta.com)" if "cloud" in names else "~/" + STORAGE,
             "start": START, "own_sandbox": False,

@@ -574,3 +574,33 @@ def test_reload_rules_of_a_running_sandbox(ui, sai, monkeypatch):
     sai.answers[("rules", "reload")] = (1, "", "sandbox-ai rules reload: the sandbox refused: --no-inspect x\n")
     page.reload_rules()
     assert widgets.SHOWN[-1][1].startswith("Not reloaded:") and "--no-inspect" in widgets.SHOWN[-1][1]
+
+
+@needs_sai
+def test_the_board_asks_a_host_again_before_it_refuses_an_option_read_before_its_update(ui, sai, monkeypatch):
+    """coding-101 (2026-11-23): the Board had read the host's options before its update and refused the start's
+    --toolchain afterwards ("kennt diese Optionen nicht"). An option the kept list lacks is asked of the host once
+    more; known now, the start goes; still unknown, it is refused by name."""
+    from sandbox_ai_app.board_view import BoardPage
+    started = []
+    page = BoardPage(sai, lambda argv, title, embedded=None, cwd=None: started.append((argv, title, cwd)),
+                     lambda: {"board_grid": 20})
+    every = backend.help_options(HELP) | {option for action in sai.parser_actions() for option in action.option_strings}
+    old = {"--mode", "--no-config", "--session"}  # (before its update: no --workspace among them)
+    answers = [old]
+    monkeypatch.setattr(sai, "host_launch_options", lambda name, agent: answers[-1])
+    monkeypatch.setattr(sai, "host_dry_run", lambda host, agent, argv: ({"on": host}, ""))
+    chosen(page.host_choice, "ct1")
+    page.check()
+    page.add_node("workspace", path="/srv/project")
+    widgets.SHOWN.clear()
+    answers.append(every)  # updated meanwhile (the Hosts page, a terminal there): the page still holds the old list
+    page.start(embedded=True)
+    assert started and started[-1][0][:3] == ["ssh", "-tt", "ct1"], widgets.SHOWN
+    assert not any("does not know these options" in text for _, text, *_ in widgets.SHOWN)
+    started.clear()
+    answers.append(old)
+    page.host_known.clear()
+    page.check()
+    page.start(embedded=True)
+    assert not started and any("does not know these options" in text for _, text, *_ in widgets.SHOWN)

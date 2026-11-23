@@ -18,7 +18,7 @@ from . import device_picker as DP
 from .files import printable, printable_text
 from .host_choice import on_host
 from .i18n import tr
-from .widgets import plain_label, safe_tooltip
+from .widgets import plain_label, safe_tooltip, set_row_flags, set_row_heading
 
 LOCAL = "local"
 LOCAL_POLL = 3000  # ms: this machine's USB devices looked at (a directory listing of sysfs; nothing is run)
@@ -185,18 +185,14 @@ class LiveDevices(QWidget):
             if in_group != group:
                 group = in_group
                 self.picker.addItem(group)
-                header = self.picker.model().item(self.picker.count() - 1)
-                header.setFlags(Qt.ItemFlag.NoItemFlags)
-                font = header.font()
-                font.setBold(True)
-                header.setFont(font)
+                set_row_heading(self.picker, self.picker.count() - 1)
             label = entry["label"] + (f"  ({tr('restart needed')})" if why else "")
             self.picker.addItem(label, None if why else entry["value"])
             index = self.picker.count() - 1
             self.picker.setItemData(index, safe_tooltip(why or entry.get("note") or entry["value"]),
                                     Qt.ItemDataRole.ToolTipRole)
             if why:
-                self.picker.model().item(index).setFlags(Qt.ItemFlag.NoItemFlags)
+                set_row_flags(self.picker, index, Qt.ItemFlag.NoItemFlags)
         self.picker.setCurrentIndex(-1)
         self.picker.setEditText(typed)
         self.picker.blockSignals(False)

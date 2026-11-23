@@ -33,7 +33,6 @@ MANAGED_DIR = "/etc/pi"
 SESSION_DIR = "pi"  # in the session directory, mounted read-only at MANAGED_DIR
 EXTENSION = MANAGED_DIR + "/sandbox-ai.js"  # sandbox-ai's extension (the image's pi command loads it with -e)
 EXTENSION_CONFIG = MANAGED_DIR + "/sandbox-ai.json"  # what it registers: {"servers", "provider", "instructions", ...}
-EXPERIMENTAL = "pi"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "Pi"
 AGENT_DIR = ".pi/agent"  # Pi's folder in the HOME: settings, models, MCP servers, auth.json, sessions, skills
 STORAGE = AGENT_DIR + "/sessions"  # its sessions (JSONL trees, one folder per working directory)
@@ -242,10 +241,6 @@ def telemetry_rules(a=None):
         rules.append({"id": "pi-share", "host": SHARE_RULE[0], "methods": ["POST"], "path": SHARE_RULE[1],
                       "decision": "deny", "reason": "Pi's /share (--pi-enable share opens it)"})
     return rules
-
-
-def experimental_note():
-    return "Pi: not live-tested yet (its image and a real start have not passed their live test)"
 
 
 def mcp_servers(names, bridge_args, timeouts=None):
@@ -460,11 +455,10 @@ def model_effort_args(a):
 
 
 def plan(a):
-    """The dry run's "pi": the reviewed release, its extension, what is on and what stays off, and whether it is
-    experimental here."""
+    """The dry run's "pi": the reviewed release, its extension, what is on and what stays off."""
     names = features(a)
     return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}", "repository": REPOSITORY,
-            "experimental": True, "extension": EXTENSION, "sessions": "~/" + STORAGE, "own_sandbox": False,
+            "extension": EXTENSION, "sessions": "~/" + STORAGE, "own_sandbox": False,
             "approvals": False,  # Pi asks before nothing (upstream's design): the sandbox is the boundary
             # Never switchable: the opt-out variable set, these paths refused by the proxy.
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),

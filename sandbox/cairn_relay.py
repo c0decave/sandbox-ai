@@ -21,6 +21,17 @@ PROMPT`, `--help` - and nothing else: no other option, no other program, no shel
 output and exit status. The worker gone (Cairn's timeout, the dispatcher stopped), the CLI's process group ends.
 The snapshots it writes into the agent's /tmp are bounded: the newest KEPT, KEPT_BYTES at most (prune).
 
+Every other harness of the launcher (OpenCode, OpenCode 2, Hermes, DeepSeek Harness, Qwen Code, Goose, OpenHands,
+nanobot, Letta Code, Pi) is a worker the same way, without a change to Cairn: Cairn calls it through its claudecode
+driver (the worker's SANDBOX_AI_CAIRN_WORKER, from the dispatcher's configuration, names the harness), and the relay
+maps that driver's command line onto the harness's own one-shot run with a command line of its own (harness_argv:
+the prompt as an argument or on standard input, the launcher's arguments for it, the harness's own switch to work
+without questions; never a word of Cairn's but the prompt). What the claudecode driver reads back - the answer on
+standard output, in which Cairn looks for a JSON object, and the exit status - is made of the harness's output
+(answer_text: its final message alone). Cairn's second ask, its conclusion (`claude -r UUID ...`, when the first
+answer did not parse), goes on in exactly that task's conversation: only nanobot is given a session by name
+(--session), so for the others it is answered as not run (NoSession) - never in a conversation that may be another's.
+
 A relay that ends during the session (killed, out of memory) is started again by its supervisor after
 RESTART_DELAYS, at most RESTARTS times within RESTART_WINDOW seconds; beyond that the supervisor leaves a note beside
 the socket (ENDED) that says why and removes the socket: a worker says the note, and Cairn's container stops its
@@ -87,6 +98,25 @@ ENDED = "relay.ended"  # beside the socket: why the relay is not started again (
 NOTE_LIMIT = 2000
 CLAUDE_SKIP = "--dangerously-skip-permissions"
 CODEX_SKIP = "--dangerously-bypass-approvals-and-sandbox"
+# The harnesses a worker may be (the launcher's agents): claude and codex through Cairn's own drivers, every other
+# through the claudecode driver, mapped by the relay (harness_argv).
+HARNESSES = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot",
+             "letta", "pi")
+WORKER_VARIABLE = "SANDBOX_AI_CAIRN_WORKER"  # in Cairn's container: the harness a worker is (the dispatcher's env)
+# Each mapped harness's own switch to work without asking (agent_mcp.SKIP; the variables: the launcher's DANGER_ENV
+# and agent_mcp.SKIP_ENV) - Cairn gives Claude Code --dangerously-skip-permissions, the others get theirs. A test keeps
+# them the same as the launcher's.
+SKIP_ARGS = {"opencode2": ["--auto"], "qwen": ["--yolo"], "letta": ["--yolo"]}
+SKIP_ENV = {"opencode": {"OPENCODE_PERMISSION": '{"*":"allow"}'}, "hermes": {"HERMES_YOLO_MODE": "1"},
+            "dsh": {"DSH_PERMISSION_MODE": "danger-full-access"}, "goose": {"GOOSE_MODE": "auto"}}
+DSH_PATCH = "/etc/dsh/sandbox-ai.patch.yml"  # dsh.py's PATCH (agent_mcp.DSH_PATCH)
+NANOBOT_HEADER = "\N{CAT} nanobot"  # nanobot's header line before its answer (agent_mcp.NANOBOT_HEADER)
+OUTPUT_LIMIT = 16 << 20  # bytes of a mapped harness's standard output the relay keeps to find its answer in
+ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+class NoSession(ValueError):
+    """Cairn's conclusion for a harness that cannot be named the task's own conversation: not run."""
 
 
 # -- frames --
@@ -115,28 +145,109 @@ def read_frame(connection, limit):
 
 # -- what the relay takes --
 
-def command(request, workers, workspace):
-    """(argv, cwd, files, extra environment) of a worker REQUEST ({"agent", "argv", "cwd", "files"}), checked
-    against the session's WORKERS ({agent: [argument]}) and the WORKSPACE root; ValueError for anything else."""
+def driver_of(agent):
+    """The shim of Cairn's that calls AGENT: codex its own, every other harness Cairn's claudecode driver (claude)."""
+    return "codex" if agent == "codex" else "claude"
+
+
+def harness_argv(agent, prompt, own, session=None, cwd=None):
+    """(argv, standard input) of AGENT's own one-shot run of PROMPT for a worker called through Cairn's claudecode
+    driver: the launcher's arguments OWN where the harness takes them, its own switch to work without questions, the
+    prompt last - after "--", as an option's own value, or on standard input (DeepSeek Harness), so that a prompt
+    starting with "-" is never an option. SESSION (Cairn's UUID of the task) names nanobot's conversation; CWD is
+    said to nanobot, which works in a workspace of its own. The same forms as agent_mcp.command (a test keeps them)."""
+    own, skip = list(own or []), list(SKIP_ARGS.get(agent, []))
+    if agent == "opencode":
+        return ["opencode", "run", *own, "--", prompt], None
+    if agent == "opencode2":
+        return ["opencode2", "run", *skip, *own, "--", prompt], None
+    if agent == "hermes":
+        return ["hermes", *own, "--oneshot=" + prompt], None
+    if agent == "dsh":
+        return ["dsh", "headless", "--patch", DSH_PATCH, *own, "-"], prompt
+    if agent == "qwen":
+        return ["qwen", *skip, *own, "--prompt=" + prompt], None
+    if agent == "goose":
+        return ["goose", "run", "--quiet", *own, "--text=" + prompt], None
+    if agent == "openhands":
+        return ["openhands", "task", *own, "--text=" + prompt], None
+    if agent == "nanobot":
+        note = (f"(sandbox-ai: Cairn's project folder is {cwd}; work there - your tools' relative paths start in your "
+                "own workspace.)\n\n") if cwd else ""
+        return ["nanobot", "agent", "--no-markdown", "--session", f"cairn-{str(session).lower()}", *own,
+                "--message=" + note + prompt], None
+    if agent == "letta":
+        return ["letta", "-p", "--new", *skip, *own, "--", prompt], None
+    if agent == "pi":
+        # (a leading "@" would make it a file to read: a space keeps it text)
+        return ["pi", "-p", *own, "--", " " + prompt if prompt.startswith("@") else prompt], None
+    raise ValueError(f"{agent}: no one-shot run known")
+
+
+def answer_text(agent, out):
+    """What Cairn's claudecode driver reads as the answer (its standard output, where it looks for a JSON object):
+    the final message in AGENT's output OUT - terminal escapes taken out, nanobot's header and what came before it
+    dropped."""
+    text = ESCAPES.sub("", out.replace("\r\n", "\n"))
+    if agent == "nanobot":
+        lines = text.strip().splitlines()
+        marks = [index for index, line in enumerate(lines) if line.strip() == NANOBOT_HEADER]
+        text = "\n".join(lines[marks[-1] + 1:]) if marks else text
+    text = text.strip()
+    return text + "\n" if text else ""
+
+
+def help_worker(request, workers):
+    """The harness that answers a `--help` (Cairn's look at its start, made with the dispatcher's own environment:
+    no worker named): the one named, else the first worker its shim calls; ValueError where there is none."""
+    agent, driver = request.get("agent"), request.get("driver") or request.get("agent")
+    if agent in workers and driver_of(agent) == driver:
+        return agent
+    if agent == driver:
+        for name in workers:
+            if driver_of(name) == driver:
+                return name
+    raise ValueError(f"{agent!r} is no worker of this session ({', '.join(workers) or 'none'})")
+
+
+def call(request, workers, workspace):
+    """What a worker REQUEST ({"agent", "driver", "argv", "cwd", "files"}) runs, checked against the session's
+    WORKERS ({agent: [argument]}) and the WORKSPACE root: {"argv", "cwd", "files", "env", "stdin", "answer"} - the
+    harness whose output is translated (answer_text), or None where it is passed on as it comes (claude and codex,
+    Cairn's own drivers). ValueError for anything else; NoSession for a conclusion that is not run."""
     if not isinstance(request, dict):
         raise ValueError("the request is no JSON object")
     agent, argv = request.get("agent"), request.get("argv")
-    if agent not in workers:
-        raise ValueError(f"{agent!r} is no worker of this session ({', '.join(workers) or 'none'})")
+    driver = request.get("driver") or agent
     if not isinstance(argv, list) or not all(isinstance(word, str) and "\0" not in word for word in argv):
         raise ValueError("argv is a list of strings")
-    own = list(workers[agent] or [])
     if argv == ["--help"]:
-        return [agent, "--help"], None, {}, {}
+        agent = help_worker(request, workers)
+        return {"argv": [agent, "--help"], "cwd": None, "files": {}, "env": {}, "stdin": None, "answer": None}
+    if agent not in workers:
+        raise ValueError(f"{agent!r} is no worker of this session ({', '.join(workers) or 'none'})")
+    if driver not in ("claude", "codex"):
+        raise ValueError(f"{driver!r} is none of Cairn's drivers here (claude, codex)")
+    if agent not in HARNESSES:
+        raise ValueError(f"{agent}: no driver")
+    if driver_of(agent) != driver:
+        raise ValueError(f"{agent} is called through Cairn's {'codex' if driver_of(agent) == 'codex' else 'claudecode'}"
+                         f" driver, not its {driver}")
+    own = list(workers[agent] or [])
     prompt = argv[-1] if argv else ""
     if len(prompt.encode("utf-8", "surrogatepass")) > PROMPT_LIMIT:
         raise ValueError(f"the prompt is larger than {PROMPT_LIMIT} bytes")
-    extra = {}
-    if agent == "claude":
+    extra, stdin, answer = {}, None, None
+    if driver == "claude":
         shapes = len(argv) == 6 and argv[0] in ("--session-id", "-r") and UUID.fullmatch(argv[1]) and \
             argv[2:5] == [CLAUDE_SKIP, "-p", "--"]
         if not shapes:
             raise ValueError("not a command line of Cairn's claudecode driver")
+    if agent not in ("claude", "codex"):
+        run = None  # (made below, once the folder is checked: nanobot is told it)
+        answer = agent
+        extra = dict(SKIP_ENV.get(agent, {}))
+    elif agent == "claude":
         run = ["claude", *argv[:4], *own, "--", prompt]
         # Claude Code refuses --dangerously-skip-permissions as root unless it is told it runs in a sandbox (as -D
         # tells it in sandbox-ai): Cairn gives the flag, the sandbox is the boundary.
@@ -150,8 +261,6 @@ def command(request, workers, workspace):
         else:
             raise ValueError("not a command line of Cairn's codex driver")
         run = ["codex", "exec", *own, *argv[1:]]
-    else:
-        raise ValueError(f"{agent}: no driver")
     cwd = request.get("cwd")
     if not isinstance(cwd, str) or not cwd.startswith(workspace.rstrip("/") + "/") or \
             not PROJECT.fullmatch(cwd[len(workspace.rstrip("/")) + 1:]):
@@ -163,7 +272,19 @@ def command(request, workers, workspace):
         if not isinstance(path, str) or not PROMPTS.fullmatch(path) or not isinstance(content, str) or \
                 len(content.encode("utf-8", "surrogatepass")) > FILE_LIMIT:
             raise ValueError("a file that is no graph snapshot of Cairn's")
-    return run, cwd, files, extra
+    if answer is not None:
+        if argv[0] == "-r" and agent != "nanobot":
+            raise NoSession(f"{agent}'s one-shot run cannot be told to go on in exactly this task's conversation, so "
+                            "Cairn's conclusion (its second ask when the first answer did not parse) is not run: the "
+                            "task fails and Cairn hands it out again")
+        run, stdin = harness_argv(agent, prompt, own, session=argv[1], cwd=cwd)
+    return {"argv": run, "cwd": cwd, "files": files, "env": extra, "stdin": stdin, "answer": answer}
+
+
+def command(request, workers, workspace):
+    """(argv, cwd, files, extra environment) of a worker REQUEST (call)."""
+    found = call(request, workers, workspace)
+    return found["argv"], found["cwd"], found["files"], found["env"]
 
 
 def prune(root, busy=(), keep=None, limit=None):
@@ -285,9 +406,10 @@ def end_group(child, grace=KILL_GRACE):
             continue
 
 
-def pump(connection, child, limit=WORKER_LIMIT, clock=time.monotonic):
+def pump(connection, child, limit=WORKER_LIMIT, clock=time.monotonic, collect=None):
     """CHILD's output to the worker as it comes, until it ends; the worker gone or LIMIT seconds over, its group
-    ends. Its exit status (or None when the worker went)."""
+    ends. Its exit status (or None when the worker went). With COLLECT (a bytearray) its standard output is kept
+    there instead (OUTPUT_LIMIT bytes at most) - a mapped harness's, whose answer is made of it at the end."""
     streams = {child.stdout.fileno(): b"o", child.stderr.fileno(): b"e"}
     poller = select.poll()
     for fd in streams:
@@ -315,6 +437,9 @@ def pump(connection, child, limit=WORKER_LIMIT, clock=time.monotonic):
             if not data:
                 poller.unregister(fd)
                 del streams[fd]
+                continue
+            if collect is not None and streams[fd] == b"o":
+                collect += data[:max(0, OUTPUT_LIMIT - len(collect))]
                 continue
             try:
                 connection.sendall(frame(streams[fd], data))
@@ -357,10 +482,14 @@ def handle(connection, cfg, guard, popen=subprocess.Popen):
         if kind != b"q":
             raise ValueError("no request")
         request = json.loads(payload.decode("utf-8", "surrogatepass"))
-        argv, cwd, files, extra = command(request, cfg["workers"], cfg["workspace"])
+        planned = call(request, cfg["workers"], cfg["workspace"])
+    except NoSession as exc:
+        log(cfg, f"not run: {exc}")
+        return answer(1, str(exc))
     except (OSError, EOFError, ValueError, UnicodeError, RecursionError) as exc:
         log(cfg, f"refused: {exc}")
         return answer(REFUSED, f"refused: {exc}")
+    argv, cwd, files, extra = planned["argv"], planned["cwd"], planned["files"], planned["env"]
     task = argv[1:] != ["--help"]
     wait = guard.paused() if task else 0
     if wait:
@@ -376,16 +505,29 @@ def handle(connection, cfg, guard, popen=subprocess.Popen):
         try:
             if cwd:
                 prepare(cwd, files)
-            child = popen(argv, cwd=run_in, env={**os.environ, **extra}, stdin=subprocess.DEVNULL,
+            given = planned["stdin"]
+            child = popen(argv, cwd=run_in, env={**os.environ, **extra},
+                          stdin=subprocess.DEVNULL if given is None else subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         except (OSError, ValueError) as exc:
             log(cfg, f"could not start {argv[0]}: {exc}")
             if task:
                 guard.done(127)
             return answer(127, f"{argv[0]} could not be started: {exc}")
+        if given is not None:
+            threading.Thread(target=feed, args=(child.stdin, given), daemon=True).start()
         connection.settimeout(None)
         log(cfg, f"started {argv[0]} {'task' if task else '--help'} in {run_in}")
-        status = pump(connection, child)
+        collected = bytearray() if planned["answer"] else None
+        status = pump(connection, child, collect=collected)
+        if status is not None and collected is not None:
+            try:  # the harness's final message alone: what Cairn's claudecode driver reads as the answer
+                text = answer_text(planned["answer"], bytes(collected).decode("utf-8", "replace"))
+                data = text.encode("utf-8", "surrogatepass")
+                for start in range(0, len(data), CHUNK):  # (in frames the worker takes: CHUNK each)
+                    connection.sendall(frame(b"o", data[start:start + CHUNK]))
+            except OSError:
+                status = None
     finally:
         with BUSY_LOCK:
             BUSY.subtract(folders)
@@ -397,6 +539,19 @@ def handle(connection, cfg, guard, popen=subprocess.Popen):
     log(cfg, f"{argv[0]} ended: {status if status is not None else 'the worker went'}")
     if status is not None:
         answer(status if status >= 0 else 128 - status)
+
+
+def feed(stream, text):
+    """TEXT to a harness's standard input (DeepSeek Harness reads its task there), then closed."""
+    try:
+        stream.write(text.encode("utf-8", "surrogatepass"))
+    except OSError:
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def listen(path):
@@ -537,12 +692,14 @@ def snapshots(argv, read_limit=FILE_LIMIT):
     return found
 
 
-def worker(agent, argv, path=None, out=None, err=None, cwd=None):
-    """The `claude` or `codex` of Cairn's dispatcher: the call relayed; its exit status."""
+def worker(agent, argv, path=None, out=None, err=None, cwd=None, harness=None):
+    """The `claude` or `codex` of Cairn's dispatcher (AGENT: the shim's name, Cairn's driver): the call relayed for
+    the worker's HARNESS (its SANDBOX_AI_CAIRN_WORKER; none: the shim's own agent); its exit status."""
     out = out or sys.stdout.buffer
     err = err or sys.stderr.buffer
     path = path or os.environ.get("SANDBOX_AI_CAIRN_RELAY") or SOCKET
-    request = json.dumps({"agent": agent, "argv": list(argv), "cwd": cwd or os.getcwd(),
+    harness = harness or os.environ.get(WORKER_VARIABLE) or agent
+    request = json.dumps({"agent": harness, "driver": agent, "argv": list(argv), "cwd": cwd or os.getcwd(),
                           "files": snapshots(argv)}).encode("utf-8", "surrogatepass")
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:

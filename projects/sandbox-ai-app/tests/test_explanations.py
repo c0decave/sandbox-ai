@@ -297,6 +297,7 @@ KEPT = {
     "None yet: “Save the board as a preset": "empty list",
     "No host yet: add one on the Hosts page": "empty list (nothing to choose)",
     "This server takes no variables.": "empty list",
+    "No host in sandbox-ai hosts yet: a host added later": "empty list (Share with hosts: no host to tick)",
     "Select an image or a variant to edit its extension.": "placeholder of an empty editor",
     "Choose a bundle, then Check.": "status line before the first result",
     "Not checked yet: press Check.": "status line before the first result",
@@ -312,6 +313,8 @@ KEPT = {
     "Load the catalogs to set the folders": "status: what to do to see more",
     "Load the catalogs to see the variables": "status: what to do to see more",
     "{count} question(s); each can be changed later": "result",
+    "gets the copy when it is shared": "status of a host (Share with hosts)",
+    "not copied yet": "status of a host (Share with hosts)",
     # facts of the dialog: where, on which host, which values
     "on {host}": "where the dialog acts",
     "It is imported on {host}.": "where the dialog acts",

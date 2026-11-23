@@ -24,8 +24,8 @@ LOADING = threading.RLock()  # the lazily loaded helper modules below
 
 HERE = Path(__file__).resolve().parent
 AGENTS = ("codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
-# Not live-tested yet (opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi): no image or login of them is
-# not a warning.
+# The agents beyond the first three (opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi): no image or
+# login of them is not a warning (few use them all).
 OPTIONAL = {"opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"}
 _launcher = None
 _modules = {}
@@ -299,6 +299,33 @@ def check_pasta(podman_url=None, which=shutil.which, tun=Path("/dev/net/tun")):
     if not device:
         return "fail", "pasta", f"{found}, but {tun} is missing: pasta cannot set up the network", TUN_HINT
     return "ok", "pasta", f"{found}, {tun}", ""
+
+
+def hostinit():
+    if "hostinit" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_hostinit_for_doctor", HERE / "hostinit.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["hostinit"] = loaded  # published only once loaded
+    return _modules["hostinit"]
+
+
+def check_init(podman_url=None, found=None, manager=None):
+    """Podman's --init takes its init (catatonit) from this host and puts it into the container as PID 1: needed
+    only by containers of images that are not sandbox-ai's own and bring no init themselves (MCP image servers,
+    --service) - the agents need none, the browser's and Cairn's containers bring sandbox-ai's own. Missing: a
+    warning with this distribution's package command (never run for you)."""
+    if podman_url:
+        return "skip", "Podman init", "remote engine: its own init binary", ""
+    h = hostinit()
+    found = h.init_binary() if found is None else found
+    if found:
+        return "ok", "Podman init", f"{found} (--init: MCP image servers, services of your images)", ""
+    command = h.install_command([h.INIT_NAME], manager)
+    return ("warn", "Podman init",
+            f"{h.INIT_NAME} not found: Podman's --init has no init binary here, so an MCP image server or a --service "
+            "whose image brings no init of its own is not started (the agents, the browser and Cairn need none)",
+            shlex.join(command) if command else f"install the package {h.INIT_NAME}")
 
 
 def check_image(agent, podman_url=None):
@@ -846,8 +873,8 @@ def check_mode(cwd=None):
 
 # The settings files a user (or the app) writes, in ~/.config/sandbox-ai: each read where it is used, and a damaged one
 # stops only that use - said here together, with the files that are fine left unnamed.
-SETTINGS_FILES = ("defaults.json", "llm.json", "mcp.json", "hosts.json", "identities.json", "git-logins.json",
-                  "publish-logins.json", "trusted.json", "app/settings.json", "app/presets.json")
+SETTINGS_FILES = ("defaults.json", "llm.json", "llm-shares.json", "mcp.json", "hosts.json", "identities.json",
+                  "git-logins.json", "publish-logins.json", "trusted.json", "app/settings.json", "app/presets.json")
 
 
 def check_settings_files(config=None):
@@ -951,6 +978,32 @@ def check_mcp_network(servers=None, problem=None):
     return "ok", "MCP network", detail, ""
 
 
+def check_mcp_images(servers=None):
+    """The catalog MCP servers of yours whose catalog pins a newer image (or rootfs) than they run - a definition
+    keeps the digest it was added with - as each catalog was last read here (nothing downloaded): `sandbox-ai mcp
+    update` takes it (its signature checked again, the definition's folders, variables, limits and network kept).
+    SERVERS: mcp.server_list()."""
+    try:
+        mcp = launcher().load_mcp_module()
+        found = mcp.server_list() if servers is None else servers
+    except Exception as exc:  # noqa: BLE001 - the other checks go on
+        return "skip", "MCP images", f"not looked at ({launcher().printable(str(exc))[:200]})", ""
+    catalog = [entry for entry in found if entry.get("own") and entry.get("kind") in ("image", "rootfs")
+               and (entry.get("definition") or {}).get("source")]
+    if not catalog:
+        return "skip", "MCP images", "no catalog server of yours", ""
+    newer = [entry for entry in catalog if entry.get("newer")]
+    printable = launcher().printable
+    if not newer:
+        return "ok", "MCP images", f"{len(catalog)} catalog server{'s' if len(catalog) != 1 else ''}, each with the " \
+            "image its catalog pins (as the catalogs were last read here: sandbox-ai mcp update --check reads them " \
+            "now)", ""
+    names = [entry["name"] for entry in newer]
+    unsigned = any(not entry["newer"].get("signed") for entry in newer)
+    return ("warn", "MCP images", printable("; ".join(mcp.newer_text(entry["name"], entry["newer"]) for entry in newer)),
+            printable(f"sandbox-ai mcp update {' '.join(names)}" + (" --unsigned" if unsigned else "")))
+
+
 def check_machine(runner=None, home=None, tmpdir=None):
     """macOS: podman machine, the Linux VM Podman runs the sandboxes in: running, rootless, sharing HOME and
     $TMPDIR (a workspace or a session's files outside the shares cannot be mounted), its CPUs and memory."""
@@ -1004,7 +1057,7 @@ def checks(backend="podman", podman_url=None, cwd=None):
               check_python(), check_userns(), check_user_session(backend=backend, podman_url=podman_url),
               check_proxy_nat(), check_landlock()]
     if backend in ("podman", "both"):
-        result += [check_podman(podman_url), check_pasta(podman_url)]
+        result += [check_podman(podman_url), check_pasta(podman_url), check_init(podman_url)]
         if not podman_url:
             result += [check_subids(backend=backend), check_newuidmap()]
         result += [check_image(agent, podman_url) for agent in AGENTS] + [check_vpn(podman_url)]
@@ -1019,8 +1072,105 @@ def checks(backend="podman", podman_url=None, cwd=None):
     result += [check_login(agent) for agent in AGENTS]
     result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
     result += [check_git_identity(), check_secrets(), check_project(cwd), check_mode(cwd), check_settings_files(),
-               check_sessions(), check_orphans(), check_remote_folders(), check_mcp_network()]
+               check_sessions(), check_orphans(), check_remote_folders(), check_mcp_network(), check_mcp_images()]
     return result
+
+
+def fixes():
+    """fixes.py: the fix plan (what is missing and what makes each), as a start uses it."""
+    if "fixes" not in _modules:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_fixes_for_doctor", HERE / "fixes.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _modules["fixes"] = loaded  # published only once loaded
+    return _modules["fixes"]
+
+
+# A check whose hint is nothing but a command of sandbox-ai's own (sandbox-ai build codex, sandbox-ai plugins claude,
+# "sandbox-ai login claude (or log in on the host)"): that command is its fix.
+OWN_COMMAND = re.compile(r"(sandbox-ai (?:build|login|plugins) [a-z0-9@._ -]+?)(?: \(or [^)]*\)| to update)?")
+TOOLS_OF = {"Podman": ["podman", "pasta"], "pasta": ["pasta"], "newuidmap, newgidmap": ["newuidmap"],
+            "MCP network": ["nft", "nsenter"]}
+
+
+def fix_of(status, title, detail, hint):
+    """The fix (fixes.py) of one check that warns or fails, or None: a host tool that is not installed is its
+    distribution's package command (shown, never run - it needs root); an image not built is built by `doctor
+    --fix`; plugins not installed and a login that is missing are sandbox-ai's own commands that talk to the human
+    (shown: not needed for a start, run when chosen)."""
+    if status not in ("warn", "fail") and not (status == "skip" and title.startswith("Remote folders")):
+        return None
+    f = fixes()
+    lacking = f"{title}: {detail}"
+    if title == "Podman init":
+        return f.init_fix()
+    if title in TOOLS_OF and "not found" in detail:
+        return f.tool_fix(TOOLS_OF[title], missing=lacking)
+    if title == "Bubblewrap tools" and detail.startswith("missing: "):
+        return f.tool_fix(detail[len("missing: "):].split(", "), missing=lacking)
+    if title == "Delegated UID/GID ranges" and "usermod" in (hint or ""):
+        # The usual range where this system has it (subid_advice): root's commands, shown, never run.
+        user = getpass.getuser()
+        return f.fix("host", "subids", lacking, "give your user the IDs 100000-165535 (its older lines for it removed "
+                     "first), then let Podman take them",
+                     [["sudo", "usermod", "--add-subuids", "100000-165535", "--add-subgids", "100000-165535", user],
+                      ["podman", "system", "migrate"]],
+                     manual="it needs root: sandbox-ai never runs sudo for you (podman system reset too, if images "
+                            "were pulled or built before: it removes this user's images and containers)")
+    if title == "Delegated UID/GID ranges":
+        return f.fix("host", "subids", lacking, "give this system more IDs from its host",
+                     manual=MORE_IDS)
+    if title == "systemd user session" and status == "warn" and "enable-linger" in (hint or ""):
+        user = getpass.getuser()
+        package = f.hostinit().install_command(["dbus-user-session"]) if f.hostinit().package_manager()[0] == "apt" \
+            else []
+        return f.fix("host", "user-session", lacking, "let your user's systemd session run, then log in again (by "
+                     "ssh or on the desktop, not with su or sudo)",
+                     [["sudo", "loginctl", "enable-linger", user], *([package] if package else [])], needed=False,
+                     manual="it needs root: sandbox-ai never runs sudo for you")
+    if title.startswith("Remote folders") and "not installed" in detail:
+        return remote_fixes()[0] if remote_fixes() else None
+    match = OWN_COMMAND.fullmatch(hint or "")
+    if match:
+        words = match[1].split()
+        kind = {"build": "image", "login": "login", "plugins": "plugin"}[words[1]]
+        return f.fix(kind, " ".join(words[2:]), lacking,
+                     {"image": "build it", "login": "log in inside a sandbox, in this terminal",
+                      "plugin": "install them (the plugin installer's sandbox, in this terminal)"}[kind], [words],
+                     duration="~5 min" if kind == "image" else "", terminal=kind != "image",
+                     needed=kind == "image")
+    return None
+
+
+def remote_fixes():
+    """The fix for sshfs that is not installed (remotefs.sshfs_fixes): optional here - only remote folders need it."""
+    check_remote_folders(which=lambda name: None)  # (loads remotefs.py once)
+    return _modules["remotefs"].sshfs_fixes(needed=False)
+
+
+def fix_plan(results):
+    """The fixes of RESULTS (checks()), each once, what a start needs first."""
+    found = [fix_of(*result) for result in results]
+    return fixes().unique([item for item in found if item is not None])
+
+
+def fix_lines(plan):
+    """What the report says after its table when checks have fixes: the commands, one per line, to copy - and that
+    `sandbox-ai doctor --fix` runs those that are sandbox-ai's own."""
+    f = fixes()
+    commands = [f.command_text(command) for item in plan for command in item["commands"]]
+    if not commands:
+        return []
+    own = [item for item in plan if item["verdict"] == "offered" and item["needed"]]
+    lines = ["What fixes it (copy these lines):", *(f"  {command}" for command in commands)]
+    if own:
+        lines.append(f"sandbox-ai doctor --fix runs {'the build' if len(own) == 1 else f'the {len(own)} builds'} "
+                     "among them, without asking"
+                     + ("; a login, the plugin installer and what needs root are yours to run"
+                        if len(own) < len(plan) else ""))
+    else:
+        lines.append("They need root: sandbox-ai never runs sudo for you.")
+    return lines
 
 
 SYMBOLS = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL", "skip": "--  "}
@@ -1095,6 +1245,11 @@ def cli(argv):
     parser.add_argument("-p", "--plain", action="store_true", help="One line per check, without the table")
     parser.add_argument("-nc", "--no-color", action="store_true",
                         help="Without colour (also without a terminal, with NO_COLOR or TERM=dumb)")
+    parser.add_argument("-f", "--fix", action="store_true",
+                        help="After the checks: build the images that are not built, without asking; a missing "
+                             "login and plugins that are not installed are shown with their commands (they talk to "
+                             "you), a host package that is missing with your distribution's command (never installed "
+                             "for you)")
     a = parser.parse_args(argv)
     results = checks(a.backend, a.podman_url)
     if a.json:
@@ -1104,6 +1259,9 @@ def cli(argv):
         entries = []
         for r in results:
             entry = {**dict(zip(("status", "check", "detail", "hint"), r)), "group": group_of(r[1])}
+            fix = fix_of(*r)  # (what fixes it, as a start's fix plan says it: its commands, whether it needs root)
+            if fix is not None:
+                entry["fix"] = fix
             if r[1] == VERSION_CHECK:
                 entry = {"id": VERSION_ID, **entry, **installation_facts()}
             entries.append(entry)
@@ -1111,6 +1269,27 @@ def cli(argv):
         return 1 if any(r[0] == "fail" for r in results) else 0
     colour = False if a.no_color else None
     status = report(results, colour=colour, plain=a.plain)
+    plan = fix_plan(results)
+    if plan:
+        print("")
+        for line in fix_lines(plan):
+            print(launcher().printable(line))
+    if a.fix:
+        f = fixes()
+        # (the builds; a login or the plugin installer talks to you: its command is in the block, yours to run)
+        own = [item for item in plan if item["verdict"] == "offered" and item["needed"]]
+        print("")
+        if not own:
+            print("sandbox-ai doctor --fix: nothing here is sandbox-ai's own to fix")
+            return status
+        try:
+            f.run(own, out=lambda text: print(f"sandbox-ai doctor: {text}", file=sys.stderr),
+                  printable=launcher().printable, again="run sandbox-ai doctor again")
+        except ValueError as exc:
+            print(f"sandbox-ai doctor: {launcher().printable(str(exc))}", file=sys.stderr)
+            return 1
+        print("sandbox-ai doctor: done; run it again to see the host as it is now", file=sys.stderr)
+        return status
     t = textout()
     print("")
     t.section("Security modes", colour=t.colour_enabled() if colour is None else colour,

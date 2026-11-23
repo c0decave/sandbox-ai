@@ -24,6 +24,6 @@
     "The model: Anthropic's API with your key (sandbox-ai secrets set ANTHROPIC_API_KEY once). Letta Code sees a placeholder, the connection proxy puts the key in on the wire; --model names the handle (anthropic/...). Another provider: --api-key api.openai.com=OPENAI_API_KEY or openrouter.ai=OPENROUTER_API_KEY with its --model, or a model server of yours with --llm (the preset letta-local-llm).",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-letta or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on.",
-    "Letta Code is not live-tested yet (a start says so); its image first: sandbox-ai build letta (a start builds it when it is missing)."
+    "Its image first: sandbox-ai build letta (a start builds it when it is missing)."
   ]
 }

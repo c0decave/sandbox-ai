@@ -43,7 +43,7 @@ def test_the_dry_run_of_opencode2_and_opencode_1_beside_it(host):
     assert found["agent"] == "opencode2" and found["image"] == "localhost/opencode2-sandbox:latest"
     assert found["https_hosts"] == ["opencode.ai"]
     section = found["opencode2"]
-    assert section["version"] == "2.2.5" and section["experimental"] and section["telemetry"]["switchable"] is False
+    assert section["version"] == "2.2.5" and "experimental" not in section and section["telemetry"]["switchable"] is False
     assert section["background_service"] is False and section["never"] == ["opentunnel.xyz"]
     one = plan(host, "opencode")
     assert one["image"] == "localhost/opencode-sandbox:latest" and one.get("opencode2") is None
@@ -97,7 +97,7 @@ def test_a_start_prepares_its_home_and_gets_as_far_as_its_pod(host):
     assert stopped is not None and "create" in stopped, (done.returncode, done.stderr[-2000:])
     assert "localhost/opencode2-sandbox:latest" in stopped
     assert json.loads((state / ".config/opencode/service.json").read_text()) == {"disabled": True}
-    assert "not live-tested yet" in done.stderr
+    assert "live-tested" not in done.stderr
 
 
 def test_build_opencode2_takes_the_reviewed_release(host):

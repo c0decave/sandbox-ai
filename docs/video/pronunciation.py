@@ -38,6 +38,8 @@ LEXICON = {
     "Image": "image", "Images": "images",
     "Backend": "back end", "Engine": "engine",
     "Build": "build", "Builds": "builds",
+    "Toolchain": "tool chain", "Toolchains": "tool chains",
+    "CLI": "C L I",
     "Update": "update", "Updates": "updates",
     "Cloud": "cloud",
     "Host": "host", "Hosts": "hosts",
@@ -93,6 +95,9 @@ LEXICON = {
     "Bot": "bot",
     # 0.1.98: the system monitor
     "CPU": "/sˌiːpˌiːjˈuː/", "Limits": "limits", "top": "top", "stats": "stats", "usage": "usage",
+    # 0.1.236: the twelve agents, Cairn and ARTEX on the Board
+    "OpenHands": "open hands", "Letta Code": "letta code", "Pi": "pie", "ARTEX": "ar tex",
+    "Cairn": "cairn", "Cairns": "cairns",
 }
 
 # Words of the German narration that English texts share, said the German way on purpose (German words, names
@@ -114,7 +119,7 @@ GERMAN = {
     "Sekunden", "Galerie", "Abzeichen", "Integration", "Kategorie", "Konto", "Kontos", "Bash", "Paket", "Pakete",
     "Fenster", "Knopf", "Knöpfe", "Reiter", "Reitern", "Kontextmenü", "Funktionstasten", "Doppelklick",
     "Rechtsklick", "Unsigniert", "signiert", "Katalog", "Kataloge", "Katalogen", "Websuche", "Binäranalyse",
-    "Schritt", "Expert", "An", "null",
+    "Schritt", "Expert", "An", "null", "Video", "Videos",
     # file and key names said as they are written, letter by letter where the voice spells them
     "F", "H", "V", "So", "Tabellen", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "L", "X", "b", "d", "C", "A",
     # names

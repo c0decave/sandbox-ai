@@ -323,7 +323,9 @@ def test_board_start_e2e_builds_sandbox_ais_own_image_then_starts(page, wait, qa
     argv, title, ended = tabs[0]
     steps = json.loads(argv[-1])
     assert steps[0][1][-5:] == ["images", "build-image", "showcase-web", "--builtin", "showcase-web"]
-    assert any(t == "Service image" for t, _, _ in widgets.SHOWN), "asked first"
+    # (asked first: the one question about everything the start lacks, sandbox-ai's default fix_questions all)
+    asked = [text for title, text, _ in widgets.SHOWN if title == "What the start lacks"]
+    assert asked and "the service image showcase-web is not built" in asked[0] and "UNCHECKED" in asked[0]
     assert started == []
     path = home / "config" / "sandbox-ai" / "user-images.json"  # (the build recorded it)
     path.write_text(json.dumps({"version": 1, "images": {"redis": RECORD, "showcase-web": {

@@ -279,6 +279,20 @@ def test_a_login_tab_offers_its_sign_in_link_and_takes_the_code(terminal, web, w
 def test_which_terminals_are_logins(terminal):
     assert terminal.login_of(["ssh", "-tt", "host", "if command -v sandbox-ai; then exec sandbox-ai login codex; fi"]) \
         == "codex"
+    # sandbox-ai 0.1.228 on: the line is /bin/sh -c '...' with the script inside (hosts.neutral_command), whatever the
+    # login shell on the host - read the same.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hosts_for_terminal_tests",
+                                                  Path(os.environ.get("SANDBOX_AI_HOME", ".")) / "sandbox/hosts.py")
+    hosts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hosts)
+    if hasattr(hosts, "neutral_command"):
+        assert hosts.NEUTRAL_HEAD == terminal.NEUTRAL_HEAD and hosts.NEUTRAL_TAIL == terminal.NEUTRAL_TAIL
+        line = hosts.remote_command({}, ["login", "codex"])
+        assert terminal.login_of(["ssh", "-tt", "host", line]) == "codex"
+        assert terminal.remote_words(hosts.remote_command({}, ["attach", "it's mine"])) == \
+            ["sandbox-ai", "attach", "it's mine"]
+        assert terminal.attach_key(["ssh", "-tt", "host", hosts.remote_command({}, ["attach", "web"])]) is not None
     assert terminal.login_of(["ssh", "-tt", "host", "exec sandbox-ai attach x"]) is None
     assert terminal.login_of(["sh", "-c", "sandbox-ai login claude"]) is None
 

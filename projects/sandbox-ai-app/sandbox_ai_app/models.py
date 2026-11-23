@@ -374,9 +374,7 @@ def fill_combo(combo, agent, current="", sai=None):
     combo.addItem(tr("the agent's default"), "")
     for provider, rows in grouped(agent, sai):
         combo.addItem(f"— {provider} —", HEADER + provider)
-        item = combo.model().item(combo.count() - 1) if hasattr(combo.model(), "item") else None
-        if item is not None:
-            item.setFlags(item.flags() & ~(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled))
+        widgets.set_row_enabled(combo, combo.count() - 1, False, selectable=False)
         for model, text, tip in rows:
             combo.addItem(text, model)
             combo.setItemData(combo.count() - 1, widgets.safe_tooltip(tip), Qt.ItemDataRole.ToolTipRole)

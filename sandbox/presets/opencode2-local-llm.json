@@ -33,6 +33,6 @@
     "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent opencode2 asks it for the API OpenCode 2 uses.",
     "OpenCode 2 gets the server as OpenCode 1 does, read-only: an OpenAI-compatible provider in /etc/opencode2/sandbox-ai-llm.json with the key as a placeholder the connection proxy replaces, the model in its configuration layer (no project file points it elsewhere), and --no-provider-defaults offers no other provider.",
     "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent; OpenCode 2 gets the loop guard's steps, compaction and instructions in its file too. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
-    "OpenCode 2 is not live-tested yet (a start says so); its image first: sandbox-ai build opencode2."
+    "Its image first: sandbox-ai build opencode2."
   ]
 }

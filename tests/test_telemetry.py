@@ -192,7 +192,10 @@ def test_claude_codes_opentelemetry_export_cannot_be_turned_on(m):  # noqa: F811
 
 
 def test_a_secret_cannot_turn_it_on(m, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(s, "secret_environment", lambda a: {"DO_NOT_TRACK": "0"} if a.secret_env else {})
+    # A real secret DO_NOT_TRACK=0 in the store of the test's HOME (a start checks that each secret it reads is there
+    # before it goes on: a stand-in for secret_environment alone was refused as "there is no secret DO_NOT_TRACK")
+    monkeypatch.setenv("SANDBOX_AI_SECRETS", "file")
+    s.load_secret_store_module().FileStore().set("DO_NOT_TRACK", "0", plain=True)
     run = m.run("--secret-env", "DO_NOT_TRACK")
     assert run.env["DO_NOT_TRACK"] == "1"
 

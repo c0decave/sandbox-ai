@@ -387,8 +387,18 @@ def test_the_script_derives_writes_and_checks(tmp_path):
     text = summary.read_text()
     assert "ornith-1.5-35b x claude" in text and "verified -> partial" in text
     assert not PRIVATE.search(table.read_text() + snapshot.read_text())
-    # the table against the snapshot alone (what the tests do without the research tree)
+    # the table against the snapshot alone (what the tests do without the research tree): every status this small
+    # tree gave no runs is still the hand-written one, which --check refuses (no light without measured runs) ...
     check = run_script("--check", "--table", str(table), "--snapshot", str(snapshot))
+    assert check.returncode == 1 and "without measured runs" in check.stdout
+    assert "ornith-1.5-35b x claude" not in check.stdout, "the derived pair is backed by its runs"
+    # ... and with only the derived pairs it matches
+    pruned = json.loads(table.read_text())
+    for found in pruned["families"]:
+        found["harnesses"] = {agent: entry for agent, entry in found.get("harnesses", {}).items()
+                              if isinstance(entry.get("evidence"), dict)}
+    (tmp_path / "pruned.json").write_text(json.dumps(pruned))
+    check = run_script("--check", "--table", str(tmp_path / "pruned.json"), "--snapshot", str(snapshot))
     assert check.returncode == 0, check.stdout + check.stderr
     # round 7 too: the codex pair gets its run; a model of no family is named, not guessed
     seven = run_script("--research", str(root), "--table", str(table), "--snapshot", str(snapshot), "--write",
@@ -407,7 +417,7 @@ def test_the_script_derives_writes_and_checks(tmp_path):
     next(f for f in broken["families"] if f["id"] == "ornith-1.5-35b")["harnesses"]["claude"]["status"] = "verified"
     table.write_text(json.dumps(broken))
     check = run_script("--check", "--table", str(table), "--snapshot", str(snapshot))
-    assert check.returncode == 1 and "ornith-1.5-35b x claude" in check.stdout
+    assert check.returncode == 1 and "ornith-1.5-35b x claude: the table says verified" in check.stdout
 
 
 def test_the_script_without_write_changes_nothing(tmp_path):
@@ -448,6 +458,37 @@ def test_every_family_with_measured_data_has_a_derived_status():
             assert derived, family["id"]
         for agent in derived:
             assert f"{family['id']}/{agent}" in SNAPSHOT["pairs"], (family["id"], agent)
+
+
+def test_every_shipped_status_is_backed_by_measured_runs():
+    """The user, 2026-11-22 ("how you know otherwise what works"): a light that is not grey comes from its own pair's
+    measured runs - in the snapshot, with run ids - never from a family's status or a status entered by hand; and
+    scripts/profile_status.py --check (what CI and a release run) says so for the shipped files."""
+    for family in TABLE["families"]:
+        assert not {"status", "reason"} & set(family["all"]), f"{family['id']}: a family has no status of its own"
+        for agent, entry in family.get("harnesses", {}).items():
+            key = f"{family['id']}/{agent}"
+            assert entry.get("status") in mp.STATUSES, key
+            block = entry.get("evidence")
+            assert isinstance(block, dict) and block.get("derived") == ev.DERIVED and block.get("run_ids"), key
+            assert SNAPSHOT["pairs"][key]["run_ids"] == block["run_ids"], key
+    check = run_script("--check")
+    assert check.returncode == 0 and "the table matches the snapshot" in check.stdout, check.stdout
+
+
+def test_check_refuses_a_family_status_and_a_status_by_hand(tmp_path):
+    table = json.loads((ROOT / "sandbox/model_profiles.json").read_text())
+    family = next(f for f in table["families"] if f["id"] == "vcoder-120b")
+    family["all"].update(status="known-bad", reason="by hand")
+    family["harnesses"] = {"opencode": {"status": "verified", "evidence": "it worked", "works": ["smoke"]}}
+    path = tmp_path / "table.json"
+    path.write_text(json.dumps(table))
+    check = run_script("--check", "--table", str(path))
+    assert check.returncode == 1
+    assert "vcoder-120b: a status for every harness, which no pair's runs back" in check.stdout
+    assert "vcoder-120b x opencode: verified without measured runs" in check.stdout
+    with pytest.raises(ValueError, match="all has no status"):
+        mp.check_table(table)
 
 
 def test_the_snapshot_holds_nothing_private():

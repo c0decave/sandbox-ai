@@ -24,6 +24,6 @@
     "Watch the board: hermes kanban watch (or hermes kanban list, hermes kanban show ID, hermes kanban log ID) in the tmux window shell. Hermes' web dashboard is not offered: a sandbox takes no connections from outside, and its frontend is not part of the image.",
     "The board (~/.hermes/kanban.db) lives in this start's HOME: it is kept when the start ends (sandbox-ai resume NAME brings it back), not with --no-keep.",
     "Hermes needs a model: its Nous Portal login (sandbox-ai login hermes), --api-key HOST=NAME, or --llm NAME. Every worker uses it too: keep --memory and --cpus in mind for many cards at once (Hermes runs at most about one worker per 512 MiB of memory).",
-    "Hermes is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+    "Its image first: sandbox-ai build hermes."
   ]
 }

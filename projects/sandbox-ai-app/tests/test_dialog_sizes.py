@@ -315,7 +315,7 @@ def more_dialogs(window):
     """[(what, make)]: the rest of the app's dialog classes (test_every_dialog_class_is_measured: none left out)."""
     from sandbox_ai_app import (agent_parts_view, bridges_view, bundle_dialogs, checkpoints_dialog, file_editor,
                                 storage_view,
-                                file_properties, file_search_view, guide_view, help_view, llm_loaded_view, llm_params, llm_params_view,
+                                file_properties, file_search_view, guide_view, help_view, llm_loaded_view, llm_params, llm_params_view, llm_share_view,
                                 kits_live_view, mcp_copy_view, mcp_fields, notify_view, package_search, pages, preset_gallery,
                                 presets, registry_browser, remote_chooser, remote_source, schedules_view,
                                 session_inspect_dialog, session_logins_view, session_state_dialogs, session_transfer,
@@ -376,6 +376,13 @@ def more_dialogs(window):
         ("llm params", lambda: llm_params_view.ParamsDialog(
             {"name": "lmstudio", "kind": "lmstudio"}, llm_params.local_catalogue(window.sai, "lmstudio") or [],
             host_label="build-box", parent=window)),
+        ("llm share", lambda: llm_share_view.ShareDialog(
+            window, {"name": "ein-server-mit-langem-namen", "api_key_secret": "LMS_KEY",
+                     "shared": {"key_to": ["ct1"], "hosts": [
+                         {"host": "ct1", "copied": True, "in_sync": True, "key": "sent", "reachable": True},
+                         {"host": "build-box-im-keller", "copied": True, "in_sync": False, "key": "missing",
+                          "reachable": False, "reach_error": "connection refused", "error": None}]}},
+            "build-box", ["ct1", "build-box-im-keller"])),
         ("schedule", lambda: schedules_view.ScheduleDialog(lambda _fields: None, parent=window)),
         ("schedule history", lambda: schedules_view.HistoryDialog(window.sai, "local", "nightly", [
             {"run": "1", "reason": "timer", "started": 1700000000, "status": "ok", "seconds": 61,

@@ -26,7 +26,7 @@ integrated as an agent of its own, `sandbox-ai opencode2` (docs/OPENCODE2_REVIEW
 | - | **Cairn** (oritera/Cairn) | **Integrate now** (as planned, pin a commit) | Its `runtime.execution: local` mode exists only on `main` (since 2026-07-15), not in a release. Pin `main` 8e7e0ea6 (2026-09-07). AGPL-3.0. |
 | 2 | **OpenHands** (Agent Canvas + Agent Server) | **Integrate later** (next after Goose) | Strong SWE agent with a web UI, automations and ACP. The project was restructured recently (CLI unmaintained, frontend-only main repo) and churns fast (Canvas 1.34->1.40 in 16 days). The Canvas sends a PostHog install event before consent unless it is switched off. |
 | 3 | **Letta Code** (letta-ai/letta-code) | **Integrate later** | Unique long-term memory and self-improving agents (MemGPT lineage), Apache-2.0, MCP. Letta Cloud is the default and the local backend is still flagged experimental. Telemetry and auto-update are on by default. About 100 releases since mid-August. |
-| 4 | **nanobot** (HKUDS/nanobot) | **Integrated in 0.1.97** (not live-tested yet; docs/NANOBOT_REVIEW.md) | MIT, a Python core (now about 144,000 lines), WebUI + TUI, MCP, memory, cron, bwrap option. Mostly overlaps Hermes, which is already supported. |
+| 4 | **nanobot** (HKUDS/nanobot) | **Integrated in 0.1.97** (docs/NANOBOT_REVIEW.md) | MIT, a Python core (now about 144,000 lines), WebUI + TUI, MCP, memory, cron, bwrap option. Mostly overlaps Hermes, which is already supported. |
 | 5 | **ZeroClaw** (zeroclaw-labs/zeroclaw) | **Watch** | Apache-2.0 Rust single binary with SHA256SUMS. Gateway + dashboard, SOP engine, hardware. Overlaps Hermes; young, with config-schema churn. |
 | 6 | **OpenClaw** (openclaw/openclaw) | **Not now** | Huge (npm package 250 MB unpacked, install scripts), very fast churn, serious security history (CVEs, ClawHub malware). A messaging-assistant niche that Hermes already covers. |
 | 7 | **Moltis** (moltis-org/moltis) | **Not now** | MIT Rust, good supply-chain hygiene, but effectively one maintainer. Web-UI-first and built around its own container sandbox. Overlaps Hermes. |
@@ -214,7 +214,7 @@ integrated as an agent of its own, `sandbox-ai opencode2` (docs/OPENCODE2_REVIEW
 
 ### Integrate now
 
-**Goose v1.57.0** as `sandbox-ai goose` (not live-tested yet, like Hermes/Qwen/DSH: no opt-in, the start says so).
+**Goose v1.57.0** as `sandbox-ai goose` (like Hermes/Qwen/DSH: no opt-in).
 
 - Image: `sandbox/Containerfile.goose` downloads the release tarball `goose-<arch>-unknown-linux-gnu.tar.gz` from the v1.57.0 release and checks the sha256 digests above. Use the non-vulkan build. Put the binary on the read-only root and do not install the desktop app.
 - Forced env and settings: `GOOSE_TELEMETRY_OFF=1`, `GOOSE_TELEMETRY_ENABLED: false` in config, `GOOSE_DISABLE_KEYRING=1`, and `GOOSE_PATH_ROOT` under the session HOME, kept per session. Block `us.i.posthog.com` at the proxy as well. Refuse `goose update` (the read-only root can't be updated anyway).
@@ -233,7 +233,7 @@ integrated as an agent of its own, `sandbox-ai opencode2` (docs/OPENCODE2_REVIEW
 ### Integrate later
 
 1. **OpenHands** (next). Pair Agent Canvas 1.34.0 with Agent Server 1.59.0 (or newer pairs once 14 days old, after checking compatibility).
-   - Done in 0.1.97 (`sandbox-ai openhands`, not live-tested yet; docs/OPENHANDS_REVIEW.md): Canvas 1.34.0 with the agent server it
+   - Done in 0.1.97 (`sandbox-ai openhands`; docs/OPENHANDS_REVIEW.md): Canvas 1.34.0 with the agent server it
      was released with, 1.58.1, and the automation backend 1.26.0 (which pins the SDK to 1.58.1), the image's own uvx in front of the
      real one instead of `OH_AGENT_SERVER_LOCAL_PATH`, the settings applied through the agent server's API.
    - Image: an npm lock (`npm ci --ignore-scripts`) plus a uv lock with hashes for `openhands-agent-server`. Start with `OH_AGENT_SERVER_LOCAL_PATH` (or a preinstalled venv) so that `uvx` never fetches at start.
@@ -251,7 +251,7 @@ integrated as an agent of its own, `sandbox-ai opencode2` (docs/OPENCODE2_REVIEW
    - Forced settings: the WebUI updater disabled and the `raw.githubusercontent.com` release index closed. `tools.exec.sandbox` none (sandbox-ai is the sandbox; nested bwrap untested). Channels per switch.
    - How the human uses it: a tmux TUI, or the WebUI on `127.0.0.1:8765` via `--browser`.
 
-4. **Pi** (earendil-works/pi, formerly badlogic/pi-mono): done in 0.1.97 (`sandbox-ai pi`, not live-tested yet; docs/PI_REVIEW.md): Pi 1.4.0 from an npm lock (`npm ci --ignore-scripts`), `PI_OFFLINE` and `PI_TELEMETRY=0`, the proxy refusing its install report and bug reports, sandbox-ai's read-only extension for `--mcp` and `--llm`, its login as OpenCode's (`sandbox-ai login pi`).
+4. **Pi** (earendil-works/pi, formerly badlogic/pi-mono): done in 0.1.97 (`sandbox-ai pi`; docs/PI_REVIEW.md): Pi 1.4.0 from an npm lock (`npm ci --ignore-scripts`), `PI_OFFLINE` and `PI_TELEMETRY=0`, the proxy refusing its install report and bug reports, sandbox-ai's read-only extension for `--mcp` and `--llm`, its login as OpenCode's (`sandbox-ai login pi`).
 
 ### Watch or not now
 

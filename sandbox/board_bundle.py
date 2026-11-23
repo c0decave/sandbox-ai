@@ -1190,12 +1190,66 @@ def plan_import(received, choices, secrets=None, here="this machine"):
         plan["create"].append({"kind": "rules", "name": ident, "what": rules_paths[ident]})
     start = resolved_start(plan, bundle, folder_map, value_map, rules_paths, names, choices)
     if start is not None:
+        plan["warnings"] += handed_secrets(start["options"], bundle, secrets, names)
         plan["start"] = start
         plan["command"] = shlex.join(["sandbox-ai", start["agent"], "--no-config", *start["options"],
                                       *(["--", *start["agent_args"]] if start["agent_args"] else [])])
     plan["ok"] = not plan["problems"]
     plan["_maps"] = (folder_map, value_map, rules_paths, names)
     return plan
+
+
+class _AllNames:
+    def __contains__(self, name):
+        return True
+
+
+ALL_NAMES = _AllNames()
+
+
+def handed_secrets(options, bundle, secrets=None, names=None):
+    """A warning for each secret of this machine's (SECRETS: their names; None: read here) that the bundle's start
+    OPTIONS (as they run here) or an LLM server of the BUNDLE hands on, and where to: a bundle is someone else's, and
+    the secrets it names that are here go wherever it says - an API key to a host it names, a Git login for a server
+    it names, a variable the agent reads. (What this machine lacks is listed as missing instead.)"""
+    if secrets is None:
+        try:
+            secrets = mcp_copy().secret_names()
+        except (OSError, ValueError, SystemExit):
+            secrets = None
+    if secrets is None:  # (they cannot be read: each one named is said, as it may be here)
+        secrets = ALL_NAMES
+    found = []
+
+    def say(secret, what):
+        if secret in secrets:
+            text = f"your secret {secret} {what} (the bundle's start says so: whoever made it chose where)"
+            if text not in found:
+                found.append(text)
+    renamed = (names or {}).get("llm", {})  # (the start names a renamed server by its new name)
+    servers = {renamed.get(entry.get("name"), entry.get("name")): entry.get("record")
+               for entry in bundle["parts"].get("llm", [])
+               if isinstance(entry, dict) and isinstance(entry.get("record"), dict)}
+    with contextlib.suppress(ValueError, SystemExit):
+        canonical = launcher().canonical_options(list(options))
+        # (where each option sends its secret: the same words as a preset of an extra directory's, presets.py)
+        presets = module("presets")
+        for entry in presets.secret_destinations(canonical):
+            say(entry["secret"], presets.destination_text(entry, shown))
+        for name, value, _ in pairs(canonical):
+            value = str(value or "")
+            if name == "--llm":
+                record = servers.get(value.partition(":")[0])
+                if record:
+                    where = shown(record.get("url", "?"), 200)
+                    if isinstance(record.get("api_key_secret"), str):
+                        say(record["api_key_secret"], f"goes to {where} as the key of the bundle's LLM server "
+                                                      f"{shown(value.partition(':')[0], 60)} (--llm)")
+                    for header, secret in (record.get("headers") or {}).items():
+                        if isinstance(secret, str):
+                            say(secret, f"goes to {where} in the header {shown(header, 60)} of the bundle's LLM "
+                                        f"server {shown(value.partition(':')[0], 60)} (--llm)")
+    return found
 
 
 def same(a, b):

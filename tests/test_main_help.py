@@ -357,3 +357,14 @@ def test_notes_prose_filled_tables_and_lists_kept_within_the_width():
     assert "  1. A service on the host, reached over the network." in lines and "  2. A device." in lines
     narrow = helpstyle.paragraphs(text, 60).splitlines()  # too narrow for the text beside its head: below it
     assert narrow[narrow.index("  sandbox-ai net list") + 1] == "          running sandboxes"
+
+
+def test_no_line_capitalizes_the_program_name():
+    """Journeys round 1: `sandbox-ai hosts --help` listed "run      Sandbox-ai ARGS on a host" (a help line that began
+    with the program's name, capitalized as a sentence's first word)."""
+    shown = subprocess.run([str(ROOT / "sandbox-ai"), "hosts", "--help"], capture_output=True, text=True).stdout
+    assert re.search(r"^  run +Run sandbox-ai ARGS on a host$", shown, re.M), shown
+    for name, _ in SECTIONS["Management Commands"]:
+        text = subprocess.run([str(ROOT / "sandbox-ai"), name.split(",")[0], "--help"], capture_output=True,
+                              text=True).stdout
+        assert "Sandbox-ai" not in text, (name, text)

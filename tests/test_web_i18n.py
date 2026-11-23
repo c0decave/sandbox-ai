@@ -206,6 +206,8 @@ NOT_WORDS = {
     "files", "Podman", "Bubblewrap", "sandbox-ai-home", "TOR_BRIDGES", "de,nl", "proton", "X-Gateway-Key=GW_KEY",
     "PreToolUse", "Bash|Write", "hub:binwalk", "egm", "x-access-token", "work", "Ann Example",
     "GH_WORK",
+    # the reading fonts' family names (CSS font-family values; their labels are translated)
+    "Atkinson Hyperlegible Next", "Lexend",
     # examples of the start form, the teams, the kits' marketplaces and the images (names, a Containerfile line)
     # examples of the schedules' form (a schedule, a branch, a remote, an agent's one-shot form)
     "nightly", "nightly-result", "origin", 'exec "review"',

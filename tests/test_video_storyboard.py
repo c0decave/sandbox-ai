@@ -431,3 +431,28 @@ def test_series_videos_last_one_to_three_minutes():
             total = scenes[-1].start + scenes[-1].duration
             assert 55 <= total <= 180, (video["id"], lang, total)
         assert make.series_file(video, "de").startswith("sandbox-ai-app-")
+
+
+def test_the_bullets_beside_a_page_end_above_the_captions():
+    """The bullets beside a page of the app are drawn smaller where they would reach the burned-in captions (a sixth
+    bullet of the Board's video was below the picture's edge). Measured without Pillow, with widths that are wider than
+    the real font's, so the video draws them at this size or larger: never smaller than 26."""
+    make = load("make_video")
+    plan = make._PlanCanvas()
+    for video, index, scene in SB.iter_series_scenes():
+        if scene["kind"] != "app" or not scene.get("bullets"):
+            continue
+        for lang in SB.LANGUAGES:
+            texts = [SB.text(item, lang) for item in scene["bullets"]]
+            size = make.bullet_size(plan, texts)
+            assert size >= 26 and make.bullets_bottom(plan, texts, size) <= make.BULLET_BOTTOM, \
+                f"{video['id']}/{index} ({lang}): too many or too long bullets beside the page"
+
+
+def test_the_fit_finds_bullets_that_would_run_into_the_captions():
+    make = load("make_video")
+    plan = make._PlanCanvas()
+    six = ["A bullet long enough to wrap onto a second and a third line beside the page of the app"] * 6
+    assert make.bullets_bottom(plan, six, 30) > make.BULLET_BOTTOM
+    assert make.bullet_size(plan, six) == make.BULLET_SIZES[-1]
+    assert make.bullet_size(plan, ["Short"]) == 30

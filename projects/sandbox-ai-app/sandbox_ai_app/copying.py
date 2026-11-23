@@ -118,11 +118,18 @@ def copy_entries(menu, view, point=None):
     if not selected and not index.isValid():
         return menu
     if menu.actions():
-        menu.addSeparator()
-    copy = menu.addAction(tr("Copy"), lambda: copy_rows(view) if selected else copy_index(view, index, row=True))
+        separator = QAction(menu)
+        separator.setSeparator(True)
+        menu.addAction(separator)
+    # (made here, then added: no method on what addAction hands back - widgets.context_menu says why)
+    copy = QAction(tr("Copy"), menu)
+    copy.triggered.connect(lambda: copy_rows(view) if selected else copy_index(view, index, row=True))
     copy.setShortcuts(copy_keys())
+    menu.addAction(copy)
     if index.isValid() and len(visible_columns(view)) > 1:
-        menu.addAction(tr("Copy cell"), lambda: copy_index(view, index))
+        cell = QAction(tr("Copy cell"), menu)
+        cell.triggered.connect(lambda: copy_index(view, index))
+        menu.addAction(cell)
     return menu
 
 

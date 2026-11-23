@@ -1050,6 +1050,83 @@ def test_the_canary_log_as_text_and_for_every_run(tmp_path):
     plan.finish()
 
 
+def many_canary_runs(logs, runs, events, records, connections):
+    """RUNS ended runs with EVENTS canary reads each, RECORDS activity records each in one activity.jsonl (the file
+    holds every run, as in a real log directory) and a connection log of CONNECTIONS lines each."""
+    state = c.run_state("x").parent
+    state.mkdir(parents=True, exist_ok=True)
+    base = 1_790_000_000
+    names = []
+
+    def at(seconds):
+        return activity.stamp(seconds)
+    with open(logs / "activity.jsonl", "w") as timeline:
+        for i in range(runs):
+            run = f"codex-{i:04d}-abcd"
+            names.append(run)
+            start = base + i * 20000
+            c.run_state(run).write_text(json.dumps({
+                "run": run, "status": "ended", "started": at(start), "agent": "codex", "log_dir": str(logs),
+                "canaries": [{"id": "aws", "tokens": {"aws": f"AKIA{i:016d}"}}], "model_hosts": ["api.openai.com"]}))
+            jsonl_lines(c.run_state(run).with_suffix(".events.jsonl"), [
+                {"time": at(start + 30 + k * 18000 // events), "event": "read", "source": "files", "canary": "aws",
+                 "path": "/root/.aws/credentials", "action": "report",
+                 "process": {"pid": 41, "comm": "cat", "argv": ["cat", "/root/.aws/credentials"]}}
+                for k in range(events)])
+            jsonl_lines(logs / f"connections-20261107-100000-{run}.jsonl", [
+                {"time": at(start + k * 18000 / connections), "event": "http",
+                 "host": "api.openai.com" if k % 3 == 0 else "pypi.org", "method": "POST",
+                 "url": "https://api.openai.com/v1/responses", "status": 200} for k in range(connections)])
+            for k in range(records):
+                timeline.write(json.dumps({
+                    "v": 1, "time": at(start + k * 18000 / records), "run": run, "agent": "codex",
+                    "kind": ("tool", "command", "prompt", "reply")[k % 4], "id": f"{run}-{k}",
+                    "summary": "cat ~/.aws/credentials" if k % 50 == 0 else "ls -la", "details": {},
+                    "source": "codex"}) + "\n")
+    return names
+
+
+def test_the_canary_log_of_many_runs_is_read_in_seconds(tmp_path, monkeypatch):
+    """User 2026-11-22: the app's request for the canary log timed out after 60 s. Every event looked at every
+    record of its run's timeline again (their times parsed anew), and every run read the whole activity.jsonl (it
+    holds every run) again: the work grew with events x records and runs x timeline. Now each time is parsed once,
+    the windows are found by bisection and the timeline is read once for all runs."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    runs, events, records, connections = 12, 150, 3000, 3000
+    names = many_canary_runs(logs, runs, events, records, connections)
+    timeline_module = c.module("activity")
+    parsed, opened = [0], []
+    epoch, read_records = timeline_module.epoch, timeline_module.read_records
+
+    def counted_epoch(value):
+        parsed[0] += 1
+        return epoch(value)
+
+    def counted_read(path, *args, **kwargs):
+        opened.append(Path(path).name)
+        return read_records(path, *args, **kwargs)
+    monkeypatch.setattr(timeline_module, "epoch", counted_epoch)
+    monkeypatch.setattr(timeline_module, "read_records", counted_read)
+    out = []
+    started = time.monotonic()
+    assert c.main(["log", "--json"], out.append) == 0
+    took = time.monotonic() - started
+    logs_read = json.loads(out[0])
+    assert sorted(log["run"] for log in logs_read) == sorted(names)
+    assert all(len(log["events"]) == events and log["activity"] and log["connections"] for log in logs_read)
+    first = logs_read[0]["events"][0]
+    assert first["tool_calls"] and first["turn"] and first["requests"], "still linked"
+    # The work grows with what is there, not with events x records: each time parsed about once.
+    assert parsed[0] <= 3 * runs * (events + records + connections), parsed[0]
+    assert opened.count("activity.jsonl") <= 1, opened
+    assert took < 10, f"sandbox-ai canaries log --json took {took:.1f} s"
+    # One run alone, the same entries as in the log of every run.
+    one = []
+    assert c.main(["log", names[3], "--json"], one.append) == 0
+    assert json.loads(one[0]) == next(log for log in logs_read if log["run"] == names[3])
+
+
 def test_the_run_record_names_its_model_providers(tmp_path):
     plan, *_ = armed(tmp_path)
     assert "api.openai.com" in json.loads(c.run_state(plan.run).read_text())["model_hosts"]

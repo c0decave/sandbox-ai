@@ -143,7 +143,7 @@ def test_another_agent_s_note_says_the_table_s_rank_there_as_the_app_does(tmp_pa
     assert f"{ORN} is measured best in Claude Code; in OpenCode: partly working" in result["ornithNote"]
     # without the rank (the table's own): the profile's word, never a rank made up
     plain = drive(tmp_path)
-    assert f"{MID} is measured best in OpenCode; in Claude Code: this pair untested" in plain["midNote"]
+    assert f"{MID} is measured best in OpenCode; in Claude Code: no data yet" in plain["midNote"]
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")

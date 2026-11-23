@@ -309,6 +309,26 @@ def line_width(line):
     return sum(f.getlength(word) for word, _, f in line)
 
 
+# The bullets beside a page of the app: from y 225 down to above the burned-in captions (their band starts at about
+# 921 for a cue of three lines). Bullets that would reach further are drawn smaller, down to the last of BULLET_SIZES;
+# below that they run into the captions (the storyboard test keeps every scene above it).
+BULLET_TOP, BULLET_BOTTOM, BULLET_SIZES = 225, 915, (30, 28, 26, 24)
+
+
+def bullets_bottom(cv, texts, size):
+    """Where bullets TEXTS (in the video's language) end, drawn at SIZE beside a page of the app."""
+    y = cv.s(BULLET_TOP)
+    for text in texts:
+        y += len(layout(cv, text, size, cv.s(460))) * cv.s(size * 41 / 30) + cv.s(24)
+    return y - cv.s(24)
+
+
+def bullet_size(cv, texts):
+    """The largest of BULLET_SIZES at which TEXTS end above the captions (else the smallest)."""
+    return next((size for size in BULLET_SIZES if bullets_bottom(cv, texts, size) <= cv.s(BULLET_BOTTOM)),
+                BULLET_SIZES[-1])
+
+
 def draw_lines(draw, lines, x, y, line_height, colour, code_colour, align="left", width=0, alpha=1.0, bg=None):
     for line in lines:
         cx = x
@@ -1131,13 +1151,16 @@ class AppPage(Scene):
 
     def draw_dynamic(self, img, draw, t):
         cv = self.cv
+        size = bullet_size(cv, [self.t(item) for item in self.items])
         y = cv.s(225)
         for i, item in enumerate(self.items):
             if t < self.reveal(i):
                 break
-            draw.rounded_rectangle((cv.s(1350), y + cv.s(14), cv.s(1364), y + cv.s(28)), radius=cv.s(4), fill=C["accent"])
-            lines = layout(cv, self.t(item), 30, cv.s(460))
-            y = draw_lines(draw, lines, cv.s(1385), y, cv.s(41), C["text"], C["accent"]) + cv.s(24)
+            mark = cv.s(14 * size / 30)
+            draw.rounded_rectangle((cv.s(1350), y + mark, cv.s(1364), y + mark + cv.s(14)), radius=cv.s(4),
+                                   fill=C["accent"])
+            lines = layout(cv, self.t(item), size, cv.s(460))
+            y = draw_lines(draw, lines, cv.s(1385), y, cv.s(size * 41 / 30), C["text"], C["accent"]) + cv.s(24)
 
 
 class SeriesTitle(Scene):

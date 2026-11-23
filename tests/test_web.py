@@ -1502,6 +1502,26 @@ def test_static_files_only_the_listed_ones(logged_in):
     assert {"light", "dark", "hacker"} <= set(themes) and all("colors" in t for t in themes.values())
 
 
+def test_the_fonts_of_the_help_and_the_reading_fonts_are_served_from_the_page_itself(logged_in):
+    """web/fonts: the help's Atkinson Hyperlegible Next and Mono and the reading fonts OpenDyslexic and Lexend, as
+    woff2 with their licences, each listed in fonts.json with its SHA-256; app.css names them by @font-face from that
+    folder only, and nothing else of the folder is served."""
+    svc = logged_in.svc
+    data = json.loads((ROOT / "sandbox/web/fonts/fonts.json").read_text())
+    css = (ROOT / "sandbox/web/app.css").read_text()
+    for name, entry in data["files"].items():
+        status, headers, body = svc.handle("GET", f"/static/fonts/{name}", {"Host": "localhost:8443"}, b"", "192.0.2.1")
+        assert status == 200 and hashlib.sha256(body).hexdigest() == entry["sha256"], name
+        assert dict(headers)["Content-Type"] == ("font/woff2" if name.endswith(".woff2") else
+                                                  "text/plain; charset=utf-8"), name
+        if name.endswith(".woff2"):
+            assert f'url("fonts/{name}")' in css, name
+    assert set(w.FONT_FILES) == set(data["files"])
+    for path in ("/static/fonts/fonts.json", "/static/fonts/../app.js", "/static/fonts/x.woff2"):
+        assert svc.handle("GET", path, {"Host": "localhost:8443"}, b"", "192.0.2.1")[0] == 404, path
+    assert "http" not in css.split("@font-face", 1)[1].split("* { box-sizing")[0], "never another host"
+
+
 def test_terminal_commands():
     hosts = w.module("hosts")
     host, argv = w.terminal_command({"host": "local", "kind": "attach", "name": "web"})
@@ -2015,8 +2035,11 @@ def test_the_editor_themes_and_the_font_lists_are_exported():
 
 
 def test_the_page_downloads_no_fonts():
+    """No font comes from another host: the page's own (web/fonts) by @font-face from its folder, nothing else."""
     script, css = (WEB / "app.js").read_text(), (WEB / "app.css").read_text()
-    assert "FontFace" not in script and "@font-face" not in css and "url(" not in css
+    assert "FontFace" not in script
+    assert re.findall(r"url\(([^)]*)\)", css) and all(re.fullmatch(r'"fonts/[A-Za-z-]+\.woff2"', url)
+                                                      for url in re.findall(r"url\(([^)]*)\)", css))
     assert "(not installed)" in script and "To get it: " in script
 
 
@@ -2049,6 +2072,11 @@ context.chooseFont("mono", "");
 result.theirs = { mono: props["--mono"] === undefined ? null : props["--mono"], stored: stored["sandbox-ai-font-mono"], terminal: terminal() };
 context.chooseFont("ui", '"; } body { background: url(https://x.example/) } /*');
 result.refused = props["--font"];
+context.chooseFont("reading", "opendyslexic");
+result.reading = { help: props["--reading"], page: props["--reading-all"], mono: props["--mono"] === undefined ? null : props["--mono"],
+  stored: stored["sandbox-ai-font-reading"] };
+context.chooseFont("reading", "comic");
+result.readingRefused = [props["--reading"] === undefined, props["--reading-all"] === undefined];
 console.log(JSON.stringify(result));
 """
 
@@ -2072,6 +2100,10 @@ def test_the_chosen_fonts_become_css_variables(tmp_path):
     assert result["installed"] == [True, False]
     assert result["theirs"] == {"mono": None, "stored": "", "terminal": [default_mono, 2]}
     assert result["refused"] == sans and "url(" not in result["refused"]
+    # the reading font (the app's setting reading_font): the whole page and its help, the monospace font stays
+    assert result["reading"] == {"help": '"OpenDyslexic"', "page": f'"OpenDyslexic", {sans}', "mono": None,
+                                 "stored": "opendyslexic"}
+    assert result["readingRefused"] == [True, True], "a name not of the list is the theme's font"
 
 
 def test_a_removed_or_reset_user_loses_its_sessions_at_once():
@@ -2464,12 +2496,17 @@ CONFIRM_CASES = {
     # run by this machine's sandbox-ai (it reaches the host over SSH)
     "host-install": ("POST", "/api/hosts/ct1/install", {"mode": "system", "prefix": "/opt/sai"},
                      ["hosts", "install", "ct1", "--system", "--prefix=/opt/sai", "--from-here", "--json"]),
+    # run by this machine's sandbox-ai too: the host's own sandbox-ai uninstall of the installation chosen
+    "host-uninstall": ("POST", "/api/hosts/ct1/uninstall", {"installation": "user", "purge": True},
+                       ["hosts", "uninstall", "ct1", "--json", "--installation", "user", "--purge", "--yes"]),
     # the parity actions
     "project-trust": ("POST", "/api/hosts/ct1/projects/trust", {"path": "/home/u/web/.sandbox-ai.json", "digest": "a" * 64},
                       ["wizard", "trust", "/home/u/web/.sandbox-ai.json", "--digest=" + "a" * 64]),
     "project-forget": ("POST", "/api/hosts/ct1/projects/forget", {"path": "/home/u/web/.sandbox-ai.json"},
                        ["wizard", "forget", "/home/u/web/.sandbox-ai.json"]),
     "mcp-stop": ("POST", "/api/hosts/ct1/mcp/files/stop", {}, ["mcp", "stop", "files"]),
+    "mcp-update": ("POST", "/api/hosts/ct1/mcp-update", {"names": ["files"]},
+                   ["mcp", "update", "files", "--json", "--yes"]),
     "mcp-detach": ("POST", "/api/hosts/ct1/starts/web/mcp-live/remove", {"server": "files"},
                    ["mcp", "detach", "files", "web", "--live", "--json"]),
     "mcp-unsigned": ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "unsigned": True},
@@ -2517,6 +2554,10 @@ CONFIRM_CASES = {
     "llm-replace": ("POST", "/api/hosts/ct1/llm", {"name": "gw", "kind": "vllm", "url": "https://gw.example.org",
                                                    "replace": True},
                     ["llm", "add", "gw", "--kind", "vllm", "--url", "https://gw.example.org", "--replace"]),
+    # for all hosts (llm share): the key to a host that has none from this share yet; unsharing
+    "llm-share-key": ("POST", "/api/hosts/ct1/llm/gw/share", {"shared": True, "key_to": ["lab"]},
+                      ["llm", "share", "gw", "--key-to", "lab"]),
+    "llm-unshare": ("POST", "/api/hosts/ct1/llm/gw/share", {"shared": False}, ["llm", "unshare", "gw"]),
     "vpn-replace": ("POST", "/api/hosts/ct1/vpn", {"name": "mv", "kind": "mullvad", "secret": "MULLVAD",
                                                    "force": True},
                     ["vpn", "add", "mv", "--mullvad", "--account-secret=MULLVAD", "--force"]),
@@ -2544,16 +2585,19 @@ CONFIRM_CASES = {
     "spend-raise": ("POST", "/api/hosts/ct1/spend/web/raise", {"usd": "5"}, ["spend", "raise", "web", "5"]),
 }
 # The actions whose command runs on this machine, not on the host they are about.
-RUN_HERE = {"host-install", "mcp-copy"}
+RUN_HERE = {"host-install", "host-uninstall", "mcp-copy"}
 READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], ["secrets", "list"],
-         ["publish-logins", "list", "--json"], ["identities", "show", "--json", "work"], ["mcp", "list", "--json"])
+         ["publish-logins", "list", "--json"], ["identities", "show", "--json", "work"], ["mcp", "list", "--json"],
+         ["llm", "show", "gw", "--json"])
 # The POST routes that end, remove or weaken nothing (each of the others names its NEEDS_CONFIRM actions): a new route
 # has to be put here or in the table, deliberately.
 SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/test",
+              r"/api/hosts/(?P<host>[^/]+)/fix-plan",  # (what a start lacks: read only, nothing is made)
               r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/export",
               r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/session-files-search",  # (a search: read only)
               r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/checkpoints",
               r"/api/hosts/(?P<host>[^/]+)/update", r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/rename",
+              r"/api/hosts/(?P<host>[^/]+)/uninstall-plan",  # (the host's uninstall --dry-run: read only)
               r"/api/hosts/(?P<host>[^/]+)/llm/(?P<name>[^/]+)/check",
               r"/api/hosts/(?P<host>[^/]+)/vpn/(?P<name>[^/]+)/check", r"/api/hosts/(?P<host>[^/]+)/kits",
               r"/api/hosts/(?P<host>[^/]+)/devices/(?P<name>[^/]+)/remove",
@@ -4295,20 +4339,22 @@ EXPERIMENTAL_DRIVER = FAKE_DOM + r"""
   const rows = body.all().filter(n => n.tagName === "tr");
   const row = (id) => rows.find(r => r.all().some(n => n.tagName === "td" && n.textContent === id));
   const badge = (id) => row(id) && row(id).all().find(n => n.tagName === "span" && String(n.className).includes("experimental"));
-  result.marked = badge("coding-goose") ? [badge("coding-goose").textContent, badge("coding-goose").getAttribute("title")] : null;
-  result.plain = badge("coding-claude") === undefined && !!row("coding-claude");
+  result.listed = [!!row("coding-goose"), !!row("coding-claude")];
+  result.marked = [badge("coding-goose") || null, badge("coding-claude") || null].map(n => n && n.textContent);
+  result.texts = [row("coding-goose") && row("coding-goose").textContent, row("coding-claude") && row("coding-claude").textContent];
   console.log(JSON.stringify(result));
 })().catch(e => { console.error(e.stack); process.exit(1); });
 """
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")
-def test_experimental_presets_are_listed_and_marked(tmp_path):
-    """A preset that starts something not live-tested yet (presets list --json "experimental") stays in the list,
-    marked so - a badge only, nothing to enable."""
+def test_presets_are_listed_without_a_not_live_tested_badge(tmp_path):
+    """The user, 2026-11-22: no "not live-tested yet" badge any more. Every preset is listed by its title alone - also
+    one an older sandbox-ai on another host still lists with "experimental" (presets list --json)."""
     result = run_driver(tmp_path, EXPERIMENTAL_DRIVER, "experimental")
-    assert result["marked"] == ["not live-tested yet", "Not live-tested yet: goose"]
-    assert result["plain"] is True
+    assert result["listed"] == [True, True] and result["marked"] == [None, None]
+    assert not any("live-tested" in text.lower() for text in result["texts"]), result["texts"]
+    assert "Coding with Goose" in result["texts"][0]
 
 
 PAGE_DRIVER = FAKE_DOM + r"""
@@ -5807,6 +5853,19 @@ const byId = (id) => document.getElementById(id);
   button(card, "Yes, restart it").fire("click"); await settle();
   result.restartPost = posts();
   result.restartGone = !card.all().some(n => n.tagName === "button" && n.textContent === "Restart the agent now (the conversation goes on)" && !n.parent.hidden);
+  // Codex that its restart inside the sandbox gives the server (restart_in_place): that restart, never resume --restart
+  // (reported live: the sandbox of a Codex session ended, exit status 143)
+  calls.length = 0;
+  attached = { message: "web reaches the MCP server search now ... sandbox-ai kits restart-agent web ...", agent_restart: "required", attached: "live", restart_in_place: true };
+  byId("mcp-live-server").value = "search";
+  button(card, "Add now…").fire("click");
+  button(card, "Yes, add it now").fire("click"); await settle();
+  const inside = button(card, "Start the agent again (the conversation goes on)");
+  result.insideOffered = [Boolean(inside), card.all().filter(n => n.tagName === "button" && n.textContent === "Restart the agent now (the conversation goes on)" && !n.parent.hidden).length];
+  calls.length = 0;
+  inside.fire("click");
+  button(card, "Yes, start it again").fire("click"); await settle();
+  result.insidePost = posts();
   // a helper agent; an agent that sees it at once: no restart offered
   calls.length = 0;
   attached = { message: "web reaches it now", attached: "live" };
@@ -5932,6 +5991,8 @@ def test_a_running_starts_mcp_servers_and_workspaces_in_its_resources_card(tmp_p
     assert before == 0 and "web on ct1" in ask and "continues its conversation" in ask, ask
     assert result["restartPost"] == [["/api/hosts/ct1/starts/web/resume", {"restart": True, "confirm": True}]]
     assert result["restartGone"]
+    assert result["insideOffered"] == [True, 0], "the restart inside its sandbox only"
+    assert result["insidePost"] == [["/api/hosts/ct1/starts/web/agent-restart", {"confirm": True}]]
     assert "opencode as a helper" in result["helperAsk"] or "opencode" in result["helperAsk"]
     assert "ct1" in result["helperAsk"] and "web" in result["helperAsk"]
     assert result["helperPost"] == [["/api/hosts/ct1/starts/web/mcp-live", {"helper": "opencode", "confirm": True}]]
@@ -6430,7 +6491,7 @@ def test_round_four_of_the_page(tmp_path):
                                    ["POST", "/api/hosts/ct1/teams/review/stop", {"confirm": True}]]
     assert result["teamStart"] == [{"kind": "team-start", "host": "ct1", "team": "duo", "agents": "opencode,codex",
                                     "workspace": "/srv/x", "options": '["--mode","high"]'}]
-    assert result["buildTargets"] == ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi", "all", "team", "cairn", "vpn", "tor", "browser", "data"]
+    assert result["buildTargets"] == ["claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi", "all", "team", "cairn", "artex", "vpn", "tor", "browser", "data"]
     ask, before = result["imageAsk"]
     assert ask.startswith("Build /home/u/t.sh of ct1 into data?") and before == 0
     assert "Remove the variant data on ct1" in result["imageRemoveAsk"]
@@ -8163,3 +8224,36 @@ def test_duplicate_and_import_of_a_session_in_the_web(tmp_path):
                                   "replace": False, "no_workspace": False, "grant_approvals": False}]
     assert result["checkText"] and "--api-key evil.example" in result["importAsk"]
     assert result["imported"][-1]["confirm"] is True and result["imported"][-1]["check"] is False
+
+
+HELP_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const help = JSON.parse(fs.readFileSync(require("path").join(require("path").dirname(process.argv[2]), "help.json"), "utf8"));
+  answer = (method, path) => (path.startsWith("/static/help.json") ? help : {});
+  await vm.runInContext("pages.help(__main)", context); await settle();
+  const box = body.all().find(n => n.id === "help-network");
+  const text = box.all().find(n => (n.className || "").includes("help-text"));
+  const tag = (name) => text.all().filter(n => n.tagName === name);
+  const folds = text.all().filter(n => n.tagName === "details");
+  console.log(JSON.stringify({
+    lead: text.all().find(n => n.className === "help-lead").textContent,
+    headings: tag("h3").map(n => n.textContent), tasks: tag("h4").map(n => n.textContent),
+    steps: tag("li").map(n => n.textContent).slice(0, 3),
+    commands: text.all().filter(n => n.className === "help-command").map(n => [n.children[0].textContent, n.children[1].textContent]),
+    folds: folds.map(n => [n.children[0].textContent, "open" in n.attributes]),
+    foldText: folds[0].textContent.slice(0, 200),
+  }));
+})();
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_web_help_has_the_apps_pattern(tmp_path):
+    """The web page's help shows each section as the app does: one sentence, "How do I…" in short steps with each
+    command as a block to copy, the details folded away (closed until opened), the command line folded too."""
+    result = run_driver(tmp_path, HELP_DRIVER, "help")
+    assert result["lead"].startswith("Each sandbox has its own network")
+    assert result["headings"] == ["How do I…", "Details"] and "Allow a host for one start" in result["tasks"]
+    assert ["sandbox-ai net allow RUN api.example.com", "Copy"] in result["commands"]
+    assert result["folds"][-1] == ["Command line", False] and not any(opened for _name, opened in result["folds"])
+    assert "default-deny firewall" in result["foldText"], "the details are there, folded"

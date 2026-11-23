@@ -479,3 +479,82 @@ def test_a_part_named_with_its_catalog_is_said_on_the_board_not_added_without_en
     assert added(lab) == [] and board.started == []
     said = "\n".join(text for title, text, _ in widgets.SHOWN if title == "Not started")
     assert "--mcp takes the name of a server (\u201cradare2\u201d)" in said, widgets.SHOWN
+
+
+# -- the folder defaults (0.1.214: mcp add NAME needs no --mount - /work the start's workspace, any other folder one of
+# the server's own): the Board asks nothing where they apply (2026-11-22) --
+
+BINWALK_DEFAULTS = {"prefix": "hub", "name": "binwalk",
+                    "mounts": [{"target": "/work", "required": True, "default": "workspace", "mode": "ro"},
+                               {"target": "/out", "required": False, "default": "own", "mode": "rw"}]}
+
+
+def test_a_hosts_server_with_folder_defaults_is_added_without_a_question(board, lab, host, monkeypatch, wait):
+    """lab's sandbox-ai has the folder defaults (its `mcp catalog --json` says each folder's): binwalk's required /work
+    is the start's workspace there by default - nothing is asked, and `mcp add binwalk` goes without --mount."""
+    lab.catalog = [BINWALK_DEFAULTS]
+    shown_project(lab, monkeypatch, error="no such file")
+    driven(monkeypatch, wait, lambda dialog: select(dialog, "proj/") and dialog.chosen())
+    open_button(board).click()
+    assert wait(lambda: board.remote_project == ("lab", str(host / "proj")), 20)
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "other")  # (a question would get an answer: none may come)
+    board.new_from_preset(binwalk_preset(lab))
+    assert not [title for title, *_ in lab.asked if title == "MCP server binwalk"], lab.asked
+    assert added(lab) == [("lab", "mcp", "add", "binwalk")]
+
+
+def test_a_host_without_folder_defaults_is_still_asked(board, lab, monkeypatch):
+    """An older sandbox-ai there (its catalog --json says no default): its add would refuse a required folder left
+    out, so the Board asks for it, as before."""
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "other")
+    monkeypatch.setattr(board, "prerequisite_mcp_entries", lambda: {})
+    from sandbox_ai_app import remote_chooser
+    monkeypatch.setattr(remote_chooser, "choose_folder", lambda *a, **k: "/srv/firmware")
+    folders, dropped = board.ask_mcp_folders("lab", ["binwalk"], ["--workspace", "/srv/ws"], [BINWALK])
+    assert folders == {"binwalk": ["/work=/srv/firmware"]} and dropped == {}
+    assert folder_question(lab)
+
+
+@pytest.mark.parametrize("cleared", ["binwalk:/work=", "binwalk:/work=<folder:binwalk-work>"])
+def test_a_default_the_start_cleared_is_asked_for(board, lab, monkeypatch, cleared):
+    """Only where the start names the folder but gives it none - cleared (an empty folder), or a preset's folder not
+    filled in - is the default not taken unasked: the Board asks which folder it gets."""
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "workspace")
+    monkeypatch.setattr(board, "prerequisite_mcp_entries", lambda: {})
+    argv = ["--workspace", "/srv/ws", "--mcp-mount", cleared]
+    folders, dropped = board.ask_mcp_folders("lab", ["binwalk"], argv, [BINWALK_DEFAULTS])
+    assert folders == {"binwalk": ["/work=/srv/ws"]} and dropped == {}
+    assert folder_question(lab)
+    assert prerequisites.mcp_add_args(argv, "binwalk", folders["binwalk"], host="lab") == \
+        ("mcp", "add", "binwalk", "--mount", "/work=/srv/ws"), "never an empty --mount"
+
+
+def test_this_machines_server_with_folder_defaults_is_added_without_a_question(board, lab, monkeypatch):
+    """On this machine: its own sandbox-ai has the defaults (its MCP module), the raw catalog entry says none -
+    binwalk's /work is the start's workspace by default, nothing asked."""
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "other")
+    monkeypatch.setattr(board, "prerequisite_mcp_entries", lambda: {})
+    raw = [("hub", {"name": "binwalk", "mounts": [{"target": "/work", "required": True}, {"target": "/out"}]})]
+    folders, dropped = board.ask_mcp_folders("local", ["binwalk"], ["--workspace", "/srv/ws"], raw)
+    assert folders == {} and dropped == {}
+    assert not [title for title, *_ in lab.asked if title == "MCP server binwalk"], lab.asked
+
+
+def test_an_older_host_that_does_not_know_an_option_is_said_as_the_update_to_do(board, monkeypatch):
+    """The user 2026-11-23: "Der Launcher lehnt ab: usage: sandbox-ai claude [OPTIONS] ... unrecognized arguments:
+    --toolchain rust" - another host's sandbox-ai older than the option: the Board says that host is too old for
+    --toolchain and to update it, not argparse's usage."""
+    monkeypatch.setattr(board, "host", lambda: "lab")
+    board.checking_state = board.board.state()
+    board.check_token += 1
+    usage = ("usage: sandbox-ai claude [OPTIONS] [-- AGENT ARGS]\n"
+             "sandbox-ai: error: unrecognized arguments: --toolchain rust")
+    board.checked(board.check_token, (None, usage), None, "lab")
+    said = board.verdict.text()
+    assert "lab" in said and "--toolchain" in said and "too old" in said and "usage:" not in said, said
+    assert board.launcher_refusal[0] == said, "Start is held back with the same words"
+    # this machine's own refusal stays the launcher's words
+    monkeypatch.setattr(board, "host", lambda: "local")
+    board.check_token += 1
+    board.checked(board.check_token, (None, usage), None, "local")
+    assert board.verdict.text().startswith("The launcher refuses:")

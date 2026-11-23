@@ -119,12 +119,46 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+# What a test started and left: the upstream servers (serve), the proxies' servers with their listeners, and the
+# log descriptors of the proxies made without a Proxy - ended after each test (stop_what_tests_left). A test that
+# left them ran its threads and held its sockets for the rest of the process: in one run with the files after it,
+# hundreds of threads and descriptors (the flake of test_take_relays, 2026-11-22).
+LEFT = {"servers": [], "proxies": [], "fds": []}
+
+
+@pytest.fixture(autouse=True)
+def stop_what_tests_left():
+    yield
+    while LEFT["servers"]:
+        server = LEFT["servers"].pop()
+        with contextlib.suppress(OSError):
+            server.shutdown()
+            server.server_close()
+    while LEFT["proxies"]:
+        proxy, listeners = LEFT["proxies"].pop()
+        proxy.close(listeners)
+        for listener in listeners:
+            with contextlib.suppress(OSError):
+                listener.close()
+    while LEFT["fds"]:
+        with contextlib.suppress(OSError):
+            os.close(LEFT["fds"].pop())
+
+
 def serve(handler, context=None):
     server = Server(("127.0.0.1", 0), handler)
     if context:
         server.socket = context.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    LEFT["servers"].append(server)
     return server
+
+
+def log_fd(path):
+    """A proxy's log, open for appending; closed after the test."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    LEFT["fds"].append(fd)
+    return fd
 
 
 @pytest.fixture
@@ -152,6 +186,7 @@ class Proxy:
         self.listener.listen()
         self.port = self.listener.getsockname()[1]
         self.server.serve([self.listener])
+        LEFT["proxies"].append((self.server, [self.listener]))
 
     def records(self, wait=2.0, until=None):
         """The log's records once there is one (or one matching UNTIL), at most WAIT seconds later."""
@@ -163,6 +198,7 @@ class Proxy:
             time.sleep(0.05)
 
     def close(self):
+        self.server.close([self.listener])
         self.listener.close()
         os.close(self.fd)
 
@@ -1203,6 +1239,7 @@ def test_llm_endpoint_with_its_own_ca(tmp_path, pki):
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         server.serve([listener])
+        LEFT["proxies"].append((server, [listener]))
         try:
             try:
                 answer = https_request(listener.getsockname()[1], pki["ca"], b"GET /team/v1/models HTTP/1.1\r\n"
@@ -1613,7 +1650,7 @@ FRONTED = {"api_keys": [{"host": "myendpoint.hf.space", "port": 443, "name": "HF
 
 
 def fronting_server(tmp_path, config=FRONTED, **kw):
-    fd = os.open(tmp_path / "log.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = log_fd(tmp_path / "log.jsonl")
     return rt.ProxyServer({"body_limit": 65536, **config}, fd, run_dir=tmp_path, **kw), tmp_path / "log.jsonl"
 
 

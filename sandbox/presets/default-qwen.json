@@ -19,6 +19,6 @@
     "The model: Qwen OAuth (your login: sandbox-ai login qwen once) or DashScope with a key (--api-key dashscope.aliyuncs.com=DASHSCOPE_API_KEY); its hosts are open by default. A server of yours instead: the preset qwen-local-llm.",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-qwen or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on.",
-    "Qwen Code is not live-tested yet (a start says so); its image first: sandbox-ai build qwen (a start builds it when it is missing)."
+    "Its image first: sandbox-ai build qwen (a start builds it when it is missing)."
   ]
 }

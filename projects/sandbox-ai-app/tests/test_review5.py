@@ -473,20 +473,47 @@ def test_clean_up_acts_on_the_chosen_host_and_names_it(window, monkeypatch):
 
 @needs_sai
 def test_a_start_never_takes_the_apps_own_folder_as_its_workspace(window, isolated, monkeypatch):
-    launch = window.launch
+    """The Start page (a Start from its Expert view is the board's start): without a workspace nothing starts - the
+    launcher would take the folder the app runs in as /work; with the project's folder it starts there."""
+    launch, board = window.launch, window.board
     started = []
-    monkeypatch.setattr(launch, "terminal", lambda argv, title, embedded=None, cwd=None: started.append((argv, cwd)))
-    launch.form.widgets["--workspace"].set_value([])
-    launch.project = None
+    monkeypatch.setattr(board, "terminal", lambda argv, title, embedded=None, cwd=None: started.append((argv, cwd)))
+    assert not board.board.of_kind("workspace")
     assert launch.start() is False and not started
-    assert "Choose the workspace first" in widgets.SHOWN[-1][1]
+    assert "Add a workspace first" in widgets.SHOWN[-1][1] and "HOME" in widgets.SHOWN[-1][1]
+    assert board.start() is False and not started
     project = isolated / "proj"
     project.mkdir()
-    launch.project = str(project)
+    window.set_project(str(project))
     assert launch.start() is True
     argv, cwd = started[-1]
     assert argv[argv.index("--workspace") + 1] == str(project) and "--workspaces-as-given" in argv
-    assert cwd == str(project) and "project folder" in launch.project_note.text()
+    assert cwd == str(project)
+
+
+@needs_sai
+def test_the_start_form_on_its_own_never_takes_the_apps_own_folder_as_its_workspace(qapp, isolated, monkeypatch):
+    """The Start form without a Board beside it: an empty workspace is never the app's folder - the project chosen
+    fills it in, else nothing starts."""
+    from sandbox_ai_app.ui import LaunchPage
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    started = []
+    launch = LaunchPage(backend.SandboxAI(), lambda argv, title, embedded=None, cwd=None: started.append((argv, cwd)))
+    try:
+        launch.form.widgets["--workspace"].set_value([])
+        launch.project = None
+        assert launch.start() is False and not started
+        assert "Choose the workspace first" in widgets.SHOWN[-1][1]
+        project = isolated / "proj"
+        project.mkdir()
+        launch.project = str(project)
+        assert launch.start() is True
+        argv, cwd = started[-1]
+        assert argv[argv.index("--workspace") + 1] == str(project) and "--workspaces-as-given" in argv
+        assert cwd == str(project) and "project folder" in launch.project_note.text()
+    finally:
+        launch.deleteLater()
 
 
 @needs_sai

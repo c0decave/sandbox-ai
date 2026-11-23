@@ -23,8 +23,7 @@ lock (installed with `npm ci --ignore-scripts` from the npm registry, which this
 and `--help`, and one-shot and interactive runs from that install against a local fake model with every other
 connection sent to a logging proxy that refuses it: with upstream's defaults, and with sandbox-ai's settings (below);
 the shell tool ran a command in both. Not verified here: the image build (no Podman in this sandbox: the image builds
-in CI or on the host) and a start in a real sandbox; hence the release ships Qwen Code as not live-tested yet
-(the start says so in one line; no opt-in).
+in CI or on the host) and a start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (qwen)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -205,7 +204,7 @@ project's (`settings.ts`: mergeSettings) and their `hooks` are concatenated with
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - Qwen Code contacts nothing by default beyond its model once its usage statistics, model catalog refresh and update
   check are off - and each has a clean setting in a system scope that overrides the user's and that the agent cannot
@@ -217,4 +216,4 @@ project's (`settings.ts`: mergeSettings) and their `hooks` are concatenated with
 - Against: usage statistics are **on** by default upstream (pinned off here three ways and blocked at the proxy); the
   code base is large and moves fast (a release every one to three days); many features (channels, daemon, browser
   and computer use, extensions) reach out or run servers - off or absent here, each to be reviewed before it is
-  offered; not live-tested in a sandbox yet. Hence experimental, and the review is repeated for every release taken in.
+  offered; not live-tested in a sandbox when reviewed; it has been since (see above). The review is repeated for every release taken in.

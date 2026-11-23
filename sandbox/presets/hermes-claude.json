@@ -22,6 +22,6 @@
   "notes": [
     "Hermes needs a model of its own: its Nous Portal login (sandbox-ai login hermes, once), an API key that stays out of the sandbox (--api-key api.anthropic.com=ANTHROPIC_API_KEY, --api-key openrouter.ai=OPENROUTER_API_KEY) or a server of yours with --llm NAME (a helper is then refused: it reaches its own provider, which --llm keeps out).",
     "Claude Code runs as an MCP server in a sandbox of its own: its own login (sandbox-ai login claude or the host's), its provider's hosts, the same main workspace (/work) - nothing of Hermes' HOME or login. Hermes reaches it only through its tool ask.",
-    "Hermes is not live-tested yet (a start says so); its image first: sandbox-ai build hermes."
+    "Its image first: sandbox-ai build hermes."
   ]
 }

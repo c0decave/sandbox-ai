@@ -318,11 +318,12 @@ def installation(here=None):
     return {**info, "kind": "user", "data": str(data)}
 
 
-def installs_by_hand(info, access=os.access):
+def installs_by_hand(info, access=None):
     """Whether whoever runs it can install a release into the copy INFO now (--install, the app's Install now): a
     copy that replaces itself, and a system installation by whoever may write it - root, as a rule (asked of the
     system, not concluded from the user's number: a root without its capabilities, as in some containers, cannot).
     (download and auto, which act by themselves, stay with the copies of a user's own: self_updating.)"""
+    access = access or os.access
     if self_updating(info):
         return True
     return info["kind"] == "system" and bool(info.get("data")) and bool(access(info["data"], os.W_OK))
@@ -687,6 +688,7 @@ def status(info=None, run=subprocess.run, at=None):
                       "files": timer_now["files"]},
             "downloaded": pending["version"] if pending else None, "waiting": state.get("waiting"),
             "last_install": state.get("last_install"), "rollback": rollback_target(info),
+            "rollback_now": installs_by_hand(info),
             "skipped": state.get("skip_version"), "notes": notes_link(result["available"], chosen["source"])
             if result.get("available") else None}
 
@@ -704,6 +706,8 @@ def result_text(result):
         return f"{available} is available (installed: {installed}), {signed}"
     if newer(available, installed):
         return f"{available} is there, but {signed}: not offered"
+    if newer(installed, available):
+        return f"{installed} is newer than the newest release {available}: nothing to update"
     return f"up to date ({installed}; the newest release is {available})"
 
 
@@ -825,6 +829,9 @@ def apply(info=None, scheduled=False, runner=subprocess.run, busy=busy_reasons, 
     after = tree_version(Path(info["data"]) / "current")
     if done.returncode != 0 or after != pending["version"]:
         why = [line for line in (done.stderr or "").splitlines() if line.strip()] if scheduled else []
+        # (what install.sh refused - a download that no longer checks out, a full disk - is fetched anew next time;
+        # kept, the same refused files were taken again at every try)
+        drop_pending(info)
         raise ValueError(printable(why[-1] if why else f"install.sh ended with {done.returncode}; nothing switched"))
     drop_pending(info)
     state = load_state()
@@ -887,7 +894,11 @@ def install_now(info=None, version=None, source=None, while_running=False, allow
     if not result["newer"]:
         if newer(result.get("available"), result["installed"]):
             raise ValueError(f"{result_text(result)}; nothing installed")
-        out(f"sandbox-ai {result['installed']} is already installed and up to date")
+        if newer(result["installed"], result.get("available")):
+            out(f"sandbox-ai {result['installed']} is newer than the newest release {result['available']}: nothing "
+                "to update (an older release is installed only with --allow-downgrade)")
+        else:
+            out(f"sandbox-ai {result['installed']} is already installed and up to date")
         return None
     fetch(info, result["available"], source, runner)
     return apply(info, runner=runner, busy=busy, while_running=True, out=out, by_hand=True)
@@ -1267,6 +1278,11 @@ def package_check(info, source, out):
     way = manual_way(info)
     out(f"update: {way}" + (" (it replaces this copy; the version before is kept: sandbox-ai update --rollback)"
                             if way == "sandbox-ai update" else ""))
+    if newer(installed, found["available"]):
+        out(f"result: sandbox-ai {installed} is newer than the newest release {found['available']}: nothing to "
+            "update")
+    elif found["available"] == installed:
+        out(f"result: sandbox-ai {installed} is up to date")
     return 0
 
 

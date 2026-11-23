@@ -9,7 +9,7 @@ import subprocess
 import pytest
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")
-from sandbox_ai_app import applog, backend, files, logview, widgets  # noqa: E402
+from sandbox_ai_app import applog, backend, files, logview, prerequisites, widgets  # noqa: E402
 from test_ui import ask, env, fake_run, window  # noqa: E402,F401 - the isolated home and window of the UI tests
 from test_terminal_reopen import sai, stub_web, terminal  # noqa: E402,F401 - real terminal tabs, a stand-in sandbox-ai
 from test_live_regressions import board_page, user  # noqa: E402,F401 - the real sandbox-ai, Podman faked
@@ -153,24 +153,56 @@ def test_a_crash_in_a_background_callback_names_the_call_and_the_app_goes_on(qap
 # -- the Start page --
 
 def test_the_start_page_says_what_start_was_asked_and_where_it_went(window, env, logged, monkeypatch):
+    """A Start from the Expert view of the Start page is the board's start (one start, two views): the log says what
+    it was asked, why it did not start, and where it went."""
     launch = window.launch
     launch.agent.setCurrentText("codex")
     assert launch.start() is False
-    assert said(logged, "Start: codex on local, workspace -", "INFO", "start")
-    assert said(logged, "not started: the options or the workspace are refused", "INFO", "start")
+    assert said(logged, "Start: the board of a new board with codex on local", "INFO", "board")
+    assert said(logged, "Not started: Add a workspace first", "WARNING")
     del logged[:]
-    launch.project = str(env)
+    window.set_project(str(env))
+    launch.agent.setCurrentText("codex")
     launch.form.widgets["--allow-host"].set_value(["example.org"])
     launch.start()
-    assert said(logged, "Start: codex on local, workspace", "INFO", "start")
-    assert said(logged, "options --allow-host example.org", "INFO", "start")
+    assert said(logged, f"Start: the board of {env} with codex on local", "INFO", "board")
+    assert said(logged, "the start goes to a terminal (codex", "INFO", "board") and \
+        said(logged, "--allow-host example.org", "INFO", "board"), lines(logged)
     assert said(logged, f"codex: runs in a terminal window: {window.sai.command()[0]}", "INFO", "terminal")
     assert said(logged, f"codex --workspace {env} --allow-host example.org", "INFO", "terminal"), lines(logged)
+
+
+def test_the_start_form_on_its_own_says_what_start_was_asked(qapp, env, logged, monkeypatch):
+    """The Start form without a Board beside it (no window): its own start says what it was asked and why not."""
+    from sandbox_ai_app.ui import LaunchPage
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    started = []
+    launch = LaunchPage(backend.SandboxAI(), lambda argv, title, embedded=None, cwd=None: started.append(argv))
+    try:
+        launch.agent.setCurrentText("codex")
+        assert launch.start() is False
+        assert said(logged, "Start: codex on local, workspace -", "INFO", "start")
+        assert said(logged, "not started: the options or the workspace are refused", "INFO", "start")
+        del logged[:]
+        launch.project = str(env)
+        launch.form.widgets["--allow-host"].set_value(["example.org"])
+        launch.start()
+        assert said(logged, "Start: codex on local, workspace", "INFO", "start")
+        assert said(logged, "options --allow-host example.org", "INFO", "start")
+        assert started and "--allow-host" in started[-1]
+    finally:
+        launch.deleteLater()
 
 
 # -- the Board's Start: held for a VPN profile that is missing, an identity made first --
 
 def test_a_board_start_held_or_prepared_says_what_it_needs_and_why(board_page, user, logged, monkeypatch):
+    # The agent's image is there (else the start's fix plan lists it too, "agent-image claude", and offers its build):
+    # what is held or made here is the VPN profile and the identity alone.
+    # (built after the page was made, which looked at it then: looked at again when the board is shown)
+    user.add_image("localhost/claude-sandbox:latest")
+    monkeypatch.setattr(prerequisites, "IMAGE_UNBUILT_SECONDS", 0)
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
     page = board_page.show_board("claude", ["--vpn", "nosuchvpn"])
     assert said(logged, "agent-sandbox: no VPN profile nosuchvpn (profiles: none yet)", "INFO",

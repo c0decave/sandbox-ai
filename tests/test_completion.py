@@ -65,6 +65,9 @@ def home(tmp_path, monkeypatch):
     (["build", "--"], {"--pin", "--uv", "--node", "--podman-url", "--extension-only", "--variant"}, set()),
     (["build", "-"], {"-p", "-u", "-n", "-e", "-pu"}, set()),
     (["nothing", ""], {c.FILES}, set()),
+    (["cairn", ""], {"workers"}, set()),  # how each harness fares as Cairn's worker
+    (["cairn", "workers", ""], {"claude", "codex", "opencode", "pi", "goose"}, {c.FILES}),
+    (["cairn", "workers", "--"], {"--json"}, set()),
 ])
 def test_candidates(words, expected, absent):
     found = set(c.complete(words))

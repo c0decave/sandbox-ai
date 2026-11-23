@@ -26,10 +26,12 @@ $ sandbox-ai opencode --llm studio:qwen/qwen3-coder-next
 agent-sandbox: --llm studio: profile qwen3-coder-next × opencode (partial): temperature 0.7, top_p 0.8, top_k 20,
   repeat_penalty 1.05, max_tokens 16384, context 131072, loop_guard.steps 150 (--no-llm-profile switches it off)
 $ sandbox-ai codex --llm studio:qwen/qwen3.8-27b
-agent-sandbox: WARNING: --llm studio: profile qwen3.8-27b × codex (known bad): temperature 0.6, top_p 0.95, top_k 20,
-  max_tokens 16384, context 49152, loop_guard.steps 150 (--no-llm-profile switches it off)
-agent-sandbox: WARNING: --llm studio: Qwen3.8-27B: too slow for big agent contexts: prefill ~200 tokens/s (3-8 min
-  for a 55-83k prompt), 15-18 tokens/s out; ...
+agent-sandbox: --llm studio: profile qwen3.8-27b × codex (no data yet in Codex): temperature 0.6, top_p 0.95,
+  top_k 20, max_tokens 16384, context 49152, loop_guard.steps 150 (--no-llm-profile switches it off)
+$ sandbox-ai claude --llm studio:seed-oss-36b-instruct-mlx
+agent-sandbox: WARNING: --llm studio: profile seed-oss-36b × claude (known bad): ...
+agent-sandbox: WARNING: --llm studio: Seed-OSS-36B: nothing passed: all three runs were refused while Claude Code's
+  Workflow tool was offered ...
 ```
 
 `sandbox-ai llm profiles [MODEL] [--agent AGENT] [--json]` lists them (the table is `sandbox/model_profiles.json`);
@@ -39,8 +41,11 @@ agent-sandbox: WARNING: --llm studio: Qwen3.8-27B: too slow for big agent contex
 
 **The traffic light** (0.1.98) is read from the same table whenever a model list is shown (`llm models` SUPPORT,
 `llm profiles`, the app's and the web's model lists): a pair's `status` gives its colour - green `verified`, yellow
-`partial` and `smoke-only`, red `failing` and `known-bad`, grey no entry (a family's own `status` in `all` colours
-every agent without an entry) - and a model's colour is its best agent's. The details per pair come from its
+`partial` and `smoke-only`, red `failing` and `known-bad`, grey "no data yet" - and only a **measured** pair has a
+colour: a status needs the pair's derived `evidence` block (its runs and run ids, the same numbers in
+`sandbox/model_evidence.json`). A family has no `status` of its own, and an agent without its own measured pair is
+grey ("no data yet in OpenCode") whatever the model did in the other agents (before, a family's status, or
+one entered by hand, coloured agents never run). A model's colour is its best measured agent's. The details per pair come from its
 `evidence`, `runs`/`solved`, `works`/`fails`/`unknown`, `notes`, `reason` and the merged settings. For it the table
 has these **optional** keys (schema 1 stays; a table without them is valid, and older sandbox-ai versions never see
 them in their own table):
@@ -55,8 +60,9 @@ them in their own table):
 | `tool_class` | `all` | the family's class (`small`, `mid`, `large`); without it a model is classed by the parameter count in its name (`gemma-4-12b-it`: 12B), else it has no budget |
 
 A measured pair's `status` and `evidence` are **derived** from the research's graded runs (next section); a pair
-without data (phase 1's API failures) keeps the status the research gave it by hand, with its `evidence` text. Put a
-model's measured speed into `speed`; nothing in the code names a model.
+without graded runs has no entry and no status - what phase 1's API probes found (an HTTP 500 on the Messages API)
+stays as a `fails` bullet or a note of the family, said as a fact with its source, never as a colour. Put a model's
+measured speed into `speed`; nothing in the code names a model.
 
 ### How a status is derived
 
@@ -65,8 +71,10 @@ in Claude Code in round 5, Ornith-35B x OpenCode "partial" after 35). Now `scrip
 derives them from every graded run of the research with fixed rules (`sandbox/model_evidence.py`, `RULES`) and writes
 each measured pair's `status`, its `evidence` block and `runs`/`solved` into `sandbox/model_profiles.json` - every
 other key (settings, notes, works/fails, a hand-written evidence text as the block's `summary`) stays as it was. It
-writes the aggregated numbers into `sandbox/model_evidence.json` as well, and `tests/test_profile_status.py` fails
-when a shipped status contradicts the numbers it was derived from, or a family with measured data has none.
+writes the aggregated numbers into `sandbox/model_evidence.json` as well, and `tests/test_profile_status.py` (and
+`scripts/profile_status.py --check`) fails when a shipped status contradicts the numbers it was derived from, a family
+with measured data has none, a family has a status of its own, or a pair's status has no evidence block with the
+run ids of the snapshot.
 
 **What counts.** A graded run of a harness (the API-only runs of the small-jobs task are no harness), per family (the
 profiles' `pattern`) x harness: phase 2 and rounds 1-4 pass or fail their tasks (the smoke test, the debugging task,
@@ -87,7 +95,7 @@ the planted text in a command (Codex removing it with an edit).
 | `partial` | something passed, but not all of the above - the evidence's `rule` names what is missing |
 | `smoke-only` | only the smoke test ran (phase 2 - round 4's smoke test, round 6-7's smoke pass of a new model) |
 | `failing` | nothing passed, in fewer than 4 graded runs |
-| `known-bad` | nothing passed in **4** or more graded runs (a systematic failure); or by hand, for a pair without data |
+| `known-bad` | nothing passed in **4** or more graded runs (a systematic failure) |
 
 Why these numbers: one harness's tier 1 of round 5 (1a x 4, 1b x 3, 1c x 2, web x 2, review x 2, small jobs) is
 13-15 runs over 6 use cases; 10 over 5 asks for nearly all of it with a margin for a cut cell, and keeps out the
@@ -445,10 +453,11 @@ prefill falls to ~280 tokens/s at 46k, thinking loops of 8k tokens without an an
 OpenCode debug 0 of 1 (profile `glm-4.7`).
 
 **Qwen3.8-27B** (dense, MLX 8-bit 30 GB / GGUF 18 GB, vision): the best per-step quality of phase 1 and perfect vision,
-but prefill ~200 tokens/s (5 min for 55k tokens): agents give up; the profile tells them 49,152 tokens; Codex known bad.
+but prefill ~200 tokens/s (5 min for 55k tokens): agents give up; the profile tells them 49,152 tokens; measured in a
+harness only in Claude Code (round 7: partial), no data yet in the others.
 
-**Not for agents:** Qwen3-Coder-30B-A3B (LM Studio's parser drops some of its XML tool calls; known bad in Codex and
-Claude Code), Devstral Small 2 24B (blind parallel calls, 0 of 2), GLM-4.5-Air (smoke test passed, 0 of 2, no reasoning
+**Not for agents:** Qwen3-Coder-30B-A3B (LM Studio's parser drops some of its XML tool calls; phase 1's API probe
+failed on the Responses and Messages APIs, no harness run), Devstral Small 2 24B (blind parallel calls, 0 of 2), GLM-4.5-Air (smoke test passed, 0 of 2, no reasoning
 on the Messages API), Seed-OSS-36B (needs 0.1.98's schema fix, thinks without a budget, Claude Code refused),
 vcoder-120b (tool calls as text).
 
@@ -467,7 +476,7 @@ recommendation (sizes on disk, LM Studio keys):
 | `nemotron-3.5-bolt-74b-a9b` | 54.1 GB | round 7 on 2.73.0: loads, but 1 of 7 tier-1 tasks and no vision task passed |
 | `xing4.0-29b-a4b` (round 7) | 34.2 GB | not usable for agents on LM Studio 2.73.0 (`7777...` after the first tool result) |
 | `glm-4.5-air-mlx`, `seed-oss-36b-instruct-mlx`, `devstral-small-2-24b-instruct-2512` | 60.2, 20.3, 26.6 GB | 0 of 2-3 solved in round 3; Seed-OSS refused by Claude Code |
-| `qwen3-coder-30b-a3b-instruct-mlx` | 32.5 GB | LM Studio's parser drops its tool calls; known bad in Codex and Claude Code |
+| `qwen3-coder-30b-a3b-instruct-mlx` | 32.5 GB | LM Studio's parser drops its tool calls; phase 1's API probe failed on the Responses and Messages APIs (no harness run) |
 | `gpt-oss-120b-heretic-v2-hi-mlx` | 63.4 GB | gave the debugging task up; no parallel calls - Ornith-35B and KAT are better at a little over half the size |
 
 Keep: Qwen3.8-Flash-Next (GGUF), Ornith-1.5-122B and -35B-A3B, KAT-Coder, Flint (with runtime 2.73.0), Qwen3.6-35B-A3B,
@@ -515,7 +524,7 @@ the wizard and the web (never hidden), never picked by a start's `--use-case` on
 the model and its best harness (its first recommendation) -, best first: the table's, then the models it does not have
 ("not measured", their best harness by the traffic light), then the unsafe ones; with `--agent` a pair of another
 harness says what is known of the model there (the use case's own rank in that agent, else the model profiles'
-status, else "not tested").
+status of that agent's own measured pair, else "no data yet").
 
 **Later rounds:** add the round to `rounds`; per use case put the measured pairs first with `basis` `measured`, their `evidence` (`"round 5: s1a 6/8, s1b 6/6"`), `round`, `runs`/`solved` or `score`, a use case's own settings where it needs them and the failures seen; drop the `unknown` bullets that are known now and keep the ones that are not. Nothing in the code names a model: the CLI, the app's Board, the web's start form and a start read the table when they use it.
 
@@ -529,10 +538,10 @@ data for; a model whose planted-instruction canary fired in any harness stays pa
 | model | Claude Code | OpenCode | Codex | Qwen Code | Goose | Hermes | DSH | Pi | OpenCode 2 |
 |---|---|---|---|---|---|---|---|---|---|
 | Qwen3-Coder-Next 80B | **verified** (19/23) | **verified** (12/20) | partial (11/21) | **verified** (12/14) | **verified** (13/15) | partial (8/14) | **verified** (11/14) | **verified** (11/14) | partial (11/14) |
-| Qwen3-Coder-30B-A3B | known-bad |  | known-bad |  |  |  |  |  |  |
+| Qwen3-Coder-30B-A3B |  |  |  |  |  |  |  |  |  |
 | Qwen3.6-35B-A3B | partial (17/23) | partial (21/25) | partial (13/15) | partial (11/15) | partial (11/15) | partial (11/14) | partial (11/14) | partial (10/15) | partial (12/14) |
 | Qwen3.8-27B | partial (5/6) |  |  |  |  |  |  |  |  |
-| Nemotron-3-Super 120B (MLX build) | known-bad |  |  |  |  |  |  |  |  |
+| Nemotron-3-Super 120B (MLX build) |  |  |  |  |  |  |  |  |  |
 | Nemotron-3-Super 120B (GGUF) | partial (3/4) | partial (3/3) | partial (2/3) | smoke (1/1) | partial (1/2) | smoke (2/2) | smoke (1/1) | smoke (1/1) | smoke (1/1) |
 | Laguna-S-2.1 | partial (28/33) | partial (11/16) | partial (11/15) | partial (12/17) | partial (13/14) | partial (2/3) | partial (3/3) | partial (3/3) | partial (12/19) |
 | VCoder-120B |  |  |  |  |  |  |  |  |  |
@@ -554,7 +563,11 @@ data for; a model whose planted-instruction canary fired in any harness stays pa
 | Xing4.0-29B-A4B | failing (0/2) | failing (0/2) |  |  |  |  |  |  |  |
 | Nemotron 3.5 Bolt 74B-A9B | partial (1/8) |  |  |  |  |  |  |  |  |
 
-Pairs per status: partial 52, verified 31, smoke-only 15, failing 9, known-bad 4
+Pairs per status: partial 52, verified 31, smoke-only 15, failing 9, known-bad 1 (108 measured pairs, each in
+`sandbox/model_evidence.json` with its run ids; an empty cell: no data yet. Until 2026-11-22 three pairs of phase 1's
+API probes - Qwen3-Coder-30B in Claude Code and Codex, the Nemotron MLX build in Claude Code - carried a known-bad
+entered by hand, and Qwen3.8-27B and VCoder one for every harness: no harness ran them, so they have no status now;
+what the probes found stays in their notes and fails bullets.)
 
 
 ## Model x harness

@@ -47,7 +47,6 @@ PLATFORMS = {
 MIN_AGE = datetime.timedelta(days=14)
 NEXT = {"version": "2.2.6", "eligible": "2026-11-20"}  # its x64 binary published 2026-11-06 23:38 UTC
 
-EXPERIMENTAL = "opencode2"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "OpenCode 2"
 BINARY = "opencode2"  # the image's command (upstream's second name for its binary; "opencode" is the same)
 SERVICE_FILE = ".config/opencode/service.json"  # its shared background service's settings, in the sandbox's HOME
@@ -295,10 +294,6 @@ def telemetry_rules(a=None):
     return rules
 
 
-def experimental_note():
-    return "OpenCode 2: not live-tested yet (its image and a real start have not passed their live test)"
-
-
 def mcp_servers(names, bridge_args, timeouts=None, timeout=300):
     """OpenCode 2's MCP servers for the --mcp servers NAMES (its native mcp.servers): each a stdio server that runs the
     launcher's bridge (BRIDGE_ARGS(name)), its tools the model's own (codemode false: not behind Code Mode's
@@ -491,11 +486,10 @@ def service_settings(text):
 
 
 def plan(a):
-    """The dry run's "opencode2": the reviewed release, what is on and what stays off, and whether it is
-    experimental here."""
+    """The dry run's "opencode2": the reviewed release, what is on and what stays off."""
     names = features(a)
     return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}", "repository": REPOSITORY,
-            "experimental": True, "background_service": False, "own_sandbox": False,
+            "background_service": False, "own_sandbox": False,
             # Never switchable: opt-out variables set, these hosts never opened and refused by the proxy.
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),
                           "environment": sorted(TELEMETRY_ENV)},

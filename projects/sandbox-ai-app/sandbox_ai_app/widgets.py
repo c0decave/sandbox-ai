@@ -640,6 +640,7 @@ class MessageDialog(QDialog):
         layout.addLayout(row, 1)
         self.details = None
         self.details_button = QPushButton(tr("Show details…"))
+        self.details_button.setAutoDefault(False)  # (Qt made it, hidden, the default: Enter then pressed nothing)
         self.details_button.setVisible(False)
         self.details_button.clicked.connect(self._toggle_details)
         self.buttons = QDialogButtonBox()
@@ -1835,6 +1836,34 @@ def after_shown(dialog):
         pass
 
 
+# The roles of a button box's buttons in the order one becomes the dialog's default when none is (Enter presses it):
+# what accepts first, then what closes - a dialog with Close alone closes on Enter as on Esc.
+DEFAULT_ROLES = ("AcceptRole", "YesRole", "ApplyRole", "RejectRole", "NoRole")
+
+
+def ensure_default_button(dialog):
+    """DIALOG (shown) has a default button: Qt makes a button box's first accepting button one, but not a Close
+    alone, and a dialog of its own may have none - Enter did nothing there (round 2, 2026-11-22: every dialog has a
+    default button). A wizard and a message box choose theirs themselves; a disabled button is never made one."""
+    from PySide6.QtWidgets import QDialogButtonBox, QMessageBox, QPushButton, QWizard
+    if isinstance(dialog, (QWizard, QMessageBox)):
+        return None
+    shown = [button for button in dialog.findChildren(QPushButton) if button.isVisibleTo(dialog)]
+    if not shown or any(button.isDefault() for button in shown):
+        return None
+    for role in DEFAULT_ROLES:
+        wanted = getattr(QDialogButtonBox.ButtonRole, role)
+        for box in dialog.findChildren(QDialogButtonBox):
+            if not box.isVisibleTo(dialog):
+                continue
+            for button in box.buttons():
+                if isinstance(button, QPushButton) and box.buttonRole(button) == wanted and \
+                        button.isVisibleTo(dialog) and button.isEnabled():
+                    button.setDefault(True)
+                    return button
+    return None
+
+
 def fitting_dialogs():
     """Every dialog and message box follows the one rule when it is shown (dialog_rule, then place), and a dialog
     the human moved or sized opens there again (keep_place). Once per process."""
@@ -1852,6 +1881,9 @@ def fitting_dialogs():
             except RuntimeError:  # (deleted meanwhile)
                 pass
             result = original(dialog, event)  # (a message box sizes itself here; Qt centres a dialog here)
+            # (after the button boxes chose theirs, as they are shown, and once Qt chose its own after the show: the
+            # first button of the focus chain that takes one, a hidden one too)
+            QTimer.singleShot(0, dialog, lambda d=dialog: ensure_default_button(d))
             if own_rule(dialog):
                 place(dialog)
                 if not isinstance(dialog, Box):  # (a message box sizes itself)
@@ -1999,7 +2031,9 @@ def ask_password(parent, title_text, text, accept):
     return value
 
 
-AUTO_CHOICE = None  # tests: the key choose() answers while AUTO_ANSWER is set (None: the first choice, or none)
+# tests: the key choose() answers while AUTO_ANSWER is set (None, or a key the question does not have: its first
+# choice, or none)
+AUTO_CHOICE = None
 
 
 def choose(parent, title_text, text, choices, cancel=None, destructive=()):
@@ -2007,7 +2041,7 @@ def choose(parent, title_text, text, choices, cancel=None, destructive=()):
     (default "Cancel", also Esc and the default button). Keys in DESTRUCTIVE are marked as such."""
     if AUTO_ANSWER is not None:
         SHOWN.append((title_text, text, None))
-        answer = None if not AUTO_ANSWER else AUTO_CHOICE if AUTO_CHOICE is not None else \
+        answer = None if not AUTO_ANSWER else AUTO_CHOICE if AUTO_CHOICE in [key for key, _ in choices] else \
             (choices[0][0] if choices else None)
         log_answer(parent, title_text, text, "Cancel" if answer is None else answer)
         return answer
@@ -2959,56 +2993,148 @@ def shown_button(button, near=None):
     return top is None or button.isVisibleTo(top)
 
 
-def context_menu(parent, entries):
+# A combo box's entries, through its model's roles only. Never combo.model().item(i), takeRow or insertRow: those
+# wrap a QStandardItem that C++ made, and when C++ deletes it (combo.clear(), removeRow, the combo deleted) a wrapper
+# that was kept stays in Shiboken's map - the next object at that address (a QAction of the same size) is handed out
+# as that QStandardItem: menu.addAction(text).setEnabled(...) ran QStandardItem::setEnabled on a QAction, a segfault
+# in context_menu (the user's crash, 0.1.229). tests/test_standard_item_wrappers.py keeps them out of the app.
+ITEM_FLAGS_ROLE = int(Qt.ItemDataRole.UserRole) - 1  # (where a QStandardItem keeps its flags: QStandardItem::setFlags)
+
+
+def combo_index(combo, row):
+    """The model index of COMBO's entry ROW (invalid: no such entry)."""
+    model = combo.model()
+    return model.index(row, combo.modelColumn()) if model is not None and row >= 0 else QModelIndex()
+
+
+def row_flags(combo, row):
+    """The Qt.ItemFlag of COMBO's entry ROW (no such entry: none)."""
+    index = combo_index(combo, row)
+    return combo.model().flags(index) if index.isValid() else Qt.ItemFlag.NoItemFlags
+
+
+def set_row_flags(combo, row, flags):
+    """COMBO's entry ROW with FLAGS (what QStandardItem.setFlags did, through the model's role; no such entry, or a
+    model of the combo's own that keeps no flags: nothing)."""
+    index = combo_index(combo, row)
+    if index.isValid():
+        combo.model().setData(index, int(getattr(flags, "value", flags)), ITEM_FLAGS_ROLE)
+
+
+def row_enabled(combo, row):
+    """Whether COMBO's entry ROW can be chosen (no such entry: False)."""
+    return bool(row_flags(combo, row) & Qt.ItemFlag.ItemIsEnabled)
+
+
+def set_row_enabled(combo, row, on, selectable=None):
+    """COMBO's entry ROW enabled (ON) or greyed out, and selectable or not (SELECTABLE; None: as it is)."""
+    if not combo_index(combo, row).isValid():
+        return
+    flags = row_flags(combo, row)
+    flags = flags | Qt.ItemFlag.ItemIsEnabled if on else flags & ~Qt.ItemFlag.ItemIsEnabled
+    if selectable is not None:
+        flags = flags | Qt.ItemFlag.ItemIsSelectable if selectable else flags & ~Qt.ItemFlag.ItemIsSelectable
+    set_row_flags(combo, row, flags)
+
+
+def set_row_tip(combo, row, text):
+    """COMBO's entry ROW with the tooltip TEXT (escaped and shortened: safe_tooltip)."""
+    if combo_index(combo, row).isValid():
+        combo.setItemData(row, safe_tooltip(text or ""), Qt.ItemDataRole.ToolTipRole)
+
+
+def set_row_heading(combo, row):
+    """COMBO's entry ROW a heading: bold, never chosen (no flags)."""
+    if not combo_index(combo, row).isValid():
+        return
+    font = combo.itemData(row, Qt.ItemDataRole.FontRole)
+    font = QFont(font) if isinstance(font, QFont) else QFont(combo.font())
+    font.setBold(True)
+    combo.setItemData(row, font, Qt.ItemDataRole.FontRole)
+    set_row_flags(combo, row, Qt.ItemFlag.NoItemFlags)
+
+
+class MenuGroup:
+    """A submenu of a context menu (context_menu): TITLE, opened by pointing at it, with ENTRIES (context_menu's
+    kinds). Left out when none of its entries is shown."""
+
+    def __init__(self, title, entries):
+        self.title, self.entries = title, list(entries)
+
+
+def context_menu(parent, entries, owner=None):
     """The QMenu of ENTRIES, in their order: a button (a QPushButton or QToolButton: an entry with its text, enabled
     state and tooltip - the reason it is disabled -, chosen: clicked; a button with a menu: that menu's entries; a
-    hidden button is left out), a QAction or a QMenu (as they are), (text, enabled, why, callback) (a TEXT entry,
-    WHY its tooltip while disabled), None (a separator; never two, never first or last)."""
-    menu = QMenu(parent)
+    hidden button is left out), a QAction or a QMenu (as they are), a MenuGroup (a submenu of its entries, left out
+    when it has none), (text, enabled, why, callback) (a TEXT entry, WHY its tooltip while disabled), None (a
+    separator; never two, never first or last). OWNER: the menu's parent (a submenu's: the menu it is in, so it goes
+    with it); PARENT decides which buttons are shown.
+    Its own actions and submenus are made here (QAction(text, menu), QMenu(title, menu)) and then added: no method
+    runs on what addAction/addMenu hand back, which Shiboken could give as a stale wrapper of another type."""
+    menu = QMenu(owner if owner is not None else parent)
     menu.setToolTipsVisible(True)
     pending = False
+
+    def submenu(title, enabled, actions):
+        sub = QMenu(title, menu)
+        sub.setToolTipsVisible(True)
+        sub.setEnabled(enabled)
+        for action in actions:
+            sub.addAction(action)
+        menu.addMenu(sub)
+
+    def own_action(text, enabled, tip, triggered, icon=None):
+        action = QAction(text, menu)
+        if icon is not None:
+            action.setIcon(icon)
+        action.setEnabled(enabled)
+        if tip:
+            action.setToolTip(tip)
+        if triggered is not None:
+            action.triggered.connect(triggered)
+        menu.addAction(action)
+
     for entry in entries:
         if entry is None:
             pending = not menu.isEmpty()
             continue
         if isinstance(entry, QAbstractButton) and not shown_button(entry, parent):
             continue
+        if isinstance(entry, MenuGroup):
+            sub = context_menu(parent, entry.entries, owner=menu)
+            if sub.isEmpty():
+                sub.deleteLater()
+                continue
+            if pending:
+                separator = QAction(menu)
+                separator.setSeparator(True)
+                menu.addAction(separator)
+                pending = False
+            sub.setTitle(entry.title)  # (a menu made here, never one handed back by addMenu)
+            menu.addMenu(sub)
+            continue
         if pending:
-            menu.addSeparator()
+            separator = QAction(menu)
+            separator.setSeparator(True)
+            menu.addAction(separator)
             pending = False
         if isinstance(entry, QMenu):
             # A submenu of this menu's own with the same actions, never the page's menu itself: this menu is dropped
             # after use (exec_dropped), and with it went what it held as a submenu - the page's menu entries were
             # deleted under it ("Internal C++ object (QAction) already deleted": hotfix round 1).
-            sub = menu.addMenu(entry.title())
-            sub.setToolTipsVisible(True)
-            sub.setEnabled(entry.isEnabled())
-            for action in entry.actions():
-                sub.addAction(action)
+            submenu(entry.title(), entry.isEnabled(), entry.actions())
         elif isinstance(entry, QAction):
             menu.addAction(entry)
         elif isinstance(entry, tuple):
             text, enabled, why, callback = (tuple(entry) + (None, None, None))[:4]
-            action = menu.addAction(str(text))
-            action.setEnabled(bool(enabled))
-            if why and not enabled:
-                action.setToolTip(safe_tooltip(why))
-            if callback is not None:
-                action.triggered.connect(lambda _=False, f=callback: f())
+            own_action(str(text), bool(enabled), safe_tooltip(why) if why and not enabled else "",
+                       None if callback is None else (lambda _=False, f=callback: f()))
         elif isinstance(entry, QAbstractButton) and entry.menu() is not None and not entry.menu().isEmpty():
-            sub = menu.addMenu(button_text(entry))
-            sub.setToolTipsVisible(True)
-            sub.setEnabled(entry.isEnabled())
-            for action in entry.menu().actions():
-                sub.addAction(action)
+            submenu(button_text(entry), entry.isEnabled(), entry.menu().actions())
         elif isinstance(entry, QAbstractButton):
-            action = menu.addAction(button_text(entry))
-            if not entry.icon().isNull():
-                action.setIcon(entry.icon())
-            action.setEnabled(entry.isEnabled())
-            tip = entry.toolTip()  # as the button has it: escaped when it was set (set_enabled, safe_tooltip)
-            action.setToolTip(tip)
-            action.triggered.connect(lambda _=False, b=entry: b.click())
+            # (the tooltip as the button has it: escaped when it was set - set_enabled, safe_tooltip)
+            own_action(button_text(entry), entry.isEnabled(), entry.toolTip(), lambda _=False, b=entry: b.click(),
+                       icon=None if entry.icon().isNull() else entry.icon())
     return menu
 
 
@@ -4690,3 +4816,126 @@ def window_close_controls(app=None, main=None):
         show_event.closeControls = True
         cls.showEvent = show_event
 
+
+
+# -- the mouse wheel: a page scrolls, a combo box (spin box, slider) nobody clicked keeps its value --
+
+class WheelGuard(QObject):
+    """The user 2026-11-22: "if we come across a dropdown menu the scrolling will directly have affect on the dropdown
+    ... a left mouseclick activates it and THEN the scrollwheel is ok to take effects". On each of the app's windows
+    (their QWindow, where the platform's input arrives first - one filter per window, never one on the whole
+    application: InputWatch says why): a wheel over a combo box, spin box or slider without the focus scrolls the
+    scroll area it lies in (or does nothing outside one) unless the human clicked it and it still has the focus - the
+    focus alone is not enough: a dialog gives its first field the focus by itself. An open combo box's list scrolls
+    as always (it is a window of its own)."""
+    def __init__(self, app=None):
+        super().__init__()
+        self.windows = []
+        self.app = app
+        self.clicked = None  # the control the human clicked last (a weak reference): only it takes the wheel
+        if app is not None:
+            app.focusWindowChanged.connect(self.focused)
+            for widget in QApplication.topLevelWidgets():
+                handle = widget.windowHandle() if widget.isVisible() else None
+                if handle is not None:
+                    self.watch(handle)
+
+    @staticmethod
+    def _controls():
+        from PySide6.QtWidgets import QAbstractSlider, QAbstractSpinBox
+        return QComboBox, QAbstractSpinBox, QAbstractSlider
+
+    def watch(self, window):
+        """Guard WINDOW (a QWindow of the app's; once). Forgotten when it goes."""
+        try:
+            if window is None or any(seen is window for seen in self.windows):
+                return
+            window.installEventFilter(self)
+            self.windows.append(window)
+            window.destroyed.connect(lambda _=None, w=window: self.forget(w))
+        except RuntimeError:  # gone meanwhile
+            return
+
+    def forget(self, window):
+        self.windows = [seen for seen in self.windows if seen is not window]
+
+    def focused(self, window):
+        """WINDOW got the focus: guarded if it is one of the app's own windows (a top-level widget's QWindow) - never
+        a window of Chromium's (the terminal tabs): a Python filter there ended the process (InputWatch, the soak)."""
+        if window is None:
+            return
+        own = [widget.windowHandle() for widget in QApplication.topLevelWidgets()
+               if widget.windowHandle() is not None]
+        if any(handle is window for handle in own):
+            self.watch(window)
+
+    def eventFilter(self, window, event):  # noqa: N802
+        kind = event.type()
+        if kind not in (QEvent.Type.Wheel, QEvent.Type.MouseButtonPress):
+            return False
+        try:
+            if kind == QEvent.Type.MouseButtonPress:  # a click activates the control under it (and nothing else)
+                control = self.control_at(window, event)
+                self.clicked = weakref.ref(control) if control is not None else None
+                return False
+            return self.redirect(window, event)
+        except RuntimeError:  # a widget gone between the lookup and now
+            return False
+
+    def control_at(self, window, event):
+        """The combo box, spin box or slider at EVENT's position in WINDOW, or None."""
+        control = QApplication.widgetAt(window.mapToGlobal(event.position().toPoint()))
+        controls = self._controls()
+        while control is not None and not isinstance(control, controls):
+            if control.isWindow():
+                return None
+            control = control.parentWidget()
+        return control
+
+    def redirect(self, window, event):
+        """True (taken here) when the wheel at EVENT's position is over a control without the focus: then the scroll
+        area around it scrolls, as the wheel anywhere else on the page would."""
+        control = self.control_at(window, event)
+        if control is None:
+            return False
+        clicked = self.clicked() if self.clicked is not None else None
+        if clicked is control and control.hasFocus():  # activated by a click, still the focus: its own wheel
+            return False
+        if isinstance(control, QComboBox) and control.view().isVisible():
+            return False
+        area = control.parentWidget()
+        from PySide6.QtWidgets import QAbstractScrollArea
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            if area.isWindow():
+                area = None
+                break
+            area = area.parentWidget()
+        if area is not None:
+            self.scroll(area, event)
+        return True  # (outside any scroll area: not taken by the control either)
+
+    @staticmethod
+    def scroll(area, event):
+        """AREA scrolled by EVENT's wheel as Qt scrolls it: pixels from a touchpad, else lines (wheelScrollLines a
+        notch, a line being the bar's single step)."""
+        pixels, angle = event.pixelDelta(), event.angleDelta()
+        horizontal = (angle.x() and not angle.y()) or event.modifiers() & Qt.KeyboardModifier.AltModifier
+        bar = area.horizontalScrollBar() if horizontal else area.verticalScrollBar()
+        if bar is None:
+            return
+        if not pixels.isNull():
+            delta = pixels.x() if horizontal else pixels.y()
+        else:
+            notches = (angle.x() if horizontal else angle.y()) / 120
+            delta = notches * QApplication.wheelScrollLines() * bar.singleStep()
+        bar.setValue(int(bar.value() - delta))
+
+
+_wheel_guard = []
+
+
+def wheel_guard(app):
+    """The app's one WheelGuard (made at the first call; every window shown or focused later is guarded too)."""
+    if not _wheel_guard and app is not None:
+        _wheel_guard.append(WheelGuard(app))
+    return _wheel_guard[0] if _wheel_guard else None

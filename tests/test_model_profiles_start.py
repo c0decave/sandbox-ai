@@ -142,15 +142,17 @@ def test_the_agents_window_is_the_profiles_at_most_what_the_server_keeps(studio,
     assert "is told a context window of 200000" in capsys.readouterr().err
 
 
-def test_qwen38_and_codex_a_smaller_window_and_a_warning(studio):
+def test_qwen38_and_codex_a_smaller_window_and_no_status_without_a_codex_run(studio):
+    """Qwen3.8-27B was measured in Claude Code only (round 7): in Codex its settings apply (the smaller window) and
+    the start says there is no data yet for Codex - no warning, no status taken from elsewhere (2026-11-22)."""
     a = start("codex", Q38)
     found, model = llm.selection(a)
     assert llm.agent_context(found, model, a, reported=262144) == 49152
     report = llm.profile_report(a, found, model)
-    assert report["status"] == "known-bad" and report["enabled"] is True
+    assert report["status"] == "untested" and report["enabled"] is True and report["warnings"] == []
     lines = llm.profile_lines(report, NAME)
-    assert lines[0].startswith("agent-sandbox: WARNING: --llm studio: profile qwen3.8-27b × codex (known bad): ")
-    assert any("prefill" in line for line in lines[1:])
+    assert lines[0].startswith("agent-sandbox: --llm studio: profile qwen3.8-27b × codex (no data yet in Codex): ")
+    assert len(lines) == 1 and not any("WARNING" in line for line in lines)
 
 
 def test_claude_code_and_nemotron_thinking_off_unless_yours(studio):
@@ -253,7 +255,7 @@ def test_llm_profiles_says_what_we_know_of_one_pair(studio):
     assert "      ? Ollama, llama.cpp and vLLM servers: not measured (LM Studio only)" in lines
     assert lines.index("    what we know:") < lines.index("      ✓ smoke test: 2 of 2 passed (23-27 s)")
     untested = run("profiles", QCN, "--agent", "letta")
-    assert "    this pair was not tested: the model's settings for every agent apply" in untested.splitlines()
+    assert "    no data yet for this pair: the model's settings for every agent apply" in untested.splitlines()
     assert "✓ smoke test passed in all nine agents measured (16-45 s in round 1)" in untested  # the family's own
     assert "✓ smoke test: 2 of 2" not in untested
     every = run("profiles", "nvidia-nemotron-3-super-120b-a12b-mlx").splitlines()
@@ -307,12 +309,13 @@ def test_e2e_the_start_says_it_and_the_dry_run_shows_it(tmp_path):
         assert json.loads(other.stdout)["llm"]["profile"]["id"] == "qwen3-coder-next/goose"
         assert "profile qwen3-coder-next × goose (verified)" in other.stderr  # derived: round 8, 10 tier-1 runs
 
-        codex = host.run("codex", "--llm", f"{NAME}:{Q38}", "--dry-run", env=env)  # known bad: warned, not refused
+        codex = host.run("codex", "--llm", f"{NAME}:{Q38}", "--dry-run", env=env)  # never run in Codex: no data yet
         assert codex.returncode == 0, codex.stderr
         profile = json.loads(codex.stdout)["llm"]["profile"]
-        assert profile["id"] == "qwen3.8-27b/codex" and profile["status"] == "known-bad"
+        assert profile["id"] == "qwen3.8-27b/codex" and profile["status"] == "untested"
         assert profile["values"]["num_ctx"] == 49152
-        assert "WARNING: --llm studio: profile qwen3.8-27b × codex (known bad)" in codex.stderr
+        assert "--llm studio: profile qwen3.8-27b × codex (no data yet in Codex)" in codex.stderr
+        assert "WARNING: --llm studio: profile" not in codex.stderr
 
         off = host.run("opencode", "--llm", f"{NAME}:{QCN}", "--no-llm-profile", "--dry-run", env=env)
         assert off.returncode == 0, off.stderr

@@ -146,7 +146,7 @@ def test_an_agent_other_than_the_measured_harness_is_said_with_its_status_from_t
     # nothing known of it in that agent
     found = uc.recommend(TABLE, [server(models=[model("mid-35b", 37)])], "untrusted-input", agent="pi",
                          profiles=profiles)
-    assert found["pairs"][0]["agent_note"] == "mid-35b is measured best in OpenCode; in Pi: not tested"
+    assert found["pairs"][0]["agent_note"] == "mid-35b is measured best in OpenCode; in Pi: no data yet"
 
 
 def test_the_pairs_are_in_the_json_of_every_use_case():

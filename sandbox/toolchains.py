@@ -2,9 +2,10 @@
 """sandbox-ai toolchain: build tools (Go, Rust, a JDK, Node, Python ...) mounted read-only into a sandbox.
 
   sandbox-ai toolchain catalog [--json] [--catalog FILE_OR_URL]
-                                              what the signed catalog offers for this machine
+                                              what the signed catalog offers for this machine, every version
   sandbox-ai toolchain add NAME[@VERSION] [--unsigned] [--catalog FILE_OR_URL]
-                                              download it, check it, unpack it into the store
+                                              download it, check it, unpack it into the store (beside the other
+                                              versions of NAME there)
   sandbox-ai toolchain list [--run RUN] [--json]
                                               the store (with the running sandboxes that use each); --run: a
                                               running sandbox's toolchains
@@ -17,6 +18,13 @@
                                               take it out again
 
 At a start: sandbox-ai AGENT --toolchain NAME[@VERSION] (repeatable; in .sandbox-ai.json among its "options").
+
+Versions: the store keeps several versions of a toolchain side by side. NAME alone is its newest (in the store; for
+`add`, in the catalog); NAME@VERSION is that version, or the newest whose version starts with VERSION up to a '.',
+'+', '-' or '_' - a major or a line: jdk@17 (17.0.21+9), python@3.12, node@22, go@1.26. One version of a toolchain
+per sandbox (each is mounted at /opt/toolchains/NAME): two of one name at a start, or an attach of another version
+than the one attached, are refused with the reason. A toolchain another requires is its newest, unless the start
+names a version of it.
 
 A toolchain is one archive of the files of one prefix and its manifest, an entry of the signed catalog
 (toolchains.json of sandbox-ai-mcp, signed as its MCP catalog is: sandbox/mcp-signers). `add` takes an entry only
@@ -85,12 +93,32 @@ ARCHES = ("x86_64", "aarch64")
 TEXT_KEYS = ("title", "description", "license", "homepage")
 KEYS = frozenset({"name", "version", "arch", "url", "sha256", "size", "unpacked", "commands", "env", "caches",
                   "hosts", "allow", "needs", "requires", "sources", *TEXT_KEYS})
-# Variables no toolchain sets: they decide which code every process loads, or belong to the sandbox itself.
-ENV_REFUSED = re.compile(r"(LD_|DYLD_|SANDBOX_AI_).*|PATH|HOME|USER|SHELL|BASH_ENV|ENV|IFS|PS[1-4]|PROMPT_COMMAND|"
-                         r"NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PYTHONHOME|PERL5OPT|PERL5LIB|RUBYOPT|RUBYLIB|"
-                         r"JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|GIT_.*|HTTPS?_PROXY|https?_proxy|"
-                         r"ALL_PROXY|NO_PROXY|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|"
-                         r"NODE_EXTRA_CA_CERTS")
+# Variables no toolchain sets (each with why). A toolchain's env goes into the agent's own environment at a start
+# and into env.sh, which every `bash -c` of the agent reads (BASH_ENV): one of these would steer code the toolchain
+# does not ship - the agent, sandbox-ai's hooks in it (/usr/bin/python3 -I /sandbox/runtime.py), its shells, git,
+# the image's interpreters - or the sandbox itself. A toolchain's own programs do what it ships anyway.
+ENV_REFUSALS = (
+    (r"(?:LD_|DYLD_|MALLOC_).*|GCONV_PATH|LOCPATH|GLIBC_TUNABLES|NLSPATH|LANG|LANGUAGE|LC_.*|HOSTALIASES|"
+     r"RES_OPTIONS|LOCALDOMAIN|RESOLV_HOST_CONF",
+     "it decides which code and which files the loader and the C library take for every process"),
+    (r"PYTHON.*|PERL5.*|PERLLIB|RUBY.*|NODE_.*|BUN_.*|DENO_.*|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|"
+     r"CLASSPATH|LUA_.*|PHPRC|PHP_INI_SCAN_DIR|(?i:npm_config_(?:script_shell|node_options|userconfig|globalconfig|"
+     r"strict_ssl|cafile|ca|onload_script|shell|git))|PIP_CONFIG_FILE|PIP_TRUSTED_HOST|PIP_CERT|PIP_CLIENT_CERT",
+     "it decides what an interpreter or a package tool of the image loads, runs or trusts"),
+    (r"BASH_.*|ENV|ZDOTDIR|PROMPT_COMMAND|PS[1-4]|IFS|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|FPATH",
+     "it decides what a shell reads and runs first"),
+    (r"PATH|EDITOR|VISUAL|PAGER|MANPAGER|LESSOPEN|LESSCLOSE|BROWSER|SUDO_ASKPASS|SSH_.*",
+     "it names a program other programs start"),
+    (r"GIT_.*", "it decides git's hooks, configuration and programs"),
+    (r"HOME|USER|SHELL|TERM|TERMINFO|TERMINFO_DIRS|TMUX.*|XDG_.*|SANDBOX_AI_.*|AGENT_SANDBOX_.*|CLAUDE_.*|"
+     r"ANTHROPIC_.*|CODEX_.*|OPENAI_.*|OPENCODE_.*|QWEN_.*|GEMINI_.*|HERMES_.*|DSH_.*|DEEPSEEK_.*|PI_.*|LETTA_.*|"
+     r"GOOSE_.*|OPENHANDS_.*|OH_.*|NANOBOT_.*|MCP_.*",
+     "it belongs to the sandbox, or decides where sandbox-ai and the agents read their configuration and hooks"),
+    (r"(?i:https?_proxy|all_proxy|no_proxy|ftp_proxy|socks_proxy)|SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|"
+     r"REQUESTS_CA_BUNDLE|SSLKEYLOGFILE|OPENSSL_.*|CURL_HOME|WGETRC|GNUPGHOME",
+     "it decides where connections go, what they trust or where their keys are written"),
+)
+ENV_REFUSED = re.compile("|".join(f"(?:{pattern})" for pattern, _ in ENV_REFUSALS))
 LIMITS = {"commands": 256, "env": 32, "caches": 16, "hosts": 64, "allow": 8, "libraries": 16, "requires": 4,
           "sources": 64}
 # What sandbox-ai's own agent images have (Debian bookworm: node:lts-bookworm-slim, with openssl): what a
@@ -158,6 +186,31 @@ def below_prefix(value, top="the toolchain's prefix"):
     return path.as_posix()
 
 
+def refused_variable(name, value=None):
+    """Why no toolchain may set the variable NAME (to VALUE: None for a cache's folder), or None. A variable of
+    telemetry (telemetry_guard: named for it, or an opt-out) only with sandbox-ai's own value."""
+    for pattern, why in ENV_REFUSALS:
+        if re.fullmatch(pattern, name):
+            return why
+    guard = module("telemetry_guard")
+    pinned = guard.accepted()
+    if (name in pinned or guard.telemetry_name(name)) and (value is None or pinned.get(name) != value):
+        return "telemetry is always off in sandbox-ai (only its own opt-out value is taken)"
+    return None
+
+
+def env_problem(entry):
+    """"a toolchain may not set NAME: why" for the first variable of ENTRY's env or caches no toolchain sets, or
+    None."""
+    named = [*((key, value) for key, value in (entry.get("env") or {}).items()),
+             *((key, None) for key in (entry.get("caches") or {}))]
+    for key, value in named:
+        why = refused_variable(str(key), value)
+        if why:
+            return f"a toolchain may not set {shown(key)}: {why}"
+    return None
+
+
 def glibc_tuple(value):
     match = GLIBC.fullmatch(str(value)) if isinstance(value, str) else None
     return (int(match[1]), int(match[2])) if match else None
@@ -170,9 +223,11 @@ def texts(value, pattern, limit, what, where):
     return list(dict.fromkeys(value))
 
 
-def validated(entry, where="toolchain"):
+def validated(entry, where="toolchain", keep_refused=False):
     """The manifest ENTRY with every value checked (a new dict of the known keys), or ValueError. Nothing of it is
-    trusted before: it becomes paths, wrapper scripts, allowed hosts and mounts."""
+    trusted before: it becomes paths, wrapper scripts, allowed hosts and mounts. KEEP_REFUSED (the store's own
+    entries, added by a sandbox-ai before a variable was refused): one that sets such a variable is taken with
+    "refused" (why) - listed and removable, never mounted (chosen, start_plan, attach refuse it)."""
     if not isinstance(entry, dict):
         raise ValueError(f"{where}: an entry is an object")
     unknown = sorted(set(entry) - KEYS - {key for key in entry if key.startswith("_")})
@@ -222,9 +277,9 @@ def validated(entry, where="toolchain"):
     if not isinstance(caches, dict) or len(caches) > LIMITS["caches"] or not all(
             isinstance(key, str) and VARIABLE.fullmatch(key) for key in caches):
         raise ValueError(f"{where}: caches must map variable names to folders below the sandbox's HOME")
-    for key in [*env, *caches]:
-        if ENV_REFUSED.fullmatch(key):
-            raise ValueError(f"{where}: a toolchain may not set {key}")
+    problem = env_problem({"env": env, "caches": caches})
+    if problem and not keep_refused:
+        raise ValueError(f"{where}: {problem}")
     if set(env) & set(caches):
         raise ValueError(f"{where}: {sorted(set(env) & set(caches))[0]} is in env and in caches")
     for key, value in env.items():
@@ -262,6 +317,8 @@ def validated(entry, where="toolchain"):
         raise ValueError(f"{where}: sources must be a list of {{url, sha256[, signature]}}")
     result["sources"] = [{"url": item["url"], "sha256": item["sha256"],
                           **({"signature": item["signature"]} if item.get("signature") else {})} for item in sources]
+    if problem:
+        result["refused"] = problem
     return result
 
 
@@ -349,8 +406,40 @@ def version_key(version):
     return [int(part) for part in re.findall(r"[0-9]+", version)][:8], version
 
 
+def selects(wanted, version):
+    """Whether NAME@WANTED picks VERSION: the version itself, or one that starts with WANTED up to a '.', '+', '-' or
+    '_' (17 picks 17.0.21+9, 3.12 picks 3.12.16; 1.2 does not pick 1.26.0)."""
+    return version == wanted or (version.startswith(wanted) and version[len(wanted)] in ".+-_")
+
+
+def picked(versions, wanted=None):
+    """The version of VERSIONS that NAME@WANTED takes: without WANTED the newest; WANTED itself; else the newest that
+    WANTED selects (a major or a line: jdk@17, python@3.12). None when there is none."""
+    versions = list(versions)
+    if wanted is not None:
+        versions = [wanted] if wanted in versions else [version for version in versions if selects(wanted, version)]
+    return max(versions, key=version_key) if versions else None
+
+
+def selector(name, version, versions):
+    """What --toolchain takes for NAME VERSION among VERSIONS (the others of NAME): NAME for the newest, else the
+    shortest NAME@START that picks it (jdk@17, python@3.12), else NAME@VERSION."""
+    versions = {*versions, version}
+    if picked(versions) == version:
+        return name
+    for index, char in enumerate(version):
+        if char in ".+-_" and picked(versions, version[:index]) == version:
+            return f"{name}@{version[:index]}"
+    return f"{name}@{version}"
+
+
+def newest_first(versions):
+    return sorted(versions, key=version_key, reverse=True)
+
+
 def find_entry(entries, name, version=None, arch=None):
-    """The entry NAME (VERSION, else its newest) for ARCH (this machine's) of ENTRIES, or ValueError saying why."""
+    """The entry NAME (VERSION - itself, or the newest it selects: jdk@17 -, else its newest) for ARCH (this machine's)
+    of ENTRIES, or ValueError saying why."""
     arch = arch or machine()
     named = [entry for entry in entries if entry["name"] == name]
     if not named:
@@ -360,12 +449,11 @@ def find_entry(entries, name, version=None, arch=None):
     if not here:
         raise ValueError(f"the catalog has {name} for {', '.join(sorted({e['arch'] for e in named}))}, not for this "
                          f"machine ({arch})")
-    if version is not None:
-        exact = [entry for entry in here if entry["version"] == version]
-        if not exact:
-            raise ValueError(f"the catalog has {name} {', '.join(sorted(e['version'] for e in here))}, not {version}")
-        return exact[0]
-    return max(here, key=lambda entry: version_key(entry["version"]))
+    at = picked([entry["version"] for entry in here], version)
+    if at is None:
+        raise ValueError(f"the catalog has {name} {', '.join(newest_first({e['version'] for e in here}))}, not "
+                         f"{shown(version)}")
+    return next(entry for entry in here if entry["version"] == at)
 
 
 def check_signature(entry, unsigned=False, out=print):
@@ -498,7 +586,8 @@ def installed():
             continue
         for version, entry in versions.items():
             try:
-                checked = validated({key: value for key, value in entry.items() if key in KEYS}, "installed.json")
+                checked = validated({key: value for key, value in entry.items() if key in KEYS}, "installed.json",
+                                    keep_refused=True)
             except (ValueError, AttributeError):
                 continue
             if checked["name"] != name or checked["version"] != version or not tree(checked["sha256"]).is_dir():
@@ -523,18 +612,33 @@ def save_installed(found):
     os.replace(temporary, path)
 
 
-def chosen(found, name, version=None):
-    """The installed entry NAME (VERSION, else its newest), or ValueError naming the command that adds it."""
+def chosen(found, name, version=None, usable=True):
+    """The installed entry NAME (VERSION - itself, or the newest it selects: jdk@17 -, else its newest), or ValueError
+    naming the command that adds it. USABLE: one that sets a variable no toolchain sets (unusable) is refused, naming
+    the command that removes it."""
     versions = found.get(name) or {}
-    if version is not None:
-        if version not in versions:
-            have = f" (installed: {', '.join(sorted(versions, key=version_key))})" if versions else ""
-            raise ValueError(f"the toolchain {name} {version} is not in the store{have}: sandbox-ai toolchain add "
-                             f"{name}@{version}")
-        return versions[version]
-    if not versions:
+    at = picked(versions, version)
+    if at is None and version is not None:
+        have = f" (installed: {', '.join(sorted(versions, key=version_key))})" if versions else ""
+        raise ValueError(f"the toolchain {name} {shown(version)} is not in the store{have}: sandbox-ai toolchain add "
+                         f"{name}@{shown(version)}")
+    if at is None:
         raise ValueError(f"the toolchain {name} is not in the store: sandbox-ai toolchain add {name}")
-    return versions[max(versions, key=version_key)]
+    entry = versions[at]
+    if usable:
+        unusable(entry)
+    return entry
+
+
+def unusable(entry, what=""):
+    """ValueError when ENTRY sets a variable no toolchain sets (env_problem: also one handed in unchecked)."""
+    problem = entry.get("refused") or env_problem(entry)
+    if problem:
+        label = f"{entry.get('name')} {entry.get('version')}"
+        raise ValueError(f"{shown(label)}{what}: {problem}" + (
+            " - detach it first (sandbox-ai toolchain detach RUN NAME)" if what else
+            f" - it is not mounted; remove it (sandbox-ai toolchain remove {shown(entry.get('name'))}@"
+            f"{shown(entry.get('version'))}) or add a version that sets none"))
 
 
 def case_sensitive(directory):
@@ -643,8 +747,17 @@ def add(value, catalog=None, unsigned=False, out=print, fetch=None, opener=None,
             done.append(have)
         else:
             done.append(install(entry, unsigned, out, opener))
+            given = selector(wanted, entry["version"], installed().get(wanted) or {})
             out(f"added {wanted} {entry['version']} ({', '.join(entry['commands'])}): sandbox-ai AGENT --toolchain "
-                f"{wanted}, or into a running sandbox: sandbox-ai toolchain attach RUN {wanted}")
+                f"{given}, or into a running sandbox: sandbox-ai toolchain attach RUN {given}")
+            others = newest_first(set(installed().get(wanted) or {}) - {entry["version"]})
+            if others:
+                out(f"  the store has {wanted} {', '.join(others)} too: one version of it per sandbox, NAME alone is "
+                    "the newest")
+        required = [other for other in entry["requires"] if other not in [e["name"] for e in done]]
+        if required:  # (said before they are downloaded: never a download nobody asked for without a word)
+            out(f"{wanted} requires the toolchain{'s' if len(required) > 1 else ''} {' and '.join(required)}: "
+                f"{'they are' if len(required) > 1 else 'it is'} added too")
         pending += [(other, None) for other in entry["requires"]]
     return done
 
@@ -663,9 +776,12 @@ def remove(value, out=print, runs=None):
     with store_lock():
         found = installed()
         versions = found.get(name) or {}
-        if version is not None and version not in versions or not versions:
-            raise ValueError(f"the toolchain {value} is not in the store")
-        for at in [version] if version is not None else sorted(versions, key=version_key):
+        taken = sorted(versions, key=version_key) if version is None else [version] if version in versions else \
+            sorted((at for at in versions if selects(version, at)), key=version_key)
+        if not taken:
+            have = f" (it has {name} {', '.join(newest_first(versions))})" if versions else ""
+            raise ValueError(f"the toolchain {shown(value)} is not in the store{have}")
+        for at in taken:
             entry = versions[at]
             using = users_of(entry["sha256"], runs)
             if using:
@@ -694,20 +810,25 @@ def expanded(value, name):
 def variables(entry):
     """[(variable, value for a shell: quoted, ${HOME} left to it)] of ENTRY: its env, then its caches (in HOME)."""
     name = entry["name"]
-    lines = [(key, shlex.quote(expanded(value, name))) for key, value in entry.get("env", {}).items()]
-    lines += [(key, '"${HOME}"/' + shlex.quote(path)) for key, path in entry.get("caches", {}).items()]
+    lines = [(key, shlex.quote(expanded(value, name))) for key, value in entry.get("env", {}).items()
+             if not refused_variable(key, value)]
+    lines += [(key, '"${HOME}"/' + shlex.quote(path)) for key, path in entry.get("caches", {}).items()
+              if not refused_variable(key)]
     return lines
 
 
 def environment(entries):
     """{variable: value} of ENTRIES for the agent's environment at a start (the first toolchain that names a variable
-    keeps it); the caches below the sandbox's HOME."""
+    keeps it); the caches below the sandbox's HOME. A variable no toolchain sets is never among them (start_plan
+    refuses such an entry before; this holds without it)."""
     env = {}
     for entry in entries:
         for key, value in entry.get("env", {}).items():
-            env.setdefault(key, expanded(value, entry["name"]))
+            if not refused_variable(key, value):
+                env.setdefault(key, expanded(value, entry["name"]))
         for key, path in entry.get("caches", {}).items():
-            env.setdefault(key, f"{SANDBOX_HOME}/{path}")
+            if not refused_variable(key):
+                env.setdefault(key, f"{SANDBOX_HOME}/{path}")
     return env
 
 
@@ -789,25 +910,31 @@ def write_session(folder, entries):
 
 
 def resolved(values, found=None):
-    """The installed entries of the --toolchain VALUES and of what they require, each name once (two versions of one
-    toolchain share a mount point: refused), in the order given, a required one before the one that needs it."""
+    """The installed entries of the --toolchain VALUES and of what they require, each name once, in the order given,
+    a required one before the one that needs it. The version a value picks (NAME: the newest, NAME@VERSION) is the one
+    of NAME, also where a toolchain requires it; two values that pick two versions of one toolchain - they would share
+    its mount point - are refused."""
     found = installed() if found is None else found
-    result = []
+    result, given = [], {}
+    for value in values:
+        name, version = spec(value)
+        entry = chosen(found, name, version)
+        if name in given and given[name][1]["version"] != entry["version"]:
+            raise ValueError(f"--toolchain {given[name][0]} ({name} {given[name][1]['version']}) and {value} "
+                             f"({name} {entry['version']}): one version of a toolchain per sandbox (both would be "
+                             f"{MOUNT}/{name})")
+        given[name] = (value, entry)
 
     def take(value, needed_by=None, seen=()):
         name, version = spec(value)
         if name in seen:
             raise ValueError(f"the toolchains {' and '.join(seen)} require each other")
         try:
-            entry = chosen(found, name, version)
+            entry = given[name][1] if name in given else chosen(found, name, version)
         except ValueError as exc:
             raise ValueError(f"{exc}" + (f" ({needed_by} requires it)" if needed_by else "")) from None
-        for other in result:
-            if other["name"] == name:
-                if version is not None and other["version"] != version:
-                    raise ValueError(f"--toolchain {name}@{other['version']} and {name}@{version}: one version of a "
-                                     f"toolchain per sandbox (both would be {MOUNT}/{name})")
-                return
+        if any(other["name"] == name for other in result):
+            return
         for required in entry["requires"]:
             take(required, name, (*seen, name))
         result.append(entry)
@@ -816,13 +943,45 @@ def resolved(values, found=None):
     return result
 
 
+def missing(values, found=None):
+    """The --toolchain VALUES (NAME[@VERSION]) that are not in the store, and what the installed ones require that
+    is not, each once as `toolchain add` takes it - what a start offers to add (fixes.py). A value that is no
+    toolchain's name is left to resolved(), which says why."""
+    found = installed() if found is None else found
+    lacking, seen = [], set()
+
+    def look(value):
+        if value in seen:
+            return
+        seen.add(value)
+        try:
+            name, version = spec(value)
+        except ValueError:
+            return
+        versions = found.get(name) or {}
+        at = picked(versions, version)
+        if at is None:
+            lacking.append(str(value))
+            return
+        entry = versions[at]
+        for other in entry.get("requires") or []:
+            look(other)
+    for value in values:
+        look(value)
+    return lacking
+
+
 def start_plan(values, backend, own_image=True, strict=False, offline=False, mode=None, found=None, presets=(),
-               glibc=host_glibc, has_library=host_has_library):
+               glibc=host_glibc, has_library=host_has_library, policy_refuses=None):
     """What the start does with --toolchain VALUES: {"entries": [the installed entries], "hosts": [...],
     "presets": [...] (opened with them), "closed": [...] (hosts and presets left closed), "notes": [...]}.
     ValueError for one that is not in the store or cannot run here. STRICT (the modes high and paranoid) and OFFLINE
-    (--toolchain-offline, --offline) open nothing. PRESETS: the launcher's own (an unknown name is left out)."""
+    (--toolchain-offline, --offline) open nothing. PRESETS: the launcher's own (an unknown name is left out).
+    POLICY_REFUSES(kind, value) ("host", NAME or "preset", NAME): True for what the administrator's policy does not
+    take (its ceiling, an option it forbids) - left closed as well, said in a note."""
     entries, notes = resolved(values, found), []
+    for entry in entries:
+        unusable(entry)
     for entry in entries:
         problem, note = needs_problem(entry, backend, own_image, glibc, has_library)
         if problem:
@@ -846,7 +1005,18 @@ def start_plan(values, backend, own_image=True, strict=False, offline=False, mod
         notes.append(f"note: {why}: the registries of {names} stay closed ({', '.join(closed)})"
                      + (": a connection there is asked or refused as the mode does with any other" if strict else ""))
         hosts, wanted = [], []
-    elif hosts or wanted:
+    elif policy_refuses is not None and (hosts or wanted):
+        # The administrator's policy binds every way of opening a host (its ceiling, a forbidden --allow-host or
+        # --allow-PRESET): what it does not take stays closed - the toolchain is mounted all the same.
+        held = [host for host in hosts if policy_refuses("host", host)] + \
+            [f"--allow-{preset}" for preset in wanted if policy_refuses("preset", preset)]
+        if held:
+            hosts = [host for host in hosts if host not in held]
+            wanted = [preset for preset in wanted if f"--allow-{preset}" not in held]
+            closed = held
+            notes.append(f"note: the administrator's policy: the registries {', '.join(held)} of the toolchains "
+                         "stay closed (a connection there is asked or refused as the policy and the mode decide)")
+    if not (strict or offline) and (hosts or wanted):
         names = ", ".join(entry["name"] for entry in entries if entry["hosts"] or entry["allow"])
         opened = ", ".join([*hosts, *(f"--allow-{preset}" for preset in wanted)])
         notes.append(f"note: the registries of {names} are opened: {opened} (--toolchain-offline mounts the "
@@ -1159,6 +1329,26 @@ def keep(record, value, add=True):
     return True
 
 
+def attach_offered(record, value, offline=False, out=print, launcher=None, read=None, terminal=None, **kwargs):
+    """`toolchain attach RUN VALUE` as typed: a toolchain (or one it requires) that is not in the store is offered
+    to be added from the signed catalog first (fixes.py, as a start offers it: asked on a terminal, your
+    fix_questions; elsewhere refused with the command), then attached. READ, TERMINAL: for tests."""
+    launcher = launcher or module("agent_sandbox")
+    try:
+        lacking = missing([value])
+    except ValueError:
+        lacking = []
+    if lacking:
+        error = ValueError(f"the toolchain {', '.join(lacking)} is not in the store: sandbox-ai toolchain add "
+                           f"{' '.join(lacking)}")
+        error.fixes = [launcher.toolchain_fix(item) for item in lacking]
+        launcher.offer_fixes(error, mode=record.get("mode") if isinstance(record.get("mode"), str) else None,
+                             about=f"toolchain attach {value}", again="attach it again", terminal=terminal,
+                             read=read)
+        out("sandbox-ai toolchain: what the attach lacked is there now: it goes on")
+    return attach(record, value, offline=offline, out=out, launcher=launcher, **kwargs)
+
+
 def attach(record, value, offline=False, out=print, runner=None, finder=finder_default, found=None, launcher=None,
            net_main=None, glibc=host_glibc, has_library=host_has_library, own_image=None, keeper=keep):
     """`toolchain attach RUN NAME[@VERSION]`: the installed toolchain (and what it requires) mounted into the running
@@ -1178,14 +1368,20 @@ def attach(record, value, offline=False, out=print, runner=None, finder=finder_d
         raise ValueError(f"{shown(record.get('run'))} was started by a sandbox-ai without toolchains (it has no "
                          f"{MOUNT}): restart it with --toolchain {value}")
     have = attached(record)
-    wanted = [entry for entry in resolved([value], found)
-              if not any(other["name"] == entry["name"] for other in have)]
+    plan = resolved([value], found)
+    target = next(entry for entry in plan if entry["name"] == name)
+    wanted = [entry for entry in plan if not any(other["name"] == entry["name"] for other in have)]
+    for entry in wanted:
+        unusable(entry)
+    for other in have:  # one attached by a sandbox-ai before a variable was refused: env.sh is written anew below
+        unusable(other.get("manifest") or {}, " (attached)")
     for other in have:
-        if other["name"] == name and (version is None or other["version"] == version):
+        if other["name"] == name and other["version"] == target["version"]:
             raise ValueError(f"{name} {other['version']} is attached to {shown(record.get('run'))} already")
         if other["name"] == name:
-            raise ValueError(f"{name} {other['version']} is attached to {shown(record.get('run'))}: detach it first "
-                             f"(one version of a toolchain per sandbox)")
+            raise ValueError(f"{name} {other['version']} is attached to {shown(record.get('run'))}, not "
+                             f"{shown(value)}: one version of a toolchain per sandbox (both would be {MOUNT}/{name}) - "
+                             f"detach it first (sandbox-ai toolchain detach {shown(record.get('run'))} {name})")
     if own_image is None:
         own_image = not record.get("custom_image")
     for entry in wanted:
@@ -1321,27 +1517,30 @@ def store_listing(found=None, runs=None):
             runs = module("net").running()
         except Exception:  # noqa: BLE001 - the store is listed all the same
             runs = {}
-    return [{"name": name, "version": version, "arch": entry["arch"], "title": entry["title"],
+    return [{"name": name, "version": version, "toolchain": selector(name, version, versions), "arch": entry["arch"],
+             "title": entry["title"],
              "description": entry["description"], "license": entry["license"], "sha256": entry["sha256"],
              "size": entry["unpacked"] or entry["size"], "commands": sorted(entry["commands"]),
              "hosts": entry["hosts"], "allow": entry["allow"], "needs": entry["needs"],
              "requires": entry["requires"], "signed_by": entry.get("signed_by"), "added": entry.get("added"),
-             "used_by": users_of(entry["sha256"], runs)}
+             "used_by": users_of(entry["sha256"], runs), "refused": entry.get("refused")}
             for name, versions in sorted(found.items())
             for version, entry in sorted(versions.items(), key=lambda item: version_key(item[0]))]
 
 
 def catalog_listing(entries, found=None, arch=None):
     """The catalog as `toolchain catalog --json` shows it: the entries of this machine's architecture, newest
-    version of a name first, with whether each is in the store and whether its catalog is signed."""
+    version of a name first, with whether each is in the store and whether its catalog is signed. "toolchain": what
+    `toolchain add` and --toolchain take for it (jdk for the newest, jdk@17 for an older line)."""
     found = installed() if found is None else found
     arch = arch or machine()
     rows = []
-    for entry in sorted(entries, key=lambda e: (e["name"], [-n for n in version_key(e["version"])[0]])):
-        if entry["arch"] != arch:
-            continue
+    here = [entry for entry in entries if entry["arch"] == arch]
+    for entry in sorted(here, key=lambda e: (e["name"], [-n for n in version_key(e["version"])[0]])):
         have = found.get(entry["name"], {}).get(entry["version"])
-        rows.append({"name": entry["name"], "version": entry["version"], "arch": entry["arch"],
+        versions = {*(e["version"] for e in here if e["name"] == entry["name"]), *(found.get(entry["name"]) or {})}
+        rows.append({"name": entry["name"], "version": entry["version"],
+                     "toolchain": selector(entry["name"], entry["version"], versions), "arch": entry["arch"],
                      "title": entry["title"], "description": entry["description"], "license": entry["license"],
                      "homepage": entry["homepage"], "size": entry["size"], "unpacked": entry["unpacked"],
                      "commands": sorted(entry["commands"]), "hosts": entry["hosts"], "allow": entry["allow"],
@@ -1360,9 +1559,12 @@ def size_shown(value):
     return f"{value / (1 << 20):.0f} MiB" if value else "-"
 
 
-def needs_shown(needs):
+def needs_shown(needs, requires=()):
+    """What an entry needs of the host (glibc, libraries) and the toolchains it requires (added with it)."""
     parts = ([f"glibc {needs['glibc']}+"] if needs.get("glibc") else []) + list(needs.get("libraries") or [])
-    return ", ".join(parts) or "nothing but the kernel"
+    host = ", ".join(parts) or ("" if requires else "nothing but the kernel")
+    others = f"the toolchain{'s' if len(requires) > 1 else ''} {', '.join(requires)}" if requires else ""
+    return "; ".join(part for part in (host, others) if part)
 
 
 def show_lines(entry):
@@ -1407,9 +1609,25 @@ def help_style(prog):
     return loaded.CommandsFormatter(prog)
 
 
+HELP_EPILOG = """Steps:
+  1. sandbox-ai toolchain catalog                what there is for this machine (every version)
+  2. sandbox-ai toolchain add NAME               download, check, keep it (+ what it needs)
+     NAME@VERSION: another version (jdk@17, python@3.12: the newest of it), kept beside the others
+  3. sandbox-ai AGENT --toolchain NAME           a start with it (repeatable)
+  4. sandbox-ai toolchain attach RUN NAME        or into a sandbox that runs, without a restart
+  5. sandbox-ai toolchain detach RUN NAME        out of it again (--force while it is in use)
+
+What keeps it safe: only an entry of the signed catalog (--unsigned: one of your own, said at every start), its
+archive checked against the entry's SHA-256 before it is unpacked; in the sandbox read-only at /opt/toolchains/NAME,
+its commands first on the agent's PATH. The registries it names are opened as `sandbox-ai net allow` opens hosts -
+high and paranoid keep them closed (it is mounted all the same), --offline opens none.
+
+How it works inside (the format, the checks, the threat model): docs/TOOLCHAINS_DESIGN.md."""
+
+
 def parser():
     parser = argparse.ArgumentParser(prog="sandbox-ai toolchain", description=__doc__.split("\n\n")[0],
-                                     formatter_class=help_style, epilog="\n\n".join(__doc__.split("\n\n")[2:5]))
+                                     formatter_class=help_style, epilog=HELP_EPILOG)
     commands = parser.add_subparsers(dest="command", required=True)
     catalog = commands.add_parser("catalog", help="what the signed catalog offers for this machine")
     catalog.add_argument("--json", action="store_true", help="as JSON")
@@ -1458,9 +1676,14 @@ def main(argv, out=print):
                 out(f"it has no toolchain for this machine ({machine()})")
                 return 0
             out("\n".join(table([["NAME", "VERSION", "SIZE", "NEEDS", "IN STORE", "COMMANDS"], *(
-                [row["name"], row["version"], size_shown(row["unpacked"] or row["size"]), needs_shown(row["needs"]),
+                [row["toolchain"], row["version"], size_shown(row["unpacked"] or row["size"]),
+                 needs_shown(row["needs"], row.get("requires")),
                  "yes" if row["installed"] else "-", ", ".join(row["commands"][:8])
                  + (" ..." if len(row["commands"]) > 8 else "")] for row in rows)])))
+            older = next((row for row in rows if "@" in row["toolchain"]), None)
+            if older:
+                out(f"NAME is what `sandbox-ai toolchain add` and --toolchain take: {older['name']} for its newest, "
+                    f"{older['toolchain']} for {older['version']}")
             return 0
         if args.command == "add":
             add(args.name, args.catalog, args.unsigned, out=out)
@@ -1471,7 +1694,7 @@ def main(argv, out=print):
         if args.command == "show":
             name, version = spec(args.name)
             try:
-                entry = chosen(installed(), name, version)
+                entry = chosen(installed(), name, version, usable=False)
             except ValueError:
                 entry = find_entry(read_catalog(args.catalog)[0], name, version)
             out(json.dumps({key: value for key, value in entry.items() if not key.startswith("_")}, indent=2)
@@ -1486,9 +1709,13 @@ def main(argv, out=print):
                 out("no toolchain is in the store (sandbox-ai toolchain catalog, then: sandbox-ai toolchain add NAME)")
             else:
                 out("\n".join(table([["NAME", "VERSION", "SIZE", "SIGNED", "USED BY", "COMMANDS"], *(
-                    [row["name"], row["version"], size_shown(row["size"]), "yes" if row["signed_by"] else "NO",
+                    [row["toolchain"], row["version"], size_shown(row["size"]), "yes" if row["signed_by"] else "NO",
                      ", ".join(map(shown, row["used_by"])) or "-", ", ".join(row["commands"][:8])
                      + (" ..." if len(row["commands"]) > 8 else "")] for row in rows)])))
+            for row in rows:
+                if row["refused"]:
+                    out(f"refused: {row['name']} {row['version']}: {row['refused']} - not mounted; sandbox-ai "
+                        f"toolchain remove {row['name']}@{row['version']}")
             return 0
         if args.command == "list":
             runs = net.running()
@@ -1512,7 +1739,7 @@ def main(argv, out=print):
         run, value = args.args if len(args.args) == 2 else (None, args.args[0])
         record = net.choose(net.running(), run, command=f"toolchain {args.command}")
         if args.command == "attach":
-            attach(record, value, offline=args.offline, out=out)
+            attach_offered(record, value, offline=args.offline, out=out)
         else:
             detach(record, value, force=args.force, out=out)
         return 0

@@ -299,17 +299,20 @@ def test_the_boards_dry_run_says_when_another_host_was_chosen_meanwhile(window, 
 
 
 def test_the_start_pages_dry_run_says_when_the_form_changed_while_it_ran(window, qapp, env, wait, monkeypatch):  # noqa: F811
+    """The Expert view's Dry run is the board's (one start, two views): a field changed while it ran is a change of
+    that start, and the answer says it is for the start as it was."""
     launch = window.launch
+    window.set_project(str(project(env, "one")))
     window.show_page("launch")
-    launch.form.widgets["--workspace"].set_value([str(project(env, "one"))])
     release, _asked = held_dry_run(monkeypatch, window.sai)
 
     def changed_meanwhile():
         launch.dry_run()
         launch.form.widgets["--memory"].setText("8g")
+        window.start_link.flush()
         release.set()
     title, text, _ = answer(wait, changed_meanwhile)
-    assert "out of date" in title and text.startswith("The form changed while the dry run ran"), (title, text)
+    assert "out of date" in title and text.startswith("The board changed while the dry run ran"), (title, text)
     release.clear()
 
     def unchanged():
@@ -317,6 +320,28 @@ def test_the_start_pages_dry_run_says_when_the_form_changed_while_it_ran(window,
         release.set()
     title, text, _ = answer(wait, unchanged)
     assert title == "Plan (dry run)" and json.loads(text) == {"host": "local", "agent": launch.agent.currentText()}
+    assert launch.dry_button.isEnabled()
+
+
+def test_the_start_form_on_its_own_says_when_it_changed_while_its_dry_run_ran(qapp, env, wait, monkeypatch):  # noqa: F811
+    """The Start form without a Board beside it: its own dry run, and its own words when the form changed."""
+    from sandbox_ai_app.ui import LaunchPage
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    monkeypatch.setattr(widgets, "SHOWN", [])
+    sai = backend.SandboxAI()
+    launch = LaunchPage(sai, lambda *a, **k: None)
+    try:
+        launch.form.widgets["--workspace"].set_value([str(project(env, "one"))])
+        release, _asked = held_dry_run(monkeypatch, sai)
+
+        def changed_meanwhile():
+            launch.dry_run()
+            launch.form.widgets["--memory"].setText("8g")
+            release.set()
+        title, text, _ = answer(wait, changed_meanwhile)
+        assert "out of date" in title and text.startswith("The form changed while the dry run ran"), (title, text)
+    finally:
+        launch.deleteLater()
 
 
 # -- R2-21: the Bridge parts of a start still waiting when the app quit --

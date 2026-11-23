@@ -61,11 +61,25 @@ def answers(socket, version, seconds=90):
 
 
 def ended(process, seconds=60):
+    """(exit status, out, err) of PROCESS within SECONDS; (None, out, err) when it did not end: killed then - with its
+    process group when it leads one of its own (a launcher's app, which keeps the output pipes open after the
+    launcher itself is gone: reading them to their end waited forever, and the test with it)."""
     try:
         out, err = process.communicate(timeout=seconds)
     except subprocess.TimeoutExpired:
-        process.kill()
-        out, err = process.communicate()
+        try:
+            own_group = os.getpgid(process.pid) == process.pid
+        except OSError:
+            own_group = False
+        if own_group:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+        try:
+            out, err = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:  # a child elsewhere still holds the pipes: what was read is gone
+            process.wait(10)
+            out, err = "", f"(did not end within {seconds} s; killed, its output still held open by another process)"
         return None, out, err
     return process.returncode, out, err
 

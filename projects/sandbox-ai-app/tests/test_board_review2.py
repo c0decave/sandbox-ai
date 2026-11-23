@@ -938,7 +938,7 @@ def test_an_imported_boards_own_parts_come_with_their_places_and_connections(pag
          "x": 560.0, "y": 300.0}], edges=[(1, 7)])
     assert page.show_imported(document, "local")
     bridge = page.board.of_kind("bridge")[0]
-    assert bridge.props["peer"] == "other" and (bridge.x, bridge.y) == (560.0, 300.0)
+    assert bridge.props["peer"] == "other"  # (its place: arranged on arrival - the user 2026-11-23: "immer erst anordnen")
     assert page.board.connected(bridge)
     assert "--allow-pypi" in page.preview.toPlainText()
     assert page.dirty(), "not applied: no project file says this board"

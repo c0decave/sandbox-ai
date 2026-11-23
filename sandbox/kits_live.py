@@ -236,8 +236,17 @@ def wanted(agent, kit=None, skill=None, command=None, agent_file=None):
         path = k.default_home(agent) if kit == "default" and not (k.kits_dir() / kit).is_dir() \
             else k.kit_path(kit, agent)
         if not path.is_dir():
-            raise ValueError(f"kit {printable(kit)} has nothing for {agent_title(agent)} (kits for it: "
-                             f"{', '.join(k.available_kits(agent)) or 'none'})")
+            error = ValueError(f"kit {printable(kit)} has nothing for {agent_title(agent)} (kits for it: "
+                               f"{', '.join(k.available_kits(agent)) or 'none'})")
+            # An empty kit would give the running sandbox nothing: what goes into it is yours (fixes.py: shown).
+            f = launcher().FIXES
+            error.fixes = [f.fix("kit", kit, f"the kit {kit} has nothing for {agent_title(agent)}",
+                                 "make it and give it its skills, then attach it",
+                                 [["sandbox-ai", "kits", "new", kit, "--agent", agent],
+                                  ["sandbox-ai", "kits", "add-skill", kit, "DIR", "--agent", agent]],
+                                 manual="what goes into a kit is yours to say (an empty kit gives a running sandbox "
+                                        "nothing)")]
+            raise error
         label = f"kit {kit}"
         plan = k.scan(agent, [(label, path)])
         notes += plan["notes"]
@@ -930,7 +939,15 @@ def run_cli(work, json_out):
     output then), else its lines. The exit status."""
     out = (lambda line: print(line, file=sys.stderr)) if json_out else print
     try:
-        result = work(out)
+        try:
+            result = work(out)
+        except ValueError as exc:
+            if not getattr(exc, "fixes", None):
+                raise
+            # What it lacks, with what makes it (fixes.py): offered on a terminal, as a start does - else (or only
+            # yours to do) refused with the commands; done, it is tried again once.
+            launcher().offer_fixes(exc, about="this command", again="run it again")
+            result = work(out)
     except (OSError, ValueError) as exc:
         print(f"sandbox-ai: {printable(exc)}", file=sys.stderr)
         return 1

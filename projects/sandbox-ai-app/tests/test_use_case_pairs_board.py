@@ -121,7 +121,7 @@ def test_use_this_pair_sets_the_agent_and_the_model_as_one_undo_step(page):
     pairs = page.use_case_pairs
     select(pairs, MID)
     # the agent is Claude Code, Mid was measured in OpenCode: said as the brief says it
-    assert f"{MID} is measured best in OpenCode; in Claude Code: not tested" in pairs.note.text()
+    assert f"{MID} is measured best in OpenCode; in Claude Code: no data yet" in pairs.note.text()
     entries = [text for text, _ in widgets.menu_entries(widgets.menu_of(pairs.table))]
     assert "Use this pair" in entries and "Copy the start command" in entries
     pairs.use_button.click()

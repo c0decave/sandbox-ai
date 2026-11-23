@@ -61,17 +61,23 @@ def questions(title="Build MCP server jadx?"):
     return [text for shown, text, _ in widgets.SHOWN if shown == title]
 
 
+def plan_question():
+    """The one question of the plan (round 2: what would be built is in it - no question of its own afterwards)."""
+    return [text for shown, text, _ in widgets.SHOWN if shown == "What the start lacks"]
+
+
 def test_a_start_on_a_host_asks_builds_there_and_goes_on(on_lab, building, monkeypatch):
     board = on_lab(["jadx"], extra_catalog=[JADX])
     answer(building, monkeypatch)
     widgets.SHOWN.clear()
     assert board.start() is False, "not at once: the server is built first"
     project = on_lab.project
-    (text,) = questions()
+    (text,) = plan_question()
+    assert questions() == [], "what would be built is on the one page of the plan, not asked again"
     assert COMMIT in text and ARCHIVE in text and "UNSIGNED" in text and "lab" in text
     assert "https://github.com/c0decave/sandbox-ai-mcp" in text and "servers/jadx" in text and "signed: the entry" in text
     plans = [args for args in building.ran if "--build-plan" in args]
-    assert plans == [("lab", "mcp", "add", "jadx", "--mount", f"/work={project}", "--build-plan")]
+    assert plans == [("lab", "mcp", "add", "jadx", "--build-plan")]  # (read before the question)
     assert added(building)[-1] == ("lab", "mcp", "add", "jadx", "--mount", f"/work={project}", "--build", "--commit",
                                    COMMIT, "--source-sha256", ARCHIVE, "--yes")
     assert len(board.started) == 1, (board.started, widgets.SHOWN)
@@ -81,12 +87,13 @@ def test_a_start_on_a_host_asks_builds_there_and_goes_on(on_lab, building, monke
 def test_declined_nothing_is_built_and_the_start_stops_said(on_lab, building, monkeypatch):
     board = on_lab(["jadx"], extra_catalog=[JADX])
     answer(building, monkeypatch)
-    real, kinds = widgets.confirm, []  # (asked through widgets.ask_first: the app's policy, mcp-build of the table)
-    monkeypatch.setattr(widgets, "confirm", lambda parent, title, *a, **k: kinds.append(k.get("destructive")) or False
-                        if title.startswith("Build MCP") else real(parent, title, *a, **k))
+    monkeypatch.setattr(widgets, "AUTO_CHOICE", "choose")  # (Choose…: each line asked on its own)
+    real = widgets.choose
+    monkeypatch.setattr(widgets, "choose", lambda parent, title, text, choices, *a, **k: None  # (Not this one)
+                        if title.startswith("What the start lacks (") else real(parent, title, text, choices, *a, **k))
     board.start()
     assert board.started == [] and not [args for args in added(building) if "--build" in args]
-    assert kinds == [True], "asked as what weakens something: Cancel is the default"
+    assert questions() == [], "the page's answer is not asked again"
     said = "\n".join(text for title, text, _ in widgets.SHOWN if title == "Not started")
     assert "MCP server jadx: not built - its catalog has no signed image of it yet (sandbox-ai mcp add jadx --build" \
         in said, widgets.SHOWN
@@ -106,7 +113,7 @@ def test_an_unsigned_catalog_is_said_and_passed_on(on_lab, building, monkeypatch
     board = on_lab(["jadx"], extra_catalog=[{**JADX, "signature": "none"}])
     answer(building, monkeypatch)
     board.start()
-    (text,) = questions()
+    (text,) = plan_question()
     assert "NOT signed: nobody vouched for the entry" in text
     assert [args for args in building.ran if "--build-plan" in args][0][-2:] == ("--build-plan", "--unsigned")
     assert added(building)[-1][-2:] == ("--yes", "--unsigned")

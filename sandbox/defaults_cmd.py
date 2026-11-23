@@ -27,6 +27,9 @@ question stays open and its answer counts for the next try; --ask-timeout wins),
 package_min_age_days (the package guard asks before a download of a package version younger than that many days, 0 to
 3650, default 14; 0: no age check; rulesets and the modes high and paranoid can only lengthen it; `sandbox-ai
 packages`),
+fix_questions (what a start lacks and sandbox-ai can provide - its image not built, an MCP server not added, a
+toolchain not in the store: all, the default - the start lists everything and asks once, Fix all / Choose / Cancel -
+or each - one question per fix; --fix does it without asking, and without a terminal nothing is asked),
 monitor_interval (the system monitor's seconds between two samples of a run, 1 to 3600, default 10; 0: no
 recording; `sandbox-ai top`, `sandbox-ai stats usage`), budget (USD a start's model requests may cost, as --budget;
 `sandbox-ai spend`),

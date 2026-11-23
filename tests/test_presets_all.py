@@ -27,6 +27,9 @@ import home_guard  # noqa: E402
 
 home_guard.ensure()  # tests write VPN keys and LLM endpoints: never into the real HOME, also without conftest.py
 
+import live_fakes as F  # noqa: E402
+import toolchain_fakes as TF  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("sandbox_presets_all", ROOT / "sandbox/agent_sandbox.py")
 s = importlib.util.module_from_spec(SPEC)
@@ -161,10 +164,14 @@ def host(tmp_path_factory):
         for variant, _ in P.option_values(preset, defaults, "--image-variant"):
             if variant not in {name for name, _ in images.variants()}:
                 images.recipe(variant, "claude")
+    # The toolchains the presets bring (--toolchain), in the store as `sandbox-ai toolchain add` puts them: stand-ins
+    # of the published catalog's (toolchain_fakes), added from a catalog nobody signed.
+    TF.install(root / "toolchain-catalog")
     work = root / "work"
     work.mkdir()
     yield root, dev, work
     patch.undo()
+    TF.writable(root)
 
 
 def mcp_values(preset):
@@ -262,6 +269,9 @@ def network_of(preset, values, agent):
             allow, vpn = allow + VPN_OPENS[value]["allow"], value
         elif flag == "--dns":
             dns = True
+        elif flag == "--toolchain":  # the registries of the toolchain and of those it requires
+            opened = TF.opens([value])
+            hosts += opened["hosts"] + [host for name in opened["presets"] for host in s.PRESETS[name]]
         elif flag == "--llm":
             name, url, extra = next((n, u, e) for n, _, u, e in SERVERS if n == value.split(":", 1)[0])
             address = url.split("//", 1)[1].split("/", 1)[0]
@@ -1177,9 +1187,9 @@ def test_every_agent_has_its_coding_and_its_local_model_preset():
 
 
 @pytest.mark.parametrize("agent", ["opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi"])
-def test_the_presets_of_the_experimental_agents(host, capsys, monkeypatch, agent):
+def test_the_presets_of_the_other_agents(host, capsys, monkeypatch, agent):
     """The ones test_every_preset_with_every_agent leaves out (its agents are claude, codex and opencode): presets
-    check, a dry run (no opt-in: they are only not live-tested yet), and only the network the preset names."""
+    check, a dry run (no opt-in, no "experimental" in its plan), and only the network the preset names."""
     root, dev, work = host
     for name in sorted(n for n, preset in PRESETS.items() if preset.get("agents") == [agent]):
         preset = PRESETS[name]
@@ -1187,7 +1197,7 @@ def test_the_presets_of_the_experimental_agents(host, capsys, monkeypatch, agent
             values = sample_values(preset, root, dev, agent, full)
             assert P.missing(preset, values, agent) == [], name
             plan = dry_run(capsys, work, agent, name, values)
-            assert plan["agent"] == agent and plan[agent]["experimental"], name
+            assert plan["agent"] == agent and "experimental" not in plan[agent], name
             assert_network(plan, network_of(preset, values, agent))
             if values.get("llm") or "--llm" in preset["options"]:
                 # Read-only: a managed file (/etc/...) or, for Goose, variables that win over its own files.
@@ -1195,3 +1205,240 @@ def test_the_presets_of_the_experimental_agents(host, capsys, monkeypatch, agent
         for other in ("claude", "codex"):
             with pytest.raises(ValueError, match=f"preset {name} is for"):
                 dry_run(capsys, work, other, name, sample_values(preset, root, dev, agent, False))
+
+
+# --- the language presets bring their toolchain -------------------------------------------------------------------
+
+# Each language preset and the toolchains it brings (--toolchain NAME in its options; what a toolchain requires comes
+# with it: rust brings cc, cc brings zig). The user, 2026-11-23: "vorher prüfen ob wir auch Toolchain-Presets haben".
+LANGUAGE_TOOLCHAINS = {"rust": ["rust"], "go": ["go"], "jvm": ["jdk"], "dotnet": ["dotnet"], "data-ml": ["python"],
+                       "development": ["python", "node"], "node": ["node"], "python": ["python"], "c-cpp": ["cc"],
+                       "zig": ["zig"]}
+
+
+def test_the_language_presets_bring_their_toolchain():
+    """rust, go, jvm, dotnet, data-ml and development named their toolchain only in a note ("sandbox-ai toolchain add
+    rust once, then --toolchain rust"): a start of the preset ran without it. Each now brings it (--toolchain in its
+    options; the start offers `sandbox-ai toolchain add NAME` while the store lacks it), and every toolchain of the
+    catalog has a preset of its language (node, python, c-cpp and zig are new), its notes in the same words."""
+    for name, wanted in LANGUAGE_TOOLCHAINS.items():
+        preset = PRESETS[name]
+        assert [value for value, _ in P.option_values(preset, {}, "--toolchain")] == wanted, name
+        assert preset["category"] == "development" and preset["agents"] == list(AGENTS), name
+        assert set(preset["translations"]["de"]) == {"title", "description"}, name
+        notes = " ".join(preset["notes"])
+        assert re.search(r"\bcomes? with the preset \(--toolchain ", notes), name
+        for toolchain in wanted:
+            assert f"sandbox-ai toolchain add {toolchain}" in notes, (name, toolchain)
+        assert "once, then --toolchain" not in notes, f"{name}: the toolchain was only named, now it comes with it"
+    assert set(TF.TOOLCHAINS) <= {toolchain for names in LANGUAGE_TOOLCHAINS.values() for toolchain in names} | {"cc"}
+    assert "cc" in LANGUAGE_TOOLCHAINS["c-cpp"]
+    for name, preset in PRESETS.items():
+        if name not in LANGUAGE_TOOLCHAINS:
+            assert "--toolchain" not in preset.get("options", []), f"{name}: a language preset? add it above"
+    # The registries the preset opens are the toolchain's, and more (rustup's, Go's downloads): never fewer.
+    for name, wanted in LANGUAGE_TOOLCHAINS.items():
+        options = P.expand(PRESETS[name], {}, extras=False)
+        opened = {value for flag, value in option_pairs(options) if flag == "--allow-host"}
+        profiles = {flag[len("--allow-"):] for flag, _ in option_pairs(options) if flag.startswith("--allow-")}
+        need = TF.opens(wanted)
+        assert set(need["hosts"]) <= opened and set(need["presets"]) <= profiles, (name, need, opened, profiles)
+
+
+def test_presets_check_names_a_toolchain_that_is_not_in_the_store(host, tmp_path, monkeypatch):
+    """`presets check` (and the app's gallery, which asks it) names the toolchain a preset brings while the store
+    lacks it, with the command that adds it - as it names an MCP server not added yet; the start offers it."""
+    assert P.missing(PRESETS["rust"], {}, "claude") == []  # (the host's store has the stand-ins)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty"))
+    assert P.missing(PRESETS["rust"], {}, "claude") == [
+        "toolchain rust is not in the store yet (the start offers to add it): sandbox-ai toolchain add rust"]
+    assert [line.rsplit(" ", 1)[-1] for line in P.missing(PRESETS["development"], {}, "codex")] == ["python", "node"]
+    assert P.missing(PRESETS["default-claude"], {}, "claude") == []
+
+
+def test_a_language_preset_with_its_toolchain_in_the_store(host, capsys):
+    """With the toolchain in the store (here: the stand-ins), the preset's start mounts it and what it requires, read
+    only, and opens its registries - nothing beyond what the preset says (test_every_preset_with_every_agent checks
+    every agent; this names what the plan shows)."""
+    _, _, work = host
+    plan = dry_run(capsys, work, "claude", "rust", {})
+    assert [entry["name"] for entry in plan["toolchains"]] == ["zig", "cc", "rust"]
+    assert all(entry["mode"] == "ro" and entry["sandbox"] == f"/opt/toolchains/{entry['name']}"
+               for entry in plan["toolchains"])
+    assert {"crates.io", "index.crates.io", "static.crates.io", "--allow-github"} <= \
+        set(plan["toolchain_hosts"]["opened"])
+    plan = dry_run(capsys, work, "codex", "development", {})
+    assert [entry["name"] for entry in plan["toolchains"]] == ["python", "node"]
+    # The modes that open nothing by an option keep the registries closed; the toolchain is mounted all the same.
+    plan = dry_run(capsys, work, "claude", "go", {}, "--toolchain-offline")
+    assert [entry["name"] for entry in plan["toolchains"]] == ["go"] and plan["toolchain_hosts"]["opened"] == []
+
+
+# --- a fresh install: every preset gives a plan or offers, never a bare refusal -----------------------------------
+
+# The user, 2026-11-23: "ob noch alle Presets out of the box funktionieren, wenn nicht fixen". A fresh install has no
+# image built, no MCP server added, no toolchain, no LLM server, no VPN profile, no secret: a start of every preset
+# through ./sandbox-ai (--fix-plan: the dry run's checks, then what they lack as JSON) must say what it lacks and offer
+# what sandbox-ai can do (build, add from the catalog, add the toolchain), and only say - with the command - what is
+# yours to give (an LLM server's address, a VPN's keys, your service image). A value only you know (a folder, a
+# target, a task) is asked for by its name when it is not given.
+# The fixes whose values are yours: said with their command, never done for you (fixes.py "manual").
+YOURS = {"llm", "service", "vpn"}
+# The values a user gives on a fresh install (what the preset asks for by kind): an LLM server and a VPN profile by the
+# names the presets' hints propose, not added yet.
+FRESH_VALUES = {"host": "192.0.2.44", "text": "a task for the test", "llm": "api", "vpn": "anon"}
+
+
+def required_values(preset):
+    return [name for name, spec in preset.get("values", {}).items()
+            if not spec.get("optional") and "default" not in spec]
+
+
+def fresh_catalogs(folder):
+    """SANDBOX_AI_LOCAL_CATALOGS's folder: the two MCP catalogs with stand-ins of every entry a preset names
+    (CATALOG_ENTRIES, each with the folders it requires: CATALOG_FOLDERS), nobody's signature on them; the
+    toolchains' stand-ins beside them. No catalog is read over the network."""
+    for prefix, name in (("mcp", "sandbox-ai-mcp"), ("hub", "axross-mcp-hub")):
+        entries = [{"id": f"{prefix}:{entry}", "name": entry, "title": entry, "description": f"stand-in for {entry}",
+                    "kind": "oci", "image": f"ghcr.io/c0decave/{name}-{entry}", "digest": "sha256:" + "b" * 64,
+                    "network": "none", "mounts": [{"target": target, "description": target,
+                                                   "required": target in ("/work", "/data")}
+                                                  for target in CATALOG_FOLDERS.get(entry, [])]}
+                   for entry in sorted(CATALOG_ENTRIES[prefix])]
+        (folder / name).mkdir(parents=True)
+        (folder / name / "catalog.json").write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1,
+                                                                "entries": entries}))
+    TF.catalog(folder / "sandbox-ai-mcp")
+
+
+@pytest.fixture(scope="module")
+def fresh(tmp_path_factory):
+    """A fresh install (live_fakes.Host: an empty HOME, Podman with no image) with the catalogs of fresh_catalogs, and
+    every preset's start through ./sandbox-ai, at once: {(name, agent): (status, stdout, stderr)} with the values only
+    you can give, for each agent of the preset, and {(name, None): ...} with none given (its first agent)."""
+    from concurrent.futures import ThreadPoolExecutor
+    root = tmp_path_factory.mktemp("presets-fresh")
+    made = F.Host(root / "h")
+    fresh_catalogs(root / "catalogs")
+    made.env["SANDBOX_AI_LOCAL_CATALOGS"] = str(root / "catalogs")
+    jobs = {}
+    for name, preset in PRESETS.items():
+        values = {}
+        for value in required_values(preset):
+            kind = preset["values"][value].get("kind", "text")
+            if kind == "folder":
+                values[value] = str(root / "values" / name / value)
+                Path(values[value]).mkdir(parents=True)
+            else:
+                values[value] = FRESH_VALUES[kind]
+        given = [word for value, text in values.items() for word in ("--preset-value", f"{value}={text}")]
+        for agent in preset.get("agents", AGENTS):
+            jobs[(name, agent)] = [agent, "--preset", name, *given, "--no-tmux", "--fix-plan"]
+        jobs[(name, None)] = [preset.get("agents", AGENTS)[0], "--preset", name, "--no-tmux", "--fix-plan"]
+
+    def run(argv):
+        done = made.run(*argv, timeout=300)
+        return done.returncode, done.stdout, done.stderr
+    with ThreadPoolExecutor(max(2, min(8, os.cpu_count() or 2))) as pool:
+        found = dict(zip(jobs, pool.map(run, jobs.values())))
+    yield made, found
+    assert made.builds() == [] and made.stopped_at() is None, "a plan makes nothing and starts nothing"
+
+
+@pytest.mark.parametrize("name", sorted(PRESETS))
+def test_every_preset_works_out_of_the_box(fresh, name):
+    made, runs = fresh
+    preset = PRESETS[name]
+    status, out, err = runs[(name, None)]
+    assert "Traceback" not in err, err[-3000:]
+    required = required_values(preset)
+    if required:
+        # What only you know is asked for by its name and label, as `presets show` names it: never a bare refusal.
+        assert status == 1 and f"preset {name} needs: " in err, err[-1500:]
+        for value in required:
+            assert f"--preset-value {value}=... ({preset['values'][value]['label']}" in err, (value, err[-1500:])
+    else:
+        assert status == 0, err[-3000:]
+    defaults = {key: str(spec["default"]) for key, spec in preset.get("values", {}).items() if "default" in spec}
+    servers = [entry.rpartition(":") for entry in preset.get("mcp", [])] + \
+        [("", ":", value) for value, _ in P.option_values(preset, defaults, "--mcp")]
+    toolchains = [value for value, _ in P.option_values(preset, defaults, "--toolchain")]
+    for agent in preset.get("agents", AGENTS):
+        status, out, err = runs[(name, agent)]
+        assert status == 0, f"{name} ({agent}): {err[-3000:]}"
+        plan = json.loads(out)
+        fixes = plan["fixes"]
+        by_id = {item["id"]: item for item in fixes}
+        for item in fixes:
+            if item["verdict"] == "refused":
+                # Only what nobody signed, in a mode that takes nothing unsigned (code-audit, forensics: high): the
+                # stand-in catalogs here carry no signature; the published ones do, and are offered there.
+                assert item["unsigned"] and plan["mode"] in ("high", "paranoid") and "medium" in item["why"], \
+                    (name, agent, item)
+                continue
+            if item["verdict"] == "manual":  # only what is yours, and always with what to run
+                assert item["kind"] in YOURS and item["commands"], (name, agent, item)
+        # No image is built on a fresh install: the plan builds it (the agent's, a variant's, a team's).
+        assert any(item["kind"] in ("image", "variant") and item["verdict"] == "offered" for item in fixes), \
+            (name, agent, [item["id"] for item in fixes])
+        # Its MCP servers: added from the catalog the preset names, with the folders the start gives them.
+        for prefix, _, server in servers:
+            item = by_id.get(f"mcp:{server}")
+            assert item and item["verdict"] in ("offered", "refused"), (name, agent, server, item)
+            command = item["commands"][0]
+            assert command[:3] == ["sandbox-ai", "mcp", "add"], command
+            ambiguous = server in CATALOG_ENTRIES["mcp"] and server in CATALOG_ENTRIES["hub"]
+            assert command[3] == (f"{prefix}:{server}" if prefix and ambiguous else server), command
+        # Its toolchains: added from the signed catalog.
+        for toolchain in toolchains:
+            item = by_id.get(f"toolchain:{toolchain}")
+            assert item and item["verdict"] == "offered", (name, agent, toolchain, item)
+            assert item["commands"] == [["sandbox-ai", "toolchain", "add", toolchain]]
+
+
+def test_a_preset_whose_server_is_in_both_catalogs_adds_the_one_it_names(fresh):
+    """firmware-iot, hardware-analysis and software-analysis name mcp:binwalk (and mcp:capa, mcp:radare2: this
+    project's reviewed entries), which axross-mcp-hub has too: the plan said "it is in several catalogs, choose one"
+    and offered nothing. The preset's own choice is taken, with the folder the start gives it."""
+    _, runs = fresh
+    status, out, err = runs[("firmware-iot", "claude")]
+    assert status == 0, err
+    item = {item["id"]: item for item in json.loads(out)["fixes"]}["mcp:binwalk"]
+    folder = next(value for value in item["commands"][0] if value.startswith("/work="))
+    assert item["commands"] == [["sandbox-ai", "mcp", "add", "mcp:binwalk", "--unsigned", "--mount", folder]]
+    assert folder.endswith("/values/firmware-iot/firmware:ro")
+    # Started without the preset, the name alone is still yours to choose.
+    done = fresh[0].run("claude", "--mcp", "binwalk", "--no-tmux", "--fix-plan")
+    item = {item["id"]: item for item in json.loads(done.stdout)["fixes"]}["mcp:binwalk"]
+    assert item["verdict"] == "manual" and "choose one: sandbox-ai mcp add mcp:binwalk | sandbox-ai mcp add hub:binwalk" \
+        in item["why"]
+
+
+def test_a_language_preset_on_a_fresh_install_end_to_end(tmp_path):
+    """sandbox-ai claude --preset rust on a fresh install, through ./sandbox-ai: the plan offers the toolchain (the
+    image too); the toolchain added as the offer says (here from the stand-in catalog, which nobody signed:
+    --unsigned) brings what it requires (cc, zig); then the start mounts all three and opens the registries."""
+    made = F.Host(tmp_path / "h")
+    fresh_catalogs(tmp_path / "catalogs")
+    made.env["SANDBOX_AI_LOCAL_CATALOGS"] = str(tmp_path / "catalogs")
+    done = made.run("claude", "--preset", "rust", "--no-tmux", "--fix-plan")
+    assert done.returncode == 0, done.stderr
+    fixes = {item["id"]: item for item in json.loads(done.stdout)["fixes"]}
+    assert {"image:claude", "toolchain:rust"} <= set(fixes), list(fixes)
+    refused = made.run("claude", "--preset", "rust", "--no-tmux", "--dry-run")
+    assert refused.returncode == 1 and "the toolchain rust is not in the store: sandbox-ai toolchain add rust" in \
+        refused.stderr
+    added = made.run(*fixes["toolchain:rust"]["commands"][0][1:], "--unsigned")
+    assert added.returncode == 0, added.stderr
+    assert "rust requires the toolchain cc: it is added too" in added.stdout
+    try:
+        plan = made.run("claude", "--preset", "rust", "--no-tmux", "--dry-run")
+        assert plan.returncode == 0, plan.stderr
+        found = json.loads(plan.stdout)
+        assert [entry["name"] for entry in found["toolchains"]] == ["zig", "cc", "rust"]
+        assert "crates.io" in found["https_hosts"] and "static.crates.io" in found["https_hosts"]
+        assert "the toolchain rust 1.99.1 was added unsigned" in plan.stderr
+        again = made.run("claude", "--preset", "rust", "--no-tmux", "--fix-plan")
+        assert "toolchain:rust" not in {item["id"] for item in json.loads(again.stdout)["fixes"]}
+    finally:
+        TF.writable(tmp_path)

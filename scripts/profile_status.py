@@ -17,7 +17,9 @@ run (a lower --last-round, an incomplete tree): table and snapshot would no long
 measured pair's status, its evidence block and runs/solved into the table (every other key of the table kept: the hand-written settings, notes, works/fails, the
 evidence text as the block's summary) and the aggregated numbers into sandbox/model_evidence.json - the snapshot
 tests/test_profile_status.py checks the table against without the research tree. --summary FILE writes what changed
-and why (Markdown). --check compares the table with the snapshot alone (exit 1 on a contradiction).
+and why (Markdown). --check compares the table with the snapshot alone (exit 1 on a contradiction, and on any status
+the snapshot's runs do not back: a family's own status, a pair's without its run ids - a light comes only from a
+measured pair).
 
 After a round: run it again with that round (--last-round N or none: every round found) and --date "round N=DATE"
 when the table's "rounds" has no date for it yet, review the summary, run the tests, commit table and snapshot.
@@ -142,7 +144,8 @@ def dump(path, document):
 
 
 def contradictions(table, snapshot):
-    """The pairs where TABLE contradicts SNAPSHOT's numbers: ["family x agent: ..."]."""
+    """The pairs where TABLE contradicts SNAPSHOT's numbers, and every status no measured runs back (a family's own
+    status; a pair's without its derived evidence block and run ids): ["family x agent: ..."]."""
     found = []
     families = {family["id"]: family for family in table["families"]}
     for key, numbers in snapshot["pairs"].items():
@@ -158,11 +161,20 @@ def contradictions(table, snapshot):
                 any(entry["evidence"].get(k) != v for k, v in numbers.items()):
             found.append(f"{name}: its evidence block is not the snapshot's numbers")
     for family in table["families"]:
+        if {"status", "reason"} & set(family.get("all") or {}):
+            found.append(f"{family['id']}: a status for every harness, which no pair's runs back (a status is a "
+                         "measured pair's; what is known goes into works/fails)")
         for agent, entry in family.get("harnesses", {}).items():
             block = entry.get("evidence")
-            if isinstance(block, dict) and block.get("derived") == ev.DERIVED and \
-                    f"{family['id']}/{agent}" not in snapshot["pairs"]:
+            key = f"{family['id']}/{agent}"
+            if isinstance(block, dict) and block.get("derived") == ev.DERIVED and key not in snapshot["pairs"]:
                 found.append(f"{family['id']} x {agent}: derived, but not in the snapshot")
+            elif entry.get("status") and not (isinstance(block, dict) and block.get("derived") == ev.DERIVED
+                                              and block.get("run_ids")):
+                found.append(f"{family['id']} x {agent}: {entry['status']} without measured runs (no evidence block "
+                             "with run ids from scripts/profile_status.py)")
+            elif entry.get("status") and not (snapshot["pairs"].get(key) or {}).get("run_ids"):
+                found.append(f"{family['id']} x {agent}: {entry['status']}, but the snapshot names no runs of it")
     return found
 
 

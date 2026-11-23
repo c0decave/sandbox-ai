@@ -34,6 +34,6 @@
     "OpenHands gets the server as LiteLLM's OpenAI provider at the server's /v1 URL with the model, the context window when known and the key as a placeholder the connection proxy replaces, in the settings its start applies (/etc/openhands/settings.json, read-only); the loop guard's turn limit and instructions too.",
     "The relay sets the model's parameters (sandbox-ai llm params) and the loop guard on the wire, the same for every agent. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
     "OpenHands' web UI is on the sandbox's loopback: add --browser to see it in the sandbox's own browser (the app's Browser button; Podman).",
-    "OpenHands is not live-tested yet (a start says so); its image first: sandbox-ai build openhands."
+    "Its image first: sandbox-ai build openhands."
   ]
 }

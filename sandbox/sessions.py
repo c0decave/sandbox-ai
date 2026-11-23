@@ -2169,6 +2169,45 @@ def changed_options(data, given=(), dropped=()):
     return options, changes
 
 
+def plan_of(name, data):
+    """What a start of the session NAME with its options as they are now lacks, as the launcher says it (`AGENT
+    OPTIONS --fix-plan`: fixes.plan_json - a dry run, nothing made), or None when it says none (a refusal without a
+    fix, an older answer: the start itself says what is wrong)."""
+    directory = session_dir(name)
+    cmd = [sys.executable, "-I", str(launcher().launcher_script()), data["agent"], *run_options(data),
+           *(["--state-dir", str(directory / "home")] if keeps_home(data) else []), "--start-id", name, "--fix-plan"]
+    try:
+        result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, cwd=data["cwd"],
+                                timeout=READY_TIMEOUT)
+        plan = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError, RecursionError) as exc:
+        LOG.info("session", f"{display(name, data)}: its fix plan was not read: {exc}")
+        return None
+    return plan if isinstance(plan, dict) and isinstance(plan.get("fixes"), list) else None
+
+
+def fix_first(name, data, terminal=None, read=None, run_command=None):
+    """Before the stopped session NAME starts again (resume): what its start lacks - its image removed, an MCP
+    server or a toolchain gone since - asked about on this terminal and made (fixes.py: your fix_questions), as a new
+    start does: its supervisor has no terminal and could only refuse it with the commands. Declined: ValueError with
+    those commands (nothing is started). Without a terminal nothing is asked: the supervisor says what is missing.
+    READ, RUN_COMMAND: the answers and how a fix's command runs (tests)."""
+    fixes = launcher().FIXES
+    if not (fixes.on_terminal() if terminal is None else terminal):
+        return []
+    plan = plan_of(name, data)
+    # (a change of the start's own options - a way to start - is the session's options' to make: not here)
+    items = [item for item in (plan or {}).get("fixes") or [] if isinstance(item, dict) and not item.get("options")]
+    if not any(item.get("needed") for item in items):
+        return []
+    shown = launcher().printable(display(name, data))
+    return fixes.resolve(f"{shown} lacks what its start needs; nothing was started", items,
+                         mode=plan.get("mode") or "medium", questions=plan.get("questions") or "all", terminal=True,
+                         read=read, printable=launcher().printable, about=f"the session {shown}",
+                         again=f"resume it again (sandbox-ai resume {shown})", flag=None,
+                         **({"run_command": run_command} if run_command else {}))
+
+
 def check_start(name, data):
     """The checks of a new start for the session's options as they are now: the launcher with --dry-run, as the
     supervisor will start (its project file and whether it is trusted, the administrator's policy, the security
@@ -2323,6 +2362,7 @@ def resume_locked(name, workspaces=(), mounts=(), mcp=(), options=(), dropped=()
         data["options"] = before
         raise
     review_home(name, data)
+    fix_first(name, data)
     print(f"agent-sandbox: restarting stopped session {shown}; the agent continues its last conversation",
           file=sys.stderr)
     for path in workspaces:

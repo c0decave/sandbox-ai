@@ -7,8 +7,20 @@
     scripts/live_check.sh --only NAME[,NAME]  only these (repeatable; the optional ones too)
     scripts/live_check.sh --build             build the missing images first (codex, claude, opencode)
     scripts/live_check.sh --host NAME         also the remote MCP check on that host of `sandbox-ai hosts`
-    scripts/live_check.sh --llm NAME [--yes]  also the local-model smoke runs on that server of `sandbox-ai llm`
+    scripts/live_check.sh --llm NAME [--yes]  also the local-model smoke runs on that server of `sandbox-ai llm`:
+                                              local-llm (three models x Claude Code, OpenCode, Codex) and
+                                              harnesses-live (every harness of the launcher, each image built when
+                                              missing, Podman and Bubblewrap) and cairn-workers-live (every
+                                              harness as a worker of real Cairn, Podman)
+    scripts/live_check.sh --only presets-live --llm NAME [--preset-values FILE] [--presets A,B] [--provider-login]
+                                              every built-in preset started for real (its first agent; Podman and,
+                                              where it can, Bubblewrap); FILE gives the values only you can give
+    scripts/live_check.sh --only mcp-live [--mcp-servers A,B] [--mcp-repo DIR]
+                                              every server of the signed MCP catalog through a start's path
+                                              (mcp add, a session with --mcp, its relay, initialize, tools/list,
+                                              its smoke calls; Podman and Bubblewrap; per-workspace isolation)
     scripts/live_check.sh --device PATH       the device for devices-live (default: one `devices scan` found)
+    scripts/live_check.sh --only artex-live   ARTEX beside an agent (asks first; builds its image when missing)
     scripts/live_check.sh --dmg-old A --dmg-new B   on a Mac: also the update of sandbox-ai.app from disk image A to
                                               B and back (each a .dmg, or the folder of a downloaded release)
 
@@ -84,7 +96,7 @@ CHECKS = (
           "The agent and `sandbox-ai shell` cannot list or read /sandbox/proxy and /sandbox/control (Firejail's "
           "blacklist in effect), while /sandbox/session stays readable",
           ("sandbox", "image:codex"), (f"{GAPS}::test_live_firejail_hides_the_proxy_and_control_folders",),
-          source="docs/reviews/credentials-verify-A.md, -B.md (untested)"),
+          source="docs/reviews/credentials-verify-A.md, -B.md (read, not run there)"),
     Check("firewall-login-hosts",
           "A Git login's server (--git-token-env https://codeberg.org=...) is opened and no other host is, with the "
           "connection proxy and with the firewall alone (--no-proxy)",
@@ -175,6 +187,79 @@ CHECKS = (
           (f"{GAPS}::test_live_local_model_smoke_run",), optional=True, timeout=4 * 3600,
           network="prompts to your LLM server given with --llm, nothing else (--no-provider-defaults)",
           source="research-llm/LOCAL_LLM_REPORT.md section 7"),
+    Check("harnesses-live",
+          "Every harness the launcher knows (claude, codex, opencode, opencode2, hermes, dsh, qwen, goose, openhands, "
+          "nanobot, letta, pi) does one smoke run - a file written with its own tool, the nonce replied - through the "
+          "real launcher with --llm and nothing else open, with Podman and with Bubblewrap; a missing image is built "
+          "first (the report says how long), and a harness whose image cannot be built here, or that this host has "
+          "not installed for Bubblewrap, is skipped with the reason",
+          ("sandbox", "llm"), (f"{GAPS}::test_live_harness_smoke_run",), optional=True, timeout=12 * 3600,
+          network="prompts to your LLM server given with --llm, nothing else (--no-provider-defaults); a missing "
+                  "image's packages while it is built (Debian, npm, PyPI, the harness's release)",
+          source="the user, 2026-11-22: every harness tested live, not marked \"not live-tested\""),
+    Check("presets-live",
+          "Every built-in preset (sandbox/presets/*.json) is started for real through the launcher - sandbox-ai AGENT "
+          "--preset NAME, its first agent - with a smoke task (a file written with the agent's own tool, the nonce "
+          "replied), with Podman and, where the preset can, Bubblewrap; its part is checked as far as it can be "
+          "without values of yours (each MCP server it names started, each service ready, each toolchain it brings "
+          "added first); the model: --llm's server "
+          "(nothing else open), or the agent's own provider with --provider-login. A missing image is built first. "
+          "A preset that needs what only you can give (a target, a VPN profile, a device, your display) gets it from "
+          "--preset-values FILE or is skipped with the reason and the command to run it yourself",
+          ("sandbox", "model", "presets"), (f"{GAPS}::test_live_preset_smoke_run",), optional=True,
+          timeout=24 * 3600,
+          network="prompts to your LLM server given with --llm (or, with --provider-login, to each agent's own "
+                  "provider); the hosts each preset opens itself (PyPI, npm, GitHub ... while the smoke task runs); "
+                  "the MCP servers' images from ghcr.io (sandbox-ai mcp add), the toolchains a language preset brings "
+                  "(sandbox-ai toolchain add: the signed toolchains.json and its archives from GitHub; "
+                  "SAI_LIVE_TOOLCHAINS=FILE: your own builds) and a missing image's packages",
+          source="the user, 2026-11-22: \"mir scheint das alle presets auch noch nicht getestet sind\""),
+    Check("mcp-live",
+          "Every server of the signed MCP catalog (sandbox-ai-mcp) tested for real through the path a start uses: "
+          "`sandbox-ai mcp add NAME` with its defaults (the catalog's current digest) in the check's own "
+          "configuration, a kept session with --mcp NAME, the server started by sandbox-ai (its supervisor, the "
+          "bridge, each connection's container or Bubblewrap sandbox), its connection through the session's relay "
+          "(the agent side's socket), MCP initialize, tools/list (against servers/NAME/tools.json of the MCP "
+          "repository) and the smoke calls of servers/NAME/smoke.json (the calls its CI makes), with Podman and, where "
+          "its entry has a Bubblewrap form, Bubblewrap; one workspace with the smoke files for /work and a second one "
+          "to prove that one project's instance never sees the other's files. A server that needs a secret or a "
+          "network only you can give is skipped with the reason and the command; one that dies before the handshake "
+          "shows its supervisor.log",
+          ("sandbox", "mcp"), (f"{GAPS}::test_live_mcp_server",), optional=True, timeout=12 * 3600,
+          network="the published catalog (raw.githubusercontent.com), every server's image from ghcr.io (sandbox-ai "
+                  "mcp add pulls it by digest; Bubblewrap: its rootfs archive from GitHub's releases), the MCP "
+                  "repository's smoke data from github.com when no checkout of it is here (--mcp-repo), and what "
+                  "the smoke calls of the servers with network reach (search engines, web pages, APIs answering "
+                  "made-up keys with a refusal)",
+          source="the user, 2026-11-23: \"Binwalk und Radare2 ... beenden sich, bevor sie den Handshake "
+                 "beantworten\"; \"in-depth testing aller mcp server ob sie jetzt funktionieren sollten\""),
+    Check("cairn-workers-live",
+          "Every harness as one of Cairn's workers (claude, codex, opencode, opencode2, hermes, dsh, qwen, goose, "
+          "nanobot, letta, pi): real Cairn in a real pod, the harness the lead with --llm and nothing else open, "
+          "--cairn --cairn-workers AGENT and a small project made at the start (a code word to state in lower case); "
+          "Cairn's dispatcher hands the task through sandbox-ai's relay to the harness's own one-shot run, and the "
+          "board must get the fact. Missing images (the harness's, cairn, browser) are built first; OpenHands is "
+          "skipped with the reason (as the lead --cairn is refused, beside another lead it needs its own login). "
+          "The report has a row per harness: what it gives sandbox/cairn_workers.json",
+          ("podman", "llm"), (f"{GAPS}::test_live_cairn_worker",), optional=True, podman_only=True,
+          timeout=12 * 3600,
+          network="prompts to your LLM server given with --llm, nothing else (--no-provider-defaults); a missing "
+                  "image's packages while it is built (Debian, npm, PyPI, the harness's release; Cairn's source "
+                  "from GitHub)",
+          source="the user, 2026-11-22: \"why workers only for claude and not all harnesses?\""),
+    Check("artex-live",
+          "ARTEX beside an agent (--artex): its image built from the reviewed source with sandbox-ai's patches when "
+          "missing (sandbox-ai build artex), its console forwarded to this computer's 127.0.0.1 only, the password "
+          "of sandbox-ai artex console logs in, POST /api/auth/init and /api/update/* gone, another Host or Origin "
+          "and a token in the URL refused; in its container user 1000, the loopback only (PostgreSQL on no TCP port), "
+          "no password in ARTEX's environment",
+          ("podman", "image:codex", "artex"), (f"{GAPS}::test_live_artex_beside_the_agent",), optional=True,
+          podman_only=True, timeout=4 * 3600,
+          network="the image's build when it is missing: GitHub's archive of ARTEX's commit, npm's registry, Go's "
+                  "module proxy and checksum database, snapshot.debian.org, Docker Hub's pinned base images (about "
+                  "2 GB); the run itself reaches nothing (its target 192.0.2.1 is a documentation address)",
+          source="the user, 2026-11-22: \"check if we can integrate artex ... we still have to be careful\" "
+                 "(docs/ARTEX.md)"),
     Check("live-suites",
           "Every other live suite that needs no login (scripts/live_check.py's: the proxy, push check, network "
           "changes, devices, MCP, limits, approvals, namespaces, an escape probe)",
@@ -219,6 +304,29 @@ MAC_CHECKS = (
 CHECKS = CHECKS + MAC_CHECKS
 BY_NAME = {check.name: check for check in CHECKS}
 LLM_MODELS = ("qwen3.8-flash-next", "ornith-1.5-35b-a3b-mlx", "ornith-1.5-122b-mlx")
+# harnesses-live: each harness the launcher knows and how it runs one task without asking ({prompt}: the task), the
+# same one-shot forms as tests/live_agents.py's (a test keeps both, and this list and the launcher's agents, the same).
+HARNESSES = {
+    "claude": ("-p", "{prompt}"),
+    "codex": ("exec", "--skip-git-repo-check", "{prompt}"),
+    "opencode": ("run", "{prompt}"),
+    "opencode2": ("run", "--", "{prompt}"),
+    "hermes": ("--oneshot={prompt}",),
+    "dsh": ("headless", "{prompt}"),
+    "qwen": ("--prompt={prompt}",),
+    "goose": ("run", "--quiet", "--text={prompt}"),
+    "openhands": ("task", "--text={prompt}"),
+    "nanobot": ("agent", "--no-markdown", "--message={prompt}"),
+    "letta": ("-p", "--", "{prompt}"),
+    "pi": ("-p", "--", "{prompt}"),
+}
+LLM_CHECKS = ("local-llm", "harnesses-live", "cairn-workers-live")  # use --llm's server (join a whole run)
+LLM_USERS = LLM_CHECKS + ("presets-live",)  # presets-live too, with --only presets-live (a day's runs: never joined)
+# cairn-workers-live: the harnesses it runs as Cairn's workers (sandbox/cairn.py WORKERS; a test keeps them the same),
+# and those it cannot run with --llm, with the reason.
+CAIRN_WORKERS = tuple(HARNESSES)
+CAIRN_SKIPPED = {"openhands": "as the lead --cairn is refused (its Agent Canvas holds port 8000), and beside another "
+                              "lead (--with openhands) it reaches its own provider with its own login, not --llm"}
 IMAGES = ("codex", "claude", "opencode")
 DEVICE_KINDS = ("serial", "video", "render", "kvm")  # devices-live's own pick, in this order
 # Variables of the user's environment that never reach the checks (their sandbox-ai settings and runs).
@@ -228,6 +336,371 @@ XDG = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "
 
 
 # --- the checks' own environment ------------------------------------------------------------------------------------
+
+def one_shot(agent, prompt):
+    """The arguments after `--` that make AGENT (HARNESSES) do PROMPT once and end."""
+    return [part.replace("{prompt}", prompt) for part in HARNESSES[agent]]
+
+
+# --- presets-live: each built-in preset, started for real (the user, 2026-11-22) -----------------------------------
+
+PRESETS_DIR = ROOT / "sandbox" / "presets"
+# What a preset's value of a kind gets in the check without a value of yours: a folder of the check's own (made by
+# the test, with one small file in it), the text below, --llm's server; every other kind needs yours (PRESET_VALUES).
+SMOKE_TEXT = "the sandbox-ai live check's smoke task"
+TOR_PROFILE = "live-tor"  # a VPN value's profile: Tor, made in the check's own configuration (sandbox-ai vpn add)
+# Options whose part needs this machine's desktop, which the check's own runtime folder does not have.
+DESKTOP = {"--gui": "this desktop's display (--gui)", "--gui-screen": "this desktop's display (--gui-screen)",
+           "--audio": "this desktop's sound (--audio)"}
+# Options of a start only Podman takes (pasta forwards the host's port; Bubblewrap has no pod for a service, Cairn,
+# ARTEX, a helper team or a VPN tunnel).
+PODMAN_ONLY = ("--allow-host-port", "--service", "--cairn", "--artex", "--with", "--vpn")
+STRICT_MODES = ("high", "paranoid")  # the security modes a start with --llm refuses to widen for the server
+SERVICE_READY = "agent-sandbox: service {name} is ready at localhost:"
+
+
+def presets_module():
+    """sandbox/presets.py as a module (its checks, its expansion of values into options)."""
+    spec = importlib.util.spec_from_file_location("presets_for_live_check", ROOT / "sandbox" / "presets.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def builtin_presets(module=None):
+    """{id: preset} of the built-in presets (sandbox/presets/*.json, not *.rules.json), by name: never yours."""
+    module = module or presets_module()
+    found = {}
+    for path in sorted(PRESETS_DIR.glob("*.json")):
+        if not path.name.endswith(".rules.json"):
+            preset = module.read(path, origin="built-in")
+            found[preset["id"]] = {**preset, "_path": str(path), "_origin": "built-in"}
+    return found
+
+
+def by_hand(preset, agent, values, extra=()):
+    """The command that starts PRESET yourself with VALUES (a placeholder for each one of yours)."""
+    return shlex.join(["sandbox-ai", agent, "--preset", preset["id"],
+                       *(part for name, value in values.items() for part in ("--preset-value", f"{name}={value}")),
+                       *extra])
+
+
+def option_pairs(options, flag):
+    """The values of FLAG in OPTIONS (["--mcp", "jadx", ...] -> ["jadx"]; "--flag=value" too)."""
+    found = []
+    for index, option in enumerate(options):
+        if option == flag and index + 1 < len(options):
+            found.append(options[index + 1])
+        elif option.startswith(flag + "="):
+            found.append(option.split("=", 1)[1])
+    return found
+
+
+def preset_plan(preset, given=None, llm=None, provider_login=False, folders=None, module=None, gpu=None):
+    """How presets-live starts PRESET: {"preset", "agent", "values" (each value it gives: yours from GIVEN, else a
+    folder of the check's own in FOLDERS (a Path; its NAME), SMOKE_TEXT, --llm's LLM "SERVER:MODEL", a Tor profile of
+    the check's own for a VPN value: "vpn" names it, to add first), "folders"
+    (the folders to make), "options" (the launcher's options after the agent: --preset, its values, the model), "mcp"
+    [(server, [target the preset mounts])] to add in the check's configuration first, "toolchains" [name] it
+    brings (--toolchain: added to the check's store first), "services" [name], "api_keys"
+    [secret name: a made-up one of the check's own, its host closed], "backends" (podman, bwrap: where it can run),
+    "parts" (what to see come up), "skip" (why it cannot run here, or None), "by_hand" (the command to run it
+    yourself)}. GIVEN: {value: text} of --preset-values for this preset. GPU: whether this machine has one (None:
+    looked up)."""
+    module = module or presets_module()
+    given = dict(given or {})
+    agent = (preset.get("agents") or module.AGENTS)[0]
+    folders = Path(folders) if folders else Path("/nonexistent")
+    values, made, yours = {}, [], {}
+    plan = {"preset": preset["id"], "agent": agent, "values": values, "folders": made, "options": [], "mcp": [],
+            "toolchains": [], "services": [], "api_keys": [], "backends": ["podman", "bwrap"], "podman_only": [], "parts": [],
+            "vpn": None, "skip": None, "by_hand": ""}
+    for name, spec in (preset.get("values") or {}).items():
+        kind = spec.get("kind", "text")
+        if name in given:
+            values[name] = str(given[name])
+        elif kind == "llm" and (not spec.get("optional") or "default" in spec):
+            if not llm:
+                plan["by_hand"] = by_hand(preset, agent, {name: "SERVER:MODEL"})
+                plan["skip"] = f"needs a model: --llm SERVER (its value {name}); or run: {plan['by_hand']}"
+                return plan
+            values[name] = llm
+        elif spec.get("optional") or spec.get("default") not in (None, "") or kind == "session":
+            continue  # its default, or left out (an optional value)
+        elif kind == "folder":
+            values[name] = str(folders / name)
+            made.append(str(folders / name))
+        elif kind == "vpn":  # a Tor profile of the check's own (no key in it); yours are never copied
+            values[name] = TOR_PROFILE
+            plan["vpn"] = TOR_PROFILE
+        elif kind == "text":
+            values[name] = SMOKE_TEXT
+        else:
+            yours[name] = kind.upper()
+    plan["by_hand"] = by_hand(preset, agent, {**values, **yours})
+    if yours:
+        names = ", ".join(f"{name} ({(preset['values'][name].get('label') or name)})" for name in yours)
+        plan["skip"] = (f"needs a value of yours: {names}; give it in --preset-values FILE "
+                        f"({{\"{preset['id']}\": {{\"{next(iter(yours))}\": \"...\"}}}}) or run: {plan['by_hand']}")
+        return plan
+    try:
+        options = module.expand(preset, values)
+    except ValueError as exc:
+        plan["skip"] = f"its values: {exc}"
+        return plan
+    for flag, what in DESKTOP.items():
+        if flag in options:
+            plan["skip"] = f"needs {what}, which the check's own runtime folder does not reach; run: {plan['by_hand']}"
+            return plan
+    needs_variant = [need for need in preset.get("needs") or [] if "image variant" in need]
+    if needs_variant or "--image-variant" in options:
+        plan["skip"] = ("needs an image variant of yours, built once (" + (needs_variant[0] if needs_variant else
+                        "--image-variant") + f"); run: {plan['by_hand']}")
+        return plan
+    if "--gpu" in options and not (gpu if gpu is not None else gpu_found()):
+        plan["skip"] = f"needs a GPU (--gpu): none found on this machine; run it where one is: {plan['by_hand']}"
+        return plan
+    mounts = {}
+    for value in option_pairs(options, "--mcp-mount"):
+        server, _, rest = value.partition(":")
+        mounts.setdefault(server, []).append(rest.split("=", 1)[0])
+    plan["mcp"] = [(server, mounts.get(server, [])) for server in dict.fromkeys(option_pairs(options, "--mcp"))]
+    plan["toolchains"] = list(dict.fromkeys(option_pairs(options, "--toolchain")))
+    plan["services"] = [value.split(":", 1)[0] for value in option_pairs(options, "--service")]
+    plan["api_keys"] = [value.split("=", 1)[1] for value in option_pairs(options, "--api-key") if "=" in value]
+    plan["podman_only"] = [flag for flag in PODMAN_ONLY if flag in options]
+    if plan["podman_only"]:
+        plan["backends"] = ["podman"]
+    plan["parts"] = [f"MCP server {server}" for server, _ in plan["mcp"]] + \
+        [f"service {name}" for name in plan["services"]]
+    model = [] if provider_login or "--llm" in options else ["--llm", llm, "--no-provider-defaults"] if llm else None
+    if model is None:
+        plan["skip"] = "needs a model: --llm SERVER (or --provider-login for the agent's own provider)"
+        return plan
+    if model and "--model" in options:
+        plan["skip"] = ("names its provider's model (--model), which a start with --llm refuses: run it with "
+                        f"--provider-login, or yourself: {plan['by_hand']}")
+        return plan
+    if "paranoid" in option_pairs(options, "--mode"):
+        plan["skip"] = ("its --mode paranoid asks you before every action of the agent, which a smoke run without "
+                        f"you cannot answer: run it yourself: {plan['by_hand']}")
+        return plan
+    strict = [mode for mode in option_pairs(options, "--mode") if mode in STRICT_MODES]
+    if model and strict:
+        plan["skip"] = (f"its --mode {strict[0]} opens no LLM server of yours (the launcher refuses --llm there): run "
+                        f"it with --provider-login, or yourself: {plan['by_hand']}")
+        return plan
+    if model and plan["vpn"]:
+        plan["skip"] = (f"its VPN value gets a Tor profile of the check's own ({plan['vpn']}), and Tor does not reach "
+                        "an LLM server in your network (the launcher refuses it; only you may let it past Tor): run "
+                        f"it with --provider-login, or yourself: {plan['by_hand']}")
+        return plan
+    others = [flag for flag in ("--helper", "--with") if flag in options]
+    if model and others:
+        plan["skip"] = (f"its {others[0]} agent reaches its own provider, which --llm keeps out of the run: run it "
+                        f"with --provider-login, or yourself: {plan['by_hand']}")
+        return plan
+    plan["options"] = ["--preset", preset["id"],
+                       *(part for name, value in values.items() for part in ("--preset-value", f"{name}={value}")),
+                       *model, *([] if provider_login else ["--no-auth"])]
+    return plan
+
+
+def gpu_found(dev="/dev"):
+    """Whether this machine has a GPU a start's --gpu can hand over (a DRI render node, an NVIDIA or AMD KFD node)."""
+    dev = Path(dev)
+    return any(dev.glob("dri/renderD*")) or (dev / "nvidia0").exists() or (dev / "kfd").exists()
+
+
+def parts_seen(plan, stderr):
+    """[(part, seen)] of PLAN's parts in a start's STDERR: each MCP server's "started", each service's "ready"."""
+    found = []
+    for server, _ in plan["mcp"]:
+        found.append((f"MCP server {server}", bool(re.search(
+            re.escape("agent-sandbox: MCP server ") + r"\S*" + re.escape(server) + r"\S* started", stderr))))
+    for name in plan["services"]:
+        found.append((f"service {name}", SERVICE_READY.format(name=name) in stderr))
+    return found
+
+
+def preset_values(path):
+    """{preset: {value: text}} of --preset-values FILE (JSON); ValueError says what is wrong."""
+    try:
+        document = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"--preset-values {path}: {exc}") from None
+    if not isinstance(document, dict) or not all(
+            isinstance(name, str) and isinstance(found, dict) and
+            all(isinstance(key, str) and isinstance(value, (str, int, float)) for key, value in found.items())
+            for name, found in document.items()):
+        raise ValueError(f"--preset-values {path}: {{\"PRESET\": {{\"VALUE\": \"TEXT\"}}}}")
+    return {name: {key: str(value) for key, value in found.items()} for name, found in document.items()}
+
+
+# --- mcp-live: every server of the signed catalog through a start's path (the user, 2026-11-23) ---------------------
+
+MCP_PREFIX = "mcp"  # the signed catalog of sandbox-ai-mcp (the hub's is axross's)
+MCP_REPOSITORY = "https://github.com/c0decave/sandbox-ai-mcp.git"
+MCP_VARIABLE = re.compile(r"\$\{([A-Z0-9_]+)\}")
+MCP_SECRET_WORDS = re.compile(r"(?i)token|secret|passw|api_?key|credential|cookie|session|hash")
+MCP_MARKERS = ("only-in-workspace-a.txt", "only-in-workspace-b.txt")  # the two workspaces' own files
+
+
+def mcp_repo(given=None, root=ROOT):
+    """The MCP repository's checkout whose servers/NAME/smoke.json and tools.json the check takes: GIVEN
+    (--mcp-repo: that one only - a wrong path is said, never replaced by another checkout), else
+    projects/sandbox-ai-mcp of this checkout; None when it has no servers/ (cloned then, unless GIVEN)."""
+    for candidate in [Path(given).expanduser()] if given else [Path(root) / "projects" / "sandbox-ai-mcp"]:
+        if (candidate / "servers").is_dir():
+            return candidate.resolve()
+    return None
+
+
+def mcp_spec(repo, name):
+    """servers/NAME/smoke.json of the MCP checkout REPO ({} without one: initialize and tools/list only)."""
+    try:
+        spec = json.loads((Path(repo) / "servers" / name / "smoke.json").read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    return spec if isinstance(spec, dict) else {}
+
+
+def mcp_tools(repo, name):
+    """The tools servers/NAME/tools.json records (tools/list must offer exactly these), or None without one."""
+    try:
+        tools = json.loads((Path(repo) / "servers" / name / "tools.json").read_text()).get("tools")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    return [str(tool) for tool in tools] if isinstance(tools, list) else None
+
+
+def mcp_variables(value):
+    """The ${NAME}s VALUE (a spec's part) uses."""
+    return sorted(set(MCP_VARIABLE.findall(json.dumps(value))))
+
+
+def mcp_by_hand(name, backend, extra=()):
+    """The commands that test server NAME yourself (its secrets yours): add it, start an agent with it."""
+    return (f"sandbox-ai mcp add {name}" + "".join(f" {shlex.quote(part)}" for part in extra)
+            + f"; sandbox-ai claude --backend {backend} --mcp {name}")
+
+
+def mcp_plan(entry, spec, backend, tools=None):
+    """How mcp-live tests catalog ENTRY (`mcp catalog --json`'s) with BACKEND from its smoke SPEC (mcp_spec) and its
+    recorded TOOLS: {"server", "add" (mcp add's options: --backend both where it has a Bubblewrap form, a folder its
+    smoke spec mounts otherwise than its default), "env" ([(VAR, VALUE, secret)]: the spec's made-up values - a secret
+    one kept as a secret of the check's own, --mcp-env NAME:VAR@SECRET), "work" ("fixtures", "seed" [items], "empty"
+    or None: what its /work gets), "folders" ({target: "fixtures" | [seed items]}: another folder the spec fills),
+    "writable" (/work writable, as its spec mounts it), "calls" ([call]: those for this backend's runner), "skipped
+    calls" ([(tool, why)]), "expect_tools", "tools", "isolation" (it works on the start's workspace: a second
+    workspace proves the other never reaches it), "skip" (why it cannot run here, or None), "by_hand"}."""
+    name = entry.get("name")
+    plan = {"server": name, "add": [], "env": [], "work": None, "folders": {}, "writable": False, "calls": [],
+            "skipped_calls": [], "expect_tools": [str(t) for t in spec.get("expect_tools") or []], "tools": tools,
+            "isolation": any(m.get("target") == "/work" for m in entry.get("mounts") or [] if isinstance(m, dict)),
+            "skip": None, "by_hand": mcp_by_hand(name, backend), "start_timeout": spec.get("start_timeout", 60)}
+    if not entry.get("published"):
+        plan["skip"] = f"not published (no signed image yet): sandbox-ai mcp add {name} --build builds it yourself"
+        return plan
+    if backend == "bwrap" and not entry.get("bubblewrap"):
+        plan["skip"] = "its catalog entry has no Bubblewrap form (rootfs): Podman only"
+        return plan
+    if entry.get("bubblewrap"):
+        plan["add"] += ["--backend", "both"]
+    yours = [v for v in mcp_variables({"env": spec.get("env") or {}, "calls": spec.get("calls") or []})
+             if v != "FIXTURES"]
+    declared = {v.get("name"): v for v in entry.get("env") or [] if isinstance(v, dict)}
+    given = dict(spec.get("env") or {})
+    needed = [var for var, v in declared.items() if v.get("required") and var not in given]
+    if yours or needed:
+        names = ", ".join(f"{var} ({'a secret' if (declared.get(var) or {}).get('secret') or MCP_SECRET_WORDS.search(var) else 'a value'})"
+                          for var in yours + needed)
+        plan["by_hand"] = mcp_by_hand(name, backend, [part for var in yours + needed
+                                                      for part in ("--env", f"{var}@{var}")])
+        plan["skip"] = (f"needs a value of yours: {names}; keep it with sandbox-ai secrets set NAME, then run: "
+                        f"{plan['by_hand']}")
+        return plan
+    for var, value in given.items():
+        if not isinstance(value, str) or value == "":
+            continue  # (an empty one: left out, as a server without it starts)
+        secret = bool(MCP_SECRET_WORDS.search(var)) or bool((declared.get(var) or {}).get("secret"))
+        plan["env"].append((var, value, secret))
+    modes = {m.get("target"): m.get("mode", "ro") for m in entry.get("mounts") or [] if isinstance(m, dict)}
+    for mount in spec.get("mounts") or []:
+        target = mount.get("target")
+        content = "fixtures" if "${FIXTURES}" in str(mount.get("host", "")) else list(mount.get("seed") or [])
+        if target == "/work":
+            plan["work"] = "fixtures" if content == "fixtures" else "seed" if content else "empty"
+            plan["seed"] = content if isinstance(content, list) else []
+            if mount.get("writable") and modes.get("/work") != "rw":
+                plan["writable"] = True
+                plan["add"] += ["--mount", "/work=@workspace:rw"]  # (as its smoke spec mounts it: the calls write)
+        elif content:  # (a folder the spec fills: a folder of the check's own, else its default stays)
+            plan["folders"][target] = content
+        elif mount.get("writable") and modes.get(target) != "rw":
+            plan["folders"][target] = []
+    runner = f"sandbox-ai-{backend}"
+    for call in spec.get("calls") or []:
+        if call.get("runners") and runner not in call["runners"]:
+            plan["skipped_calls"].append((call.get("tool"), f"not for {runner}: {call.get('runners_why')}"))
+        else:
+            plan["calls"].append(call)
+    return plan
+
+
+def mcp_call_passed(call, answer):
+    """(passed, text, limited) of smoke CALL's ANSWER ({"result": ...} or {"error": ...}), as the MCP repository's
+    smoke_test.py judges it: its expect in the text and no JSON-RPC error; with expect_error the text alone; LIMITED: the
+    upstream_limited text the server wrote when its service refused for its own reasons (rate limits: not this
+    server's failure)."""
+    if not isinstance(answer, dict):
+        return False, "no answer", None
+    if "error" in answer:
+        text = "JSON-RPC error: " + json.dumps(answer["error"])
+    else:
+        content = (answer.get("result") or {}).get("content") or []
+        text = "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+    expect = str(call.get("expect") or "")
+    passed = expect in text if call.get("expect_error") else expect in text and "error" not in answer
+    limited = None if passed or "error" in answer else next(
+        (m for m in call.get("upstream_limited") or [] if isinstance(m, str) and m in text), None)
+    return passed, text, limited
+
+
+def mcp_rows(facts):
+    """mcp-live per server and backend: [{"server", "backend", "added", "started", "handshake", "tools", "calls",
+    "isolation", "seconds", "why", "supervisor"}] from what each test wrote into FACTS (SAI_LIVE_MCP_DIR/
+    NAME.BACKEND.json)."""
+    rows = []
+    for path in sorted(Path(facts).glob("*.json")):
+        try:
+            found = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(found, dict) or not isinstance(found.get("server"), str) or \
+                found.get("backend") not in ("podman", "bwrap"):
+            continue
+        calls = found.get("calls") or {}
+        rows.append({"server": found["server"], "backend": found["backend"],
+                     "outcome": found.get("outcome") or "?",
+                     "added": found.get("added") or "-", "started": found.get("started") or "-",
+                     "handshake": found.get("handshake") or "-", "tools": found.get("tools") or "-",
+                     "calls": (f"{calls.get('passed', 0)} passed, {calls.get('failed', 0)} failed"
+                               + (f", {calls['skipped']} skipped" if calls.get("skipped") else "")
+                               + (f" ({calls['first_failure']})" if calls.get("first_failure") else ""))
+                     if calls else "-",
+                     "isolation": found.get("isolation") or "-", "seconds": found.get("seconds"),
+                     "why": found.get("why") or "", "supervisor": found.get("supervisor") or ""})
+    return rows
+
+
+def mcp_catalog_names(catalog, only=None):
+    """The names of the signed catalog's servers (`mcp catalog --json`'s entries of MCP_PREFIX) mcp-live tests: ONLY's
+    (--mcp-servers) where given, in the catalog's order."""
+    names = [e.get("name") for e in (catalog or {}).get("entries") or []
+             if isinstance(e, dict) and e.get("prefix") == MCP_PREFIX and isinstance(e.get("name"), str)]
+    return [name for name in names if not only or name in only]
+
 
 def podman_wrapper(directory, real, podman):
     """DIRECTORY/podman: runs PODMAN with REAL's HOME and XDG folders (unset where REAL has none), so the user's
@@ -408,7 +881,11 @@ def prerequisites(env, args, system=None, runner=run_command, proc="/proc", etc=
     found["git"] = Found(status == 0, out.strip() if status == 0 else "git is not installed")
     found["host"] = Found(False, "give --host NAME (a host of sandbox-ai hosts)")
     found["llm"] = Found(False, "give --llm NAME (a server of sandbox-ai llm)")
+    found["presets"] = Found(True, "no values of yours (--preset-values FILE gives them)")
+    found["mcp"] = Found(False, "give --only mcp-live (asked first)")
+    found["model"] = Found(False, "give --llm NAME (a server of sandbox-ai llm) or --provider-login")
     found["device"] = Found(False, "give --device PATH")
+    found["artex"] = Found(False, "run it with --only artex-live (it asks first: it builds ARTEX's image when missing)")
     found["dmgs"] = Found(False, "give --dmg-old DMG --dmg-new DMG (two disk images of sandbox-ai.app, the old one "
                                  "0.1.154 or later: built here or downloaded with the release's SHA256SUMS and "
                                  "SHA256SUMS.sig)")
@@ -870,6 +1347,33 @@ def markdown(report):
             lines += [f"Network: {check['network']}", ""]
         if check.get("command"):
             lines += ["```", check["command"], "```", ""]
+        if check.get("presets"):
+            lines += ["| preset | agent | podman | bwrap | its part |", "|---|---|---|---|---|",
+                      *(f"| {row['preset']} | {row['agent']} | {cell(row['podman'])} | {cell(row['bwrap'])} | "
+                        f"{cell(row['part'])} |" for row in check["presets"]), ""]
+        if check.get("mcp"):
+            lines += ["| server | backend | outcome | added | started | handshake | tools | calls | isolation | seconds |",
+                      "|---|---|---|---|---|---|---|---|---|---|",
+                      *(f"| {row['server']} | {row['backend']} | {cell(row['outcome'])} | {cell(row['added'])} | "
+                        f"{cell(row['started'])} | {cell(row['handshake'])} | {cell(row['tools'])} | "
+                        f"{cell(row['calls'])} | {cell(row['isolation'])} | "
+                        f"{seconds_cell(row.get('seconds'))} |"
+                        for row in check["mcp"]), ""]
+            for row in check["mcp"]:
+                if row.get("why") and row["outcome"] != "passed":
+                    lines += [f"- {row['server']} ({row['backend']}): {row['why']}"]
+                if row.get("supervisor"):
+                    lines += ["", f"  supervisor.log of {row['server']} ({row['backend']}), its last lines:", "",
+                              "  ```", *("  " + line for line in str(row["supervisor"]).splitlines()), "  ```", ""]
+            lines.append("")
+        if check.get("harnesses"):
+            lines += ["| harness | image | podman | bwrap |", "|---|---|---|---|",
+                      *(f"| {row['agent']} | {cell(row['image'])} | {cell(row['podman'])} | {cell(row['bwrap'])} |"
+                        for row in check["harnesses"]), ""]
+        if check.get("cairn_workers"):
+            lines += ["| harness | image | as Cairn's worker | for sandbox/cairn_workers.json |", "|---|---|---|---|",
+                      *(f"| {row['agent']} | {cell(row['image'])} | {cell(row['result'])} | {cell(row['status'])} |"
+                        for row in check["cairn_workers"]), ""]
         for test in check.get("tests") or []:
             lines.append(f"- {test['outcome']}: `{test['name']}`" + (f" ({test['seconds']:.0f} s)"
                                                                      if test.get("seconds") else ""))
@@ -878,6 +1382,11 @@ def markdown(report):
         if check.get("tail"):
             lines += ["", "Last lines of its output:", "", "```", *check["tail"], "```"]
     return "\n".join(lines) + "\n"
+
+
+def seconds_cell(value):
+    """A number of seconds as the report's tables show it ("" for none)."""
+    return "" if not isinstance(value, (int, float)) else f"{value:.0f}"
 
 
 def cell(value):
@@ -903,7 +1412,8 @@ def listing(out=print):
         out(f"    proves:   {check.proves}")
         out(f"    needs:    {', '.join(check.needs)}" + (", Podman only" if check.podman_only else ""))
         out(f"    network:  {check.network or 'nothing leaves this machine'}")
-        out(f"    timeout:  {check.timeout} s; from {check.source}")
+        out(f"    timeout:  {check.timeout} s")
+        out(f"    why:      {check.source}")
 
 
 def selected(only):
@@ -933,10 +1443,29 @@ def parser():
     parse.add_argument("--build", action="store_true", help="build the missing images first (network: their "
                                                             "packages)")
     parse.add_argument("--host", metavar="NAME", help="also remote-mcp on this host of sandbox-ai hosts")
-    parse.add_argument("--llm", metavar="NAME", help="also local-llm on this server of sandbox-ai llm")
+    parse.add_argument("--llm", metavar="NAME", help="also local-llm, harnesses-live, cairn-workers-live and presets-live "
+                                                     "on this server of sandbox-ai llm")
     parse.add_argument("--llm-models", metavar="MODEL[,MODEL]", default=",".join(LLM_MODELS),
-                       help="the models of local-llm (default: the three best of the research)")
-    parse.add_argument("--yes", action="store_true", help="answer yes to the questions of remote-mcp and local-llm")
+                       help="the models of local-llm (default: the three best of the research); "
+                            "harnesses-live, cairn-workers-live and presets-live use the first")
+    parse.add_argument("--yes", action="store_true", help="answer yes to the questions of remote-mcp, local-llm, "
+                                                          "harnesses-live, cairn-workers-live, presets-live, "
+                                                          "mcp-live and artex-live")
+    parse.add_argument("--preset-values", type=Path, metavar="FILE",
+                       help="presets-live: the values only you can give, as JSON {\"PRESET\": {\"VALUE\": \"TEXT\"}} "
+                            "(a target of yours, a VPN profile ...); a preset that needs one and has none is skipped "
+                            "with the command to run it yourself")
+    parse.add_argument("--presets", metavar="NAME[,NAME]", help="presets-live: only these presets (default: every "
+                                                                "built-in one)")
+    parse.add_argument("--provider-login", action="store_true",
+                       help="presets-live: the agents' own providers with your logins (your HOME and data folder "
+                            "are read for them; sandbox-ai's configuration and state stay the check's own) - in "
+                            "place of or beside --llm")
+    parse.add_argument("--mcp-servers", metavar="NAME[,NAME]",
+                       help="mcp-live: only these servers of the signed catalog (default: every one)")
+    parse.add_argument("--mcp-repo", type=Path, metavar="DIR",
+                       help="mcp-live: the checkout of sandbox-ai-mcp whose servers/NAME/smoke.json and tools.json "
+                            "it takes (default: projects/sandbox-ai-mcp of this checkout, else cloned from GitHub)")
     parse.add_argument("--device", metavar="PATH", help="the device of devices-live (default: one devices scan "
                                                         "offers: a serial port, camera, render node or /dev/kvm)")
     parse.add_argument("--dmg-old", metavar="DMG", help="macos-update: the disk image updated from (sandbox-ai.app "
@@ -973,7 +1502,7 @@ def main(argv=None, out=print, stdin=None):
         if args.host or host_names(config):
             checks.append(BY_NAME["remote-mcp"])
         if args.llm or llm_names(config):
-            checks.append(BY_NAME["local-llm"])
+            checks += [BY_NAME[name] for name in LLM_CHECKS]
     names = [check.name for check in checks]
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     real_home = os.environ.get("HOME") or str(Path.home())
@@ -988,12 +1517,21 @@ def main(argv=None, out=print, stdin=None):
     said = {}
     if "remote-mcp" in names:
         said["host"] = prepare_host(args, config, temporary, env, stdin)
-    if "local-llm" in names:
-        said["llm"] = prepare_llm(args, config, temporary, env, stdin)
+    if any(name in names for name in LLM_USERS):
+        said["llm"] = prepare_llm(args, config, temporary, env, stdin, [n for n in names if n in LLM_USERS])
+    if "presets-live" in names:
+        said["presets"] = prepare_presets(args, config, env, stdin)
+    if "mcp-live" in names:
+        said["mcp"] = prepare_mcp(args, temporary, env, stdin)
+    if "artex-live" in names:
+        said["artex"] = prepare_artex(args, env, stdin)
     found, facts = prerequisites(env, args)
-    ready = {"host": f"host {env.get('SAI_LIVE_HOST')}", "llm": f"server {getattr(args, 'llm_said', '')}"}
+    ready = {"host": f"host {env.get('SAI_LIVE_HOST')}", "llm": f"server {getattr(args, 'llm_said', '')}",
+             "presets": "presets-live's values", "mcp": getattr(args, "mcp_said", "the signed catalog"),
+             "artex": "confirmed: its image built when missing, one session started"}
     for key, problem in said.items():  # what the optional sections' preparation found
         found[key] = Found(problem is None, problem or ready[key])
+    found["model"] = model_found(found, args)
     cache = Path(os.environ.get("XDG_CACHE_HOME") or Path(real_home) / ".cache") / "sandbox-ai" / "live-check"
     found["pytest"] = pytest_found(cache)
     backends = backends_of(args.backend, found)
@@ -1007,7 +1545,9 @@ def main(argv=None, out=print, stdin=None):
         found["app"] = prepare_app(args, env)
     system_keys = ("macos", "podman-machine") if found["macos"].ok else ("linux", "userns", "subuid", "podman", "bwrap")
     for key in (*system_keys, "git", "pytest", *(f"image:{i}" for i in IMAGES if not found["macos"].ok),
-                *(key for key in ("device", "host", "llm", "dmgs", "app") if key in found and key in needed(checks))):
+                *(key for key in ("device", "host", "llm", "model", "presets", "mcp", "artex", "dmgs", "app")
+                  if key in found
+                  and key in needed(checks))):
         if key not in found:
             continue
         state = found[key]
@@ -1110,10 +1650,10 @@ def prepare_host(args, config, temporary, env, stdin=None):
     return None
 
 
-def prepare_llm(args, config, temporary, env, stdin=None):
-    """local-llm's server: --llm NAME, or the one configured server; asked first (on a terminal; else --yes). The
-    endpoint without secrets into the checks' folder (SAI_LIVE_LLM_ENDPOINT, SAI_LIVE_LLM_MODELS). A problem or
-    None."""
+def prepare_llm(args, config, temporary, env, stdin=None, checks=("local-llm",)):
+    """The server of local-llm and harnesses-live (CHECKS: those that run): --llm NAME, or the one configured server;
+    asked first (on a terminal; else --yes). The endpoint without secrets into the checks' folder
+    (SAI_LIVE_LLM_ENDPOINT, SAI_LIVE_LLM_MODELS). A problem or None."""
     configured = llm_names(config)
     name = args.llm or (configured[0] if len(configured) == 1 else None)
     if not name:
@@ -1123,8 +1663,23 @@ def prepare_llm(args, config, temporary, env, stdin=None):
     if problem:
         return problem
     models = [model.strip() for model in args.llm_models.split(",") if model.strip()]
-    question = (f"local-llm: {len(models) * 3} smoke runs ({', '.join(models)} x Claude Code, OpenCode, Codex) "
-                f"against your LLM server {name}; it loads each model, which takes a while. Run them?")
+    runs = []
+    if "local-llm" in checks:
+        runs.append(f"local-llm: {len(models) * 3} smoke runs ({', '.join(models)} x Claude Code, OpenCode, Codex)")
+    if "harnesses-live" in checks and models:
+        runs.append(f"harnesses-live: one smoke run of each of the {len(HARNESSES)} harnesses with {models[0]}, with "
+                    "Podman and with Bubblewrap; a missing image is built first (its packages from the network, "
+                    "minutes each)")
+    if "presets-live" in checks and models:
+        runs.append(f"presets-live: one smoke run of each built-in preset ({len(list(PRESETS_DIR.glob('*.json')))} "
+                    f"files) with {models[0]}, with Podman and where it can Bubblewrap; the MCP servers it names are "
+                    "added from the catalog (their images from ghcr.io)")
+    if "cairn-workers-live" in checks and models:
+        runs.append(f"cairn-workers-live: one small task of real Cairn with each of the "
+                    f"{len(CAIRN_WORKERS) - len(CAIRN_SKIPPED)} harnesses as its worker with {models[0]}, Podman; "
+                    "a missing image is built first")
+    question = (f"{'; '.join(runs)} - against your LLM server {name}; it loads each model, which takes a while. "
+                "Run them?")
     if not (args.yes or ask(question, stdin)):
         return "not run: not confirmed (on a terminal it asks; else --yes)"
     path = temporary / "given" / "llm.json"
@@ -1132,6 +1687,20 @@ def prepare_llm(args, config, temporary, env, stdin=None):
     write_private(path, json.dumps(entry) + "\n")
     env.update(SAI_LIVE_LLM_ENDPOINT=str(path), SAI_LIVE_LLM_MODELS=",".join(models))
     args.llm_said = f"{name}: {', '.join(models)}"
+    return None
+
+
+def prepare_artex(args, env, stdin=None, runner=run_command):
+    """artex-live, asked first (on a terminal; else --yes): ARTEX's image is built when missing (about 2 GB from the
+    network, 10-40 minutes), then one session runs with it. A problem or None."""
+    status, _, _ = runner(["podman", "image", "exists", "localhost/sandbox-ai-artex:latest"], timeout=60, env=env)
+    build = "" if status == 0 else ("ARTEX's image is not built: sandbox-ai build artex builds it first from GitHub's "
+                                    "archive of the reviewed commit with sandbox-ai's patches (about 2 GB from the "
+                                    "network, 10-40 minutes); then ")
+    question = (f"artex-live: {build}one throwaway session starts ARTEX beside an agent and checks its console on "
+                "127.0.0.1. Run it?")
+    if not (args.yes or ask(question, stdin)):
+        return "not run: not confirmed (on a terminal it asks; else --yes)"
     return None
 
 
@@ -1167,6 +1736,18 @@ def run_check(check, entry, python, backends, temporary, env, lc, out):
     log = temporary / "logs" / f"{check.name}.txt"
     log.parent.mkdir(parents=True, exist_ok=True)
     out(f"  ...   {check.name} (at most {check.timeout // 60} min)")
+    facts = temporary / "harnesses"  # harnesses-live: what each harness's image took (test_live_harness_smoke_run)
+    if check.name in ("harnesses-live", "cairn-workers-live"):
+        facts.mkdir(parents=True, exist_ok=True)
+        env = {**env, "SAI_LIVE_HARNESS_DIR": str(facts)}
+    found_presets = temporary / "presets"  # presets-live: what each preset's run found (test_live_preset_smoke_run)
+    if check.name == "presets-live":
+        found_presets.mkdir(parents=True, exist_ok=True)
+        env = {**env, "SAI_LIVE_PRESET_DIR": str(found_presets)}
+    found_mcp = temporary / "mcp-found"  # mcp-live: what each server's test found (test_live_mcp_server)
+    if check.name == "mcp-live":
+        found_mcp.mkdir(parents=True, exist_ok=True)
+        env = {**env, "SAI_LIVE_MCP_DIR": str(found_mcp)}
     status, seconds = run_logged(command, log, check.timeout, env, ROOT)
     results = lc.junit_results(junit)
     entry["outcome"] = outcome_of(status, results)
@@ -1176,8 +1757,206 @@ def run_check(check, entry, python, backends, temporary, env, lc, out):
                        "detail": detail.strip()[-DETAIL:] if outcome != "passed" else ""}
                       for name, outcome, detail, spent in results]
     entry["tail"] = tail(log)
+    if check.name == "harnesses-live":
+        entry["harnesses"] = harness_rows(entry["tests"], facts)
+    if check.name == "presets-live":
+        entry["presets"] = preset_rows(found_presets)
+    if check.name == "mcp-live":
+        entry["mcp"] = mcp_rows(found_mcp)
+    if check.name == "cairn-workers-live":
+        entry["cairn_workers"] = cairn_worker_rows(entry["tests"], facts)
     mark = {"passed": "ok  ", "failed": "FAIL", "skipped": "skip", "error": "ERR "}[entry["outcome"]]
     out(f"  {mark}  {check.name}  ({seconds:.0f} s)")
+
+
+def harness_rows(tests, facts):
+    """harnesses-live per harness: [{"agent", "image", "podman", "bwrap"}] from its TESTS' outcomes (the names of
+    test_live_harness_smoke_run[...]) and what FACTS (the folder SAI_LIVE_HARNESS_DIR) says of its image."""
+    rows = []
+    for agent in HARNESSES:
+        try:
+            image = json.loads((Path(facts) / f"{agent}.json").read_text())
+        except (OSError, ValueError):
+            image = {}
+        if image.get("built"):
+            said = f"built now in {image.get('seconds', 0):.0f} s"
+        elif image.get("problem"):
+            said = f"cannot be built here: {image['problem']}"
+        else:
+            said = "there before" if image.get("present") else "not used"
+        row = {"agent": agent, "image": said, "podman": "not run", "bwrap": "not run"}
+        for test in tests:
+            parts = set(re.split(r"[\[\]-]", test["name"]))
+            if test["name"].split("[")[0].endswith("test_live_harness_smoke_run") and agent in parts:
+                backend = "podman" if "podman" in parts else "bwrap" if "bwrap" in parts else None
+                if backend:
+                    detail = f": {test['detail'].strip().splitlines()[0][:200]}" if (test.get("detail") or "").strip() \
+                        and test["outcome"] != "passed" else ""
+                    seconds = f" ({test['seconds']:.0f} s)" if test.get("seconds") and test["outcome"] == "passed" \
+                        else ""
+                    row[backend] = test["outcome"] + seconds + detail
+        rows.append(row)
+    return rows
+
+
+def cairn_worker_rows(tests, facts):
+    """cairn-workers-live per harness: [{"agent", "image", "result", "status"}] from its TESTS' outcomes (the names of
+    test_live_cairn_worker[AGENT]) and what FACTS says of its image; "status" is what the row gives
+    sandbox/cairn_workers.json (verified when the task's fact reached the board, failing when it did not; untested
+    when it was skipped or not run) - written there by hand, with this report's name as the evidence."""
+    rows = []
+    for agent in CAIRN_WORKERS:
+        try:
+            image = json.loads((Path(facts) / f"{agent}.json").read_text())
+        except (OSError, ValueError):
+            image = {}
+        said = f"built now in {image.get('seconds', 0):.0f} s" if image.get("built") else \
+            f"cannot be built here: {image['problem']}" if image.get("problem") else \
+            ("there before" if image.get("present") else "not used")
+        row = {"agent": agent, "image": said, "result": "not run", "status": "untested"}
+        for test in tests:
+            if test["name"].split("[")[0].endswith("test_live_cairn_worker") and \
+                    test["name"].rstrip("]").split("[")[-1] == agent:
+                detail = (test.get("detail") or "").strip()
+                first = f": {detail.splitlines()[0][:200]}" if detail and test["outcome"] != "passed" else ""
+                seconds = f" ({test['seconds']:.0f} s)" if test.get("seconds") and test["outcome"] == "passed" else ""
+                row["result"] = test["outcome"] + seconds + first
+                row["status"] = {"passed": "verified", "failed": "failing", "error": "failing"}.get(test["outcome"],
+                                                                                                   "untested")
+        rows.append(row)
+    return rows
+
+
+
+def model_found(found, args):
+    """Found: presets-live's model - --llm's server (prepared), or the agents' own providers (--provider-login)."""
+    llm = found.get("llm")
+    if llm is not None and llm.ok:
+        return Found(True, llm.detail + (" and the agents' own providers (--provider-login)" if args.provider_login
+                                         else ""))
+    if getattr(args, "provider_login", False):
+        return Found(True, "the agents' own providers with your logins (--provider-login)")
+    return Found(False, (llm.detail if llm is not None else "give --llm NAME") + "; or --provider-login (confirmed)")
+
+
+def prepare_presets(args, config, env, stdin=None):
+    """presets-live's inputs: --preset-values FILE (checked, SAI_LIVE_PRESET_VALUES), --presets
+    (SAI_LIVE_PRESETS), --provider-login after a question (SAI_LIVE_PROVIDER_LOGIN, SAI_LIVE_REAL_DATA_HOME), your
+    configuration's folder for your service images (SAI_LIVE_REAL_CONFIG: user-images.json is read, never changed).
+    A problem or None."""
+    if args.preset_values:
+        try:
+            values = preset_values(args.preset_values)
+        except ValueError as exc:
+            return str(exc)
+        unknown = sorted(set(values) - {path.stem for path in PRESETS_DIR.glob("*.json")})
+        if unknown:
+            return f"--preset-values {args.preset_values}: no built-in preset {', '.join(unknown)}"
+        env["SAI_LIVE_PRESET_VALUES"] = str(Path(args.preset_values).resolve())
+    if args.presets:
+        names = [name.strip() for name in args.presets.split(",") if name.strip()]
+        unknown = [name for name in names if not (PRESETS_DIR / f"{name}.json").is_file()]
+        if unknown:
+            return f"--presets: no built-in preset {', '.join(unknown)}"
+        env["SAI_LIVE_PRESETS"] = ",".join(names)
+    env["SAI_LIVE_REAL_CONFIG"] = str(config)
+    if args.provider_login:
+        question = ("presets-live with --provider-login: each preset's agent uses its own provider with your login "
+                    "(your HOME and data folder are read for it; prompts go to that provider). Run it?")
+        if not (args.yes or ask(question, stdin)):
+            args.provider_login = False  # (presets-live then runs with --llm alone, if given: model_found says so)
+            return None
+        real = os.environ.get("XDG_DATA_HOME") or str(Path(os.environ.get("HOME") or Path.home()) / ".local/share")
+        env.update(SAI_LIVE_PROVIDER_LOGIN="1", SAI_LIVE_REAL_DATA_HOME=real)
+    return None
+
+
+def prepare_mcp(args, temporary, env, stdin=None, runner=run_command):
+    """mcp-live's inputs, asked first (on a terminal; else --yes): the signed catalog as this checkout's sandbox-ai
+    reads it (`mcp catalog --json` in the check's own configuration: SAI_LIVE_MCP_CATALOG, its names or --mcp-servers'
+    in SAI_LIVE_MCP_SERVERS), the MCP repository's checkout (--mcp-repo, projects/sandbox-ai-mcp, else cloned from
+    GitHub after the question: SAI_LIVE_MCP_REPO), its smoke files (tests/fixtures and scripts/fixtures.py's binaries:
+    SAI_LIVE_MCP_FIXTURES), and the sandbox-ai home the servers are added to once for every test (SAI_LIVE_MCP_HOME).
+    A problem or None."""
+    only = [name.strip() for name in (args.mcp_servers or "").split(",") if name.strip()]
+    repo = mcp_repo(args.mcp_repo)
+    if args.mcp_repo and repo is None:
+        return f"--mcp-repo {args.mcp_repo}: no servers/ there (a checkout of sandbox-ai-mcp)"
+    count = f"{len(only)} of its servers ({', '.join(only)})" if only else "every server"
+    question = (f"mcp-live: {count} of the signed MCP catalog, each added in the check's own configuration (its "
+                "image pulled from ghcr.io, its rootfs for Bubblewrap from GitHub), started for real through a session "
+                "of the check's own with Podman and Bubblewrap, and its smoke calls made (the servers with network "
+                "reach the services their calls name)"
+                + ("" if repo else f"; the MCP repository's smoke data cloned from {MCP_REPOSITORY}") + ". Run it?")
+    if not (args.yes or ask(question, stdin)):
+        return "not run: not confirmed (on a terminal it asks; else --yes)"
+    status, out, err = runner([str(SAI), "mcp", "catalog", "--json"], timeout=300, env=env)
+    try:
+        catalog = json.loads(out)
+    except ValueError:
+        catalog = None
+    if status != 0 or not isinstance(catalog, dict):
+        return "sandbox-ai mcp catalog --json failed: " + ((err or out).strip()[-300:] or f"exit {status}")
+    names = mcp_catalog_names(catalog, only)
+    unknown = [name for name in only if name not in names]
+    if unknown:
+        return f"--mcp-servers: not in the signed catalog: {', '.join(unknown)}"
+    if not names:
+        return "the signed catalog lists no server (its problems: " + "; ".join(
+            str(p) for p in catalog.get("problems") or []) + ")"
+    given = temporary / "given"
+    given.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (given / "mcp-catalog.json").write_text(json.dumps(catalog))
+    if repo is None:
+        repo = temporary / "sandbox-ai-mcp"
+        status, _, err = runner(["git", "clone", "--quiet", "--depth", "1", MCP_REPOSITORY, str(repo)], timeout=900,
+                                env=env)
+        if status != 0:
+            return f"git clone {MCP_REPOSITORY} failed: {err.strip()[-300:]} (give --mcp-repo DIR)"
+    fixtures = temporary / "mcp-fixtures"
+    if (repo / "tests" / "fixtures").is_dir():
+        shutil.copytree(repo / "tests" / "fixtures", fixtures, symlinks=True, dirs_exist_ok=True)
+    fixtures.mkdir(parents=True, exist_ok=True)
+    if (repo / "scripts" / "fixtures.py").is_file():
+        # (its binary inputs, each checked against its SHA-256: as its CI writes them for --var FIXTURES=DIR)
+        status, _, err = runner([sys.executable, "-I", str(repo / "scripts" / "fixtures.py"), "--out", str(fixtures)],
+                                timeout=300, env=env, cwd=str(temporary))
+        if status != 0:
+            return f"the MCP repository's scripts/fixtures.py failed: {err.strip()[-300:]}"
+    home = temporary / "mcp-home"
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env.update(SAI_LIVE_MCP_CATALOG=str(given / "mcp-catalog.json"), SAI_LIVE_MCP_SERVERS=",".join(names),
+               SAI_LIVE_MCP_REPO=str(repo), SAI_LIVE_MCP_FIXTURES=str(fixtures), SAI_LIVE_MCP_HOME=str(home))
+    args.mcp_said = f"{len(names)} servers of the signed catalog; smoke data of {repo}"
+    return None
+
+
+def preset_rows(facts):
+    """presets-live per preset: [{"preset", "agent", "podman", "bwrap", "part"}] from what each run wrote into FACTS
+    (SAI_LIVE_PRESET_DIR/NAME.BACKEND.json): started (with its seconds), skipped (why), failed (its last line); its
+    part: what came up (each MCP server, each service), "-" for a preset without one."""
+    rows = {}
+    for path in sorted(Path(facts).glob("*.json")):
+        try:
+            found = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        name, backend = found.get("preset"), found.get("backend")
+        if not isinstance(name, str) or backend not in ("podman", "bwrap"):
+            continue
+        row = rows.setdefault(name, {"preset": name, "agent": found.get("agent") or "", "podman": "not run",
+                                     "bwrap": "not run", "part": "-", "by_hand": found.get("by_hand") or ""})
+        outcome = found.get("outcome")
+        if outcome == "passed":
+            row[backend] = "started" + (f" ({found['seconds']:.0f} s)" if found.get("seconds") else "")
+        else:
+            row[backend] = f"{outcome}: {found.get('why') or '?'}"[:400]
+        parts = found.get("parts") or []
+        if parts and outcome == "passed":
+            row["part"] = "came up: " + ", ".join(part for part, seen in parts if seen)
+        elif parts and row["part"] == "-":
+            row["part"] = "not up: " + ", ".join(part for part, seen in parts if not seen)
+    return list(rows.values())
 
 
 if __name__ == "__main__":

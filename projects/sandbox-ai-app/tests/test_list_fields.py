@@ -608,3 +608,28 @@ def test_delete_on_a_chip_keeps_the_keyboard_on_the_one_in_its_place_across_the_
     assert wait(lambda: isinstance(QApplication.focusWidget(), LF.Chip), 5)
     focused = QApplication.focusWidget()
     assert focused.value == "c.example" and field_of(page).isAncestorOf(focused), "the chip in its place, made anew"
+
+
+def test_a_kind_with_a_list_says_so_and_a_click_into_the_empty_field_opens_it(shown):
+    """The user 2026-11-23: "warum gibt es beim Board und den supporteten Toolchains kein Dropdown, damit man die direkt
+    wählen kann. Add -> Dropdown, Add -> Dropdown": the editable list looked like a line to type into. A kind that
+    offers values says "Choose from the list, or type: ...", a click into the empty field shows the list, and each
+    chosen value Add takes leaves the field empty for the next."""
+    kind = LF.ListKind("--toolchain", "Toolchains", tip="Build tools", placeholder="NAME[@VERSION]")
+    dialog, field = shown([kind])
+    assert field.value_box.lineEdit().placeholderText() == "NAME[@VERSION]", "no list yet: what a value looks like"
+    seen = changes(field)
+    field.set_provider("--toolchain", lambda fill: fill([("rust 1.99.1 (in the store)", "rust"),
+                                                         ("cc 0.17.1-1 (in the store)", "cc")]))
+    pump()
+    assert field.value_box.lineEdit().placeholderText() == "Choose from the list, or type: NAME[@VERSION]"
+    QTest.mouseClick(field.value_box.lineEdit(), Qt.MouseButton.LeftButton)
+    pump()
+    assert field.value_box.view().isVisible(), "a click into the empty field shows the list"
+    field.value_box.hidePopup()
+    for row in (0, 1):  # Add -> choose, Add -> choose
+        field.value_box.setCurrentIndex(row)
+        field.add()
+        pump()
+        assert field.value_box.currentText() == ""
+    assert seen[-1] == ("--toolchain", ["rust", "cc"])

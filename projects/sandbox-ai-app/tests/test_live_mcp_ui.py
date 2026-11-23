@@ -108,13 +108,51 @@ def test_add_mcp_server_to_a_running_start_here_and_restart_the_agent(ui, sai, m
     assert ran(sai, "local", "mcp", "attach") == ("local", "mcp", "attach", "fetch", "api", "--live", "--json")
     assert [action for action, *_ in ui.asked] == ["mcp-attach", "start-restart"]
     assert "reaches the MCP server now. As said there." in ui.asked[1][1], "sandbox-ai's message, as it is"
-    assert ui.asked[1][2] == "Restart the agent now (the conversation goes on)"
+    assert ui.asked[1][2] == "Restart the start (its sandbox starts again)", "no restart_in_place said: said honestly"
     assert ran(sai, "local", "resume") == ("local", "resume", "--restart", "api")
     # Declined: nothing restarts, and nothing attaches when the attach itself is declined.
     sai.asked.clear()
     ui.answer_yes = False
     page.add_mcp()
     assert ran(sai, "local", "mcp") is None and ran(sai, "local", "resume") is None
+
+
+def test_codex_given_a_server_while_it_runs_starts_again_inside_its_sandbox(ui, sai, monkeypatch):
+    """Reported live (0.1.211): "mcp hinzugefügt, agent sollte neu gestartet werden -> fail" - a Codex session given
+    gitleaks while it ran ended with exit status 143: the restart offered was `resume --restart`, which ends the
+    sandbox. Where sandbox-ai says its restart inside the sandbox gives the agent the server (restart_in_place), that
+    restart (kits restart-agent: the sandbox goes on); else that is said before anything is done, and the restart
+    offered is the one that keeps the session (resume --restart, its sandbox started again)."""
+    instance = backend.Instance("session", "session:api", "api", run="codex-1", session="api", state="running",
+                                agent="codex", record={"mcp_servers": []})
+    page = page_on(ui, sai, monkeypatch, instance)
+    monkeypatch.setattr(ui.LiveMcpDialog, "exec", lambda dialog: (dialog.choice.setCurrentIndex(
+        dialog.choice.findData("server:fetch")), QtWidgets.QDialog.DialogCode.Accepted)[-1])
+    answer = {"attached": "live", "agent_restart": "required", "restart_in_place": True,
+              "message": "api reaches the MCP server fetch now. Codex ...: sandbox-ai kits restart-agent api ..."}
+    sai.answers[("mcp", "attach")] = lambda host, args: (0, json.dumps(answer), "")
+    sai.answers[("kits", "restart-agent")] = (0, json.dumps({"start": "api", "restarted": True, "message":
+                                                             "api: Codex started again in its tmux window"}), "")
+    page.add_mcp()
+    assert [action for action, *_ in ui.asked] == ["mcp-attach", "agent-restart"]
+    assert "inside its sandbox" in ui.asked[1][1] and "sandbox-ai kits restart-agent api" in ui.asked[1][1]
+    assert ran(sai, "local", "kits") == ("local", "kits", "restart-agent", "api", "--json")
+    assert ran(sai, "local", "resume") is None, "the sandbox goes on: never resume --restart"
+    # Not inside its sandbox (OpenCode; a start of an older sandbox-ai; a host that does not say): said first.
+    opened = []
+    monkeypatch.setattr(page, "terminal", lambda argv, title, **kw: opened.append(argv))
+    for said in ({**answer, "restart_in_place": False}, {key: value for key, value in answer.items()
+                                                          if key != "restart_in_place"}):
+        sai.asked.clear()
+        ui.asked.clear()
+        sai.answers[("mcp", "attach")] = lambda host, args, said=said: (0, json.dumps(said), "")
+        page.add_mcp()
+        assert [action for action, *_ in ui.asked] == ["mcp-attach", "start-restart"]
+        assert "cannot be started again inside its sandbox" in ui.asked[1][1], ui.asked[1][1]
+        assert "conversation" in ui.asked[1][1] and ui.asked[1][2] == "Restart the start (its sandbox starts again)"
+        assert ran(sai, "local", "resume") == ("local", "resume", "--restart", "api")
+        assert ran(sai, "local", "kits") is None
+        assert opened and "attach" in opened[-1], "attached in the app again: its tab ended with its sandbox"
 
 
 def test_a_helper_on_a_host_and_the_restart_codex_needs(ui, sai, monkeypatch):

@@ -11,7 +11,7 @@ the use case's own tasks ("measured") or from other tasks ("indirect"). A use ca
 
 recommend() takes the models the user's LLM servers actually have (`llm models`: the names, sizes, what is loaded,
 what reads images) and the servers' memory (`llm set NAME --memory GB`, this host's own for a server on its loopback)
-and picks the best tested choice that fits - loaded first, then what fits, then what may not load - else the nearest:
+and picks the best measured choice that fits - loaded first, then what fits, then what may not load - else the nearest:
 the choice of a related use case, else the model with the best traffic light (model_profiles.support), always with why.
 `sandbox-ai llm recommend`, `sandbox-ai AGENT --llm SERVER --use-case NAME`, the app's Board and the web's start form
 use it; at a start the use case's settings for the model in that agent go over the model's profile and under
@@ -50,7 +50,7 @@ BASES = ("measured", "indirect")
 NEEDS = ("vision",)
 STATUS_TEXT = {"measured": "measured on this use case's tasks",
                "indirect": "from other tasks than this use case's own",
-               "not tested": "not tested yet"}
+               "not tested": "no data yet"}  # (the status id stays "not tested": neither measured nor indirect)
 WHY_LIMIT = 120
 TABLE_KEYS = {"schema", "source", "rounds", "use_cases"}
 CASE_KEYS = {"id", "label", "about", "tasks", "needs", "related", "fails", "unknown", "recommendations", "unsafe"}
@@ -408,7 +408,7 @@ def _nearest(table, entry, servers, agent, profiles):
             moved = f"its settings for it: --use-case {other['id']}" if found["settings"] else ""
             found.update(source="related", related=other["id"], settings={}, settings_text="",
                          note="; ".join(filter(None, [
-                             f"not tested for {entry['label']}: the choice for {other['label']}", found["note"], moved])),
+                             f"no data yet for {entry['label']}: the choice for {other['label']}", found["note"], moved])),
                          command=found["command"].rsplit(" --use-case ", 1)[0] + f" --use-case {entry['id']}")
             return found
     if profiles is None:
@@ -438,7 +438,7 @@ def _nearest(table, entry, servers, agent, profiles):
     if not candidates:
         return None
     _, server, model, found, place, harness = min(candidates, key=lambda c: c[0])
-    why = "not in this use case's table" + ("; this use case is not tested yet" if status(entry) == "not tested"
+    why = "not in this use case's table" + ("; no data yet for this use case" if status(entry) == "not tested"
                                             else "")
     return {"server": server["name"], "model": model["name"], "harness": harness,
             "harness_name": harness_name(harness), "measured_in": None, "rank": None, "source": "traffic light",
@@ -490,8 +490,8 @@ def _table_choice(table, entry, servers, agent, guard=None):
 
 def _status_in(entry, model, agent, profiles):
     """What is known of MODEL in AGENT: the use case's own word where its table has the pair ("rank 3, from other
-    tasks"), else the model profiles' status for that harness (model_profiles.support: "partial", "verified" ...;
-    the family's own for a harness without an entry), else "not tested"."""
+    tasks"), else the model profiles' measured status for that harness (model_profiles.support: "partial",
+    "verified" ...), else "no data yet" (never another harness's or a family's)."""
     light = profiles_module().support(model, profiles) if profiles is not None else None
     return _known_in(entry, model, agent, light)["text"]
 
@@ -509,9 +509,7 @@ def _known_in(entry, model, agent, light):
         own = next((h for h in light["harnesses"] if h["agent"] == agent), None)
         if own is not None:
             status = own["status"]
-        elif light.get("status") and agent in light.get("untested", []):
-            status = light["status"]
-    return {"rank": None, "measured": None, "status": status, "text": status or "not tested"}
+    return {"rank": None, "measured": None, "status": status, "text": status or "no data yet"}
 
 
 def in_agents(entry, pair, profiles):
@@ -597,8 +595,6 @@ def pairs(table, entry, servers, agent=None, profiles=None):
             harness = None
             if light is not None:
                 harness = next(iter(light["by_light"].get("green") or light["by_light"].get("yellow") or []), None)
-                if harness is None and light.get("status") in ("verified", "smoke-only", "partial"):
-                    harness = agent or "claude"
             pair = _other_pair(table, entry, server, model, "not measured", harness or agent, light=light)
             order = mp.LIGHT_ORDER.index(light["light"]) if light is not None and light["light"] in mp.LIGHT_ORDER \
                 else len(mp.LIGHT_ORDER)
@@ -617,7 +613,7 @@ def pairs(table, entry, servers, agent=None, profiles=None):
 def recommend(table, servers, name, agent=None, profiles=None, note_agent=None):
     """The recommendation for the use case NAME from the models SERVERS have (each {name, memory_bytes, answered,
     error, models: [{name, size, loaded, capabilities}] or names}): {use_case, label, about, status, status_text,
-    tasks, needs, choice (the best tested choice that fits, else the nearest - a related use case's, else by the
+    tasks, needs, choice (the best measured choice that fits, else the nearest - a related use case's, else by the
     traffic light with PROFILES -, or None; {server, model, harness, rank, source: table | related | traffic light,
     basis, why, fails, evidence, round, date, settings, fit, fit_text, note, command ...}; never a model the use case
     marks unsafe), alternatives (other usable choices), missing (recommendations not available, with why), pairs
@@ -738,7 +734,7 @@ def lines(found):
     choice = found["choice"]
     if choice is None:
         out.append("  choice: none - " + ("nothing of this use case's table is on your servers" if
-                                          found["status"] != "not tested" else "not tested yet, and no model of "
+                                          found["status"] != "not tested" else "no data yet, and no model of "
                                           "your servers has a traffic light to go by"))
     else:
         out.append(f"  choice: {choice_line(choice)}")

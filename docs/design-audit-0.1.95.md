@@ -39,7 +39,7 @@ thread.
   one action is answering what a sandbox asks (Approvals) and starting one (Start, Board).
 - **Works and stays:** the board (a real object this tool is known by: the start drawn as parts and wires, with its
   security score), the Approvals table with the countdown, the Activity timeline with its kinds in colour, the
-  themes' contrast discipline (every text pair 4.5:1, borders 3:1, tested), one accent per theme, tables before
+  themes' contrast discipline (every text pair 4.5:1, borders 3:1: projects/sandbox-ai-app/tests/test_theme.py), one accent per theme, tables before
   cards, nothing decorative, no invented figure anywhere.
 - **Reads as generated / template:** tracked-capital section labels in the navigation and the Help list (PROJECT,
   RUNNING, THE APP: hallmark floor 9), middle-dot-joined meta strings (`App 0.1.94 · sandbox-ai 0.1.94`,
@@ -79,7 +79,7 @@ here. Score: 68/100 before, 78/100 after (tokens and contrast strong; states and
 
 | Category | Defined (theme.py) | Hardcoded found |
 |---|---|---|
-| Colours | 24 colour tokens + 4 status per theme, 19 themes, contrast-tested | theme extras: mac `#b9b9be #a1a1a6 #e5e5ea #dedee3 #d1d1d6` (and `#7fb0ee`, now the accent), cyberpunk and unicorn gradients; `widgets.py` NavDelegate badge `#d93025`/`#ffffff`; `intro.py` mixes with `#000000`/`#ffffff`; `video_player.py` subtitles `#000`/`#fff`; `theme.app_icon` `#1f63c6`/`#e8710a` |
+| Colours | 24 colour tokens + 4 status per theme, 19 themes, contrast checked by projects/sandbox-ai-app/tests/test_theme.py | theme extras: mac `#b9b9be #a1a1a6 #e5e5ea #dedee3 #d1d1d6` (and `#7fb0ee`, now the accent), cyberpunk and unicorn gradients; `widgets.py` NavDelegate badge `#d93025`/`#ffffff`; `intro.py` mixes with `#000000`/`#ffffff`; `video_player.py` subtitles `#000`/`#fff`; `theme.app_icon` `#1f63c6`/`#e8710a` |
 | Spacing | none (Qt's layout defaults; QSS paddings per control) | 18 distinct `setContentsMargins` sets (`(18,14,18,10)`, `(14,12,14,12)`, `(10,10,6,10)`, `(6,2,2,2)`, ...), spacings 0, 2, 3, 4, 6, 8, 10 |
 | Type | base size per theme (9-11 pt), families per theme | sizes 8, 10, 11, 13, 14, 17, 18 pt in the stylesheet, `+3 pt` (Approvals URL, pages.py:345), 30 px (preset gallery, preset_gallery.py:113), 13 pt toasts, 15 px subtitles, `-1 pt` small labels (ui.py:310, widgets.py:2592) |
 | Radius | one per theme, `small = radius - 2` | indicators `min(3, r)`, radio 8 px, scroll bars `min(5, r)` |

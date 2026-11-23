@@ -22,7 +22,7 @@ source at the tag, the lock (exported from upstream's `uv.lock`, installed with 
 venv from PyPI, which is reachable here too), Hermes started from that install with sandbox-ai's managed configuration
 (`hermes config get`, `hermes config set` refused for managed keys, a one-shot run against a local fake model).
 Not verified here: the image build itself (no Podman in this sandbox: the image builds in CI or on the host) and a
-start in a real sandbox; hence the release ships Hermes as not live-tested yet (the start says so; no opt-in).
+start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (hermes)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## How sandbox-ai configures Hermes
 
@@ -189,7 +189,7 @@ leaf: `managed_scope.apply_managed_overlay`).
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - Hermes contacts nothing by default beyond its model provider, once its free tier, keyless search, model catalog,
   update checks and run-time installs are off - and each of them has a clean configuration key, pinned in a managed
@@ -202,5 +202,5 @@ leaf: `managed_scope.apply_managed_overlay`).
   third-party tool with PostHog telemetry, the optional macOS computer-use driver cua-driver, is turned off by
   Hermes and is not in the image.
 - Against: the code base is large and moves fast (231 commits between v0.22.4 and v0.22.5), the gateway, Kanban
-  workers and curator run processes in the background, and Hermes is not live-tested in a sandbox yet (its tool
-  rules neither). Hence experimental, and the review is to be repeated for every new release taken in.
+  workers and curator run processes in the background, and Hermes is not live-tested in a sandbox when reviewed (its tool
+  rules neither); it has been since (see above). The review is to be repeated for every new release taken in.

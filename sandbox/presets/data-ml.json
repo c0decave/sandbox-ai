@@ -3,11 +3,11 @@
   "version": 1,
   "id": "data-ml",
   "title": "Data and machine learning",
-  "description": "PyPI and Hugging Face open, more memory; the GPU if you give one.",
+  "description": "Python with uv mounted in, PyPI and Hugging Face open, more memory; the GPU if you give one.",
   "translations": {
     "de": {
       "title": "Daten und maschinelles Lernen",
-      "description": "PyPI und Hugging Face offen, mehr Speicher; die GPU, wenn Sie eine angeben."
+      "description": "Python mit uv eingehängt, PyPI und Hugging Face offen, mehr Speicher; die GPU, wenn Sie eine angeben."
     }
   },
   "category": "development",
@@ -17,6 +17,8 @@
     "opencode"
   ],
   "options": [
+    "--toolchain",
+    "python",
     "--allow-pypi",
     "--allow-host",
     "huggingface.co",
@@ -37,8 +39,8 @@
     }
   },
   "notes": [
+    "A current Python (3.14) with pip and uv comes with the preset (--toolchain python): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox); install into a virtual environment (uv venv, python3 -m venv). Not in the store yet, the start offers to add it (sandbox-ai toolchain add python: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
     "The GPU, if given: dri (Intel/AMD, /dev/dri), rocm (AMD, /dev/kfd and /dev/dri) or nvidia (Podman with a CDI specification: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml). A GPU weakens the isolation; the security modes high and paranoid refuse it.",
-    "CUDA or ROCm libraries come from an image variant of yours: sandbox-ai images new NAME --from AGENT, sandbox-ai images extend NAME --add-apt PKG / --add-pip PKG, then sandbox-ai build NAME; start with --image-variant NAME.",
-    "A newer Python with uv: from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox): sandbox-ai toolchain add python once, then --toolchain python on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN python. Its registries are the ones this preset opens."
+    "CUDA or ROCm libraries come from an image variant of yours: sandbox-ai images new NAME --from AGENT, sandbox-ai images extend NAME --add-apt PKG / --add-pip PKG, then sandbox-ai build NAME; start with --image-variant NAME."
   ]
 }

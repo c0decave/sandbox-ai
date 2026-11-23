@@ -78,3 +78,13 @@ def test_a_page_github_would_refuse_is_refused_here(tmp_path, capsys):
 def test_the_current_versions_page_fits_on_github():
     version = rn.version_of()
     assert len(rn.notes(version)) <= rn.GITHUB_LIMIT, f"shorten docs/releases/v{version}.md"
+
+
+def test_the_current_version_has_its_own_notes():
+    """release.yml writes the page with release_notes.py --version TAG: without docs/releases/vTAG.md (the running note
+    renamed with every bump) the page goes up without "What is new", and nothing says so."""
+    version = rn.version_of()
+    note = ROOT / "docs" / "releases" / f"v{version}.md"
+    assert note.is_file(), f"docs/releases/v{version}.md is missing (git mv the newest note to it)"
+    assert note.read_text(encoding="utf-8").startswith(f"# sandbox-ai {version}\n"), note
+    assert "## What is new" in rn.notes(version)

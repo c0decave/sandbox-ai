@@ -18,7 +18,8 @@
                                          COMMAND, its exit status passed on; -n: without a terminal, for scripts)
   sandbox-ai pause|resume NAME           freeze every process of a start, and thaw it again
   sandbox-ai resume NAME                 a stopped kept start: reborn with its HOME and options, the agent
-                                         continues its last conversation (running processes are not kept)
+                                         continues its last conversation (running processes are not kept);
+                                         what its start lacks is asked about on this terminal first and made
   sandbox-ai resume NAME [--restart] [OPTIONS] [--drop-option OPTION[=VALUE]]
                                          reborn with options changed (--gui, --cpus 4, --allow-host H ...), kept
   sandbox-ai resume NAME --review-home   what changed in its HOME's start files since its last start

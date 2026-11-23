@@ -60,6 +60,9 @@ def pytest_configure(config):
         # Secrets kept in private files by the tests need no primary password (plain files, the choice a machine
         # without anyone to ask makes; test_secrets_primary_password.py turns it off).
         os.environ.setdefault("SANDBOX_AI_SECRETS_PLAIN", "1")
+        # Podman's --init has its init binary (catatonit) on the tests' hosts, whatever this machine has (the tests
+        # of a host without it say so: SANDBOX_AI_INIT_BINARY=none; test_hostinit.py).
+        os.environ.setdefault("SANDBOX_AI_INIT_BINARY", "/usr/libexec/podman/catatonit")
         # A start compacts no logs in the background (test_statedirs.py turns it on).
         os.environ.setdefault("SANDBOX_AI_AUTO_COMPACT", "0")
     config.addinivalue_line("markers", "agent_live: launches real sandboxes")

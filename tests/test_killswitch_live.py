@@ -100,3 +100,12 @@ def test_connections_open_before_the_cut_stop_at_once(report):
                 for name in report["established"]}
     wrong = mismatches(report["established"], expected)
     assert not wrong, "connections open before the cut:\n" + "\n".join(wrong)
+
+
+def test_dns_allowed_during_the_run_answers_the_stub_alone(report):
+    """sandbox-ai net allow --dns: port 53 of the nameserver takes the DNS stub's marked questions only. The agent's
+    own (the same user, no mark) is dropped over UDP and goes to the proxy over TCP, which refuses it."""
+    expected = {"udp agent 9.9.9.9:53": "refused", "tcp agent 9.9.9.9:53": "proxy", "udp stub 9.9.9.9:53": "sent",
+                "udp stub 9.9.9.9:5353": "refused", "udp stub 9.9.9.8:53": "refused"}
+    wrong = mismatches(report["dns during the run"], expected)
+    assert not wrong, "DNS during the run:\n" + "\n".join(wrong)

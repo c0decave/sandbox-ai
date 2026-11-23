@@ -12,6 +12,7 @@ import shutil
 import sys
 import textwrap
 import time
+import weakref
 
 from PySide6.QtCore import QByteArray, QEvent, QObject, QPoint, QProcess, QRect, QSize, QStringListModel, Qt, QTimer, Signal, qVersion
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
@@ -44,6 +45,8 @@ from . import copying, dock_fold, drafts, help_view, labels, short_notices, stor
 from . import device_picker as DP
 from .prerequisites import Prerequisites
 from .session_start import SessionStart, StartTab
+from . import start_link
+from .start_link import CommandEdit, StartLink, ViewSwitch
 from . import presets as PR
 from . import project_trust as PT
 from .hosts_page import HostsPage
@@ -85,7 +88,7 @@ def report(parent, title, result, error):
 GROUP_TITLES = {  # the launcher's option groups (backend.GROUPS), translated
     "Workspace": N_("Workspace"), "Network": N_("Network"), "Proxy & privacy": N_("Proxy & privacy"), "Git": N_("Git"),
     "Agent": N_("Agent"), "Login": N_("Login"), "Display & terminal": N_("Display & terminal"),
-    "Cairn": N_("Cairn"), "Hardware": N_("Hardware"), "Limits": N_("Limits"), "Engine": N_("Engine"), "More": N_("More"),
+    "Cairn": N_("Cairn"), "ARTEX": N_("ARTEX"), "Hardware": N_("Hardware"), "Limits": N_("Limits"), "Engine": N_("Engine"), "More": N_("More"),
 }
 
 
@@ -679,7 +682,7 @@ class OptionsForm(QTabWidget):
                         widget.completions.setStringList(list(names or []))
                     if names == [] and long in self.NONE_YET:  # none there: where one is added (greyed)
                         widget.addItem(f"{tr('None on {host}', host=where)} - {tr(self.NONE_YET[long])}")
-                        widget.model().item(widget.count() - 1).setEnabled(False)
+                        widgets.set_row_enabled(widget, widget.count() - 1, False)
                     widget.setCurrentText(current)  # what was typed or chosen stays, also a name it lacks
                 finally:
                     widget.blockSignals(False)
@@ -716,7 +719,7 @@ class OptionsForm(QTabWidget):
             elif isinstance(widget, QComboBox):
                 for index in range(widget.count()):
                     if widget.itemText(index) in values:
-                        widget.model().item(index).setEnabled(False)
+                        widgets.set_row_enabled(widget, index, False)
             elif isinstance(widget, MultiChoice):
                 for value in values:
                     if value in widget.boxes:
@@ -788,9 +791,14 @@ def without_file_values(options, values, file_values):
 
 
 class LaunchPage(Prerequisites, SessionStart, QWidget):
-    """Choose the agent and every option, see the command, start."""
+    """Choose the agent and every option, see the command line and edit it, start. In the window this is the Expert
+    view of the Start page: the same start as the Board view's board (self.link: start_link.StartLink, which keeps the
+    two the same) - what is set here is put onto the board, and Start, Dry run, the project's file and the presets
+    are the board's. On its own (no link) it is a form with its own start, as before."""
     opened = Signal(str)  # a project folder was reviewed and trusted here
     images_wanted = Signal()  # a start refused for a service's image: the Images page, Your images
+    view_wanted = Signal(str)  # the window: show this view of the Start page ("board": what the Board alone shows)
+    link = None  # the Board view's board is this view's start (the window: start_link.StartLink); None: on its own
 
     def __init__(self, sai, terminal):
         super().__init__()
@@ -924,12 +932,49 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         arguments.addWidget(buddy(tr("Agent arguments"), self.agent_args))
         arguments.addWidget(self.agent_args)
         layout.addLayout(arguments)
-        self.preview = QPlainTextEdit()
-        self.preview.setReadOnly(True)
+        # The whole start as its command line, to read, edit or paste: taken once it can be read (the fields - and in
+        # the window the board - follow at once); a text that cannot be read changes nothing, the reason below it.
+        self.preview = self.command = CommandEdit()
         self.preview.setFont(MONO)
         self.preview.setFixedHeight(70)
         self.preview.setAccessibleName(tr("Command line"))
-        layout.addWidget(self.preview)
+        self.preview.setToolTip(safe_tooltip(tr(
+            "The start as its command line: sandbox-ai AGENT [options] [-- the agent's arguments]. Edit or paste a "
+            "line here: once it can be read, the fields above (and the Board) show it; a line that cannot be read "
+            "changes nothing and says why below.")))
+        self.preview.edited.connect(self.line_edited)
+        self.preview.entered.connect(self.line_left)
+        self.preview.left.connect(self.line_left)
+        self.copy_button = QPushButton(tr("Copy command"))
+        self.copy_button.setToolTip(tr("Copy the command line of this start (to run it in a terminal)"))
+        self.copy_button.clicked.connect(lambda _=False: self.copy_command())
+        line = QHBoxLayout()
+        line.addWidget(self.preview, 1)
+        line.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(line)
+        # Below the line: why a line as typed is not taken; in the window also what is wrong with the start (the
+        # board's errors, the launcher's verdict of its last check) - with the way to the Board view, which lists all.
+        self.line_note = plain_label(role="secondary", selectable=True)
+        self.line_note.setAccessibleName(tr("What is wrong with the command line or the start"))
+        self.line_note.hide()
+        self.line_text = ""  # the line as typed while it cannot be read (update_preview leaves it to the human)
+        self.board_button = QPushButton(tr("Show on the Board"))
+        self.board_button.setToolTip(tr("The Board view of this start: its parts, every finding, and what a start "
+                                        "that waits is preparing"))
+        self.board_button.clicked.connect(lambda _=False: self.view_wanted.emit("board"))
+        self.board_button.hide()
+        note_row = QHBoxLayout()
+        note_row.addWidget(self.line_note, 1)
+        note_row.addWidget(self.board_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(note_row)
+        # Undo and Redo: the board's own (one history for both views), shown in the window only (linked).
+        self.undo_button, self.redo_button = QToolButton(), QToolButton()
+        self.undo_button.setText(tr("Undo"))
+        self.redo_button.setText(tr("Redo"))
+        self.undo_button.setToolTip(tr("Undo the last change of this start, wherever it was made (Board or Expert)"))
+        self.redo_button.setToolTip(tr("Redo the change undone last"))
+        self.undo_redo = widgets.together(self.undo_button, self.redo_button)
+        self.undo_redo.hide()
         dry = QPushButton(tr("Dry run"))
         dry.setToolTip(tr("Check the options and show the plan; nothing is started"))
         dry.clicked.connect(self.dry_run)
@@ -941,7 +986,7 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         write = self.write_button = QPushButton(tr("Save as project configuration…"))
         write.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it"))
         write.clicked.connect(self.write_project)
-        layout.addWidget(flow(dry, self.start_controls, write))
+        layout.addWidget(flow(self.undo_redo, dry, self.start_controls, write))
         self.host_choice.chosen.connect(lambda _host: self.host_changed())
         self.agent.currentTextChanged.connect(lambda _agent: self.read_host_options())
         self.form.changed.connect(self.update_preview)
@@ -952,6 +997,8 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         self.form.changed.connect(lambda *_: self.show_use_case())  # --use-case typed in the options
         self.agent.currentTextChanged.connect(lambda _text: self.show_model(force=True))
         self.agent.currentTextChanged.connect(lambda _text: self.apply_agent_options())
+        # (the agent's own image looked at in the background as soon as it is shown: Start only reads the answer)
+        self.agent.currentTextChanged.connect(lambda _agent: self.look_at_agent_image())
         self.model_choice.activated.connect(lambda _index: self.model_chosen())
         self.model_only.toggled.connect(lambda _on: self.model_chosen())
         self.apply_agent_options()
@@ -959,6 +1006,90 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         self.update_preview()
         self.show_model(force=True)
         self.read_llm_servers()
+
+    # -- the Expert view of the Start page: one start with the Board view (start_link.StartLink) --
+
+    def linked(self):
+        """The window linked this view with the Board (self.link): Undo and Redo are the board's, the project's file
+        is written by the board's Apply, and what this page kept per agent and project is the board's to keep."""
+        board = self.link.board_page
+        self.undo_redo.show()
+        self.undo_button.clicked.connect(lambda _=False: self.undo_redo_step(False))
+        self.redo_button.clicked.connect(lambda _=False: self.undo_redo_step(True))
+        board.undo_group.canUndoChanged.connect(self.undo_button.setEnabled)
+        board.undo_group.canRedoChanged.connect(self.redo_button.setEnabled)
+        self.undo_button.setEnabled(board.undo_group.canUndo())
+        self.redo_button.setEnabled(board.undo_group.canRedo())
+        self.write_button.setToolTip(tr("Write .sandbox-ai.json into the first workspace and trust it, after showing "
+                                        "it and what changes (the Board's Apply)"))
+        self.review_button.setToolTip(tr("Show the project's .sandbox-ai.json as this start has it and what changes, "
+                                         "then write and trust exactly that (the Board's Apply)"))
+
+    def undo_redo_step(self, redo):
+        """Undo or Redo of the one history both views share; what was typed a moment ago is a step of it first."""
+        self.link.flush()
+        group = self.link.board_page.undo_group
+        (group.redo if redo else group.undo)()
+
+    def veil_also(self):
+        """What a dialog of this view veils besides it: the Board view and its panels (the same start)."""
+        if self.link is None:
+            return []
+        board = self.link.board_page
+        return [board, *board.veil_also()]
+
+    def copy_command(self):
+        """Copy command: the command line of the start (as the field shows it) onto the clipboard."""
+        if self.link is not None:
+            self.link.flush()
+            text = self.link.command()
+        else:
+            text = self.preview.toPlainText()
+        QApplication.clipboard().setText(text)
+        short_notice(self, tr("Command line"), tr("Copied: {command}", command=printable(text)[:300]))
+        return text
+
+    def show_line_note(self, text, role="secondary", whole=None, board=False):
+        """TEXT below the command line (ROLE: its colour; WHOLE: all of it, in the tooltip), or nothing; BOARD: with
+        the way to the Board view, which shows more about it (its findings, what a start waits for)."""
+        self.line_note.setText(text)
+        self.line_note.setToolTip(safe_tooltip(whole or text) if text else "")
+        if self.line_note.property("role") != role:
+            self.line_note.setProperty("role", role)
+            self.line_note.style().unpolish(self.line_note)
+            self.line_note.style().polish(self.line_note)
+        self.line_note.setVisible(bool(text))
+        self.board_button.setVisible(bool(text) and bool(board) and self.link is not None)
+
+    def line_edited(self, text):
+        """The command line was typed into (this page on its own; in the window the link takes it): read whole and
+        shown in the fields, or - a text that cannot be read - nothing changes and the reason is shown below it."""
+        if self.link is not None:
+            return
+        from . import board as B
+        try:
+            host, agent, argv, agent_args = B.parse_command(self.sai, text)
+            if host and host != self.host() and self.host_choice.findData(host) < 0:
+                raise ValueError(tr("{host} is not a host of sandbox-ai hosts", host=printable(host)))
+        except ValueError as exc:
+            self.line_text = text
+            self.show_line_note(printable_text(exc), "notice-error")
+            return
+        self.line_text = text
+        self.show_line_note("")
+        if (host or LOCAL) != self.host():
+            self.host_choice.choose(host or LOCAL)
+        values, _ = backend.values_from_argv(self.options, argv, backend.canonical_of(self.sai))
+        self.agent.setCurrentText(agent)
+        self.form.set_values(values)
+        self.agent_args.setText(shlex.join(agent_args))
+
+    def line_left(self):
+        """Enter in the command line, or the keyboard left it (this page on its own): a line that was read is shown
+        as the fields have it now; one that cannot be read stays, with its reason."""
+        if self.link is None and not self.line_note.isVisible():
+            self.line_text = ""
+            self.update_preview()
 
     # -- the model: the agent's provider or a server of yours (sandbox-ai llm) --
 
@@ -998,6 +1129,7 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
     def showEvent(self, event):  # noqa: N802
         self.host_choice.reload()  # a host added on the Hosts page meanwhile
         super().showEvent(event)
+        self.look_at_agent_image()
         if time.monotonic() - self.llm_read_at > 30:
             self.read_llm_servers()
         if self.presets_host != self.host():
@@ -1136,6 +1268,20 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
                 return False
             values = form.values() or {}
         values = values or {}
+        if self.link is not None:
+            # In the window: the preset becomes the start of both views, as the Board's New from preset makes it (its
+            # parts, its own MCP servers and ruleset, what is left to fill in asked by name at the start).
+            self.link.flush()
+            board = self.link.board_page.new_from_preset(preset, values)
+            if board is None:
+                return False
+            left = [marker for marker, _ in B.placeholders(board)]
+            self.show_preset_note(tr("Still to fill in: {list}", list=", ".join(printable(m) for m in left))
+                                  if left else "", "notice-warn" if left else "secondary")
+            index = self.preset_choice.findData(preset.key)
+            if index >= 0:
+                self.preset_choice.setCurrentIndex(index)
+            return True
         notes = []
         if preset.agents and self.agent.currentText() not in preset.agents:
             self.agent.setCurrentText(preset.agents[0])
@@ -1226,8 +1372,9 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         host's, typed in; the project's file of this machine is not that host's."""
         host = self.host()
         remote = host != LOCAL
+        self.look_at_agent_image()  # (this machine again: its agent's image, in the background)
         workspace = self.form.widgets.get("--workspace")
-        if workspace is not None and self.project:
+        if workspace is not None and self.project and self.link is None:  # (linked: the board's folders, as they are)
             if remote and workspace.value() == [self.project]:
                 workspace.set_value([])  # this machine's folder is not a folder there
             elif not remote and not workspace.value():
@@ -1495,6 +1642,14 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         at the next start (the workspace follows the project; agent arguments that may be secrets are left out)."""
         self.state = state
         saved = state.section("launch")
+        if self.link is not None:
+            # The Expert view of the Start page: the start is the board's, kept with the board (its drafts, its host)
+            # - only the profile chosen last is this view's own.
+            if isinstance(saved.get("profile"), str) and self.profile.findText(saved["profile"]) >= 0:
+                self.profile.setCurrentText(saved["profile"])
+            self.profile.currentTextChanged.connect(state.schedule)
+            state.collect(self.keep_form)
+            return
         if saved.get("agent") in self.sai.agents:
             self.agent.setCurrentText(saved["agent"])
         if isinstance(saved.get("profile"), str) and self.profile.findText(saved["profile"]) >= 0:
@@ -1571,6 +1726,12 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
 
     def keep_form(self):
         saved = self.state.section("launch")
+        if self.link is not None:
+            # (the start itself is the board's, kept with it - what was typed here a moment ago first: this runs
+            # before the board's drafts are collected)
+            self.link.flush()
+            saved["profile"] = self.profile.currentText()
+            return
         agent = self.agent.currentText()
         saved["agent"], saved["profile"] = agent, self.profile.currentText()
         saved["host"] = self.host()
@@ -1621,6 +1782,13 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         first time shows what RUNNING ((agent, launcher options, agent arguments) of its session that runs) was
         started with, else, once read, its trusted .sandbox-ai.json's; else the form stays as it is."""
         previous, self.project = self.project, path
+        if self.link is not None:
+            # The Expert view: the project's board is its start (the window shows that one first). A project with
+            # nothing of its own - no file, no change - shows what its session that runs was started with (RUNNING).
+            if path and running:
+                self.link.board_page.seed_start(path, *running)
+            self.show_project_note()
+            return
         waiting = self.seeding is not None and self.seeding[0] == previous and \
             self.seeding[1:] == (self.agent.currentText(), self.form_state())
         if previous and previous != path and not waiting:  # (left before its file was read: read again next time)
@@ -1703,6 +1871,8 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         if error is not None or review is None or not review.trusted or not review.usable:
             self.file_values.pop(project, None)
             return
+        if self.link is not None:  # (the board was read from the file, and its start names every option itself)
+            return
         self.file_values[project] = backend.values_from_argv(self.options, review.options,
                                                              backend.canonical_of(self.sai))[0]
         seeding, self.seeding = self.seeding, None
@@ -1715,7 +1885,11 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         """The launcher's options of the form; for another host without the ones its launcher does not know (a start
         or dry run refuses those by name first: refused_options). What the project's trusted .sandbox-ai.json sets
         the same is left out: the launcher applies the file itself, and some options given twice are refused (a
-        folder mounted twice)."""
+        folder mounted twice). In the window (linked): the options of the board's start, which both views show."""
+        if self.link is not None:
+            from . import board as B
+            self.link.flush()
+            return B.start_argv(self.sai, self.link.board)[1]
         values = without_file_values(self.options, self.form.values(), self.applied_file())
         return backend.argv_for_host(self.options, values, self.known_options())
 
@@ -1727,7 +1901,12 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
             return False
         warn(self, title, tr("The sandbox-ai on {host} does not know these options: {list}. Clear them, or update "
                              "sandbox-ai there; none is left out without a word.", host=printable(self.host()),
-                             list=", ".join(dropped)))
+                             list=", ".join(dropped)) + " " + tr(
+            "Its options are read again now: if it was updated meanwhile, try once more."))
+        # (what was read may be from before an update there: read again, for the next try)
+        self.host_known.pop((self.host(), self.agent.currentText()), None)
+        getattr(self.sai, "forget_host_options", lambda name: None)(self.host())
+        self.read_host_options()
         return True
 
     def preset_images(self):
@@ -1839,11 +2018,27 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
             return []
 
     def update_preview(self):
+        """The command line of the start in its field. In the window (linked) it is the board's, shown by the link;
+        a line being typed that cannot be read yet, or that means this very start, is left to the human."""
+        if self.link is not None:
+            return  # (the link shows the board's line when the board changed: show_board)
         args = self.agent_arguments()
-        host = self.host()
-        where = ["hosts", "run", host, "--"] if host != LOCAL else []  # the same start from this machine's shell
-        line = ["sandbox-ai", *where, self.agent.currentText(), *self.argv(), *(["--", *args] if args else [])]
-        self.preview.setPlainText(shlex.join(line))
+        # (the same start from this machine's shell: on another host with `hosts run HOST --`)
+        text = start_link.command_text(self.agent.currentText(), self.argv(), args, self.host())
+        typed = self.line_text
+        if typed and self.preview.hasFocus():
+            from . import board as B
+            try:
+                host, agent, argv, agent_args = B.parse_command(self.sai, typed)
+                same = (host or LOCAL, agent, backend.argv_from_values(self.options, backend.values_from_argv(
+                    self.options, argv, backend.canonical_of(self.sai))[0]), agent_args) == \
+                    (self.host(), self.agent.currentText(), backend.argv_from_values(self.options, self.form.values()),
+                     args)
+            except ValueError:
+                same = True  # (not read yet: the human mends it)
+            if same:
+                return
+        self.preview.show_text(text)
 
     def refresh_profiles(self):
         self.profile.clear()
@@ -1851,6 +2046,12 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
 
     def set_from_argv(self, agent, argv, agent_args=()):
         values, unknown = backend.values_from_argv(self.options, argv, backend.canonical_of(self.sai))
+        if self.link is not None:
+            # In the window: the whole start onto the board (one step of Undo); what this version does not know is
+            # kept there on the part Other options, not left out.
+            self.link.flush()
+            self.link.board_page.take_start(agent, list(argv), list(agent_args))
+            return
         self.agent.setCurrentText(agent)
         self.form.set_values(values)
         self.agent_args.setText(shlex.join(agent_args))
@@ -1870,8 +2071,12 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
             # A profile without a workspace keeps the project's: else the start would run in whatever folder the
             # terminal opens in (the launcher's default workspace is the current directory).
             kept = self.form.values().get("--workspace") or []
-            self.set_from_argv(profile.get("agent", "claude"), profile.get("options", []), profile.get("agent_args", []))
-            if kept and not self.form.values().get("--workspace"):
+            options = [str(option) for option in profile.get("options", [])]
+            if self.link is not None and kept and "--workspace" not in backend.values_from_argv(
+                    self.options, options, backend.canonical_of(self.sai))[0]:
+                options += [token for folder in kept for token in ("--workspace", folder)]
+            self.set_from_argv(profile.get("agent", "claude"), options, profile.get("agent_args", []))
+            if self.link is None and kept and not self.form.values().get("--workspace"):
                 self.form.widgets["--workspace"].set_value(kept)
 
     def save_profile(self):
@@ -1888,7 +2093,16 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         too) and trust exactly the bytes shown if the human agrees. The file's options are never copied into
         the form: the launcher applies a trusted file itself when the folder is the first workspace, and
         refuses it if it changes afterwards. With another host chosen: a folder there, reviewed and trusted by that
-        host's sandbox-ai (load_project_on_host)."""
+        host's sandbox-ai (load_project_on_host). In the window (linked): the Board's own - a folder opened is opened
+        as the project's board (Open project folder…), the project's own file is shown and trusted by Apply."""
+        if self.link is not None:
+            board = self.link.board_page
+            self.link.flush()
+            if directory and same_folder(directory, board.directory):
+                return board.apply()
+            if board.open_request is not None and self.host() == LOCAL and not directory:
+                return board.open_request()
+            return board.open_project(directory)
         if self.host() != LOCAL:
             self.load_project_on_host(directory)
             return None
@@ -1980,7 +2194,11 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         review_and_trust(self, self.sai, host, path, done=done, source=self.open_button)
 
     def dry_run(self):
-        """The launcher's plan, nothing started: on the chosen host by its own launcher."""
+        """The launcher's plan, nothing started: on the chosen host by its own launcher. In the window (linked): the
+        board's dry run - the same start, the same check."""
+        if self.link is not None:
+            self.link.flush()
+            return self.link.board_page.dry_run(also=self.dry_button)
         if self.refused_options(tr("Dry run")) or not self.require_workspace(tr("Dry run")):
             return
         asked = self.dry_run_asked()
@@ -2069,6 +2287,10 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
                                                          "settings say") + f", options {options}")
 
     def start(self, session=None, embedded=False):
+        if self.link is not None:
+            # The Expert view of the Start page: the board's start - one start, whichever view it is started from
+            # (what was typed a moment ago is on the board first). What it waits for is shown on the Board.
+            return self.link.start(embedded=embedded, session=session)
         self.log_start(session, embedded)
         self.starting_session = session or None  # (the login check asks whether that session has a login of its own)
         if self.refused_options(tr("Not started")) or not self.require_workspace(tr("Not started")):
@@ -2133,6 +2355,9 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         return self.start_controls.start()
 
     def write_project(self):
+        if self.link is not None:  # the board's Apply: the same file, shown with what changes, written and trusted
+            self.link.flush()
+            return self.link.board_page.apply()
         if self.host() != LOCAL:
             return
         document, main = self.sai.project_document(self.agent.currentText(), self.options, self.form.values(),
@@ -2647,9 +2872,9 @@ class LiveMcpDialog(QDialog):
                 self.choice.addItem(printable(f"{name} ({tr('attached already')})" if have else
                                               f"{name} ({status})" if status else name), "server:" + name)
                 if have:  # never offered as new
-                    item = self.choice.model().item(self.choice.count() - 1)
-                    item.setEnabled(False)
-                    item.setToolTip(tr("It reaches it already: Remove MCP server… takes it back"))
+                    widgets.set_row_enabled(self.choice, self.choice.count() - 1, False)
+                    widgets.set_row_tip(self.choice, self.choice.count() - 1,
+                                        tr("It reaches it already: Remove MCP server… takes it back"))
         # A server of another host, copied here first (sandbox-ai mcp copy: checked, then asked) - what a host without
         # servers of its own offers (reported on coding-101)
         self.choice.addItem(tr("From another host…"), COPY_CHOICE)
@@ -2658,8 +2883,7 @@ class LiveMcpDialog(QDialog):
                                 Qt.ItemDataRole.ToolTipRole)
         for helper in backend.LIVE_HELPERS:
             self.choice.addItem(tr("{agent} as a helper", agent=HELPER_TITLES[helper]), "helper:" + helper)
-        first = next((index for index in range(self.choice.count())
-                      if self.choice.model().item(index).isEnabled()), 0)
+        first = next((index for index in range(self.choice.count()) if widgets.row_enabled(self.choice, index)), 0)
         self.choice.setCurrentIndex(first)
         self.choice.setToolTip(tr("A server of sandbox-ai mcp list there, or another agent as a helper (an MCP "
                                   "server in a sandbox of its own on the same main workspace)"))
@@ -3170,8 +3394,11 @@ class ResumeDialog(QDialog):
     starts), a running one restarted (`sandbox-ai resume --workspace … --mount … --mcp … [--restart] NAME`). The paths
     are those of the start's HOST: typed in there, chosen from this computer's only for this machine."""
 
-    def __init__(self, parent, name, host=LOCAL, running=False, servers=(), draft=None):
+    def __init__(self, parent, name, host=LOCAL, running=False, servers=(), draft=None, start=None):
         super().__init__(parent)
+        # START: (agent, launcher options, agent arguments) the session was created with, when they are known - "On the
+        # Start page…" shows them there with what is added here (to_start: chosen instead of OK).
+        self.start, self.to_start = start, False
         self.setWindowTitle(tr("Resume {name} with…", name=printable(name)) if host == LOCAL else
                             tr("Resume {name} on {host} with…", name=printable(name), host=printable(host)))
         form = QFormLayout(self)
@@ -3211,12 +3438,42 @@ class ResumeDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        # The whole start on the Start page - as a board, or as fields and its command line: every option of the
+        # session with what is added here, to look at, change and start as a new start (the session itself is not
+        # changed: that is this dialog's OK).
+        self.start_button = buttons.addButton(tr("On the Start page…"), QDialogButtonBox.ButtonRole.ActionRole)
+        self.start_button.setAutoDefault(False)
+        set_enabled(self.start_button, start is not None, tr(
+            "The options this session was created with are not known here (a session of another host, or one made "
+            "by an older sandbox-ai)"), tr(
+            "Show this session's whole start on the Start page, with what is added here: as a board or as fields "
+            "and its command line, to look at, change and start as a new start. The session itself is not changed "
+            "(that is OK); what Take out names is this dialog's own."))
+        self.start_button.clicked.connect(lambda _=False: self.show_on_start())
         form.addRow(buttons)
         # What was typed and not sent (Cancel, a "no", a refusal): filled in again for this start (drafts.py); the
         # restart is chosen anew each time (it follows whether the start runs).
         self.draft = None if draft is None else drafts.Draft(self, draft, {
             "workspaces": self.workspaces.edit, "mounts": self.mounts, "servers": self.servers,
             "options": self.options, "dropped": self.dropped})
+
+    def show_on_start(self):
+        """On the Start page…: the dialog closes without resuming; its caller shows start_line() on the Start page."""
+        self.to_start = True
+        self.reject()
+
+    def start_line(self):
+        """(agent, launcher options, agent arguments) of the session's start with what is added here: its options,
+        then the workspaces, mounts, MCP servers and other options of the dialog. ValueError: as values() and
+        changed_options()."""
+        agent, options, arguments = self.start
+        workspaces, mounts, servers, _ = self.values()
+        added, _ = self.changed_options()
+        argv = [str(option) for option in options]
+        argv += [token for folder in workspaces for token in ("--workspace", folder)]
+        argv += [token for source, destination, mode in mounts for token in ("--mount", f"{source}:{destination}:{mode}")]
+        argv += [token for server in servers for token in ("--mcp", server)]
+        return agent, argv + added, [str(argument) for argument in arguments]
 
     def changed_options(self):
         """(options, options taken out) as typed (words as a shell splits them). ValueError: quotes not closed."""
@@ -3264,6 +3521,9 @@ class SandboxesPage(QWidget):
     notice = Signal(str, str, str)  # level, title, text: a notification (what the kill switch cut)
     open_credentials = Signal(str)  # the secrets and logins of that host (the Credentials page with it chosen)
     open_given = Signal(str, str)  # (host, run): what that running start was given during its run, each with Revoke…
+    # Resume with…'s "On the Start page…": (agent, launcher options, agent arguments, host) of a session's start to
+    # show on the Start page (the window: show_start_line)
+    start_wanted = Signal(str, object, object, str)
 
     def __init__(self, sai, terminal):
         super().__init__()
@@ -3581,6 +3841,7 @@ class SandboxesPage(QWidget):
             button.clicked.connect(lambda _=False, s=slot: s())
             self.run_buttons.append(button)
             self.run_named[key] = button
+        self.toolchain_button = self.run_named["add-toolchain"]  # (the tours and the Help point at it: tours.py)
         # The secrets and Git logins of the selected start's host: the Credentials page with that host chosen (its
         # Give to a running sandbox… gives one to this start there).
         self.credentials_button = button_icons.IconButton("credentials", tr("Secrets and logins…"),
@@ -3625,7 +3886,7 @@ class SandboxesPage(QWidget):
         widgets.list_menu(self.table, lambda: [
             *self.session_buttons.values(), self.resume_with_button, None, self.stop_button, self.cut_button,
             self.stop_all_button, None,
-            *self.run_buttons, self.credentials_button, None, *self.transfer_buttons.values(), None,
+            *self.run_menu_entries(), self.credentials_button, None, *self.transfer_buttons.values(), None,
             *self.manage_buttons.values(), None, self.refresh_button])
         # This account's starts every sandboxes_interval while the page is shown; hidden, every HIDDEN_EVERY-th time
         # (the window's tabs and counts follow them); with the window in the tray or minimised, not at all (read again
@@ -4813,6 +5074,28 @@ class SandboxesPage(QWidget):
                                                                                                          "session"):
                 self.open_given.emit(host, str(run))
 
+    # The run actions that add something to a running start or take it out again, grouped in its menus (the user,
+    # 2026-11-23: the right-click menu was too long): Add… and Remove…, each opening the kinds - MCP server,
+    # skills/plugins, toolchain, workspace, device.
+    RUN_GROUPS = (("add", N_("Add…"), ("add-mcp", "add-kits", "add-toolchain", "add-workspace", "add-device")),
+                  ("remove", N_("Remove…"), ("remove-mcp", "remove-kits", "remove-toolchain", "remove-workspace",
+                                             "remove-device")))
+
+    def run_menu_entries(self):
+        """The run buttons for a context menu (widgets.context_menu): the network's and the rest in their order, the
+        add and remove actions as the submenus Add… and Remove… (RUN_GROUPS) where the first of them stood."""
+        grouped = {key for _, _, keys in self.RUN_GROUPS for key in keys}
+        entries, placed = [], False
+        for button in self.run_buttons:
+            key = next((k for k, b in self.run_named.items() if b is button), None)
+            if key not in grouped:
+                entries.append(button)
+            elif not placed:
+                placed = True
+                entries += [widgets.MenuGroup(tr(title), [self.run_named[k] for k in keys if k in self.run_named])
+                            for _, title, keys in self.RUN_GROUPS]
+        return entries
+
     def update_buttons(self):
         instance = self.current()
         self.update_cut_button()  # never held back by another command: the kill switch must act at once
@@ -5724,25 +6007,27 @@ class SandboxesPage(QWidget):
             warn(self, title, printable_text(str(error)))
             return
         found, have = result
-        stored = {row["name"]: row for row in found["installed"] if row["name"] not in have}
-        offered = {row["name"]: row for row in found["catalog"] if row["name"] not in have and row["name"] not in stored}
-        if not stored and not offered:
+        # every version of a toolchain not attached (one version of a toolchain per sandbox): the store's, then the
+        # signed catalog's others, each by what `toolchain attach` and `add` take for it (jdk, jdk@17)
+        choices = backend.toolchain_choices(found, attached=set(have))
+        if not choices:
             inform(self, title, tr("Every toolchain of the store is attached to it already.") if found["installed"]
                    else tr("No toolchain is in the store, and the signed catalog offers none ({problem}). In a "
                            "terminal: sandbox-ai toolchain catalog", problem=found.get("problem") or tr("it is empty")))
             return
         labels = {}
-        for name, row in stored.items():
-            labels[tr("{name} {version}: {commands}", name=name, version=printable(row["version"]),
-                      commands=printable(", ".join(row.get("commands") or [])[:80]))] = (name, False)
-        for name, row in offered.items():
-            labels[tr("{name} {version} (downloaded from the signed catalog first)", name=name,
-                      version=printable(row["version"]))] = (name, True)
+        for choice in choices:
+            row = choice["row"]
+            label = tr("{name} {version}: {commands}", name=choice["name"], version=printable(row["version"]),
+                       commands=printable(", ".join(row.get("commands") or [])[:80])) if choice["stored"] else \
+                tr("{name} {version} (downloaded from the signed catalog first)", name=choice["name"],
+                   version=printable(row["version"]))
+            labels[label] = choice
         chosen, ok = QInputDialog.getItem(self, title, tr("Toolchain"), list(labels), 0, False)
         if not ok or chosen not in labels:
             return
-        name, download = labels[chosen]
-        row = (offered if download else stored)[name]
+        choice = labels[chosen]
+        name, value, row, download = choice["name"], choice["value"], choice["row"], not choice["stored"]
         opens = [*(row.get("hosts") or []), *(f"--allow-{preset}" for preset in row.get("allow") or [])]
         text = tr("Mount {name} read-only into {run} at /opt/toolchains/{name}? Its commands are on the agent's "
                   "PATH from then on.", name=name, run=printable(run))
@@ -5757,10 +6042,10 @@ class SandboxesPage(QWidget):
 
         def work():
             if download:
-                status, out, err = self.sai.toolchain_add(name, host=host)
+                status, out, err = self.sai.toolchain_add(value, host=host)
                 if status != 0:
                     return status, out, err
-            return self.sai.toolchain_attach(run, name, host=host)
+            return self.sai.toolchain_attach(run, value, host=host)
         background(work, owner=self, source=self.run_buttons, work=True, timeout=3900,
                    done=lambda result, error: self.device_done(title, result, error))
 
@@ -6045,7 +6330,12 @@ class SandboxesPage(QWidget):
 
     def live_mcp_done(self, host, start, title, result, error):
         """What sandbox-ai said of the attach, as it said it; where the agent needs (or may need) a restart to see
-        the server, the offer to restart it now (`sandbox-ai resume START --restart`, asked as start-restart)."""
+        the server, the offer to restart it now: inside its sandbox where sandbox-ai says that gives it the server
+        (restart_in_place: `sandbox-ai kits restart-agent START`, asked as agent-restart - the sandbox goes on), else
+        the restart of the whole start that keeps its session (`sandbox-ai resume START --restart`, asked as
+        start-restart), said as such before anything is done. Reported live: a Codex session given a server while it
+        ran ended with exit status 143 - the only restart offered was resume --restart, and it said "the conversation
+        goes on" of a sandbox that ended."""
         self.update_buttons()
         self.after_live_change(host)
         applog.log("INFO" if error is None else "WARNING", "sandboxes", f"add MCP server (live) to {printable(start)} "
@@ -6056,20 +6346,45 @@ class SandboxesPage(QWidget):
             return
         text = "\n\n".join([result.get("message") or "", *result.get("notes", [])]).strip()
         if result.get("agent_restart") in ("required", "maybe"):
-            if ask_first(self, "start-restart", title, text + "\n\n" + (
-                    tr("Codex and OpenCode see a new server only after a restart.")
-                    if result.get("agent_restart") == "required" else
-                    tr("If /mcp does not list it, restart the agent.")),
-                    tr("Restart the agent now (the conversation goes on)")):
+            hint = tr("Codex and OpenCode see a new server only after a restart.") \
+                if result.get("agent_restart") == "required" else tr("If /mcp does not list it, restart the agent.")
+            if result.get("restart_in_place") is True:
+                if ask_first(self, "agent-restart", title, text + "\n\n" + hint + " " + tr(
+                        "Start the agent again inside its sandbox now (sandbox-ai kits restart-agent {start})? What it "
+                        "does now ends; its conversation continues, the sandbox, its network and MCP servers stay.",
+                        start=printable(start)), tr("Start the agent again")):
+                    # (kits restart-agent: its agent again in its tmux window, the sandbox goes on)
+                    from .kits_live_view import restarted
+                    background(lambda: self.sai.host_agent_restart(host, start), owner=self, work=True,
+                               source=self.run_buttons, timeout=150,
+                               done=lambda done_, failed: (restarted(self, title, done_, failed),
+                                                           self.after_live_change(host)))
+                return
+            if ask_first(self, "start-restart", title, text + "\n\n" + hint + " " + tr(
+                    "The agent of {start} cannot be started again inside its sandbox so that it sees the server: the "
+                    "whole start is restarted instead (sandbox-ai resume {start} --restart) - its sandbox ends and "
+                    "starts again, its HOME and conversation are kept, the conversation continues.",
+                    start=printable(start)), tr("Restart the start (its sandbox starts again)")):
                 self.restart_agent(host, start, title)
             return
         short_notice(self, title, text)
 
     def restart_agent(self, host, start, title):
+        """`sandbox-ai resume START --restart` on HOST: the whole start again (its sandbox ends and starts anew, its HOME
+        and conversation kept), then attached in the app again - the tab that showed it ended with its sandbox (exit
+        status 143), and a restart from here is no tab's own, so nothing else brings it back."""
         args = backend.resume_args(start, restart=True)
+        current = self.current()
+        instance = current if current is not None and getattr(current, "host", LOCAL) == host and \
+            start in (current.name, getattr(current, "session", None)) else None
+
+        def done(result, error):
+            self.command_done(title, result, error)
+            self.after_live_change(host)
+            if instance is not None and outcome(result, error)[0] == 0:
+                self.session("attach-app", instance)
         background(lambda: self.sai.host_run(host, *args, timeout=300), owner=self, work=True, source=self.run_buttons,
-                   timeout=330, done=lambda result, error: (self.command_done(title, result, error),
-                                                            self.after_live_change(host)))
+                   timeout=330, done=done)
 
     def after_live_change(self, host):
         """The start's rows are read again: the server it reaches now shows below it."""
@@ -6570,11 +6885,22 @@ class SandboxesPage(QWidget):
         questions and `sandbox-ai resume` there."""
         self.update_buttons()
         key = ("resume", host, name)  # what was typed and not sent: filled in again (drafts.py)
-        dialog = ResumeDialog(self, name, host, instance.state in ("running", "paused"), servers, draft=key)
-        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
-            return
+        start = self.sai.session_start(getattr(instance, "ident", None)) if host == LOCAL and \
+            hasattr(self.sai, "session_start") else None
+        dialog = ResumeDialog(self, name, host, instance.state in ("running", "paused"), servers, draft=key,
+                              start=start)
         title = tr("Resume {name} on {host}", name=printable(name), host=printable(host)) if host != LOCAL else \
             tr("Resume {name}", name=printable(name))
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
+            if getattr(dialog, "to_start", False):  # On the Start page…: the whole start there, nothing resumed
+                try:
+                    agent, argv, arguments = dialog.start_line()
+                except ValueError as exc:
+                    warn(self, title, printable_text(exc))
+                    return
+                self.log_asked("resume with: its start shown on the Start page", instance)
+                self.start_wanted.emit(agent, argv, arguments, host)
+            return
         try:
             workspaces, mounts, mcp, restart = dialog.values()
             options, dropped = dialog.changed_options()
@@ -7290,8 +7616,23 @@ class AddServerDialog(QDialog):
             form.addRow(tr("Variables"), self.env_line)
         self.mcp = MF.mcp_module(getattr(parent, "sai", None))
         self.mount_reasons = {}
+        # Each folder's default (sandbox-ai 0.1.212: `mcp add` needs no --mount): this machine's sandbox-ai says them,
+        # another host's in its `mcp catalog --json` ("default", "mode"); an older one has none (a required folder is
+        # asked for then, as before).
+        self.declared = MF.folder_defaults(self.mcp, entry, host) if not entry.get("_listed") else {}
         if entry.get("mounts") and not entry.get("_listed"):
-            form.addRow(explanation(tr("Each folder: on the left the path inside the server's container, in the field "
+            form.addRow(explanation((tr("Each folder: the field is the folder on this machine that the server's "
+                                        "container sees at the path its label names (read-only unless writable). "
+                                        "Left empty, it is its default: /work the workspace of the start that uses "
+                                        "the server, any other one a folder of the server's own, made by sandbox-ai.")
+                                     if host == LOCAL else
+                                     tr("Each folder: the field is the folder on {host} that the server's container "
+                                        "sees at the path its label names (… chooses one there; read-only unless "
+                                        "writable). Left empty, it is its default: /work the workspace of the start "
+                                        "that uses the server, any other one a folder of the server's own, made there "
+                                        "by sandbox-ai.", host=printable(host)))
+                                    if self.declared else
+                                    tr("Each folder: on the left the path inside the server's container, in the field "
                                        "the folder on this machine (read-only unless writable; a writable one that is "
                                        "not there yet is created).") if host == LOCAL else
                                     tr("Each folder: on the left the path inside the server's container, in the field "
@@ -7300,17 +7641,18 @@ class AddServerDialog(QDialog):
         for mount in entry.get("mounts", []) if not entry.get("_listed") else []:
             field = PathField()
             field.set_host(host)
+            target = mount.get("target")
             field.edit.setPlaceholderText(tr("a folder on this machine") if host == LOCAL else
                                           tr("a folder on {host}", host=printable(host)))
             writable = QCheckBox(tr("writable"))
+            writable.setChecked((self.declared.get(target) or {}).get("mode") == "rw")
             row = QHBoxLayout()
             row.addWidget(field)
             row.addWidget(writable)
             holder = QWidget()
             holder.setLayout(row)
-            target = mount.get("target")
-            form.addRow(tr("{target} in the container", target=target)
-                        + (f" ({tr('required')})" if mount.get("required") else ""), holder)
+            form.addRow(MF.folder_label(target, host) + (f" ({tr('required')})" if mount.get("required") else ""),
+                        holder)
             if mount.get("description"):  # what the folder is for, as its catalog entry says
                 form.addRow("", plain_label(printable(str(mount["description"]))[:300], role="secondary"))
             reason = plain_label(role="notice-error")
@@ -7321,6 +7663,8 @@ class AddServerDialog(QDialog):
             writable.toggled.connect(lambda _on, t=target: self.check_mount(t))
             if mount.get("required"):  # (asked for: OK waits for it)
                 self.check_mount(target)
+        self.show_defaults()
+        self.local.textChanged.connect(lambda _text: self.show_defaults())
         # Its variables as its entry declares them (required, a secret, what for): a value that is no secret, your
         # environment or its secret, or a secret chosen - each one not required left out unless given (every one used
         # to be passed, and required: a flag like ALLOW_PRIVATE_TARGETS failed every start where it was not set).
@@ -7394,13 +7738,23 @@ class AddServerDialog(QDialog):
         self.prefix_name = None
         self.update_state()
 
+    def show_defaults(self):
+        """Each empty folder field shows its default (the start's workspace, the folder of the server's own under the
+        name for --mcp), as sandbox-ai makes it where it is added."""
+        name = self.local.text().strip() or str(self.entry.get("name") or "")
+        for target, (field, _writable) in self.mounts.items():
+            shown = MF.default_text(self.mcp, self.declared.get(target), name, target, self.host)
+            if shown:
+                field.edit.setPlaceholderText(shown)
+
     def check_mount(self, target):
         """The folder of TARGET checked at once (this machine's: mcp.mount_host's rules; another host's at add, there);
-        a folder the entry requires is asked for - none is filled in for it (never one of this machine on a host)."""
+        a folder the entry requires and has no default for is asked for - none is filled in for it (never one of this
+        machine on a host)."""
         field, writable = self.mounts[target]
         value = field.value().strip()
         required = any(m.get("target") == target and m.get("required") for m in self.entry.get("mounts", [])
-                       if isinstance(m, dict))
+                       if isinstance(m, dict)) and target not in self.declared
         if not value:
             reason = (tr("{target} needs a folder of this machine.", target=target) if self.host == LOCAL else
                       tr("{target} needs a folder of {host} (… chooses one there).", target=target,
@@ -7438,6 +7792,10 @@ class AddServerDialog(QDialog):
         """[(target, host folder, "ro"|"rw")]. ValueError: a line that is not TARGET=HOST_FOLDER[:ro|rw]."""
         found = [(target, field.value(), "rw" if writable.isChecked() else "ro")
                  for target, (field, writable) in self.mounts.items() if field.value()]
+        # An empty field is its default: named (TARGET=default) only where its mode is not the declared one.
+        found += [(target, backend.MCP_DEFAULT_FOLDER, "rw" if writable.isChecked() else "ro")
+                  for target, (field, writable) in self.mounts.items() if not field.value() and target in self.declared
+                  and ("rw" if writable.isChecked() else "ro") != self.declared[target].get("mode", "ro")]
         for line in (self.mount_lines.toPlainText().splitlines() if self.mount_lines is not None else []):
             line = line.strip()
             if not line:
@@ -7568,12 +7926,10 @@ class McpPage(QWidget):
         self.servers.setAccessibleName(tr("MCP servers"))
         widgets.multi_select(self.servers)  # several at once (Ctrl, Shift): Stop takes them all
         servers_layout.addWidget(self.servers)
-        row = QHBoxLayout()
         self.server_buttons = []
         for action, text in (("start", tr("Start…")), ("stop", tr("Stop"))):
             button = QPushButton(text)
             button.clicked.connect(lambda _=False, a=action: self.server(a))
-            row.addWidget(button)
             self.server_buttons.append(button)
         self.server_buttons[0].setToolTip(tr("Start the server sandbox: its backend, a VPN in front, or for an agent "
                                              "start (sandbox-ai mcp start)"))
@@ -7581,30 +7937,48 @@ class McpPage(QWidget):
         self.attach_button.setToolTip(tr("Connect the server to an agent start (sandbox-ai mcp attach)"))
         self.attach_button.clicked.connect(self.attach)
         self.attach_button.setEnabled(sai.mcp_attach_supported())
-        row.addWidget(self.attach_button)
         self.server_buttons.append(self.attach_button)
         self.properties_button = QPushButton(tr("Properties…"))
         self.properties_button.setToolTip(tr("Its limits for every start, network, VPN, folders and variables "
                                              "(sandbox-ai mcp set); also a double click or Alt+Enter"))
         self.properties_button.clicked.connect(lambda _=False: self.properties())
-        row.addWidget(self.properties_button)
         self.server_buttons.append(self.properties_button)
         self.copy_button = QPushButton(tr("From another host…"))
         self.copy_button.setToolTip(tr("Copy a server of another host here (sandbox-ai mcp copy): a catalog server is "
                                        "added from its catalog here, a server of your own checked as mcp.json is; "
                                        "what it takes is shown before anything is copied"))
         self.copy_button.clicked.connect(lambda _=False: self.copy_from_host())
-        row.addWidget(self.copy_button)
+        # The server selected to another host (reported live: "es sollte, wenn man einen MCP markiert hat, dann heißen:
+        # zu einem anderen host"): its text names it; greyed out, saying why, without one selected.
+        self.copy_to_button = QPushButton(tr("Copy to another host…"))
+        self.copy_to_button.setToolTip(tr("Copy the server selected to another host (sandbox-ai mcp copy): checked "
+                                          "there first, what it takes is shown before anything is copied"))
+        self.copy_to_button.clicked.connect(lambda _=False: self.copy_to_host())
+        # Update: the newer image the catalog of each server selected pins (sandbox-ai mcp update NAME...); Update all:
+        # every server of yours from a catalog (the user, 2026-11-23: "add mcp update").
+        self.update_button = QPushButton(tr("Update"))
+        self.update_button.setToolTip(tr("Take the newer image the catalog of each server selected pins (sandbox-ai "
+                                         "mcp update): the catalog read again and its signature checked; its folders, "
+                                         "variables, limits and network stay"))
+        self.update_button.clicked.connect(lambda _=False: self.update_servers())
+        self.update_all_button = QPushButton(tr("Update all"))
+        self.update_all_button.setToolTip(tr("Every server of yours from a catalog takes the newer image its catalog "
+                                             "pins, where there is one (sandbox-ai mcp update)"))
+        self.update_all_button.clicked.connect(lambda _=False: self.update_servers(every=True))
+        self.server_buttons += [self.update_button, self.update_all_button]
+        self.notes = {}
         # Start…, Attach to… and Properties…: one server
         widgets.one_only(self.servers, [self.server_buttons[0], self.attach_button, self.properties_button])
+        self.servers.itemSelectionChanged.connect(self.update_copy_to)
         self.servers.doubleClicked.connect(lambda _index: self.properties())
         for keys in ("Alt+Return", "Alt+Enter"):
             shortcut = QShortcut(QKeySequence(keys), self.servers)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda: self.properties())
-        table_menu(self.servers, lambda: [*self.server_buttons, None, self.copy_button])  # the buttons
-        row.addStretch()
-        servers_layout.addLayout(row)
+        table_menu(self.servers, lambda: [*self.server_buttons, None, self.copy_to_button, self.copy_button])
+        # One row that wraps where the window is narrow: the copy buttons' texts are long in German, and Copy NAME to
+        # another host… grows with the name selected (the page needed 996 px, more than a small laptop's 900)
+        servers_layout.addWidget(flow(*self.server_buttons, self.copy_to_button, self.copy_button))
         layout.addWidget(servers)
         catalog = QGroupBox(tr("Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)"))
         catalog_layout = QVBoxLayout(catalog)
@@ -7649,7 +8023,23 @@ class McpPage(QWidget):
         # When another host was chosen while the page was hidden (time.monotonic; the window gives a hidden page the
         # Sandboxes page's host as it is about to be shown): its servers were asked for then, not again by that show.
         self.host_read_at = None
+        self.update_copy_to()
         self.refresh()
+
+    def update_copy_to(self):
+        """Copy NAME to another host…: the one server selected named; greyed out (saying why) without one, with
+        several, or while its copy runs."""
+        button = self.copy_to_button
+        if widgets.held(button):
+            return
+        rows = widgets.selected_rows(self.servers)
+        name = selected(self.servers) if len(rows) == 1 else None
+        name = name if name and re.fullmatch(backend.MCP_NAME, name) else None
+        button.setText(tr("Copy {name} to another host…", name=printable(name)) if name else
+                       tr("Copy to another host…"))
+        widgets.set_enabled(button, name is not None, tr("Acts on one row: {count} are selected.", count=len(rows))
+                            if len(rows) > 1 else tr("Select a server first: the one selected is copied to the "
+                                                     "host chosen then."))
 
     def showEvent(self, event):  # noqa: N802
         """The catalogs load by themselves the first time the page is shown (in the background); the hosts are read
@@ -7703,6 +8093,7 @@ class McpPage(QWidget):
         whether its limits are below what its catalog recommends (Properties… applies them)."""
         if not notes:
             return
+        self.notes = notes if isinstance(notes, dict) else {}
         rows, colors, tooltips = [], [], []
         for row in getattr(self, "server_rows", []):
             note = notes.get(row[0]) if isinstance(notes, dict) else None
@@ -7717,11 +8108,71 @@ class McpPage(QWidget):
                 tips.append(tr("Below the limits its catalog recommends: {limits}. Properties… applies them (sandbox-ai "
                                "mcp set {name} --recommended).", limits=printable(", ".join(
                                    f"{k} {v}" for k, v in note["below"].items())), name=printable(row[0])))
+            newer = note.get("newer") if note else None
+            if newer:
+                status += " · " + tr("a newer image")
+                tips.append(tr("Its {signed} catalog pins a newer image: {change}. Update takes it (sandbox-ai mcp "
+                               "update {name}); its folders, variables, limits and network stay.",
+                               signed=tr("catalog|signed") if newer.get("signed") else tr("catalog|unsigned"),
+                               change=", ".join(f"{key} {backend.short_digest(pair[0])} → "
+                                                f"{backend.short_digest(pair[1])}"
+                                                for key, pair in newer.items() if key in ("image", "rootfs")),
+                               name=printable(row[0])))
             rows.append((row[0], status, *row[2:]))
-            colors.append("bad" if note and note.get("problem") else "warn" if note and note.get("below") else
-                          "ok" if row[1] == "running" else None)
+            colors.append("bad" if note and note.get("problem") else "warn" if note and (note.get("below") or newer)
+                          else "ok" if row[1] == "running" else None)
             tooltips.append("\n".join(tips) or None)
         fill(self.servers, rows, colors, tooltips=tooltips)
+
+    def update_servers(self, every=False):
+        """Update (the servers selected) or Update all (EVERY: each server of yours from a catalog): asked first
+        (mcp-update), then `sandbox-ai mcp update [NAME...] --yes` on the host shown - the catalogs read again there,
+        each signature checked; a server of an unsigned catalog only when the human was told so here (--unsigned)."""
+        names = [] if every else [name for name in widgets.selected_keys(self.servers)
+                                  if name and re.fullmatch(backend.MCP_NAME, name)]
+        title = tr("Update all") if every else tr("Update")
+        if not every and not names:
+            inform(self, title, tr("Select a server first."))
+            return
+        host = self.host()
+        unsigned = [name for name in names if ((self.notes.get(name) or {}).get("newer") or {}).get("signed") is False]
+        text = (tr("Update every MCP server of yours whose catalog pins a newer image? Each catalog is read again and "
+                   "its signature checked; each new image is pulled by its digest. Folders, variables, limits and "
+                   "network stay; a running one runs on with its old image until it is stopped.") if every else
+                several(tr("Update these {count} MCP servers to the newer image their catalog pins? Each catalog is "
+                           "read again and its signature checked. Folders, variables, limits and network stay; a "
+                           "running one runs on with its old image until it is stopped.", count=len(names)),
+                        [printable(name) for name in names]))
+        if unsigned:
+            text += " " + tr("The catalog of {names} is not signed: nobody vouched for its new image.",
+                             names=", ".join(printable(name) for name in unsigned))
+        if host != LOCAL:
+            text = tr("On {host}: {text}", host=printable(host), text=text)
+        if not ask_first(self, "mcp-update", title, text, tr("Update")):
+            return
+        applog.log("INFO", "mcp", f"mcp update: {', '.join(names) or 'all'} on {printable(host)} asked")
+        self.catalog_status.setText(tr("Updating {names}…", names=", ".join(printable(n) for n in names)
+                                       if names else tr("every server of yours")))
+        background(lambda: self.sai.host_mcp_update(host, names, unsigned=bool(unsigned)), owner=self, work=True,
+                   source=self.server_buttons, timeout=3700,
+                   done=lambda result, error: self.updated(title, result, error))
+
+    def updated(self, title, result, error):
+        """What `mcp update` said: the servers updated, those that were not (why), or its refusal."""
+        self.refresh()
+        if error is not None:
+            self.catalog_status.setText(tr("Not updated: {reason}", reason=printable_text(str(error))[:1500]))
+            warn(self, title, tr("Not updated: {reason}", reason=printable_text(str(error))[:1500]), modal=False)
+            return
+        updated = [printable(str(name)) for name in result.get("updated") or []]
+        others = [f"{printable(str(row.get('server')))}: {printable_text(str(row.get('why') or ''))[:300]}"
+                  for row in result.get("servers") or [] if isinstance(row, dict) and row.get("state") == "refused"]
+        text = tr("Updated: {names}.", names=", ".join(updated)) if updated else \
+            tr("Nothing to update: each runs the image its catalog pins.")
+        if others:
+            text += "\n" + tr("Not updated: {reason}", reason="; ".join(others))
+        self.catalog_status.setText(text)
+        short_notice(self, title, text)
 
     def properties(self, name=None, host=None, values=None):
         """Properties… of the server NAME of HOST, else the one selected (double click, Alt+Enter, its menu): what `mcp
@@ -7818,7 +8269,35 @@ class McpPage(QWidget):
                    work=True, source=self.copy_button, timeout=3700,
                    done=lambda result, error: self.copied(title, name, result, error))
 
-    def copied(self, title, name, result, error):
+    def copy_to_host(self):
+        """Copy NAME to another host…: the server selected copied from the host shown to a host chosen in the dialog
+        (checked there first, asked first here: mcp-copy, and mcp-replace where one of that name is replaced)."""
+        name = selected(self.servers)
+        if not name or not re.fullmatch(backend.MCP_NAME, name):
+            inform(self, tr("Copy to another host…").rstrip("…"), tr("Select a server first."))
+            return
+        source = self.host()
+        dialog = McpCopyDialog(self, self.sai, server=(source, name))
+        if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
+            return
+        source, name, choices = dialog.values()
+        target = dialog.target
+        title = tr("Copy {name} to another host", name=printable(name))
+        if not ask_first(self, "mcp-copy", title, copy_question(source, name, target, None, choices), tr("Copy")):
+            return
+        if choices.get("replace") and not ask_first(self, "mcp-replace", title, tr(
+                "An MCP server {name} is there already: replace its definition for every start that uses it?",
+                name=printable(choices.get("as_name") or name)), tr("Replace")):
+            return
+        there = printable(target) if target != LOCAL else tr("this machine")
+        self.catalog_status.setText(tr("Copying {name} to {host}…", name=printable(name), host=there))
+        background(lambda: self.sai.host_mcp_copy(source, target, [name], dry_run=False, **choices), owner=self,
+                   work=True, source=self.copy_to_button, timeout=3700,
+                   done=lambda result, error: (self.copied(title, name, result, error, there), self.update_copy_to()))
+
+    def copied(self, title, name, result, error, there=None):
+        """What the copy said: here (THERE None: From another host…) or to the host THERE (Copy NAME to another
+        host…)."""
         self.refresh()
         if error is not None or blocked_copy(result):
             from .mcp_copy_view import plan_lines
@@ -7828,6 +8307,10 @@ class McpPage(QWidget):
             return
         servers = ", ".join(printable(str(plan.get("server"))) for plan in result.get("servers") or []
                             if isinstance(plan, dict))
+        if there is not None:
+            self.catalog_status.setText(tr("{name} copied to {host}: use it there with --mcp {there}.",
+                                           name=printable(name), host=there, there=servers or printable(name)))
+            return
         self.catalog_status.setText(tr("{name} copied: it is in the list above; use it with --mcp {local}.",
                                        name=printable(name), local=servers or printable(name)))
 
@@ -8054,8 +8537,8 @@ class McpPage(QWidget):
                 "An MCP server {name} is there already: replace its definition for every start that uses it?",
                 name=printable(values["name_as"])), tr("Replace")):
             return
-        if host != LOCAL and values.get("mounts"):
-            # Another host's folders: looked at there first (over SSH, as its folder chooser does) - one that is not a
+        if host != LOCAL and [m for m in values.get("mounts") or [] if m[1] != backend.MCP_DEFAULT_FOLDER]:
+            # Another host's folders (a default is none: sandbox-ai there makes it): looked at there first (over SSH, as its folder chooser does) - one that is not a
             # folder said here, a read-only one that is not there offered to be made there. Before, `mcp add` there
             # refused it with its own words alone ("... is not there on this machine"; user report 2026-11-19).
             self.look_at_host_folders(host, key, values, args)
@@ -8064,7 +8547,8 @@ class McpPage(QWidget):
 
     def look_at_host_folders(self, host, key, values, args):
         """The folders of VALUES looked at on HOST over SSH and SFTP in the background, then host_folders_read."""
-        paths = list(dict.fromkeys(source for _target, source, _mode in values["mounts"]))
+        paths = list(dict.fromkeys(source for _target, source, _mode in values["mounts"]
+                                   if source != backend.MCP_DEFAULT_FOLDER))
         try:
             target = RC.host_target(self.sai, host)
         except Exception as exc:  # noqa: BLE001 - no SSH host of sandbox-ai here: sandbox-ai there checks them
@@ -8095,7 +8579,8 @@ class McpPage(QWidget):
             return
         modes = {}
         for _target, source, mode in values["mounts"]:
-            modes[source] = "rw" if mode == "rw" or modes.get(source) == "rw" else "ro"
+            if source != backend.MCP_DEFAULT_FOLDER:  # (a default is made there by sandbox-ai, never over SSH)
+                modes[source] = "rw" if mode == "rw" or modes.get(source) == "rw" else "ro"
         bad = [(path, state) for path, state in states.items() if state in ("file", "link", "relative")]
         if bad:
             words = {"file": tr("is not a folder"), "link": tr("is a symbolic link (not followed)"),
@@ -8655,8 +9140,15 @@ SECTIONS = ((N_("Project"), (("launch", N_("Start")), ("board", N_("Board")))),
                              ("monitor", N_("System monitor")))),
             (N_("System"), (("system", N_("System")), ("hosts", N_("Hosts")), ("help", N_("Help")))))
 PAGES = tuple(page for _, pages in SECTIONS for page in pages)
+# The Start page has two views of one start, with a switch above them (start_link.py): Board ("board", the default)
+# and Expert ("launch": every option a field, and the command line). Each view is a page of the window of its own key -
+# its panels, help, video and tour are its own - but the navigation has one entry for both, Start: the row of
+# "launch". VIEW_OF: {a view without a row of its own: the page whose row it is shown under}.
+VIEW_OF = {"board": "launch"}
+START_VIEWS = start_link.VIEW_KEYS
 SHORTCUT_PAGES = 9
 HISTORY_KEPT = 50  # the steps Back can go (MainWindow.page_history)
+SHOW_ME_SECONDS = 6  # how long the Help's "Show me" outlines a control
 NOTIFY_AT_ONCE = 5  # new questions announced one by one at once; more are counted in one notification
 NAV_WIDTH, COMPACT_NAV_WIDTH = 224, 52  # the navigation with titles, and as a strip of icons
 NAV_MAX_WIDTH = 300  # the navigation with titles at most, however long a title is in the language chosen
@@ -9436,6 +9928,9 @@ class MainWindow(QMainWindow):
         labels.set_flags_shown(backend.setting("show_flags"))  # before the forms that show them are made
         widgets.set_explanations_shown(backend.setting("explanations"))  # the pages' info texts: before they are made
         button_icons.set_texts_shown(backend.setting("button_texts"))  # the icon buttons' texts: before they are made
+        # The mouse wheel over a combo box, spin box or slider nobody clicked scrolls the page, on every window of the
+        # app (one guard for the whole run: widgets.WheelGuard).
+        widgets.wheel_guard(QApplication.instance())
         # quitting: SIGTERM or logout (no questions); leaving: a confirmed quit from the tray menu (no hiding);
         # finished: the window has closed for good (shutdown ran, exactly once).
         self.sai, self.quitting, self.leaving, self.finished, self.stopped = sai, False, False, False, False
@@ -9518,6 +10013,14 @@ class MainWindow(QMainWindow):
             self.build_page(key)
         # The navigation: a header per section (not selectable), then its pages; rows are found by page key.
         self.keys, self.nav_rows, self.section_rows, self.collapsed = [], {}, {}, set()
+        # The Start page's view: the one chosen last (kept: start_view), Board for a new installation; view_wanted:
+        # the view something asked for by its own key (show_page("board")), until the row shows it.
+        self.start_view, self.view_wanted, self.start_link = start_link.DEFAULT_VIEW, None, None
+        # The Start page's switch between its two views, Board and Expert (shown on that page only; each view names
+        # it as its own view_switch: the tours point at it).
+        self.view_switch = ViewSwitch()
+        self.view_switch.chosen.connect(self.choose_view)
+        self.view_switch.hide()
         for section, pages in SECTIONS:
             header = QListWidgetItem(tr(section).upper())
             header.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -9527,19 +10030,22 @@ class MainWindow(QMainWindow):
             self.nav.addItem(header)
             self.section_rows[section] = (self.nav.count() - 1, [])
             for key, title in pages:
-                self.section_rows[section][1].append(self.nav.count())
-                item = QListWidgetItem(theme.glyph(key), tr(title))
-                item.setData(Qt.ItemDataRole.UserRole, key)
-                item.setData(Qt.ItemDataRole.AccessibleTextRole, tr(title))  # also in the strip of icons
-                self.nav_rows[key] = self.nav.count()
-                self.nav.addItem(item)
+                if key in VIEW_OF:  # a view of the page before it (the Board: of Start): under that page's row
+                    self.nav_rows[key] = self.nav_rows[VIEW_OF[key]]
+                else:
+                    self.section_rows[section][1].append(self.nav.count())
+                    item = QListWidgetItem(theme.glyph(key), tr(title))
+                    item.setData(Qt.ItemDataRole.UserRole, key)
+                    item.setData(Qt.ItemDataRole.AccessibleTextRole, tr(title))  # also in the strip of icons
+                    self.nav_rows[key] = self.nav.count()
+                    self.nav.addItem(item)
                 page = self.built(key)
                 if page is not None:
                     self.pages.add_page(page, scroll=key not in UNSCROLLED_PAGES)
                 else:  # made when it is first shown, or in idle time after the first paint
                     self.page_holders[key] = self.pages.add_holder(key)
                 self.keys.append(key)
-                if len(self.keys) <= SHORTCUT_PAGES:
+                if len(self.keys) <= SHORTCUT_PAGES and key not in VIEW_OF:
                     item.setToolTip(tr("{page} (Ctrl+{number})", page=tr(title), number=len(self.keys)))
         self.nav.currentRowChanged.connect(self.nav_changed)
         self.nav.viewport().installEventFilter(self)  # a click on a section's header folds it
@@ -9607,6 +10113,7 @@ class MainWindow(QMainWindow):
             policy = widget.sizePolicy()
             policy.setRetainSizeWhenHidden(True)
             widget.setSizePolicy(policy)
+        strip_layout.addWidget(self.view_switch, 0, Qt.AlignmentFlag.AlignVCenter)
         self.page_help = help_view.HelpButton("page.launch")  # explains the page shown (page_changed)
         strip_layout.addWidget(self.page_help, 0, Qt.AlignmentFlag.AlignVCenter)
         # The video about the page shown (video_player.py; the videos are downloaded once when they are not here).
@@ -9643,6 +10150,8 @@ class MainWindow(QMainWindow):
         settings_now = sai.settings() if hasattr(sai, "settings") else {}
         self.gl_surface = terminal.prepare_window(self, wanted=settings_now.get("terminal", "app") == "app")
         help_view.OPENER = self.show_help
+        help_view.WINDOW[:] = [weakref.ref(self)]  # the Help's screenshots show this window's pages
+        help_view.SHOW_ME = self.show_me
         help_view.VIDEO_OPENER = self.watch_video  # the videos about the pages (the Help page's list, the (?)s)
         help_view.VIDEO_SAI[:] = [sai]
         help_view.set_shown(backend.setting("help_buttons"))  # the setting; the Help page and F1 stay either way
@@ -9832,6 +10341,12 @@ class MainWindow(QMainWindow):
         """The signals of page KEY to the window and to the other pages; LATE (made after the window): what the
         others said meanwhile, too."""
         page = getattr(self, key)
+        if key in START_VIEWS:
+            page.view_switch = self.view_switch
+        if key in START_VIEWS and self.start_link is None and all(self.built(view) is not None
+                                                                  for view in START_VIEWS):
+            # The two views of the Start page show one start from now on (before their state is read: attach_state).
+            self.start_link = StartLink(self.built("board"), self.built("launch"))
         if key in FOLLOWERS:  # the Sandboxes page's host (chosen there before it was made: taken when shown)
             combos, note = FOLLOWERS[key](page)
             self.host_follow.attach(key, page, combos, note)
@@ -9841,6 +10356,7 @@ class MainWindow(QMainWindow):
         elif key == "launch":
             page.opened.connect(self.project_opened)
             page.images_wanted.connect(self.show_your_images)
+            page.view_wanted.connect(self.choose_view)
         elif key == "sandboxes":
             combo = page.host_filter
             combo.currentIndexChanged.connect(lambda _=0: self.host_follow.choose(combo.currentData()))
@@ -9848,6 +10364,8 @@ class MainWindow(QMainWindow):
             page.open_remote_log.connect(self.show_remote_log)
             page.open_credentials.connect(self.show_credentials_of)
             page.open_given.connect(self.show_given_of)
+            page.start_wanted.connect(lambda agent, argv, arguments, host: self.show_start_line(
+                agent, argv, arguments, host))
             page.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
             page.updated.connect(self.sync_tabs)
             # The Board's Bridge parts offer the sessions that run here.
@@ -9961,6 +10479,10 @@ class MainWindow(QMainWindow):
     def nav_changed(self, row):
         item = self.nav.item(row)
         key = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if key in VIEW_OF.values():
+            # The Start page's row: the view asked for by its key (show_page), else the one chosen last.
+            wanted, self.view_wanted = self.view_wanted, None
+            key = wanted if wanted in START_VIEWS else self.start_view
         if key in self.nav_rows:
             applog.debug("page", key=key)
             self.remember_page(key)
@@ -9986,16 +10508,55 @@ class MainWindow(QMainWindow):
             page.show_your_images()
 
     def show_page(self, key, raise_window=True, unfold=True):
+        """Page KEY shown. A view of the Start page ("board", "launch": the Expert view) is that page in that view."""
         section = self.section_of(key)
         if unfold and section in self.collapsed and not self.compact_nav:
             self.toggle_section(section, False)  # a page reached another way shows where it is
-        self.nav.setCurrentRow(self.nav_rows[key])
+        row = self.nav_rows[key]
+        if key in START_VIEWS:
+            self.view_wanted = key
+            if self.nav.currentRow() == row:  # the page is shown: its other view (the row does not change)
+                self.nav_changed(row)
+        self.nav.setCurrentRow(row)
+        self.view_wanted = None
         if not raise_window:
             return
         if not self.isVisible():  # hidden in the tray
             self.show()
         self.raise_()
         self.activateWindow()
+
+    def show_start(self, raise_window=True):
+        """The Start page in the view chosen last (its row of the navigation, Ctrl+1, Go > Start)."""
+        return self.show_page(self.start_view, raise_window=raise_window)
+
+    def choose_view(self, key, raise_window=False):
+        """The human chose the view KEY of the Start page (the switch, its key, Ctrl+2, Show on the Board): shown, and
+        the view the page opens in from now on (kept: start_view). A tour or a link that shows a view by its key
+        (show_page) chooses nothing."""
+        if key not in START_VIEWS:
+            return
+        self.show_page(key, raise_window=raise_window)
+        if key != self.start_view:
+            self.start_view = key
+            self.state.set("start_view", key)
+
+    def switch_view(self):
+        """The other view of the Start page (the switch's key): Board <-> Expert. Nothing on another page."""
+        current = self.current_page()
+        if current in START_VIEWS:
+            self.choose_view(next(view for view in START_VIEWS if view != current))
+
+    def show_start_line(self, agent, argv, agent_args=(), host=None, raise_window=True):
+        """The start AGENT ARGV -- AGENT_ARGS put onto the Start page (one step of its Undo: the parts that are there
+        stay where they are) and the page shown in the view chosen last: for what leads to a start from elsewhere."""
+        board = self.board
+        if host and host != board.host():
+            board.host_choice.choose(host)
+        if self.start_link is not None:
+            self.start_link.flush()
+        board.take_start(agent, list(argv), list(agent_args))
+        self.show_start(raise_window=raise_window)
 
     # -- Back and Forward: the mouse's side buttons, Alt+Left and Alt+Right, Go > Back and Forward --
 
@@ -10199,11 +10760,20 @@ class MainWindow(QMainWindow):
         go = bar.addMenu(tr("&Go"))
         self.shortcuts = []
         for number, (key, title) in enumerate(PAGES, 1):
-            item = action(go, f"page:{key}", tr(title), lambda k=key: self.show_page(k),
+            # Start (Ctrl+1): the page in the view chosen last; Board (Ctrl+2, as ever): the page in its Board view.
+            text = tr("Start: {view}", view=tr(title)) if key in VIEW_OF else tr(title)
+            item = action(go, f"page:{key}", text,
+                          (lambda: self.show_start()) if key in VIEW_OF.values() else
+                          (lambda k=key: self.choose_view(k, raise_window=True)) if key in VIEW_OF else
+                          (lambda k=key: self.show_page(k)),
                           [f"Ctrl+{number}"] if number <= SHORTCUT_PAGES else ())
             item.setIcon(theme.glyph(key, theme.colors()["text"], 16))
             if number <= SHORTCUT_PAGES:
                 self.shortcuts.append(item)
+            if key in VIEW_OF:  # right after the page's views: the switch between them (on that page only)
+                switch = action(go, "switch-view", tr("Start: switch between Board and Expert"), self.switch_view)
+                switch.setToolTip(safe_tooltip(tr("The other view of the Start page: Board (parts and connections) "
+                                                  "or Expert (fields and the command line); both show one start")))
         go.addSeparator()
         # The platform's keys (Alt+Left and Alt+Right; Cmd+[ and Cmd+] on macOS), and the mouse's side buttons.
         for name, text, slot, standard, fallback in (
@@ -10402,6 +10972,55 @@ class MainWindow(QMainWindow):
         self.show_page("help")
         return self.help
 
+    @contextlib.contextmanager
+    def showing(self, key):
+        """For a picture of page KEY (the Help's screenshots): the page and its panels in the window's workspace for
+        the moment, as the navigation shows them - without the navigation (no history, nothing remembered) - and
+        the page shown before back right after. Nothing is painted on screen in between (no event loop runs)."""
+        before = self.current_page()
+        page = getattr(self, key)
+        if before == key:
+            yield page
+            return
+        old = self.built(before) if before else None
+        if hasattr(self, "docks"):
+            self.put_away_docks(key)
+        self.pages.setCurrentWidget(page)
+        if hasattr(self, "docks"):
+            self.update_docks()
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        try:
+            yield page
+        finally:
+            if hasattr(self, "docks"):
+                self.put_away_docks(before)
+            if old is not None:
+                self.pages.setCurrentWidget(old)
+            if hasattr(self, "docks"):
+                self.update_docks()
+            QApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+
+    def show_me(self, page, target):
+        """The Help's "Show me": page PAGE with its control TARGET outlined - the attribute its tours outline - for a
+        few seconds (a tour's own outline is left alone)."""
+        from PySide6.QtCore import QTimer
+        if page not in self.nav_rows:
+            return None
+        self.show_page(page)
+        self.point_at(page, target)
+        widget = getattr(getattr(self, page, None), target, None)
+        spotlight = getattr(self, "spotlight", None)
+
+        def done():
+            try:
+                if spotlight is not None and getattr(spotlight, "target", None) is widget:
+                    spotlight.follow(None)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(SHOW_ME_SECONDS * 1000, done)
+        return widget
+
     def show_page_video(self, key):
         """The button of the video about page KEY (beside its (?)): there for every page of the series."""
         from . import videos
@@ -10581,6 +11200,7 @@ class MainWindow(QMainWindow):
         Terminals page the keys a terminal needs go to the terminal."""
         self.update_docks()
         self.show_project_tabs(key)
+        self.show_view_switch(key)
         if key in help_view.H.PAGE_SECTIONS and hasattr(self, "page_help"):
             self.page_help.set_tip(f"page.{key}")
         self.show_page_video(key)
@@ -10588,6 +11208,21 @@ class MainWindow(QMainWindow):
             help_view.explain_tree(getattr(self, key))  # what the page made since (it fills some parts later)
         for name, keys in getattr(self, "terminal_keys", {}).items():
             self.actions[name].setShortcuts([] if key == "terminals" else keys)
+
+    def show_view_switch(self, key):
+        """The Start page's switch (Board | Expert) on that page only, the view shown down. What was typed in the
+        Expert view is on the board before the Board is looked at; the switch's key works on that page only (F6 is
+        the Files page's own elsewhere)."""
+        on_start = key in START_VIEWS
+        if getattr(self, "view_switch", None) is not None:
+            self.view_switch.setVisible(on_start)
+            if on_start:
+                self.view_switch.set_view(key)
+        if "switch-view" in getattr(self, "actions", {}):
+            self.actions["switch-view"].setShortcuts([QKeySequence(start_link.SWITCH_KEYS)] if on_start else [])
+            self.actions["switch-view"].setEnabled(on_start)
+        if on_start and self.start_link is not None:
+            self.start_link.flush()
 
     def show_project_tabs(self, key):
         """The project tabs only where the current project changes what the page shows or does (PROJECT_TAB_PAGES)."""
@@ -10692,12 +11327,16 @@ class MainWindow(QMainWindow):
     def about(self):
         import platform
         import PySide6
+        from . import reading_fonts
         from . import __version__
         inform(self, tr("About sandbox-ai-app"), tr(
             "sandbox-ai-app {app} from {app_path}\nsandbox-ai {sai} from {path}\nPySide6 {pyside}, Qt {qt}\n"
             "Python {python}", app=__version__, app_path=printable(backend.PACKAGE_DIR), sai=self.sai.version(),
             path=printable(self.sai.directory), pyside=PySide6.__version__, qt=qVersion(),
-            python=platform.python_version()))
+            python=platform.python_version()) + "\n\n" + tr(
+            "Fonts that come with the app: {fonts} (SIL Open Font License 1.1; the licences are in {folder})",
+            fonts="Atkinson Hyperlegible Next, Atkinson Hyperlegible Mono, OpenDyslexic, Lexend",
+            folder=printable(str(reading_fonts.FOLDER))))
 
     def readme(self):
         """The app's README, as text (it comes with the app; nothing is opened in another program)."""
@@ -10804,7 +11443,14 @@ class MainWindow(QMainWindow):
             self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
         elif saved.get("state") == "fullscreen":
             self.setWindowState(self.windowState() | Qt.WindowState.WindowFullScreen)
+        view = self.state.get("start_view", "")
+        if view in START_VIEWS:
+            self.start_view = view  # the Start page's view chosen last: the one it opens in
         page = self.state.get("page", "")
+        if page in START_VIEWS:
+            page = self.start_view  # (one page: left on it, it comes back in the view chosen last)
+        elif page not in self.nav_rows:
+            page = self.start_view if self.current_page() in START_VIEWS else ""
         if page in self.nav_rows:
             self.show_page(page, raise_window=False, unfold=False)  # sections stay as they were left
         self.update_window_controls()
@@ -10879,6 +11525,8 @@ class MainWindow(QMainWindow):
         QApplication.sendEvent(self.nav, QEvent(QEvent.Type.StyleChange))
         self.nav.setIconSize(QSize(24, 24) if self.compact_nav else QSize(20, 20))
         for key, row in self.nav_rows.items():
+            if key in VIEW_OF:
+                continue  # (a view of another page: that page's row)
             item = self.nav.item(row)
             item.setText("" if self.compact_nav else self.nav_title(key))
             item.setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))  # never an empty icon
@@ -10923,7 +11571,16 @@ class MainWindow(QMainWindow):
         else:
             title = tr("{page} (Ctrl+{number})", page=self.nav_title(key), number=index + 1)
         about = help_view.summary(f"page.{key}") if f"page.{key}" in help_view.H.TIPS else ""
-        return "\n".join([title, *textwrap.wrap(about, 60)])
+        lines = [title, *textwrap.wrap(about, 60)]
+        for view, page in VIEW_OF.items():  # the page's other view (the Board, of Start): its key and what it is
+            if page == key:
+                number = self.keys.index(view) + 1
+                name = start_link.view_title(view)
+                lines.append(name if self.compact_nav or number > SHORTCUT_PAGES else
+                             tr("{page} (Ctrl+{number})", page=name, number=number))
+                if f"page.{view}" in help_view.H.TIPS:
+                    lines += textwrap.wrap(help_view.summary(f"page.{view}"), 60)
+        return "\n".join(lines)
 
     def nav_menu(self, position):
         menu = QMenu(self)
@@ -11299,6 +11956,8 @@ class MainWindow(QMainWindow):
         """Make PATH the current project: the Start page's workspace, the Board (the project's own, as it was
         left), Connections and Statistics (its logs), Files, Approvals and Sandboxes (its rows marked), Kits
         (what it uses). Kept for the next start."""
+        if self.start_link is not None:
+            self.start_link.flush()  # what was typed for the project shown until now is its start, not the next one's
         try:
             self.project = self.sai.remember_project(path)
         except (OSError, ValueError):  # a read-only or unreadable configuration: the project is used, not kept
@@ -11345,6 +12004,8 @@ class MainWindow(QMainWindow):
             self.show_tab_project(path)
 
     def show_tab_project(self, path):
+        if self.start_link is not None:
+            self.start_link.flush()
         if same_folder(path, self.project):
             self.board.activate(path)
         else:
@@ -11582,14 +12243,24 @@ class MainWindow(QMainWindow):
             return None
         menu = QMenu(tr("While it runs"), parent)
         menu.setToolTipsVisible(True)
-        for button in sandboxes.run_buttons:
+
+        def add(into, button):
             text = getattr(button, "label", "") or button.accessibleName()  # (its full text: "Allow…")
-            action = menu.addAction(text)
+            action = QAction(text, into)
             action.setEnabled(button.isEnabled())
-            tip = button.toolTip()  # (the button's own, made with safe_tooltip: taken as it is)
-            action.setToolTip(tip)
+            action.setToolTip(button.toolTip())  # (the button's own, made with safe_tooltip: taken as it is)
             action.triggered.connect(lambda _=False, b=button, key=instance.key:
                                      self.select_quietly(key) and b.click())
+            into.addAction(action)
+        for entry in sandboxes.run_menu_entries():  # (Add… and Remove… as submenus, as on the page)
+            if isinstance(entry, widgets.MenuGroup):
+                sub = QMenu(entry.title, menu)
+                sub.setToolTipsVisible(True)
+                for button in entry.entries:
+                    add(sub, button)
+                menu.addMenu(sub)
+            else:
+                add(menu, entry)
         return menu
 
     def select_quietly(self, key):
@@ -12030,7 +12701,8 @@ class MainWindow(QMainWindow):
         """A new theme: the navigation's icons and the question count take its colours."""
         if event.type() == QEvent.Type.PaletteChange and getattr(self, "nav_rows", None):
             for key in self.keys:
-                self.nav_item(key).setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))
+                if key not in VIEW_OF:
+                    self.nav_item(key).setIcon(theme.glyph(key, size=24 if self.compact_nav else 20))
             self.show_question_count()  # the Approvals entry's badge, in the new colours
             QTimer.singleShot(0, lambda: alive(self) and self.fit_nav_width())  # the new theme's frame, once applied
             for section, (header, _) in getattr(self, "section_rows", {}).items():
@@ -12278,7 +12950,11 @@ class MainWindow(QMainWindow):
             self.offer_update(installed, available, route, where, hint=text)
             self.announce_update(installed, available)
         else:
-            text = tr("sandbox-ai {installed} is up to date.", installed=installed)
+            # (a copy newer than the newest release - installed from a checkout, another source or a release not
+            # published there yet: said so, not just "up to date")
+            text = tr("sandbox-ai {installed} is newer than the newest release {available}: nothing to update",
+                      installed=installed, available=available) if backend.newer(installed, available) else \
+                tr("sandbox-ai {installed} is up to date.", installed=installed)
             if not self.update_running:
                 self.offer_update()
         self.show_update_text(text)

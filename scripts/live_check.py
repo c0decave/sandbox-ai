@@ -10,10 +10,9 @@ Run it on the host, in a checkout (not inside a sandbox: there is no container e
                                                  checks the build's DNS preflight too
     scripts/live_check.py --quick                only the new checks and the end-to-end suite
     scripts/live_check.py --agents [NAME,...] [--build]
-                                                 the agents and parts not live-tested before (hermes, qwen, dsh,
-                                                 goose, openhands, nanobot, letta, pi, opencode2, cairn, browser; default
-                                                 all), with
-                                                 Podman only: each against a scripted model on this host, one MCP
+                                                 the agents and parts with a live test of their own (hermes,
+                                                 qwen, dsh, goose, openhands, nanobot, letta, pi, opencode2, cairn,
+                                                 browser; default all), with Podman only: each against a scripted model on this host, one MCP
                                                  tool, its switches' hosts, no telemetry (scripts/live_check_agents.sh
                                                  is the short form)
 
@@ -152,8 +151,8 @@ def agents_summary(directory):
 
 
 def agents_main(args, directory, report, facts):
-    """--agents: build (with --build) and run the live checks of the agents and parts not live-tested before, with
-    Podman; the report adds what each check saw."""
+    """--agents: build (with --build) and run the live checks of the agents and parts with a live test of their own,
+    with Podman; the report adds what each check saw."""
     names = agent_names(args.agents)
     facts["agents"] = ", ".join(names)
     if not shutil.which("podman"):
@@ -244,7 +243,7 @@ def main(argv=None):
     parser.add_argument("--image", metavar="IMAGE", help="the agent image for Podman (default: each agent's own)")
     parser.add_argument("--out", type=Path, metavar="DIR")
     parser.add_argument("--agents", nargs="?", const="all", metavar="NAME[,NAME...]",
-                        help="the agents and parts not live-tested before, Podman only: "
+                        help="the agents and parts with a live test of their own, Podman only: "
                              f"{', '.join(AGENT_SUITES)} (default all); with --build their images first")
     args = parser.parse_args(argv)
     if inside_a_container():

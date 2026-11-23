@@ -60,6 +60,10 @@ REOPEN_PATIENCE = 180
 # The tab of a session (a start in tmux, an attach) whose command ended normally (exit status 0: detached, the session
 # ended) closes by itself after this moment - the human sees it end; one that failed stays, marked, until closed.
 AUTO_CLOSE_MS = 3000
+# The tab of a one-shot helper the app runs itself (closes_when_done: `sandbox-ai login AGENT`, its --logout; here or
+# on a host) that ended well closes by itself after this many seconds, counted down above its terminal with "Keep it
+# open" (its ×, or Esc in that line, too); one that failed stays.
+HELPER_CLOSE_SECONDS = 30
 # Why a kept tab's start that runs was not reopened (reopen_listed): the line above the tabs says it.
 NOT_REOPENED = {
     "paused": N_("Not reopened (paused: resume it first): {names}"),
@@ -229,6 +233,23 @@ def login_of(argv):
     return terminal_text.login_agent(argv)
 
 
+LOGOUT_WORDS = ("--logout", "-L")  # `sandbox-ai login AGENT --logout`: its words, read by closes_when_done (never run)
+
+
+def closes_when_done(argv):
+    """Whether the tab of ARGV is a one-shot helper's that closes by itself once it ended well (HELPER_CLOSE_SECONDS):
+    `sandbox-ai login AGENT` (a sign-in, a device login) or `sandbox-ai login AGENT --logout`, here or on a host over
+    SSH. Not `login --status` (read there), and never a shell, an agent's start or session, a build or a setup: their
+    output is read in the tab (a session's own tab: AUTO_CLOSE_MS)."""
+    argv = [str(arg) for arg in argv]
+    if argv and os.path.basename(argv[0]) == "ssh":
+        argv = remote_words(argv[-1]) or []
+    if terminal_text.login_agent(argv):
+        return True
+    return any(word in LOGOUT_WORDS for word in argv) and \
+        terminal_text.login_agent([word for word in argv if word not in LOGOUT_WORDS]) is not None
+
+
 def start_of_argv(argv):
     """The agent a terminal of ARGV starts (`sandbox-ai AGENT ...` here, or on a host over SSH), else None."""
     argv = [str(arg) for arg in argv]
@@ -294,6 +315,8 @@ class TerminalView(QWidget):
         self.started_agent = None if self.login_agent else start_of_argv(self.argv)
         self.tail, self.device_url, self.device_done, self.device_timer = None, None, False, None
         self.ended_status = None  # the command's exit status once it ended (its output may still be on its way here)
+        # A one-shot helper that ended well (count_down): CLOSE() when its countdown ends, the seconds left, its timer.
+        self.closing, self.closing_left, self.closing_timer = None, 0, None
         if self.login_agent:
             self.watch = terminal_text.LoginWatch()
             self.bridge.output.connect(self.login_output)
@@ -515,6 +538,56 @@ class TerminalView(QWidget):
             shown.login_ended(status)
         if status == 0 and self.offered:
             self.bar.dismiss()
+
+    # -- a one-shot helper that ended well: its tab closes by itself after a countdown --
+
+    def count_down(self, seconds, close):
+        """CLOSE() in SECONDS, said and counted down above the terminal with Keep it open and Close now; Keep it
+        open, the line's × or Esc in it keep the tab open. The focus stays where the human has it (on Keep it open
+        when it was in this tab: Enter keeps it, Esc too)."""
+        from PySide6.QtWidgets import QApplication
+        self.closing_left, self.closing = max(1, int(seconds)), close
+        if self.closing_timer is None:
+            self.closing_timer = QTimer(self)  # (the tab's own: it goes with the tab)
+            self.closing_timer.setInterval(1000)
+            self.closing_timer.timeout.connect(self.count_tick)
+        focus = QApplication.focusWidget()
+        self.bar.ask(self.closing_text(), [(tr("Keep it open"), self.keep_open), (tr("Close now"), self.close_now)],
+                     cancelled=self.keep_open, level="info")
+        try:
+            if focus is not None and focus is not self and not self.isAncestorOf(focus) and focus.isVisible():
+                focus.setFocus()
+        except RuntimeError:  # (gone meanwhile)
+            pass
+        self.closing_timer.start()
+
+    def closing_text(self):
+        return tr("Done: this tab closes in {seconds} s.", seconds=self.closing_left)
+
+    def count_tick(self):
+        self.closing_left -= 1
+        if self.closing_left > 0:
+            self.bar.label.setText(self.closing_text())
+            return
+        self.close_now(chosen=False)
+
+    def close_now(self, chosen=True):
+        """The countdown's end (or Close now, CHOSEN): the line goes without its Cancel, then CLOSE()."""
+        self.closing_timer.stop()
+        close, self.closing = self.closing, None
+        if not chosen:  # (Close now: the bar hid itself already)
+            self.bar.cancelled = None
+            self.bar.hide_bar()
+        if close is not None:
+            close()
+
+    def keep_open(self):
+        """Keep it open (or the countdown's line closed with × or Esc, or replaced): the tab stays."""
+        if self.closing_timer is not None:
+            self.closing_timer.stop()
+        if self.closing is not None:
+            self.closing = None
+            applog.log("INFO", "terminal", f"tab {printable(self.title())}: kept open (its countdown was cancelled)")
 
     # -- a device sign-in: its page in the system browser, its one-time code in a window --
 
@@ -828,7 +901,8 @@ def attach_key(argv):
             base = base[:-1]
         if base and (base[-1].endswith("main.py") or os.path.basename(base[-1]) == "sandbox-ai"):
             return ("here", argv[-1])
-    if len(argv) >= 2 and os.path.basename(argv[0]) == "ssh" and re.search(r"(?:^|\s)attach\s", argv[-1]):
+    if len(argv) >= 2 and os.path.basename(argv[0]) == "ssh" and \
+            re.search(r"(?:^|\s)attach\s", neutral_script(argv[-1])):
         return ("ssh", tuple(argv))
     return None
 
@@ -836,12 +910,27 @@ def attach_key(argv):
 AGENT_NAMES = ("claude", "codex", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands", "nanobot", "letta", "pi")
 
 
+# hosts.neutral_command (sandbox-ai 0.1.228 on): the line ssh hands the login shell is /bin/sh -c '...' with the POSIX
+# script inside, its bytes other than plain printable ASCII as \0NNN - whatever the login shell there is.
+NEUTRAL_HEAD, NEUTRAL_TAIL = "/bin/sh -c 'v=$(printf %b \"", "X\"); eval \"${v%X}\"'"
+
+
+def neutral_script(line):
+    """The script of a LINE hosts.neutral_command made, or LINE itself (an older sandbox-ai's: the script as it is)."""
+    line = str(line)
+    if not (line.startswith(NEUTRAL_HEAD) and line.endswith(NEUTRAL_TAIL)):
+        return line
+    encoded = line[len(NEUTRAL_HEAD):len(line) - len(NEUTRAL_TAIL)].encode("utf-8", "surrogateescape")
+    return re.sub(rb"\\0([0-7]{3})", lambda match: bytes([int(match.group(1), 8)]), encoded).decode(
+        "utf-8", "surrogateescape")
+
+
 def remote_words(command):
     """The words of `sandbox-ai ...` in the command an ssh terminal hands another host (hosts.remote_command: `exec
-    sandbox-ai ARGS`, or the same in an if/else that looks for it; the program is the first one exec runs), or None
-    when it is not one."""
+    sandbox-ai ARGS`, or the same in an if/else that looks for it, inside /bin/sh -c '...' since 0.1.228; the program
+    is the first one exec runs), or None when it is not one."""
     try:
-        lexer = shlex.shlex(str(command), posix=True, punctuation_chars=";&|")
+        lexer = shlex.shlex(neutral_script(command), posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
@@ -1430,13 +1519,20 @@ class TerminalsPage(QWidget):
         self.update_close_key()
         # A session's tab that ended normally goes by itself (a tab of an ended session makes no sense); one that
         # failed stays with its message; a build's or another command's stays (its output is read there).
+        # A one-shot helper the app ran (a login: closes_when_done) that ended well goes after a countdown in it.
         closes = status == 0 and detaches(view.argv, self.launcher())
+        helper = status == 0 and not closes and closes_when_done(view.argv) and hasattr(view, "count_down")
         applog.log("INFO" if status == 0 else "WARNING", "terminal", f"tab {printable(title)}: its command ended, exit "
                    f"status {status} - " + (f"the tab closes by itself in {AUTO_CLOSE_MS / 1000:g} s (its session's "
                                            "terminal ended normally)" if closes else
+                                           f"the tab closes by itself in {HELPER_CLOSE_SECONDS} s unless kept open "
+                                           "(a one-shot helper that ended well)" if helper else
                                            "the tab stays open with its output"))
         if closes:
             QTimer.singleShot(AUTO_CLOSE_MS, lambda v=view: self.close_ended(v))
+        elif helper:
+            view.count_down(HELPER_CLOSE_SECONDS, lambda v=view: self.close_ended(v, "its one-shot command ended "
+                                                                                     "well"))
 
     def ended_title(self, view, title):
         """TITLE of the tab VIEW whose command ended: failed (an exit status other than 0), detached (its session
@@ -1449,9 +1545,10 @@ class TerminalsPage(QWidget):
             return tr("{title} (detached)", title=title)
         return tr("{title} (ended)", title=title)
 
-    def close_ended(self, view):
-        """Close the tab VIEW of a session that ended normally (AUTO_CLOSE_MS after it did), unless it was closed or
-        runs again meanwhile; the focus stays where the human has it."""
+    def close_ended(self, view, why="its session's terminal ended normally"):
+        """Close the tab VIEW of a session that ended normally (AUTO_CLOSE_MS after it did) or of a one-shot helper
+        that ended well (its countdown's end), unless it was closed or runs again meanwhile; the focus stays where
+        the human has it. WHY: for the log."""
         try:
             index = self.tabs.indexOf(view)
             if index < 0 or view.running:
@@ -1462,8 +1559,7 @@ class TerminalsPage(QWidget):
             return
         from PySide6.QtWidgets import QApplication
         focus = QApplication.focusWidget()
-        applog.log("INFO", "terminal", f"tab {printable(self.tabs.tabText(index))}: closed by itself (its session's "
-                   "terminal ended normally)")
+        applog.log("INFO", "terminal", f"tab {printable(self.tabs.tabText(index))}: closed by itself ({why})")
         self.close_tab(index, ask=False)
         try:
             if focus is not None and focus.isVisible() and QApplication.focusWidget() is not focus:

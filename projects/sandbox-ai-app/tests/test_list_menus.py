@@ -65,7 +65,7 @@ def test_the_menu_mirrors_buttons_their_state_and_reason(qapp):
 def test_every_list_of_the_app_offers_its_pages_actions(window):
     window.build_pages()
     s = window.sandboxes
-    found = texts(s.table)
+    found = [text.strip() for text in texts(s.table)]  # (Add… and Remove… hold theirs one level down: 2026-11-23)
     for button in [*s.session_buttons.values(), s.resume_with_button, s.stop_button, s.cut_button, *s.run_buttons,
                    *s.transfer_buttons.values(), *s.manage_buttons.values()]:
         assert widgets.button_text(button) in found, widgets.button_text(button)

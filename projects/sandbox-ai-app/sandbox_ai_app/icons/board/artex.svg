@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+<!-- sandbox-ai Board: ARTEX: a crosshair on a target (authorized testing; own drawing, MIT; drawn in currentColor) -->
+<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="12" cy="12" r="7.5"/>
+  <circle cx="12" cy="12" r="3"/>
+  <path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/>
+</g>
+</svg>

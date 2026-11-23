@@ -51,7 +51,11 @@ def home(tmp_path, monkeypatch):
 
 # -- the processes the service would start --
 
-REMOTE_HEAD = "if command -v sandbox-ai >/dev/null 2>&1; then exec sandbox-ai "
+# (the SSH user's own installation first, as a terminal there finds it; else the one on PATH: hosts.OWN_COMMAND)
+REMOTE_HEAD = 'if [ -x "$HOME/.local/bin/sandbox-ai" ]; then exec "$HOME/.local/bin/sandbox-ai" '
+_SPEC = importlib.util.spec_from_file_location("hosts_for_web_matrix", ROOT / "sandbox" / "hosts.py")
+HOSTS_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(HOSTS_MODULE)
 
 
 def sandbox_args(command):
@@ -63,10 +67,11 @@ def sandbox_args(command):
     assert command[1] in ("-T", "-tt") and "BatchMode=yes" in command and "StrictHostKeyChecking=accept-new" in command
     index = command.index("--")
     assert command[command.index("-p") + 1] == str(REMOTE["port"]) and len(command) == index + 3, command
-    target, remote = command[index + 1], command[index + 2]
-    assert remote.startswith(REMOTE_HEAD), remote
+    target, line = command[index + 1], command[index + 2]
+    remote = HOSTS_MODULE.neutral_script(line)  # (the script inside /bin/sh -c '...': hosts.neutral_command)
+    assert remote is not None and remote.startswith(REMOTE_HEAD), line
     quoted = remote[len(REMOTE_HEAD):remote.index("; else exec ")]
-    assert remote.endswith(f'; else exec "$HOME/.local/bin/sandbox-ai" {quoted}; fi'), remote
+    assert remote.endswith(f'; else exec sandbox-ai {quoted}; fi'), remote
     return "ct1", target, shlex.split(quoted)
 
 
@@ -1117,6 +1122,38 @@ def test_a_host_install_in_every_login_state(web, state, sent, args):
     web.assert_nothing_leaked()
 
 
+@pytest.mark.parametrize("state", STATES)
+def test_a_host_uninstall_in_every_login_state(web, state):
+    """POST /api/hosts/ct1/uninstall-plan: the host's own table of what its uninstall removes (hosts uninstall --dry-run,
+    run here); POST: with a full login and its confirmation, `sandbox-ai hosts uninstall ct1 ... --yes --json` on this
+    machine (it runs the host's own uninstall over SSH). Nothing runs without a full login; this machine is never
+    removed this way."""
+    headers = web.headers(state)
+    status, _, data = web.request("POST", "/api/hosts/ct1/uninstall-plan", {"installation": "user", "purge": True},
+                                  headers)
+    assert status == expected_status(state, "POST"), data
+    if status == 200:
+        assert web.processes.args() == [("local", ["hosts", "uninstall", "ct1", "--json", "--installation", "user",
+                                                   "--purge", "--dry-run"])]
+    web.processes.log.clear()
+    sent = {"installation": "system", "remove": True, "confirm": True}
+    status, _, data = web.request("POST", "/api/hosts/ct1/uninstall", sent, headers)
+    assert status == expected_status(state, "POST"), data
+    if status != 200:
+        assert web.processes.log == []
+    else:
+        assert web.processes.args() == [("local", ["hosts", "uninstall", "ct1", "--json", "--installation", "system",
+                                                   "--remove-from-list", "--yes"])]
+    web.processes.log.clear()
+    if state == "full":
+        for body in ({"installation": "user"}, {"installation": "admin", "confirm": True},
+                     {"secrets": True, "confirm": True}, {"purge": "maybe", "confirm": True}):
+            assert web.request("POST", "/api/hosts/ct1/uninstall", body, headers)[0] == 400, body
+        assert web.request("POST", "/api/hosts/local/uninstall", {"confirm": True}, headers)[0] == 400
+        assert web.processes.log == []
+    web.assert_nothing_leaked()
+
+
 def test_a_host_install_needs_its_confirmation_and_never_runs_on_this_machine(web):
     headers = web.headers("full")
     for body, status in (({"mode": "user"}, 400), ({"mode": "user", "confirm": "true"}, 400),
@@ -1257,9 +1294,15 @@ def test_every_call_of_the_page_is_in_the_matrix():
     covered |= {("POST", "/api/hosts/X/update"), ("POST", "/api/hosts/X/mcp/X/attach")}
     # test_a_host_install_in_every_login_state (run by this machine's sandbox-ai, about the host)
     covered |= {("POST", "/api/hosts/X/install"), ("GET", "/api/hosts/X/install")}
+    # test_a_host_uninstall_in_every_login_state (run by this machine's sandbox-ai, about the host)
+    covered |= {("POST", "/api/hosts/X/uninstall"), ("POST", "/api/hosts/X/uninstall-plan")}
     # tests/test_web_mcp_copy.py: MCP servers of another host copied here (run by this machine's sandbox-ai, which
     # reaches both hosts; its check and the copy asked first)
     covered |= {("POST", "/api/hosts/X/mcp-copy")}
+    # tests/test_web_mcp_update.py: Update and Update all (mcp update [NAME...] on the host, asked first)
+    covered |= {("POST", "/api/hosts/X/mcp-update")}
+    # tests/test_web_fix_plan.py: what a start lacks (`AGENT ... --fix-plan` on the host), end to end with Podman faked
+    covered |= {("POST", "/api/hosts/X/fix-plan")}
     # a schedule's ${path}: run, pause, resume above; a run's report (report/RUN) above
     covered |= {("POST", "/api/hosts/X/schedules/X/X"), ("GET", "/api/hosts/X/schedules/X/report/X")}
     # a start's memory and session files: ${source} (auto, home, store), a listed file's name, /full above

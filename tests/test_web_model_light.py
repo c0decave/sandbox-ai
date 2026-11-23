@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from test_web import FAKE_DOM  # noqa: E402
 
 QCN = "qwen/qwen3-coder-next"
-Q38 = "vcoder-120b-1.0-qx86-hi-mlx"   # known not to work in every harness (Qwen3.8-27B: yellow in Claude Code since round 7)
+Q38 = "mistralai/devstral-small-2-2512"   # red where it was run: Claude Code, OpenCode, Codex (0 passed, round 3)
 OTHER = "meta/llama3-8b"
 
 
@@ -112,9 +112,10 @@ def test_the_llm_page_shows_each_models_light_and_its_details(tmp_path):
     assert text.startswith("✓ verified: ") and "Claude Code" in text and dot == "light light-green" and hidden == "true"
     assert title.startswith("verified in ") and "Claude Code" in title.split(";")[0] and "; partly working in " in title
     assert label == f"Support of {QCN}: {title}"
-    assert cells[Q38][:2] == ["✗ does not work: every agent", "light light-red"]
-    assert cells[Q38][2:4] == ["true", "does not work in every agent"]
-    assert cells[OTHER][:2] == ["? not tested", "light light-grey"] and cells[OTHER][3] == "not tested: no data yet"
+    # red only in the agents it was run in; every other agent has no data yet (2026-11-22: a light only from runs)
+    assert cells[Q38][:2] == ["✗ does not work: Claude Code, OpenCode, Codex", "light light-red"]
+    assert cells[Q38][2:4] == ["true", "does not work in Claude Code, OpenCode, Codex"]
+    assert cells[OTHER][:2] == ["? no data yet", "light light-grey"] and cells[OTHER][3] == "no data yet"
     qcn, q38, other = (result["details"][[row[0] for row in result["cells"]].index(m)] for m in (QCN, Q38, OTHER))
     found = support(QCN)
     claude = next(pair for pair in found["harnesses"] if pair["agent"] == "claude")
@@ -127,16 +128,35 @@ def test_the_llm_page_shows_each_models_light_and_its_details(tmp_path):
     assert f"Measured: {claude['evidence']}" in qcn and f"✓ {claude['works'][0]}" in qcn
     assert f"Recommended settings: {claude['settings_text']}" in qcn
     assert any(line.startswith("~ Codex: partly working (") for line in qcn)   # round 8: OpenCode verified
-    assert qcn[-1].startswith("Not tested in: ")
-    assert any(line.startswith("Known not to work: its tool calls are broken") for line in q38)
+    assert qcn[-1].startswith("No data yet in: ")
+    assert any(line.startswith("✗ Claude Code: failing") for line in q38) and q38[-1].startswith("No data yet in: ")
+    assert not any(line.startswith("Known not to work") for line in q38), "no family-wide verdict"
     assert other == ["No data yet: no model family of sandbox-ai's research matches this name."]
     picks = {value: (text, title) for value, text, title in result["picks"]}
     assert picks[QCN][0].startswith(f"{QCN}  — ✓ verified: ") and "Claude Code" in picks[QCN][0] and picks[QCN][1].startswith("verified in ")
-    assert picks[OTHER] == (f"{OTHER}  — ? not tested", "not tested: no data yet")
+    assert picks[OTHER] == (f"{OTHER}  — ? no data yet", "no data yet")
     assert "Support" not in result["oldColumns"], "an older host's answer: no column"
     start = {value: (text, title) for value, text, title in result["start"]}
-    assert start[f"studio:{Q38}"] == (f"studio:{Q38}  — ✗ does not work: every agent", "does not work in every agent")
-    assert start[f"studio:{QCN}"][0].startswith(f"studio:{QCN}  (loaded, 45.0 GB)  — ✓ verified: ")
+    # a start's select, OpenCode chosen: OpenCode's own measured light first, then the rest
+    assert start[f"studio:{Q38}"] == (f"studio:{Q38}  — ✗ In OpenCode: does not work",
+                                      "In OpenCode: does not work. does not work in Claude Code, OpenCode, Codex")
+    assert start[f"studio:{QCN}"][0] == f"studio:{QCN}  (loaded, 45.0 GB)  — ✓ In OpenCode: verified"
+    assert start[f"studio:{OTHER}"][0] == f"studio:{OTHER}  — ? In OpenCode: no data yet"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_start_s_select_never_shows_another_agents_light_for_the_chosen_one(tmp_path):
+    """The user, 2026-11-22: "it says opencode verifiziert" for a model never run in OpenCode. Qwen3.8-27B was run in
+    Claude Code only: with OpenCode chosen its entry is grey (no data yet), never Claude Code's yellow."""
+    global QCN
+    saved, QCN = QCN, "qwen/qwen3.8-27b"
+    try:
+        result = drive(tmp_path)
+    finally:
+        QCN = saved
+    start = {value: (text, title) for value, text, title in result["start"]}
+    text, title = start["studio:qwen/qwen3.8-27b"]
+    assert text.endswith("— ? In OpenCode: no data yet") and title.startswith("In OpenCode: no data yet. partly working in Claude Code")
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")
@@ -149,7 +169,7 @@ def test_the_light_in_german(tmp_path):
     counts = next(p for p in support(QCN)["harnesses"] if p["agent"] == "claude")["measured_counts"]
     assert f"✓ Claude Code: verifiziert ({counts['runs']} Läufe, {counts['use_cases']} Anwendungsfälle, " \
            "phase 2, rounds 1, 5)" in qcn
-    assert cells[OTHER][3] == "nicht getestet: noch keine Daten"
+    assert cells[OTHER][3] == "noch keine Daten"
     assert cells[QCN][4].startswith(f"Unterstützung von {QCN}: verifiziert in ")
     other = result["details"][[row[0] for row in result["cells"]].index(OTHER)]
     assert other[0].startswith("Noch keine Daten")

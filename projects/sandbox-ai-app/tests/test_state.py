@@ -74,7 +74,7 @@ def test_a_damaged_file_at_start_says_so_and_the_window_works(qapp, env, monkeyp
         text = w.notice_bar.text()
         assert "state.json" in text and "settings.json" in text and "defaults" in text
         assert not backend.settings_file().exists() and list(backend.settings_file().parent.glob("settings.json.damaged-*"))
-        assert w.current_page() == "launch" and w.tabs.count() == 0
+        assert w.current_page() == "board" and w.tabs.count() == 0  # (the Start page, as a new installation shows it)
     finally:
         close(w)
 
@@ -126,7 +126,15 @@ def test_secrets_never_reach_a_file(window, env, monkeypatch, wait):
     token = "ghp" + "_AAAAbbbbCCCCdddd1111222233334444"
     folder = project(env, "p")
     window.set_project(folder)
+    # The Expert view's agent arguments are the board's (one start): kept in its draft without what may be a secret.
     window.launch.agent_args.setText(f"--model sonnet --api-key {secret} --token={token} {token}")
+    window.start_link.flush()
+    assert secret in window.board.board.first("agent").props["arguments"]
+    window.state.flush()
+    first = json.loads(state.state_file().read_text())
+    assert secret not in json.dumps(first) and token not in json.dumps(first)
+    assert next(n for n in first["boards"][str(folder)]["draft"]["nodes"] if n["kind"] == "agent")["props"][
+        "arguments"] == "--model sonnet"
     for edit in window.findChildren(QtWidgets.QLineEdit):  # every password field holds the secret
         if edit.property("secret_value") or edit.echoMode() == QtWidgets.QLineEdit.EchoMode.Password:
             edit.setText(secret)
@@ -138,7 +146,7 @@ def test_secrets_never_reach_a_file(window, env, monkeypatch, wait):
     settings = backend.settings_file().read_text() if backend.settings_file().exists() else ""
     assert secret not in written and token not in written and secret not in settings and token not in settings
     saved = json.loads(written)
-    assert saved["launch"]["forms"]["claude"]["arguments"] == ["--model", "sonnet"]
+    assert "forms" not in saved.get("launch", {}), "the Expert view keeps no start of its own: it is the board's"
     draft = saved["boards"][str(folder)]["draft"]
     agent = next(n for n in draft["nodes"] if n["kind"] == "agent")
     assert agent["props"]["arguments"] == "--verbose", "the board's draft is kept without the secret"
@@ -248,27 +256,46 @@ def test_tables_splitters_filters_and_folders_come_back(window, env, monkeypatch
         close(again)
 
 
-def test_the_start_form_per_agent_comes_back_without_secrets(window, env, monkeypatch):
+def test_the_start_made_in_the_expert_view_comes_back_without_secrets(window, env, monkeypatch):
+    """The Start page's start is one for both views (the board's): made in the Expert view's fields, it comes back
+    after a restart as the board's draft - without what may be a secret. Another agent chosen keeps what every agent
+    takes (as on the Board), not a form of its own."""
     launch = window.launch
     launch.form.widgets["--allow-host"].set_value(["example.org"])
-    launch.agent_args.setText("--model opus --api-key " + "sk-" + "secret-abcdefghijklmnop0123")
+    launch.agent_args.setText("--verbose --api-key " + "sk-" + "secret-abcdefghijklmnop0123")
     launch.agent.setCurrentText("codex")
-    assert launch.form.values()["--allow-host"] == ["example.org"], "an agent without a saved form keeps the form"
-    launch.form.widgets["--allow-host"].set_value(["codex.example"])
-    launch.agent_args.setText("--model gpt")
-    launch.agent.setCurrentText("claude")
-    assert launch.form.values()["--allow-host"] == ["example.org"] and launch.agent_args.text() == "--model opus"
-    launch.agent.setCurrentText("codex")
+    assert launch.form.values()["--allow-host"] == ["example.org"], "another agent: the options stay"
+    assert window.board.board.first("agent").props["agent"] == "codex"
     again = restart(window, monkeypatch)
     try:
         assert again.launch.agent.currentText() == "codex"
-        assert again.launch.form.values()["--allow-host"] == ["codex.example"]
-        assert again.launch.agent_args.text() == "--model gpt"
-        again.launch.agent.setCurrentText("claude")
         assert again.launch.form.values()["--allow-host"] == ["example.org"]
-        assert again.launch.agent_args.text() == "--model opus"
+        assert again.launch.agent_args.text() == "--verbose"
+        assert again.board.board.first("network").props == {"--allow-host": ["example.org"]} and again.board.dirty()
     finally:
         close(again)
+
+
+def test_the_start_form_on_its_own_keeps_a_form_per_agent(qapp, env):
+    """The Start form without a Board beside it (no window): each agent's last options and arguments come back when
+    the agent is chosen again."""
+    from sandbox_ai_app.ui import LaunchPage
+    launch = LaunchPage(backend.SandboxAI(), lambda *a, **k: None)
+    try:
+        launch.attach_state(state.State())
+        launch.agent.setCurrentText("claude")
+        launch.form.widgets["--allow-host"].set_value(["example.org"])
+        launch.agent_args.setText("--model opus --api-key " + "sk-" + "secret-abcdefghijklmnop0123")
+        launch.agent.setCurrentText("codex")
+        assert launch.form.values()["--allow-host"] == ["example.org"], "an agent without a saved form keeps the form"
+        launch.form.widgets["--allow-host"].set_value(["codex.example"])
+        launch.agent_args.setText("--model gpt")
+        launch.agent.setCurrentText("claude")
+        assert launch.form.values()["--allow-host"] == ["example.org"] and launch.agent_args.text() == "--model opus"
+        launch.agent.setCurrentText("codex")
+        assert launch.form.values()["--allow-host"] == ["codex.example"] and launch.agent_args.text() == "--model gpt"
+    finally:
+        launch.deleteLater()
 
 
 def test_an_unapplied_board_draft_comes_back_with_undo_and_discard(window, env, monkeypatch, qapp):

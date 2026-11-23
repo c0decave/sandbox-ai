@@ -61,9 +61,13 @@ def floats_over(shown, owner):
 
 def click_link(browser, text):
     """A real mouse click on the link with TEXT in the QTextBrowser BROWSER."""
-    cursor = browser.document().find(text)
-    assert not cursor.isNull(), text
-    point = browser.cursorRect(cursor).center()
+    from PySide6.QtGui import QTextCursor
+    found = browser.document().find(text)
+    assert not found.isNull(), text
+    middle = QTextCursor(browser.document())  # (the found cursor stands after the text: a click there can miss it)
+    middle.setPosition((found.selectionStart() + found.selectionEnd()) // 2)
+    point = browser.cursorRect(middle).center()
+    assert browser.anchorAt(point), f"no link at {text!r}"
     QTest.mouseClick(browser.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
 
 
@@ -291,7 +295,12 @@ def test_the_help_section_about_the_videos_leads_to_the_list(app_window, languag
     assert 'href="section:videos"' in html
     title = "Videos zu den Seiten" if language == "de" else "Videos about the pages"
     words = "Die Liste der Videos" if language == "de" else "The list of the videos"
-    assert words in window.help.text.toPlainText()
+    plain = window.help.text.toPlainText()
+    assert words in plain
+    details = help_view.tr_in(language, "Details")
+    assert details not in plain or plain.index(words) < plain.index(details), "in the first view, above the folds"
+    window.help.toggle_fold(0)  # drawn again (a fold opened): the link stays
+    assert 'href="section:videos"' in window.help.text.toHtml()
     click_link(window.help.text, words)
     assert window.help.shown == help_view.VIDEOS and title in window.help.text.toPlainText()
     assert help_content.BY_ID["app-videos"]

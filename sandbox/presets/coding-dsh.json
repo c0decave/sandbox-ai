@@ -25,6 +25,6 @@
     "Memory: ~/.dsh/AGENTS.md belongs to this project only and is kept between runs (not with --no-memory); the agent keeps its notes about the project there.",
     "DeepSeek Harness talks in the terminal: sandbox-ai's chat (its release has none of its own), each message one run of its headless mode, one conversation kept by its session id (/help lists the commands, Ctrl+C cancels an answer). Approvals cannot be answered in the chat: an action it would ask about is refused (with -D it asks nothing). Add --browser (the app: the Board's Browser part; Podman) and its web UI opens as well, in the session browser beside the terminal, where it asks you; -- web: the web UI alone. One task: sandbox-ai dsh -- headless \"TASK\".",
     "DeepSeek Harness's telemetry is always off and cannot be turned on (pinned in its read-only configuration and refused by the proxy).",
-    "DeepSeek Harness is not live-tested yet (a start says so); its image first: sandbox-ai build dsh."
+    "Its image first: sandbox-ai build dsh."
   ]
 }

@@ -1350,6 +1350,16 @@ def checked_device(value, launcher=None):
     if parse_selector(value) is None:
         a = argparse.Namespace(device=[value], gpu=None, backend="podman", podman_url=None, rulesets=[])
         notes = notes + launcher.device_notes(a)
+    for entry in entries:
+        # A node your user cannot open: the udev rule that gives it, with its commands to copy (root's: shown, never
+        # run - fixes.py), as a start lists it.
+        try:
+            item = None if launcher.device_access(entry["path"]) else launcher.udev_fix(entry["path"])
+        except (OSError, AttributeError, KeyError):
+            item = None
+        if item is not None:
+            notes.append(f"{item['title']} (copy these lines; they need root): "
+                         + " && ".join(launcher.FIXES.command_text(command) for command in item["commands"]))
     return entries, notes, device
 
 

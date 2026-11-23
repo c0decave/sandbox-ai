@@ -1,7 +1,7 @@
 # Source distribution: the package plus everything a checkout has.
 include LICENSE THIRD-PARTY.md README.md README_DE.md QUICKSTART.md QUICKSTART_DE.md SANDBOX.md TODO.md RELEASING.md PROXMOX_LXC.md PROXMOX_LXC_DE.md INTEGRATIONS.md INTEGRATIONS_DE.md
 include install.sh sandbox-ai
-recursive-include sandbox Containerfile.* build_image.sh release-signers mcp-signers public_suffix_list.dat model_profiles.json model_usecases.json model_evidence.json prices.json cloud_models.json
+recursive-include sandbox Containerfile.* build_image.sh release-signers mcp-signers public_suffix_list.dat model_profiles.json model_usecases.json model_evidence.json live_evidence.json cairn_workers.json prices.json cloud_models.json
 graft sandbox/web
 graft sandbox/launcher
 graft sandbox/presets
@@ -11,6 +11,7 @@ graft sandbox/service-images
 graft sandbox/templates
 graft sandbox/builtin
 graft sandbox/marketplace
+graft sandbox/artex-build
 # The desktop app (the wheel's sandbox_ai_app; the extra [gui] adds its PySide6).
 graft projects/sandbox-ai-app/sandbox_ai_app
 recursive-include tests *.py *.sh

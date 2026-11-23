@@ -174,7 +174,7 @@ def known_limitation(found):
         return None
     if "mqueue" in run and "Operation not permitted" in run:
         return (f"{KNOWN_LIMITATION}: crun may not mount mqueue in the sandbox here ({run[len('failed:'):][:200]}); "
-                "--nested-containers stays not live-tested")
+                "this runner cannot run containers inside the sandbox")
     return None
 
 

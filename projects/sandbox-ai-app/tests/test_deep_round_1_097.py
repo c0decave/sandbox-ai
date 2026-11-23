@@ -108,7 +108,7 @@ def user_host(tmp_path, monkeypatch):
     agents' images in the user's store) as the app's own process sees it."""
     import sys
     from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tests"))
+    sys.path.append(str(Path(__file__).resolve().parents[3] / "tests"))  # (after the app's own tests: conftest.app_tests_first)
     from live_fakes import Host
     host = Host(tmp_path / "host")
     host.add_image(*[f"localhost/{agent}-sandbox:latest" for agent in ("openhands", "nanobot", "letta", "opencode2")])

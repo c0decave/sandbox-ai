@@ -490,7 +490,7 @@ def help_style(prog):
 
 
 def parser():
-    p = argparse.ArgumentParser(prog="sandbox-ai rules", description=__doc__.split("\n\n")[0],
+    p = argparse.ArgumentParser(prog="sandbox-ai rules", description="The rulesets of the starts: check, show, reload, builtin, audit (README \"Rulesets\").",
                                 formatter_class=help_style, allow_abbrev=False,
                                 epilog="\n\n".join(__doc__.split("\n\n")[1:]))
     commands = p.add_subparsers(dest="command", required=True)
@@ -511,7 +511,7 @@ def parser():
     reloading.add_argument("name", nargs="?", metavar="NAME", help="a running start (default: the only one, or the "
                                                                   "one of this folder)")
     reloading.add_argument("-j", "--json", action="store_true", help="as JSON")
-    building = commands.add_parser("builtin", help="sandbox-ai's own rulesets (--rules builtin:NAME)",
+    building = commands.add_parser("builtin", help="the built-in rulesets of sandbox-ai (--rules builtin:NAME)",
                                    allow_abbrev=False)
     building.add_argument("name", nargs="?", metavar="NAME", help="print this one (to save a copy of it)")
     building.add_argument("--audit", action="store_true", help='with "mode": "audit": it records what it would '

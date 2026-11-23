@@ -59,6 +59,7 @@
     "Cairn's tasks are long (bootstrap, reason, explore): a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). Only one worker runs at a time here.",
     "Podman only. Build the images once: sandbox-ai build claude, sandbox-ai build cairn and sandbox-ai build browser (the board opens in the app's Browser button). With origin and goal the project is made at the start; else make it on the board.",
     "Once a project is active, Cairn hands out tasks on its own until it is complete or stopped, and a failing task is handed out again; the relay pauses the workers after 5 failed tasks in a row. Stop the project on the board to stop it.",
-    "Licence: Cairn is AGPL-3.0, built unchanged from the reviewed commit by sandbox-ai build cairn on your machine; using it for yourself puts no duty on you."
+    "Licence: Cairn is AGPL-3.0, built unchanged from the reviewed commit by sandbox-ai build cairn on your machine; using it for yourself puts no duty on you.",
+    "Another harness on the same server is a worker too: the same options with that harness as the lead and the worker (sandbox-ai pi --llm NAME --no-provider-defaults --cairn --cairn-workers pi); sandbox-ai cairn workers shows how far each harness is supported, as a traffic light."
   ]
 }

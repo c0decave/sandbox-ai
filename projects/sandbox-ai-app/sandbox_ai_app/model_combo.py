@@ -10,6 +10,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QCompleter
 
+from .widgets import row_enabled
+
 VISIBLE = 20  # rows the popup shows at a time; the rest scroll
 
 
@@ -51,8 +53,7 @@ def settle(combo):
     except RuntimeError:  # the combo is gone (a page rebuilt)
         return
     index = combo.findText(text, Qt.MatchFlag.MatchFixedString)
-    item = combo.model().item(index) if index >= 0 and hasattr(combo.model(), "item") else None
-    if index >= 0 and (item is None or item.isEnabled()):
+    if index >= 0 and row_enabled(combo, index):
         if index != combo.currentIndex():
             combo.setCurrentIndex(index)
             combo.activated.emit(index)

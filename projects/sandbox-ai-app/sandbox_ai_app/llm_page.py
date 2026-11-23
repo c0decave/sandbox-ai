@@ -34,7 +34,13 @@ model selected in the models table (another model of the server can be chosen in
 loop guard and whether the server may unload its other models; read with `llm show NAME --json` and `llm params --kind
 KIND --json` (the names, types and ranges come from sandbox-ai there), checked before the dialog closes and saved with
 `llm set NAME [--model MODEL] --reset ...` (a refusal shown in the dialog). A sandbox-ai without `llm params` (this
-machine's, or a host's once asked) leaves the button disabled, its tooltip saying why."""
+machine's, or a host's once asked) leaves the button disabled, its tooltip saying why.
+
+For all hosts (sandbox-ai llm share; llm_share_view.py): the column says whether a server is shared with every host of
+that host's sandbox-ai hosts and how many hosts have it ready (each host's state in its tooltip), or that it is a copy
+managed from another machine; For all hosts… (also on right-click) opens the server's sharing properties - the flag,
+one key tick per host, each host's state - and the Edit dialog has the flag too (applied once the server is saved).
+A key newly sent to a host, and unsharing, are asked first (llm-share-key, llm-unshare)."""
 from __future__ import annotations
 
 import functools
@@ -42,6 +48,7 @@ import json
 import re
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QVBoxLayout, QWidget,
@@ -54,6 +61,7 @@ from . import backend, theme, widgets
 from . import llm_params as LP
 from . import llm_loaded_view as LLV
 from . import llm_params_view as LPV
+from . import llm_share_view as LSV
 from . import wizard_llm as WL
 from . import model_profile as MP
 from . import model_profile_view as MPV
@@ -88,6 +96,7 @@ VPN_EXAMPLE = "home"
 LIST_SECONDS, ADD_SECONDS, CHECK_SECONDS, MODELS_SECONDS, REMOVE_SECONDS = 60, 90, 150, 120, 60
 PARAMS_SECONDS = 60
 SHOW_SECONDS = 60
+SHARE_SECONDS = 600  # llm share/unshare: SSH to every host of that host's list (a key: a few commands each)
 CONNECTION = ("kind", "url", "secret", "headers", "ca")  # what decides how the server is reached
 
 
@@ -164,9 +173,11 @@ class LlmDialog(QDialog):
     closes only once it saved (finish); failed(message) keeps it open with everything typed."""
 
     def __init__(self, parent=None, host_label="", remote=False, existing=None, run=None, taken=(), require=None,
-                 sai=None, host=LOCAL, draft=None):
+                 sai=None, host=LOCAL, draft=None, shared=None):
         """DRAFT (a new server only): the key of what was typed and not saved (drafts.py), filled in again - never
-        the key typed, nor plain http outside the local networks or Replace (chosen anew each time)."""
+        the key typed, nor plain http outside the local networks or Replace (chosen anew each time). SHARED: whether
+        the server is for all hosts now (llm share; the box For all hosts), None where it cannot be (a copy another
+        machine manages)."""
         super().__init__(parent)
         self.remote, self.existing, self.run, self.taken = remote, existing, run, set(taken or ())
         self.sai = sai  # this machine's sandbox-ai: the models' traffic light (model_profile.support_of)
@@ -247,6 +258,14 @@ class LlmDialog(QDialog):
             self.ca.textChanged.connect(lambda text: self.no_ca.setEnabled(not text.strip()))
         self.insecure = QCheckBox(tr("Allow plain http to an address outside the local networks (unencrypted)"))
         self.replace = QCheckBox(tr("Replace an LLM server of that name"))
+        self.shared_before = shared
+        self.share_box = QCheckBox(tr("For all hosts")) if shared is not None else None
+        if self.share_box is not None:
+            self.share_box.setAccessibleName(tr("For all hosts"))
+            self.share_box.setChecked(bool(shared))
+            self.share_box.setToolTip(tr("Copy the entry to every host of sandbox-ai hosts and keep it in sync (sandbox-ai "
+                                         "llm share) once it is saved; which hosts get its key: For all hosts… in "
+                                         "the list"))
         self.form.addRow(tr("Name"), self.name)
         self.form.addRow("", self.hint_row)
         self.form.addRow(tr("Kind"), self.kind)
@@ -263,6 +282,8 @@ class LlmDialog(QDialog):
         self.form.addRow("", self.no_ca)
         self.form.addRow("", self.insecure)
         self.form.addRow("", self.replace)
+        if self.share_box is not None:
+            self.form.addRow("", self.share_box)
         layout.addLayout(self.form)
         # (once the form is in the dialog: a row hidden before showed its field as a window of its own for a moment)
         self.form.setRowVisible(self.no_ca, bool((existing or {}).get("has_ca")))
@@ -311,6 +332,12 @@ class LlmDialog(QDialog):
         self.ca.setText(fields.get("ca") or "")
         self.insecure.setChecked(bool(fields.get("insecure")))
         self.replace.setChecked(True)
+
+    def share_wanted(self):
+        """True or False when the box For all hosts was changed from what the server is now, else None."""
+        if self.share_box is None or self.share_box.isChecked() == bool(self.shared_before):
+            return None
+        return self.share_box.isChecked()
 
     def show_fields(self):
         # Ollama, LM Studio, llama.cpp and vLLM offer the Messages API themselves (sandbox-ai llm knows since when).
@@ -484,13 +511,13 @@ class LlmDialog(QDialog):
     def ask_insecure(self, fields):
         """sandbox-ai refused to send the key over plain http to an address outside the local networks: asked as the
         web page asks (llm-insecure, naming the host and the URL). Yes: tested again with --insecure-http, and the
-        server is saved with it (the box ticked; Add asks no second time for that URL). No: not tested, said."""
+        server is saved with it (the box ticked; Add asks no second time for that URL). No: not checked, said."""
         url = fields["url"]
         if not ask_first(self, "llm-insecure", self.title_text, tr(
                 "Test {url} over plain http, unencrypted, from {host}, and save the server with plain http allowed? "
                 "The test sends only the key; the starts send the prompts, the answers and the key that way too. "
                 "Whoever is on the way can read them.", url=printable(url), host=self.host_label), tr("Allow")):
-            self.test_result.setText(tr("Not tested: the key is not sent over plain http outside the local networks "
+            self.test_result.setText(tr("Not checked: the key is not sent over plain http outside the local networks "
                                         "(use https, or allow it)."))
             colored(self.test_result, "warn")
             return
@@ -571,8 +598,8 @@ class LlmPage(QWidget):
         self.follow_note = follow_note()  # whose servers, when the window's pages follow the Sandboxes page's host
         top.addWidget(self.follow_note)
         layout.addLayout(top)
-        self.servers = table([tr("Name"), tr("Kind"), tr("URL"), tr("Model"), tr("Key"), tr("VPN"), tr("Agents")],
-                             stretch=2, compact=(1, 5, 6))
+        self.servers = table([tr("Name"), tr("Kind"), tr("URL"), tr("Model"), tr("Key"), tr("VPN"), tr("Agents"),
+                              tr("For all hosts")], stretch=2, compact=(1, 5, 6))
         self.servers.setAccessibleName(tr("LLM servers"))
         multi_select(self.servers)  # several at once (Ctrl, Shift): Remove… (and the Delete key) takes them all
         self.servers.itemSelectionChanged.connect(self.update_buttons)
@@ -623,6 +650,12 @@ class LlmPage(QWidget):
                                          "loaded, load, unload)"))
         self.loaded_button.clicked.connect(lambda _=False: self.server_models())
         self.loaded_dialog = None
+        self.share_button = QPushButton(tr("For all hosts…"))
+        self.share_button.setAccessibleName(tr("For all hosts"))
+        self.share_button.setToolTip(tr("Make the server reachable for every host of sandbox-ai hosts (sandbox-ai llm "
+                                        "share): its entry copied there and kept in sync, its key only to the hosts "
+                                        "ticked; each host's state"))
+        self.share_button.clicked.connect(lambda _=False: self.share())
         self.remove_button = QPushButton(tr("Remove…"))
         self.refresh_button = QPushButton(tr("Refresh"))
         for button, name, tip in (
@@ -645,11 +678,12 @@ class LlmPage(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         # A row that wraps when the window is narrow (it made the window 1300 px wide in German before).
         layout.addWidget(flow(self.add_button, self.edit_button, self.check_button, self.agent, self.models_button,
-                              self.sort, self.show_button, self.params_button, self.loaded_button,
+                              self.sort, self.show_button, self.params_button, self.loaded_button, self.share_button,
                               self.remove_button, self.refresh_button))
         widgets.list_menu(self.servers, lambda: [
             self.edit_button, self.check_button, self.models_button, self.show_button, self.params_button,
-            self.loaded_button, None, self.remove_button, None, self.add_button, self.refresh_button])
+            self.loaded_button, self.share_button, None, self.remove_button, None, self.add_button,
+            self.refresh_button])
         layout.addWidget(self.build_models(), 3)
         self.status = plain_label(role="secondary", selectable=True, log="llm")
         self.status.setAccessibleName(tr("Status"))
@@ -787,8 +821,15 @@ class LlmPage(QWidget):
         self.entries, self.loaded_host = entries, host
         rows = [[text_of(e.get("name"), 64), text_of(e.get("kind"), 40), text_of(e.get("url")),
                  text_of(e.get("model")), text_of(e.get("api_key_secret"), 64), text_of(e.get("vpn"), 64),
-                 text_of(e.get("agents"))] for e in entries]
+                 text_of(e.get("agents")), LSV.share_cell(e)] for e in entries]
         fill(self.servers, rows, keys=[e["name"] for e in entries])
+        by_name = {e["name"]: e for e in entries}
+        for row in range(self.servers.rowCount()):  # each host's state of a shared server, in the column's tooltip
+            entry, cell = by_name.get(row_key(self.servers, row)), self.servers.item(row, 7)
+            if entry is not None and cell is not None:
+                cell.setToolTip(safe_tooltip(LSV.share_tooltip(entry)))
+                if LSV.share_color(entry):
+                    cell.setForeground(QColor(theme.color(LSV.share_color(entry))))
         lines = [self.kept_status] if self.kept_status else []
         self.kept_status = ""
         lines += [tr("LLM servers on {host}: {count}", count=len(entries), host=self.host_label(host))
@@ -858,11 +899,11 @@ class LlmPage(QWidget):
     def update_buttons(self):
         keys = selected_keys(self.servers)
         for button in (self.edit_button, self.check_button, self.models_button, self.show_button, self.remove_button,
-                       self.params_button, self.loaded_button):
+                       self.params_button, self.loaded_button, self.share_button):
             set_enabled(button, bool(keys), tr("Select a server first."))
         if len(keys) > 1:  # several: Remove… takes them all; what acts on one server waits
             for button in (self.edit_button, self.check_button, self.models_button, self.show_button,
-                           self.params_button, self.loaded_button):
+                           self.params_button, self.loaded_button, self.share_button):
                 set_enabled(button, False, tr("Acts on one row: {count} are selected.", count=len(keys)))
         if keys and self.params_missing(self.host()):
             set_enabled(self.params_button, False, tr("The sandbox-ai of {host} has no model parameters yet "
@@ -891,7 +932,7 @@ class LlmPage(QWidget):
         taken = [e["name"] for e in self.entries] if host == self.loaded_host else []
         self.open_dialog(LlmDialog(self, self.host_label(host), remote=host != "local", run=self.runner(host),
                                    taken=taken, require=self.requirement(host), sai=self.sai, host=host,
-                                   draft=("llm", host)), host, None)
+                                   draft=("llm", host), shared=False), host, None)
 
     def edit(self):
         """The dialog prefilled from `llm show NAME --json` (and the CA's path from `llm show NAME`)."""
@@ -899,9 +940,11 @@ class LlmPage(QWidget):
         if host is None or name is None:
             return
         self.status.setText(tr("Reading {name}…", name=name))
+        entry = self.entry_of(name) or {}
+        shared = None if LSV.origin_of(entry) else LSV.shared_of(entry) is not None
         self.server_fields(host, name, self.edit_button, lambda old: self.open_dialog(
             LlmDialog(self, self.host_label(host), remote=host != "local", existing=old, run=self.runner(host),
-                      require=self.requirement(host), sai=self.sai, host=host),
+                      require=self.requirement(host), sai=self.sai, host=host, shared=shared),
             host, old))
 
     def server_fields(self, host, name, source, then):
@@ -948,8 +991,12 @@ class LlmPage(QWidget):
         title = dialog.title_text
         changed = WL.changes(old, fields) if old is not None else []
         if old is not None and not changed and not value:
-            self.status.setText(tr("{name}: nothing changed.", name=name))
+            wanted = dialog.share_wanted() if hasattr(dialog, "share_wanted") else None
             dialog.finish()
+            if wanted is None:
+                self.status.setText(tr("{name}: nothing changed.", name=name))
+            else:  # only For all hosts changed
+                self.share_after_save(host, name, fields, wanted)
             return
         # Plain http to a public address: prompts, answers and the key unencrypted on the way - asked first (an
         # edited server that had it already keeps it without a question; so does one whose Test connection asked
@@ -1043,7 +1090,10 @@ class LlmPage(QWidget):
             self.status.setText(lines_of(out.strip()[-1500:]) or tr("{name} added.", name=name))
             if open_:
                 dialog.finish()
-        if host == self.host():
+        wanted = dialog.share_wanted() if status == 0 and hasattr(dialog, "share_wanted") else None
+        if wanted is not None:  # the box For all hosts changed: llm share or unshare once the server is saved
+            self.share_after_save(host, name, {"secret": secret}, wanted)
+        elif host == self.host():
             self.kept_status = self.status.text()
             self.refresh()
         if status == 0 and check:
@@ -1414,6 +1464,95 @@ class LlmPage(QWidget):
         run_each(lambda name: self.sai.host_run(host, "llm", "remove", name, timeout=REMOVE_SECONDS), names, owner=self,
                  source=self.remove_button, timeout=(REMOVE_SECONDS + 15) * len(names), done=done)
 
+    # -- for all hosts (sandbox-ai llm share) --
+
+    def entry_of(self, name):
+        return next((e for e in self.entries if e.get("name") == name), None)
+
+    def share_hosts(self, host, entry):
+        """The hosts a server of HOST is shared with: those `llm list --json` named for it, else (this machine) the
+        app's own list of sandbox-ai hosts; a host's own list is not known here before it shares."""
+        shared = LSV.shared_of(entry)
+        if shared is not None and shared["hosts"]:
+            return [h["host"] for h in shared["hosts"] if LSV.HOST.fullmatch(h["host"])]
+        if host != LOCAL:
+            return []
+        try:
+            entries = self.sai.host_entries() if self.sai.hosts_supported() else []
+        except (OSError, ValueError):
+            entries = []
+        return sorted(e["name"] for e in entries if isinstance(e, dict) and e.get("kind") == "ssh"
+                      and isinstance(e.get("name"), str) and LSV.HOST.fullmatch(e["name"]))
+
+    def share(self):
+        """For all hosts…: the server's sharing (the flag, the key per host, each host's state); OK runs `llm share
+        NAME --key-to ...` or `llm unshare NAME` on the host chosen - a key newly sent to a host, and unsharing,
+        asked first."""
+        host, name = valid_host(self.host()), self.chosen()
+        entry = self.entry_of(name) if name else None
+        if host is None or entry is None:
+            return
+        origin = LSV.origin_of(entry)
+        if origin:
+            self.status.setText(tr("{name} is managed from {origin} (shared from there): share it there.", name=name,
+                                   origin=printable(origin)[:64]))
+            return
+        dialog = ShareDialog(self, entry, self.host_label(host), self.share_hosts(host, entry))
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            wanted, key_to = dialog.wanted()
+        finally:
+            dialog.deleteLater()
+        self.apply_share(host, name, entry, wanted, key_to)
+
+    def share_after_save(self, host, name, fields, wanted):
+        """The box For all hosts of the dialog, applied once the server is saved: shared with the hosts its key went
+        to before (none for a new one: For all hosts… ticks them), or unshared (asked first)."""
+        entry = self.entry_of(name) or {"name": name, "api_key_secret": fields.get("secret") or None}
+        key_to = (LSV.shared_of(entry) or {}).get("key_to", [])
+        self.apply_share(host, name, entry, wanted, key_to if wanted else [])
+
+    def apply_share(self, host, name, entry, wanted, key_to):
+        before = LSV.shared_of(entry)
+        try:
+            if not wanted:
+                if before is None:
+                    self.status.setText(tr("{name}: nothing changed.", name=name))
+                    return
+                argv = LSV.unshare_argv(name)
+                if not ask_first(self, "llm-unshare", tr("For all hosts"), on_host(host, tr(
+                        "Take {name} away from every host it is shared with? Its copies there are removed, with the "
+                        "keys sent; sessions there cannot start with it any more.", name=name)), tr("Unshare")):
+                    return
+            else:
+                argv = LSV.share_argv(name, key_to)
+                new = sorted(set(key_to) - set((before or {}).get("key_to", [])))
+                if new and not ask_first(self, "llm-share-key", tr("For all hosts"), on_host(host, tr(
+                        "Send the key of {name} ({names}) to {hosts}? It is kept in their secret stores from then on: "
+                        "whoever controls those hosts can use it.", name=name,
+                        names=", ".join(LSV.key_names(entry)), hosts=", ".join(new))), tr("Send the key")):
+                    return
+        except ValueError as exc:
+            self.status.setText(printable_text(exc))
+            return
+        self.status.setText(tr("Sharing {name} with the hosts…", name=name) if wanted else
+                            tr("Taking {name} away from the hosts…", name=name))
+        background(lambda: self.sai.host_run(host, *argv, timeout=SHARE_SECONDS), owner=self, work=True,
+                   source=self.share_button, timeout=SHARE_SECONDS + 15,
+                   done=lambda result, error: self.shared(host, name, result, error))
+
+    def shared(self, host, name, result, error):
+        status, out, err = outcome(result, error)
+        said = lines_of(((out or "") + "\n" + (err or "")).strip()[-3000:])
+        if status != 0 and not out:
+            self.status.setText(tr("Could not share {name}: {error}", name=name, error=failure(result, error)))
+        else:
+            self.status.setText(said or tr("{name}: done.", name=name))
+        if host == self.host():
+            self.kept_status = self.status.text()
+            self.refresh()
+
     def removed(self, host, name, result, error):
         status, out, err = outcome(result, error)
         if status != 0:
@@ -1426,6 +1565,9 @@ class LlmPage(QWidget):
                 self.models_of = None
         if host == self.host():
             self.refresh()
+
+
+ShareDialog = LSV.ShareDialog  # (a name of this module: the tests stand in for its exec)
 
 
 class ServerStatusLine(QLabel):

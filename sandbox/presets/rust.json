@@ -3,11 +3,11 @@
   "version": 1,
   "id": "rust",
   "title": "Rust",
-  "description": "Rust projects: crates.io, rustup's downloads and GitHub open, everything else closed.",
+  "description": "Rust projects: the Rust toolchain (rustc, cargo, clippy) mounted in; crates.io, rustup's downloads and GitHub open, everything else closed.",
   "translations": {
     "de": {
       "title": "Rust",
-      "description": "Rust-Projekte: crates.io, die Downloads von rustup und GitHub offen, alles andere zu."
+      "description": "Rust-Projekte: die Rust-Toolchain (rustc, cargo, clippy) eingehängt; crates.io, die Downloads von rustup und GitHub offen, alles andere zu."
     }
   },
   "category": "development",
@@ -17,6 +17,8 @@
     "opencode"
   ],
   "options": [
+    "--toolchain",
+    "rust",
     "--allow-github",
     "--allow-host",
     "crates.io",
@@ -30,8 +32,8 @@
     "sh.rustup.rs"
   ],
   "notes": [
-    "The toolchain (rustc, cargo; it brings the C toolchain cc it links with): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox): sandbox-ai toolchain add rust once, then --toolchain rust on the command line, or into the running sandbox: sandbox-ai toolchain attach RUN rust. Its registries are the ones this preset opens.",
-    "Without it: the toolchain: rustup into the sandbox's HOME, kept with the start (curl https://sh.rustup.rs -sSf | sh -s -- -y), or Debian's older cargo in an image variant: sandbox-ai images new rust --from claude, sandbox-ai images extend rust --add-apt cargo, sandbox-ai build --variant rust, then start with --image-variant rust.",
+    "The toolchain (rustc, cargo, rustfmt, clippy; it brings the C toolchain cc it links with, and zig) comes with the preset (--toolchain rust): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add it (sandbox-ai toolchain add rust: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "Another Rust version (a rust-toolchain.toml, which the toolchain does not read: it has no rustup): rustup into the sandbox's HOME, kept with the start (curl https://sh.rustup.rs -sSf | sh -s -- -y; sh.rustup.rs and static.rust-lang.org are open), then PATH=$HOME/.cargo/bin:$PATH puts its cargo before the toolchain's.",
     "A build needs memory: --memory 16g on the command line for a large workspace.",
     "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
   ]

@@ -35,6 +35,10 @@ NAME = instance_probe.NAME
 MESSAGES = (b"show", b"hidden")  # what is passed on (asked); "info" and "quit" are answered here
 ASK_FOR = 5.0  # seconds a second start tries to reach the first (which may not listen yet: it started a moment ago)
 QUIT_WAIT = 15.0  # seconds a start waits for an older app to quit (its questions answered) and end
+# Seconds a start keeps asking an app that said nothing in time (instance_probe.ANSWER each): its GUI thread is busy - it
+# has just started itself, a moment before - and a "silent" app is only asked to show its window, so a newer start
+# would end and leave the older version running.
+SILENT_FOR = 10.0
 
 
 def socket_path(environ=None):
@@ -68,6 +72,11 @@ class Instance(QObject):
         """True when an app listens on the socket and was told about this start (see meet); False when none does, or
         one made way (this start is the app then)."""
         running = instance_probe.ask(self.path)  # on the GUI thread on purpose: at start, no window yet, bounded
+        deadline = time.monotonic() + SILENT_FOR
+        while running is not None and running.protocol == "silent" and not hidden and time.monotonic() < deadline:
+            applog.log("INFO", "instance", f"the app that runs ({self.path}{instance_probe.where_of(running)}) did "
+                                           "not answer in time: asked again")
+            running = instance_probe.ask(self.path)  # (the same: at start, bounded by SILENT_FOR)
         if running is None:
             return False
         return not self.meet(running, hidden)

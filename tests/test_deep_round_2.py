@@ -76,18 +76,21 @@ def test_a_failed_session_start_says_its_supervisors_lines_once(host):
 
 
 def test_a_session_start_says_its_notes_once(host):
-    """A session start (the app's Start, `sandbox-ai qwen --session q1`) said its notes twice: "note: Qwen Code: not
-    live-tested yet ...", "no systemd user session (podman: cgroupfs), so --memory ... are not enforced", the
-    browser's and the devices' notes - once by the terminal's own check, once more by its supervisor (relayed). The
-    supervisor says them; the terminal does not say them first."""
-    host.add_image("localhost/qwen-sandbox:latest")
-    result = host.run("qwen", "--session", "q1", "--memory", "2g")
+    """A session start (the app's Start, `sandbox-ai openhands --session o1`) said its notes twice: an agent's own
+    note (OpenHands' Agent Canvas on the loopback), "no systemd user session (podman: cgroupfs), so --memory ... are
+    not enforced", the browser's and the devices' notes - once by the terminal's own check, once more by its
+    supervisor (relayed). The supervisor says them; the terminal does not say them first. (Until 0.1.209 the agents'
+    "not live-tested yet" note was such a note too; it is gone: tests/test_no_live_tested_note.py.)"""
+    host.add_image("localhost/openhands-sandbox:latest")
+    result = host.run("openhands", "--session", "o1", "--memory", "2g")
     assert host.stopped_at() is not None, result.stderr
-    assert result.stderr.count("not live-tested yet") == 1, result.stderr
+    said = result.stderr.split("Session failed to start")[0]  # (the fake engine's failure quotes the log again)
+    assert said.count("Agent Canvas, its web UI") == 1, result.stderr
     assert result.stderr.count("--pids are not enforced") <= 1, result.stderr
+    assert "live-tested" not in result.stderr
     # A dry run (the app's check) and a start in the foreground still say them, once.
-    dry = host.run("qwen", "--memory", "2g", "--dry-run")
-    assert dry.stderr.count("not live-tested yet") == 1, dry.stderr
+    dry = host.run("openhands", "--memory", "2g", "--dry-run")
+    assert dry.stderr.count("Agent Canvas, its web UI") == 1, dry.stderr
 
 
 def session_of_0_1_94(host, name, options):

@@ -9,8 +9,8 @@
   sandbox-ai hosts set NAME --update-sudo on|off       whether its update needs sudo (a system installation)
   sandbox-ai hosts remove NAME
   sandbox-ai hosts test NAME [--json]                  SSH, the host's sandbox-ai version, its doctor
-  sandbox-ai hosts update NAME...|--all [--version X.Y.Z] [--sudo] [--jobs N] [--json]
-                                                       the host's own `sandbox-ai update` (signed, as install.sh
+  sandbox-ai hosts update NAME...|--all [--version X.Y.Z] [--sudo] [--jobs N] [--installation user|system|all]
+                       [--json]                        the host's own `sandbox-ai update` (signed, as install.sh
                                                        installed it): old -> new version per host, a summary
   sandbox-ai hosts update NAME...|--all --mode off|notify|download|auto [--at HH:MM[-HH:MM]] [--json]
                                                        the host's own update mode (sandbox-ai update mode there,
@@ -19,13 +19,24 @@
                        [--version X.Y.Z]] [--json]     install sandbox-ai there: this machine's copy (default) or
                                                        the signed release the host downloads; for the SSH user, or
                                                        for every user as root (SSH as root, or with sudo)
+  sandbox-ai hosts uninstall NAME [--installation user|system] [--purge [--secrets] [--mcp-data]] [--stop-running]
+                       [--sudo|--no-sudo] [--remove-from-list] [--dry-run] [--yes] [--json]
+                                                       remove sandbox-ai there (its own sandbox-ai uninstall, after
+                                                       its table of what goes and a question); the host stays in
+                                                       the list unless --remove-from-list
   sandbox-ai hosts run NAME -- ARGS...                 `sandbox-ai ARGS` on that host (e.g. -- list --json)
 
 The desktop app and the web interface (sandbox-ai web) use the same list (~/.config/sandbox-ai/hosts.json) and
 reach each host the same way: SSH with your keys, never a password prompt (BatchMode), the host key learnt at the
 first contact and checked strictly from then on, each argument quoted on its own. Nothing listens on the network
 on the hosts: they only need sshd and sandbox-ai. A non-interactive SSH login reads no ~/.bashrc on Debian, so the
-remote command falls back to ~/.local/bin/sandbox-ai (install.sh's place) when sandbox-ai is not on its PATH.
+remote command runs ~/.local/bin/sandbox-ai (the SSH user's own installation, install.sh's place) when there is
+one - the one a terminal there finds first, through the PATH block in ~/.bashrc - else the sandbox-ai on its PATH.
+
+A host may have several installations: the user's own and a system one (PREFIX/lib/sandbox-ai, its commands in
+PREFIX/bin), a pip or pipx one, a package. hosts list names each (--json: "installations", with the one a terminal
+there runs and the one the app's commands run; "differ" when those are not the same one); update and uninstall take
+--installation user|system for another one than the one the commands run.
 
 A key file that others can read is refused by ssh ("UNPROTECTED PRIVATE KEY FILE"): add and test make your own
 key files (the host's --identity, else ~/.ssh/id_*; regular files you own, never through a symbolic link)
@@ -506,25 +517,71 @@ def command_word(command):
     return shlex.quote(command)
 
 
-def remote_command(entry, args, sudo=None):
-    """The one string ssh hands the remote shell: sandbox-ai with ARGS, each quoted; sandbox-ai from PATH, else
-    ~/.local/bin/sandbox-ai (a non-interactive login reads no ~/.bashrc), else the host's own command. SUDO:
-    "batch" runs it as `sudo -n` (refused rather than asking for a password), "prompt" as `sudo` (in a terminal,
-    which asks); sandbox-ai's path is found as you either way."""
+# The one line ssh hands the remote user's login shell ($SHELL -c LINE) is read by that shell, whichever it is: sh,
+# bash, zsh, but also fish (inside '...' it takes \' and \\ as escapes, and has no if/then) or csh and tcsh (a line
+# break inside '...' is an error there, ! is history). shlex.quote is POSIX only. So the line is always
+# /bin/sh -c '...' with the script inside in characters each of them reads alike - printable ASCII but ' " \ $ `
+# and ! - and every other byte as \0NNN, which sh itself turns back into the script (printf %b, POSIX) and runs.
+# No login shell parses an argument, and none needs to be POSIX.
+NEUTRAL_PLAIN = frozenset(chr(code) for code in range(32, 127)) - set("'\"\\$`!")
+
+
+NEUTRAL_HEAD, NEUTRAL_TAIL = "/bin/sh -c 'v=$(printf %b \"", "X\"); eval \"${v%X}\"'"
+
+
+def neutral_command(script):
+    """The line for ssh that runs the POSIX sh SCRIPT on the remote host whatever the login shell there is."""
+    encoded = "".join(char if char in NEUTRAL_PLAIN else
+                      "".join(f"\\0{byte:03o}" for byte in char.encode("utf-8", "surrogateescape"))
+                      for char in script)
+    # (X: command substitution drops the script's last line breaks, never the X after them.)
+    return f"{NEUTRAL_HEAD}{encoded}{NEUTRAL_TAIL}"
+
+
+def neutral_script(line):
+    """The script of a LINE neutral_command made (what the remote sh runs), or None for another line."""
+    if not (line.startswith(NEUTRAL_HEAD) and line.endswith(NEUTRAL_TAIL)):
+        return None
+    encoded = line[len(NEUTRAL_HEAD):len(line) - len(NEUTRAL_TAIL)].encode("utf-8", "surrogateescape")
+    return re.sub(rb"\\0([0-7]{3})", lambda match: bytes([int(match.group(1), 8)]), encoded).decode(
+        "utf-8", "surrogateescape")
+
+
+# The sandbox-ai a host's commands run when its entry names none (--command): the SSH user's own installation
+# (install.sh's ~/.local/bin/sandbox-ai) when there is one, else the one on the PATH of the SSH command. A terminal
+# there finds the same: install.sh's PATH block (and Debian's, Fedora's ~/.profile) put ~/.local/bin first - but a
+# non-interactive SSH command reads none of them, and found a system installation in /usr/local/bin instead (user
+# report 2026-11-23: the terminal on coding-101 ran the user's 0.1.188, the app's commands and its Update the system's
+# 0.1.234). Every command of the app, its terminals and its checks (a start's --help) goes to this one.
+OWN_COMMAND = '"$HOME/.local/bin/sandbox-ai"'
+# An installation's own command (hosts.installations: DATA/current/sandbox-ai of install.sh's user or system one).
+EXECUTABLE = re.compile(r"/[^\0\n\r]{1,400}/current/sandbox-ai")
+
+
+def remote_command(entry, args, sudo=None, executable=None):
+    """The one string ssh hands the remote shell (neutral_command: whatever login shell the user has there):
+    sandbox-ai with ARGS, each quoted; the host's own command (--command), else ~/.local/bin/sandbox-ai, else the one
+    on PATH (OWN_COMMAND); EXECUTABLE: that installation's own command instead (installations: update and uninstall
+    of the one chosen). SUDO: "batch" runs it as `sudo -n` (refused rather than asking for a password), "prompt" as
+    `sudo` (in a terminal, which asks); sandbox-ai's path is found as you either way."""
     quoted = " ".join(shlex.quote(str(arg)) for arg in args)
     prefix = SUDO[sudo] if sudo else ""
+    if executable is not None:
+        if not EXECUTABLE.fullmatch(executable) or "/../" in executable:
+            raise ValueError(f"not an installation's command: {printable(executable)[:200]}")
+        return neutral_command(f"exec {prefix}{shlex.quote(executable)} {quoted}".rstrip())
     if entry.get("command"):
-        return f"exec {prefix}{command_word(entry['command'])} {quoted}".rstrip()
+        return neutral_command(f"exec {prefix}{command_word(entry['command'])} {quoted}".rstrip())
     if sudo:
-        return (f'if command -v sandbox-ai >/dev/null 2>&1; then exec {prefix}"$(command -v sandbox-ai)" {quoted}; '
-                f'else exec {prefix}"$HOME/.local/bin/sandbox-ai" {quoted}; fi')
-    return (f'if command -v sandbox-ai >/dev/null 2>&1; then exec sandbox-ai {quoted}; '
-            f'else exec "$HOME/.local/bin/sandbox-ai" {quoted}; fi')
+        return neutral_command(f'if [ -x {OWN_COMMAND} ]; then exec {prefix}{OWN_COMMAND} {quoted}; else exec '
+                               f'{prefix}"$(command -v sandbox-ai || echo sandbox-ai)" {quoted}; fi')
+    return neutral_command(f'if [ -x {OWN_COMMAND} ]; then exec {OWN_COMMAND} {quoted}; '
+                           f'else exec sandbox-ai {quoted}; fi')
 
 
-def argv(name, args, tty=False, path=None, sudo=None, control=None):
-    """The command line that runs `sandbox-ai ARGS` on host NAME (LOCAL: this machine's sandbox-ai); SUDO: see
-    remote_command."""
+def argv(name, args, tty=False, path=None, sudo=None, control=None, executable=None):
+    """The command line that runs `sandbox-ai ARGS` on host NAME (LOCAL: this machine's sandbox-ai); SUDO,
+    EXECUTABLE: see remote_command."""
     if any(not isinstance(arg, str) or "\0" in arg for arg in args):
         raise ValueError("an argument is not a string without NUL")
     if sudo not in (None, *SUDO):
@@ -537,12 +594,14 @@ def argv(name, args, tty=False, path=None, sudo=None, control=None):
     if name not in hosts:
         raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
     entry = hosts[name]
-    return [*ssh_base(entry, tty, control=None if tty else control), remote_command(entry, args, sudo)]
+    return [*ssh_base(entry, tty, control=None if tty else control),
+            remote_command(entry, args, sudo, executable)]
 
 
-def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, sudo=None):
+def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, sudo=None, executable=None):
     """(exit status, stdout, stderr) of `sandbox-ai ARGS` on host NAME; 255 when SSH itself failed, 124 when it
-    did not end within TIMEOUT seconds (starting the shared connection included)."""
+    did not end within TIMEOUT seconds (starting the shared connection included). EXECUTABLE: an installation's own
+    command there (remote_command)."""
     begun = time.monotonic()
     deadline = begun + timeout
     control = entry = None
@@ -552,7 +611,7 @@ def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, s
         if control is not None and not ensure_master(entry, control, deadline=deadline):
             control = None
     status, out, err, answered = run_once(name, args, input, deadline - time.monotonic(), timeout, path, runner,
-                                          sudo, control)
+                                          sudo, control, executable)
     if control is not None and (status == 255 or status == 124 and not answered):
         # The master may be dead (it still answers -O check, locally): it stops taking new sessions (-O stop, so
         # the commands running through it on that host go on), and the next command makes a new one. The command
@@ -562,7 +621,7 @@ def run(name, args, input=None, timeout=120, path=None, runner=subprocess.run, s
         if status == 255 and mux_refused(out, err):
             status, out, err, _ = run_once(name, args, input, max(deadline - time.monotonic(),
                                                                   min(timeout, CONNECT_TIMEOUT + 5)),
-                                           timeout, path, runner, sudo, None)
+                                           timeout, path, runner, sudo, None, executable)
     ran(name, f"sandbox-ai {LOG.command_line(args)}", begun, status, err)
     return status, out, err
 
@@ -608,9 +667,9 @@ def mux_refused(out, err):
     return False
 
 
-def run_once(name, args, input, seconds, timeout, path, runner, sudo, control):
+def run_once(name, args, input, seconds, timeout, path, runner, sudo, control, executable=None):
     """(status, stdout, stderr, whether anything was answered) of one try of run() within SECONDS."""
-    command = argv(name, args, path=path, sudo=sudo, control=control)
+    command = argv(name, args, path=path, sudo=sudo, control=control, executable=executable)
     if seconds <= 0:
         return 124, "", f"sandbox-ai on {name}: no answer within {timeout} s", False
     try:
@@ -742,18 +801,19 @@ def fixed_text(change):
             f"private ({change['now']})")
 
 
-def run_fixing(name, args, timeout=30, path=None, runner=subprocess.run, sudo=None):
+def run_fixing(name, args, timeout=30, path=None, runner=subprocess.run, sudo=None, executable=None):
     """run() for host NAME with its key files made private first, and once more when ssh still refuses a key
     file as too open: (status, out, err, fixed, warnings)."""
     entry = None if name == LOCAL else load(path).get(name)
     fixed, warnings = protect_keys(entry) if entry else ([], [])
-    status, out, err = run(name, args, timeout=timeout, path=path, runner=runner, sudo=sudo)
+    status, out, err = run(name, args, timeout=timeout, path=path, runner=runner, sudo=sudo, executable=executable)
     if entry and status != 0 and TOO_OPEN.search(err or ""):
         more, more_warnings = protect_keys(entry, err)
         fixed += more
         warnings += [warning for warning in more_warnings if warning not in warnings]
         if more:
-            status, out, err = run(name, args, timeout=timeout, path=path, runner=runner, sudo=sudo)
+            status, out, err = run(name, args, timeout=timeout, path=path, runner=runner, sudo=sudo,
+                                   executable=executable)
     return status, out, err, fixed, warnings
 
 
@@ -889,6 +949,158 @@ def installation(text):
     return info
 
 
+# --- every sandbox-ai on a host: install.sh's (the user's own, a system one), pip, pipx, a package ------------
+#
+# One shell script over SSH (no sandbox-ai needed there, python3 is - install.sh's own requirement): the command a
+# terminal there finds (the user's login shell, interactive: `$SHELL -lic 'command -v sandbox-ai'`, which reads
+# ~/.bashrc and its PATH block), the one the app's commands run (OWN_COMMAND), and every sandbox-ai in ~/.local/bin,
+# ~/.bin, the user's install.sh data folder, /usr/local/bin, /usr/bin and on PATH: an install.sh installation by its
+# folder (DATA/versions/X, the version read from its file), any other by its own `version --verbose`.
+INSTALLATIONS_PY = r"""
+import json, os, re, subprocess, sys
+home = os.path.expanduser("~")
+data = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+names = [n for n in sys.argv[1:4] if n.startswith("/")]
+names += [os.path.join(home, ".local/bin/sandbox-ai"), os.path.join(home, ".bin/sandbox-ai"),
+          os.path.join(data, "sandbox-ai/current/sandbox-ai"), "/usr/local/bin/sandbox-ai", "/usr/bin/sandbox-ai"]
+names += [os.path.join(d, "sandbox-ai") for d in os.environ.get("PATH", "").split(":") if d.startswith("/")]
+found, seen = [], {}
+for name in names:
+    if not (os.path.isfile(name) and os.access(name, os.X_OK)):
+        continue
+    real = os.path.realpath(name)
+    match = re.fullmatch(r"(/.*)/versions/([^/]+)/sandbox-ai", real)
+    key = match.group(1) if match else real
+    if key in seen:
+        seen[key]["links"].append(name)
+        continue
+    item = {"links": [name], "real": real, "data": None, "tree": os.path.dirname(real), "version": None,
+            "verbose": None}
+    if match:
+        item["data"] = match.group(1)
+        try:
+            with open(os.path.join(item["tree"], "sandbox", "agent_sandbox.py")) as stream:
+                for line in stream:
+                    if line.startswith("__version__ = "):
+                        item["version"] = line.split('"')[1]
+                        break
+        except (OSError, IndexError, UnicodeDecodeError):
+            pass
+    else:
+        try:
+            item["verbose"] = subprocess.run([name, "version", "--verbose"], capture_output=True, text=True,
+                                             stdin=subprocess.DEVNULL, timeout=30).stdout[:4000]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    seen[key] = item
+    found.append(item)
+uid = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4].isdigit() else str(os.getuid())
+print(json.dumps({"uid": int(uid), "home": home, "terminal": sys.argv[1], "commands": sys.argv[2],
+                  "plain": sys.argv[3], "installations": found}))
+"""
+INSTALLATIONS_SH = (
+    'own="$HOME/.local/bin/sandbox-ai"; plain=$(command -v sandbox-ai 2>/dev/null); '
+    'if [ -x "$own" ]; then commands=$own; else commands=$plain; fi; '
+    'login=${SHELL:-}; case $login in */bash|*/zsh|*/ksh|*/mksh|*/dash|*/sh) ;; '
+    '*) login=$(command -v bash 2>/dev/null) ;; esac; terminal=; '
+    'if [ -n "$login" ]; then t=; command -v timeout >/dev/null 2>&1 && t="timeout 20"; '
+    "terminal=$($t \"$login\" -lic 'printf \"\\nSANDBOX_AI_FOUND=%s\\n\" \"$(command -v sandbox-ai)\"' "
+    "</dev/null 2>/dev/null | sed -n 's/^SANDBOX_AI_FOUND=//p' | tail -n 1); fi; "
+    'case $terminal in /*) ;; *) terminal= ;; esac; '
+    'exec python3 -I -c "$py" "$terminal" "$commands" "$plain" "$(id -u)"')
+
+
+def installation_of(item):
+    """{"kind", "version", "path", "prefix", "data", "links", "executable"} of one sandbox-ai the probe found: an
+    install.sh installation (kind user or system, EXECUTABLE its own DATA/current/sandbox-ai), else what its
+    `version --verbose` said (pip, package, checkout, unknown)."""
+    if item.get("data"):
+        info = installation(f"sandbox-ai {item.get('version') or '?'}\ninstalled in: {item.get('tree')}\n")
+        executable = f"{item['data']}/current/sandbox-ai"
+        info.update(data=item["data"], executable=executable if EXECUTABLE.fullmatch(executable) else None)
+    else:
+        # (a wrapper that runs an install.sh installation says that one's place: named, never run as one here)
+        info = installation(item.get("verbose") or "")
+        info.update(data=None, executable=None)
+    info["links"] = [printable(link) for link in item.get("links") or [] if isinstance(link, str)][:8]
+    info["version"] = printable(info["version"]) if info.get("version") else None
+    info["path"] = printable(info["path"]) if info.get("path") else printable(item.get("real") or "") or None
+    return {key: info.get(key) for key in ("kind", "version", "path", "prefix", "data", "links", "executable",
+                                           "package")}
+
+
+def installations(name, path=None, runner=subprocess.run):
+    """{"installations": [installation_of ..., "terminal": a terminal there runs it, "commands": the app's commands
+    run it], "terminal", "commands": the sandbox-ai each one finds, "differ": both found and not the same one,
+    "uid", "error"} of host NAME (one SSH command, INSTALLATIONS_SH)."""
+    result = {"installations": [], "terminal": None, "commands": None, "differ": False, "uid": None, "error": None}
+    entry = load(path).get(name)
+    if entry is None:
+        raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
+    script = f"py={shlex.quote(INSTALLATIONS_PY)}; {INSTALLATIONS_SH}"
+    if entry.get("command"):  # (the host's own command: what the app's commands run)
+        script = script.replace('if [ -x "$own" ]; then commands=$own; else commands=$plain; fi',
+                                f"commands={command_word(entry['command'])}", 1)
+    status, out, err = remote_shell(entry, script, timeout=CONNECT_TIMEOUT + 60, runner=runner)
+    try:
+        found = json.loads(out.decode("utf-8", "replace")) if status == 0 else None
+    except (ValueError, RecursionError):
+        found = None
+    if not isinstance(found, dict) or not isinstance(found.get("installations"), list):
+        result["error"] = failure(status, "", err) if status != 0 else "the host's answer was not understood"
+        return result
+    result["uid"] = found.get("uid") if isinstance(found.get("uid"), int) else None
+    items = [item for item in found["installations"][:16] if isinstance(item, dict)]
+
+    def owner(command):
+        """The item of the probe a found COMMAND (a path) runs, by its links (or its folder)."""
+        if not isinstance(command, str) or not command.startswith("/"):
+            return None
+        for index, item in enumerate(items):
+            if command in (item.get("links") or []) or command == item.get("real"):
+                return index
+        return None
+    terminal, commands = owner(found.get("terminal")), owner(found.get("commands"))
+    for index, item in enumerate(items):
+        info = installation_of(item)
+        info["terminal"], info["commands"] = index == terminal, index == commands
+        result["installations"].append(info)
+    for key, command in (("terminal", found.get("terminal")), ("commands", found.get("commands"))):
+        result[key] = printable(command) if isinstance(command, str) and command else None
+    result["differ"] = terminal is not None and commands is not None and terminal != commands
+    return result
+
+
+def installations_text(found, running=None):
+    """The other installations of a host beside the one RUNNING (its version) in a few words: "; system 0.1.236",
+    and a warning when a terminal there runs another one than the app's commands."""
+    items = (found or {}).get("installations") or []
+    if not isinstance(items, list):
+        return ""
+    words = [f"{printable(item.get('kind') or '?')} {printable(item.get('version') or '?')}"
+             for item in items if isinstance(item, dict) and not item.get("commands")]
+    text = "".join(f"; {word}" for word in words)
+    if (found or {}).get("differ"):
+        terminal = next((item for item in items if isinstance(item, dict) and item.get("terminal")), {})
+        commands = next((item for item in items if isinstance(item, dict) and item.get("commands")), {})
+        text += (f"; a terminal there runs {printable(terminal.get('kind') or '?')} "
+                 f"{printable(terminal.get('version') or '?')}, the app's commands "
+                 f"{printable(commands.get('kind') or '?')} {printable(commands.get('version') or running or '?')}")
+    return text
+
+
+def chosen_installation(found, kind, name="the host"):
+    """The installation of FOUND (installations()) of KIND: "user", "system" (the first one), or a data folder; a
+    ValueError naming those there are when there is none."""
+    items = [item for item in (found or {}).get("installations") or [] if isinstance(item, dict)]
+    for item in items:
+        if item.get("executable") and (item.get("kind") == kind or item.get("data") == kind):
+            return item
+    there = ", ".join(f"{printable(item.get('kind'))} {printable(item.get('version') or '?')} "
+                      f"({printable(item.get('path') or '?')})" for item in items) or "none"
+    raise ValueError(f"{name} has no install.sh installation of the kind {printable(kind)} (there: {there})")
+
+
 def not_updatable(name, info):
     """Why the sandbox-ai of host NAME (INSTALLATION info) is not updated over SSH, with the way to do it, or None."""
     where = printable(info.get("path") or "?")
@@ -935,19 +1147,37 @@ def update_args(info, version=None):
     return ["update", *(["--version", version] if version else []), *mode]
 
 
-def host_status(name, path=None, runner=subprocess.run):
-    """{"name", "version", "kind", "path", "prefix", "available", "update", "error", "fixed", "checked"}: the
-    sandbox-ai of host NAME and whether a newer release is there (its own `update --check`: the release it would
-    install, checked as it would check it)."""
+def not_installed(status, err):
+    """Whether a remote command's (STATUS, ERR) says the shell found no sandbox-ai there (sh: exec: ...: not found)."""
+    return status == 127 and bool(re.search(r"sandbox-ai[^\n]*(?:not found|No such file)", err or ""))
+
+
+def host_status(name, path=None, runner=subprocess.run, check=True):
+    """{"name", "version", "kind", "path", "prefix", "available", "update", "error", "fixed", "checked",
+    "installations", "differ", "missing"}: the sandbox-ai of host NAME (the one its commands run), every installation
+    there (installations(): which one a terminal there runs, "differ" when that is another one) and, with CHECK,
+    whether a newer release is there (its own `update --check`: the release it would install, checked as it would
+    check it). "missing": the host answers but has no sandbox-ai where its commands look."""
     result = {"name": name, "version": None, "kind": None, "path": None, "prefix": None, "available": None,
-              "update": None, "update_mode": None, "error": None, "fixed": [], "checked": int(time.time())}
+              "update": None, "update_mode": None, "error": None, "fixed": [], "checked": int(time.time()),
+              "installations": None, "differ": False, "missing": False}
     status, out, err, result["fixed"], _ = run_fixing(name, ["version", "--verbose"], path=path, runner=runner)
+    if status != 255:
+        try:
+            found = installations(name, path, runner)
+        except Exception as exc:  # noqa: BLE001 - only more to say: the version stands without it
+            LOG.debug("hosts", f"{name}: its installations were not read: {exc}")
+            found = {"error": str(exc)}
+        if not found.get("error"):
+            result["installations"], result["differ"] = found["installations"], found["differ"]
     if status != 0:
-        result["error"] = failure(status, out, err)
+        result["missing"] = not_installed(status, err)
+        result["error"] = (f"no sandbox-ai there (install it: sandbox-ai hosts install {name})" if result["missing"]
+                           else failure(status, out, err))
         return result
     info = installation(out)
     result.update({key: info.get(key) for key in ("version", "kind", "path", "prefix", "update_mode")})
-    if info["kind"] == "checkout" or (info["kind"] == "pip" and not info.get("self_update")):
+    if not check or info["kind"] == "checkout" or (info["kind"] == "pip" and not info.get("self_update")):
         return result
     # As your user `update --check` of a system installation reads none (it would install for you): only the
     # newest release it names counts; the installed version is the one --verbose said.
@@ -956,10 +1186,44 @@ def host_status(name, path=None, runner=subprocess.run):
     if found and VERSION.fullmatch(found.group(1)):
         result["available"] = found.group(1)
         if version_key(result["version"]) and version_key(result["available"]):
-            result["update"] = version_key(result["available"]) > version_key(result["version"])
+            # (an update only of a release signed by a key the host trusts - what its update would take; a host
+            # too old to say a signature is taken at its word; a host newer than the newest release has nothing to
+            # update, and says so)
+            line = re.search(r"^signature: (.*)$", out, re.M)
+            signed = line is None or line.group(1).startswith("good")
+            result["update"] = signed and version_key(result["available"]) > version_key(result["version"])
+            result["ahead"] = version_key(result["version"]) > version_key(result["available"])
     else:
         result["error"] = "update check: " + failure(status, out, err)
     return result
+
+
+def keep_status(name, path=None, runner=subprocess.run, newest=False):
+    """Host NAME's status read again now and kept (after an update, an installation or an uninstall: the Hosts page
+    and hosts list --cached show the version there at once, never an empty column): its version and installations;
+    whether an update is there from its last update check (NEWEST: the newest release was just installed); the
+    update check itself waits for the next hosts list after STATUS_TTL. The status, or None for a host not listed."""
+    entry = load(path).get(name)
+    if entry is None:
+        return None
+    before = load_statuses().get(name) or {}
+    result = host_status(name, path, runner, check=False)
+    available = before.get("available") if isinstance(before.get("available"), str) else None
+    if newest and version_key(result["version"]) and (not version_key(available) or
+                                                      version_key(result["version"]) > version_key(available)):
+        available = result["version"]
+    if version_key(result["version"]) and version_key(available):
+        result["available"] = available
+        result["update"] = version_key(available) > version_key(result["version"])
+        result["ahead"] = version_key(result["version"]) > version_key(available)
+    with STATUS_LOCK:  # (hosts update --jobs N: each host's status kept, none lost to another's write)
+        kept = load_statuses()
+        kept[name] = {**result, "ssh": entry["ssh"], "port": entry["port"]}
+        save_statuses(kept)
+    return result
+
+
+STATUS_LOCK = threading.Lock()
 
 
 def status_file():
@@ -1018,9 +1282,10 @@ def statuses(names, refresh=False, cached=False, path=None, runner=subprocess.ru
 
 
 def forget_status(name):
-    kept = load_statuses()
-    if kept.pop(name, None) is not None:
-        save_statuses(kept)
+    with STATUS_LOCK:
+        kept = load_statuses()
+        if kept.pop(name, None) is not None:
+            save_statuses(kept)
 
 
 def status_text(info):
@@ -1029,16 +1294,23 @@ def status_text(info):
     if not info:
         return "?"
     version = printable(info.get("version") or "?")
+    others = installations_text(info, info.get("version"))
     if not info.get("version"):
+        if info.get("missing"):
+            return "not installed" + others
         return "unreachable" if info.get("error") else "?"
     mode = f"; updates: {info['update_mode']}" if info.get("update_mode") in UPDATE_MODES else ""
+    # (the kind of installation is named when there are several: which one this is)
+    kind = f" ({info['kind']})" if info.get("kind") in ("user", "system") and others else ""
     if info.get("kind") in ("checkout", "pip", "package"):
-        return f"{version} ({info['kind']}){mode}"
+        return f"{version} ({info['kind']}){mode}{others}"
     if info.get("update"):
-        return f"{version}, update: {printable(info.get('available'))}{mode}"
+        return f"{version}{kind}, update: {printable(info.get('available'))}{mode}{others}"
+    if info.get("ahead"):
+        return f"{version}{kind}, newer than the newest release {printable(info.get('available'))}{mode}{others}"
     if info.get("update") is False:
-        return f"{version}, up to date{mode}"
-    return f"{version}, update unknown{mode}"
+        return f"{version}{kind}, up to date{mode}{others}"
+    return f"{version}{kind}, update unknown{mode}{others}"
 
 
 UPDATE_MODES = ("off", "notify", "download", "auto")  # updates.py MODES: a host's own update mode
@@ -1073,26 +1345,46 @@ def update_mode(name, mode, at=None, path=None, runner=subprocess.run):
     return result
 
 
-def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from_here=False, terminal=False):
+def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from_here=False, terminal=False,
+           installation_=None):
     """Update sandbox-ai on host NAME with its own `sandbox-ai update` (install.sh's signed update), as the same
     kind of installation. SUDO (None: the host's update_sudo): as `sudo -n`, which never asks for a password.
-    {"name", "before", "after", "changed", "kind", "sudo", "error", "needs_sudo", "needs_password", "output",
-    "notes", "fixed"}; "needs_password": sudo wants one (update_terminal asks in a terminal). FROM_HERE: this
-    machine's copy of sandbox-ai is installed there instead (hosts install), as the same kind of installation (the
-    user's own, or for every user in its prefix): for a host that cannot reach the release server, or before a
-    release is published."""
+    {"name", "before", "after", "changed", "kind", "installation", "sudo", "error", "needs_sudo", "needs_password",
+    "output", "notes", "fixed"}; "needs_password": sudo wants one (update_terminal asks in a terminal);
+    "installation": {"kind", "path", "prefix"} of the one updated. FROM_HERE: this machine's copy of sandbox-ai is
+    installed there instead (hosts install), as the same kind of installation (the user's own, or for every user in
+    its prefix): for a host that cannot reach the release server, or before a release is published. INSTALLATION_:
+    "user", "system" (or an installation's data folder) of installations(): that one, run by its own command; None:
+    the one the host's commands run (OWN_COMMAND: the user's own first, as a terminal there finds it)."""
     entry = {} if name == LOCAL else load(path).get(name)
     if entry is None:
         raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
-    result = {"name": name, "before": None, "after": None, "changed": False, "kind": None, "sudo": False,
-              "error": None, "needs_sudo": False, "needs_password": False, "output": "", "notes": [], "fixed": []}
-    status, out, err, result["fixed"], warnings = run_fixing(name, ["version", "--verbose"], path=path, runner=runner)
+    result = {"name": name, "before": None, "after": None, "changed": False, "kind": None, "installation": None,
+              "sudo": False, "error": None, "needs_sudo": False, "needs_password": False, "output": "", "notes": [],
+              "fixed": []}
+    executable = None
+    if installation_ is not None:
+        if name == LOCAL:
+            raise ValueError("this machine updates the installation it runs from: sandbox-ai update")
+        found = installations(name, path, runner)
+        if found["error"]:
+            result["error"] = found["error"]
+            return result
+        try:
+            executable = chosen_installation(found, installation_, name)["executable"]
+        except ValueError as exc:
+            result["error"] = str(exc)
+            return result
+    status, out, err, result["fixed"], warnings = run_fixing(name, ["version", "--verbose"], path=path, runner=runner,
+                                                             executable=executable)
     result["notes"] += warnings
     if status != 0:
-        result["error"] = failure(status, out, err)
+        result["error"] = (f"no sandbox-ai there to update: install it (sandbox-ai hosts install {name})"
+                           if not_installed(status, err) else failure(status, out, err))
         return result
     info = installation(out)
     result["before"], result["kind"] = info["version"], info["kind"]
+    result["installation"] = {key: info.get(key) for key in ("kind", "path", "prefix")}
     why = not_updatable(name, info)
     if why:
         result["error"] = why
@@ -1117,8 +1409,6 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
                       changed=bool(done.get("after")) and done.get("after") != result["before"],
                       from_here=True, mode=mode, prefix=done.get("prefix") or (info.get("prefix") if mode == "system" else None))
         result["notes"] += ["from this machine's copy (hosts install --from-here)", *done.get("notes", [])]
-        if not result["error"]:
-            forget_status(name)
         return result
     args = update_args(info, version)
     use_sudo = bool(entry.get("update_sudo")) if sudo is None else bool(sudo)
@@ -1131,7 +1421,7 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
                                "root's)")
     result["sudo"] = use_sudo
     status, out, err = run(name, args, timeout=UPDATE_TIMEOUT, path=path, runner=runner,
-                           sudo="batch" if use_sudo else None)
+                           sudo="batch" if use_sudo else None, executable=executable)
     said = f"{err}\n{out}"
     result["output"] = printable(said.strip()[-3000:])
     if status != 0:
@@ -1156,24 +1446,45 @@ def update(name, version=None, sudo=None, path=None, runner=subprocess.run, from
                 result["error"] += (f"; update it with this machine's copy instead: sandbox-ai hosts update {name} "
                                     "--from-here")
         return result
-    return finish_update(name, result, path, runner)
+    return finish_update(name, result, path, runner, newest=version is None, executable=executable)
 
 
-def finish_update(name, result, path=None, runner=subprocess.run):
-    """RESULT with the version host NAME has now ("after", "changed"); its kept status is asked anew."""
-    status, out, err = run(name, ["--version"], timeout=30, path=path, runner=runner)
+def finish_update(name, result, path=None, runner=subprocess.run, newest=False, executable=None):
+    """RESULT with the version host NAME has now ("after", "changed"; EXECUTABLE: of that installation); its status
+    is read again and kept (keep_status; NEWEST: the newest release was installed): the Hosts page and hosts list
+    show the new version at once."""
+    status, out, err = run(name, ["--version"], timeout=30, path=path, runner=runner, executable=executable)
     found = VERSION.search(out) if status == 0 else None
     result["after"] = found.group(0) if found else None
     result["changed"] = bool(result["after"]) and result["after"] != result["before"]
     if status != 0:
         result["error"] = "updated, but the version could not be read afterwards: " + failure(status, out, err)
-    forget_status(name)
+    refresh_status(name, path, runner, newest)
     return result
 
 
-def update_terminal(name, version=None, path=None, runner=subprocess.run):
-    """argv of the update of host NAME in a terminal, where sudo may ask for the password (ssh -tt ... sudo)."""
-    status, out, err = run(name, ["version", "--verbose"], timeout=30, path=path, runner=runner)
+def refresh_status(name, path=None, runner=subprocess.run, newest=False):
+    """keep_status after a change on host NAME; when that cannot be read, the kept status is forgotten (asked anew
+    by the next hosts list) - never left as it was before the change."""
+    try:
+        if keep_status(name, path, runner, newest) is not None:
+            return
+    except Exception as exc:  # noqa: BLE001 - the change stands; its status is asked anew next time
+        LOG.debug("hosts", f"{name}: its status was not read again: {exc}")
+    forget_status(name)
+
+
+def update_terminal(name, version=None, path=None, runner=subprocess.run, installation_=None):
+    """argv of the update of host NAME in a terminal, where sudo may ask for the password (ssh -tt ... sudo);
+    INSTALLATION_: as update's."""
+    executable = None
+    if installation_ is not None:
+        found = installations(name, path, runner)
+        if found["error"]:
+            raise ValueError(found["error"])
+        executable = chosen_installation(found, installation_, name)["executable"]
+    status, out, err = run(name, ["version", "--verbose"], timeout=30, path=path, runner=runner,
+                           executable=executable)
     if status != 0:
         raise ValueError(failure(status, out, err))
     info = installation(out)
@@ -1181,7 +1492,7 @@ def update_terminal(name, version=None, path=None, runner=subprocess.run):
     if why:
         raise ValueError(why)
     return argv(name, update_args(info, version), tty=True, path=path,
-                sudo="prompt" if info["kind"] != "user" else None)
+                sudo="prompt" if info["kind"] != "user" else None, executable=executable)
 
 
 # --- installing sandbox-ai on a host (hosts install) ------------------------------------------------------------
@@ -1294,8 +1605,8 @@ def install_bundle(source="here", root=None, runner=subprocess.run):
 PROBE = ('printf "uid=%s\\n" "$(id -u)"; for tool in bash tar gzip python3; do command -v "$tool" >/dev/null 2>&1 '
          '|| printf "missing=%s\\n" "$tool"; done; if [ "$(id -u)" != 0 ]; then if ! command -v sudo >/dev/null 2>&1; '
          'then echo sudo=none; elif sudo -n true 2>/dev/null; then echo sudo=ok; else echo sudo=password; fi; fi; '
-         'v=$({ command -v sandbox-ai >/dev/null 2>&1 && sandbox-ai --version; } 2>/dev/null || '
-         '"$HOME/.local/bin/sandbox-ai" --version 2>/dev/null); printf "installed=%s\\n" "$v"')
+         'v=$({ [ -x "$HOME/.local/bin/sandbox-ai" ] && "$HOME/.local/bin/sandbox-ai" --version; } 2>/dev/null || '
+         '{ command -v sandbox-ai >/dev/null 2>&1 && sandbox-ai --version; } 2>/dev/null); printf "installed=%s\\n" "$v"')
 
 
 def prefix_paths(prefix):
@@ -1346,9 +1657,9 @@ def probe_script(mode=None, prefix=None):
 
 
 def remote_shell(entry, script, input=None, timeout=60, runner=subprocess.run, tty=False):
-    """(status, stdout bytes, stderr text) of SCRIPT run by sh on host ENTRY (`sh -c SCRIPT`: whatever the user's
-    login shell is, fish or csh too; no sandbox-ai needed); INPUT: bytes on its standard input."""
-    command = [*ssh_base(entry, tty), f"sh -c {shlex.quote(script)}"]
+    """(status, stdout bytes, stderr text) of SCRIPT run by /bin/sh on host ENTRY (neutral_command: whatever the
+    user's login shell is, fish or csh too; no sandbox-ai needed); INPUT: bytes on its standard input."""
+    command = [*ssh_base(entry, tty), neutral_command(script)]
     name, begun = entry.get("ssh") if isinstance(entry, dict) else "?", time.monotonic()
     what = f"a shell script ({len(script)} characters)"
     if tty:
@@ -1501,7 +1812,7 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
         else:
             result["error"] = f"install.sh on {name} ended with exit status {status}: {printable(said.strip()[-400:])}"
         return result
-    forget_status(name)
+    forget_status(name)  # (read again below, when the version answers)
     if mode == "system":  # the copy just installed, not another one on PATH
         status, raw, err = remote_shell(entry, f"{shlex.quote(result['prefix'])}/bin/sandbox-ai --version", timeout=30,
                                         runner=runner)
@@ -1514,6 +1825,8 @@ def install(name, mode=None, prefix=None, sudo=None, source="here", version=None
     result["changed"] = bool(result["after"]) and result["after"] != result["before"]
     if status != 0:
         result["notes"].append("installed, but sandbox-ai there does not answer yet: " + failure(status, out, err))
+    elif runner is subprocess.run:
+        refresh_status(name, path, runner, newest=source == "download" and version is None)
     return result
 
 
@@ -1549,26 +1862,226 @@ def update_lines(result):
     else:
         lines.insert(0, f"{name}: {printable(result.get('after') or result.get('before') or '?')}, up to date"
                         + (f" ({printable(result['error'])})" if result.get("error") else ""))
+    where = result.get("installation") or {}
+    if where.get("kind") in ("user", "system") and (result.get("after") or result.get("changed")):
+        # which one (a host may have the user's own and a system one: user report 2026-11-23)
+        lines.insert(1, f"  installation: {'the user' + chr(39) + 's own' if where['kind'] == 'user' else 'system'}"
+                        f" ({printable(where.get('path') or '?')})")
     lines += [f"  note: {printable(note)}" for note in result.get("notes") or []]
     return lines
 
 
 def update_many(names, version=None, sudo=None, jobs=1, path=None, runner=subprocess.run, done=None,
-                from_here=False):
-    """[update result] for the hosts NAMES in their order, JOBS at a time; DONE(result) as each one ends."""
-    def one(name):
+                from_here=False, installation_=None):
+    """[update result] for the hosts NAMES in their order, JOBS at a time; DONE(result) as each one ends.
+    INSTALLATION_: as update's; "all": each install.sh installation of a host, one result each."""
+    def one(name, which=installation_):
         try:
-            result = update(name, version, sudo, path, runner, from_here=from_here)
+            result = update(name, version, sudo, path, runner, from_here=from_here,
+                            **({"installation_": which} if which is not None else {}))
         except (OSError, ValueError) as exc:
             result = {"name": name, "before": None, "after": None, "changed": False, "error": printable(exc),
                       "needs_password": False, "needs_sudo": False, "notes": [], "fixed": []}
         if done:
             done(result)
         return result
+
+    def every(name):
+        try:
+            found = installations(name, path, runner)
+        except (OSError, ValueError) as exc:
+            found = {"error": printable(exc), "installations": []}
+        folders = [item["data"] for item in found["installations"] if item.get("executable")]
+        if found["error"] or not folders:
+            result = {"name": name, "before": None, "after": None, "changed": False, "notes": [], "fixed": [],
+                      "error": found["error"] or "no install.sh installation there", "needs_password": False,
+                      "needs_sudo": False}
+            if done:
+                done(result)
+            return [result]
+        return [one(name, folder) for folder in folders]
+    if installation_ == "all":
+        return [result for name in names for result in every(name)]
     if jobs <= 1 or len(names) <= 1:
         return [one(name) for name in names]
     with concurrent.futures.ThreadPoolExecutor(min(jobs, len(names))) as pool:
         return list(pool.map(one, names))
+
+
+# --- removing sandbox-ai on a host (hosts uninstall) -----------------------------------------------------------
+#
+# The host's own `sandbox-ai uninstall` of the installation chosen, run by that installation's own command (so the
+# one removed is exactly that one, whichever another command would find): the user's own (its links, folder, PATH
+# block; afterwards a system one is what runs there) or a system one (root's: as root over SSH, or `sudo -n`; when
+# sudo wants a password, a terminal asks). --purge, --secrets, --mcp-data and --stop-running are its own options;
+# --purge removes the data of whoever runs it, so never under sudo (that would be root's). The host stays in the
+# list unless --remove-from-list.
+
+def uninstall_args(purge=False, secrets=False, mcp_data=False, stop_running=False, dry_run=False):
+    if (secrets or mcp_data) and not purge:
+        raise ValueError(f"{'--secrets' if secrets else '--mcp-data'} goes with --purge")
+    return ["uninstall", "--dry-run" if dry_run else "--yes", *(["--purge"] if purge else []),
+            *(["--secrets"] if secrets else []), *(["--mcp-data"] if mcp_data else []),
+            *(["--stop-running"] if stop_running and not dry_run else [])]
+
+
+def uninstall_target(name, installation_=None, path=None, runner=subprocess.run):
+    """(the installation of host NAME to remove, installations()): INSTALLATION_ "user", "system" or a data folder;
+    None: the only install.sh installation there. ValueError: none, or several and none chosen (each named, with
+    the option that chooses it)."""
+    if name == LOCAL:
+        raise ValueError("this machine's sandbox-ai is the one the app runs from: remove it in a terminal here with "
+                         "sandbox-ai uninstall (--purge: also its data)")
+    if load(path).get(name) is None:
+        raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
+    found = installations(name, path, runner)
+    if found["error"]:
+        raise ValueError(f"{name}: {found['error']}")
+    if installation_ is not None:
+        return chosen_installation(found, installation_, name), found
+    items = [item for item in found["installations"] if item.get("executable")]
+    if len(items) == 1:
+        return items[0], found
+    others = [item for item in found["installations"] if not item.get("executable")]
+    if not items:
+        there = "; ".join(f"{printable(item.get('kind'))} {printable(item.get('version') or '?')} in "
+                          f"{printable(item.get('path') or '?')}" for item in others)
+        raise ValueError(f"{name} has no install.sh installation of sandbox-ai" + (
+            f" (there: {there}: remove that one there as it was installed, e.g. pip uninstall sandbox-ai-app)"
+            if there else ""))
+    raise ValueError(f"{name} has {len(items)} installations of sandbox-ai; choose one: " + ", or ".join(
+        f"--installation {item['kind']} ({printable(item.get('version') or '?')} in "
+        f"{printable(item.get('path') or '?')})" for item in items))
+
+
+def uninstall(name, installation_=None, purge=False, secrets=False, mcp_data=False, stop_running=False, sudo=None,
+              dry_run=False, remove=False, path=None, runner=subprocess.run, terminal=False):
+    """Remove sandbox-ai on host NAME: the installation chosen (uninstall_target), by its own `sandbox-ai uninstall
+    --yes` there. SUDO None: with `sudo -n` for a system installation when the SSH user is no root; False: never.
+    DRY_RUN: only its table of what would go ("plan"). REMOVE: the host leaves the list afterwards. TERMINAL: when
+    sudo wants a password, ask in this terminal. {"name", "removed", "sudo", "dry_run", "plan", "output", "error",
+    "needs_password", "removed_from_list", "remaining": the installations left there, "notes"}."""
+    args = uninstall_args(purge, secrets, mcp_data, stop_running, dry_run)
+    item, found = uninstall_target(name, installation_, path, runner)
+    entry = load(path)[name]
+    where = {key: item.get(key) for key in ("kind", "version", "path", "prefix", "data")}
+    result = {"name": name, "removed": None, "installation": where, "sudo": False, "dry_run": dry_run, "plan": "",
+              "output": "", "error": None, "needs_password": False, "removed_from_list": False, "remaining": None,
+              "notes": []}
+    root = found.get("uid") == 0 or str(entry.get("ssh", "")).startswith("root@")
+    use_sudo = item["kind"] == "system" and not root and sudo is not False
+    if item["kind"] == "user" and sudo:
+        result["notes"].append("without sudo: the installation there is the user's own")
+    if purge and use_sudo:
+        result["error"] = (f"--purge removes the data of whoever runs the uninstall - with sudo that is root, not "
+                           f"the SSH user: remove the system installation on {name} without --purge (the user's data "
+                           f"stays; that user's own sandbox-ai uninstall --purge removes it)")
+        return result
+    if item["kind"] == "system" and not root and sudo is False:
+        result["error"] = (f"the system installation on {name} ({printable(item.get('path') or '?')}) is root's: "
+                           "remove it with sudo (without --no-sudo)")
+        return result
+    result["sudo"] = use_sudo
+    if dry_run:
+        # (the list only reads: as the SSH user first - an older sandbox-ai there refuses a system one's list
+        # to anyone but root, then with sudo -n)
+        status, out, err = run(name, args, timeout=180, path=path, runner=runner, executable=item["executable"])
+        if status != 0 and use_sudo:
+            status, out, err = run(name, args, timeout=180, path=path, runner=runner, sudo="batch",
+                                   executable=item["executable"])
+        result["plan"] = printable(out.strip()[-6000:])
+        if status != 0:
+            result["error"] = f"{name}: " + failure(status, out, err)
+        return result
+    LOG.info("hosts", f"uninstall on {name}: the {item['kind']} installation in {item.get('data')}"
+                      + (" and the SSH user's data" if purge else "") + (" with sudo" if use_sudo else ""))
+    status, out, err = run(name, args, timeout=UPDATE_TIMEOUT, path=path, runner=runner,
+                           sudo="batch" if use_sudo else None, executable=item["executable"])
+    said = f"{err}\n{out}"
+    result["output"] = printable(said.strip()[-3000:])
+    if status != 0 and use_sudo and any(text in said for text in SUDO_PASSWORD):
+        if not terminal:
+            result["needs_password"] = True
+            result["error"] = (f"sudo on {name} wants a password, and nothing here asks for one: remove it in a "
+                               f"terminal (sandbox-ai hosts uninstall {name} there), or allow sudo without one")
+            return result
+        status = runner(argv(name, args, tty=True, path=path, sudo="prompt", executable=item["executable"])).returncode
+        said = ""
+    if status != 0:
+        if use_sudo and any(text in said for text in SUDO_REFUSED):
+            result["error"] = f"{name}: this user may not use sudo there: {printable(said.strip()[-300:])}"
+        else:
+            result["error"] = f"{name}: " + (failure(status, out, err) if said else f"exit status {status}")
+        refresh_status(name, path, runner)
+        return result
+    result["removed"] = where
+    if remove:
+        remove_host(name, lambda line: result["notes"].append(line))
+        result["removed_from_list"] = True
+        return result
+    try:
+        kept = keep_status(name, path, runner)
+    except Exception as exc:  # noqa: BLE001 - removed all the same; its status is asked anew next time
+        LOG.debug("hosts", f"{name}: its status was not read again: {exc}")
+        forget_status(name)
+        kept = None
+    if kept is not None and kept.get("installations") is not None:
+        result["remaining"] = [{key: item.get(key) for key in ("kind", "version", "path")}
+                               for item in kept["installations"]]
+    return result
+
+
+def uninstall_terminal(name, installation_=None, purge=False, secrets=False, mcp_data=False, stop_running=False,
+                       path=None, runner=subprocess.run):
+    """argv of the uninstall of host NAME in a terminal, where sudo may ask for the password (ssh -tt ... sudo)."""
+    args = uninstall_args(purge, secrets, mcp_data, stop_running)
+    item, found = uninstall_target(name, installation_, path, runner)
+    root = found.get("uid") == 0 or str(load(path)[name].get("ssh", "")).startswith("root@")
+    use_sudo = item["kind"] == "system" and not root
+    if purge and use_sudo:
+        raise ValueError("--purge removes the data of whoever runs it - with sudo that is root: without --purge")
+    return argv(name, args, tty=True, path=path, sudo="prompt" if use_sudo else None, executable=item["executable"])
+
+
+def uninstall_lines(result):
+    """What hosts uninstall prints for one host."""
+    name, where = result["name"], result.get("installation") or {}
+    what = (f"{'the user' + chr(39) + 's own' if where.get('kind') == 'user' else 'the system'} installation "
+            f"{printable(where.get('version') or '?')} ({printable(where.get('path') or '?')})")
+    if result.get("error"):
+        lines = [f"{name}: not removed: {printable(result['error'])}"]
+    elif result.get("dry_run"):
+        lines = [f"{name}: {what} - what its uninstall would remove there:", result.get("plan") or ""]
+    else:
+        lines = [f"{name}: removed {what}" + (" (sudo)" if result.get("sudo") else "")]
+        if result.get("removed_from_list"):
+            lines.append(f"  {name} is no longer in the list")
+        elif result.get("remaining") is not None:
+            left = ", ".join(f"{printable(item.get('kind'))} {printable(item.get('version') or '?')}"
+                             for item in result["remaining"])
+            lines.append(f"  there now: {left}" if left else f"  no sandbox-ai is left there (install it again: "
+                                                             f"sandbox-ai hosts install {name})")
+    return lines + [f"  note: {printable(note)}" for note in result.get("notes") or []]
+
+
+def remove_host(name, out=print):
+    """Host NAME out of the list (hosts remove): its shared LLM servers first, its kept status, its connection."""
+    if name not in load():
+        raise ValueError(f"no host {printable(name)}")
+    try:  # a shared LLM server is for the hosts of the list: its copy (and the key sent) leaves this one first
+        shares = llm_shares()
+        if shares is not None:
+            shares.host_leaving(name, out)
+    except Exception as exc:  # noqa: BLE001 - the host is removed all the same
+        out(f"note: shared LLM servers: {printable(exc)}")
+    with hosts_file_lock():
+        hosts = load()
+        if name not in hosts:
+            raise ValueError(f"no host {printable(name)}")
+        removed = hosts.pop(name)
+        save(hosts)
+    forget_status(name)
+    stop_master(removed)  # its shared connection would otherwise serve commands for up to CONTROL_PERSIST s
 
 
 def summary(results):
@@ -1576,6 +2089,44 @@ def summary(results):
     failed = sum(1 for r in results if r.get("error") and not r.get("after"))
     return (f"{len(results)} host{'s' if len(results) != 1 else ''}: {updated} updated, "
             f"{len(results) - updated - failed} up to date, {failed} not updated")
+
+
+_shares = None
+
+
+def llm_shares():
+    """llm_share.py (the LLM servers shared with every host: sandbox-ai llm share), or None when nothing is shared -
+    then nothing is loaded (hosts list stays quick)."""
+    global _shares
+    if not config_file().with_name("llm-shares.json").exists():
+        return None
+    if _shares is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_llm_share_hosts", HERE / "llm_share.py")
+        loaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(loaded)
+        _shares = loaded
+    return _shares
+
+
+def shares_pending(json_out=False, out=print):
+    """A copy of a shared LLM server a host did not get yet (it did not answer): tried again now when it is due, and
+    said (on stderr where the command prints JSON). Never fails the command."""
+    try:
+        shares = llm_shares()
+        if shares is not None:
+            shares.pending(out, err=(lambda line: print(line, file=sys.stderr)) if json_out else None)
+    except Exception as exc:  # noqa: BLE001 - the hosts' own command goes on
+        LOG.warning("hosts", f"shared LLM servers: {printable(exc)}")
+
+
+def shared_to_new_host(name, out=print):
+    """After hosts add NAME: the LLM servers shared with every host (llm share) copied there now."""
+    try:
+        shares = llm_shares()
+        if shares is not None:
+            shares.host_added(name, out)
+    except Exception as exc:  # noqa: BLE001 - the host is added all the same
+        out(f"  note: shared LLM servers: {printable(exc)}")
 
 
 def help_style(prog):
@@ -1633,6 +2184,34 @@ def cli(argv_, out=print):
                           help="set the host's own update mode instead (off, notify, download, auto: sandbox-ai "
                                "update mode there); nothing is installed now")
     updating.add_argument("--at", metavar="HH:MM[-HH:MM]", help="with --mode auto: its window there (local time)")
+    updating.add_argument("--installation", choices=["user", "system", "all"],
+                          help="which installation there (hosts list --json: installations): the user's own, the "
+                               "system one, or all; default: the one the host's commands run (the user's own first, "
+                               "as a terminal there finds it)")
+    uninstalling = commands.add_parser("uninstall", help="remove sandbox-ai on a host (its own sandbox-ai uninstall)")
+    uninstalling.add_argument("name")
+    uninstalling.add_argument("--installation", choices=["user", "system"],
+                              help="which one, when the host has both: the user's own (a system one is left and "
+                                   "runs from then on) or the system one (with sudo)")
+    uninstalling.add_argument("--purge", action="store_true",
+                              help="also the SSH user's sandbox-ai data there (not with sudo)")
+    uninstalling.add_argument("--secrets", action="store_true",
+                              help="with --purge: also the secrets and logins there; they cannot be recovered")
+    uninstalling.add_argument("--mcp-data", action="store_true",
+                              help="with --purge: also the MCP servers' own folders there")
+    uninstalling.add_argument("--stop-running", action="store_true",
+                              help="stop the starts running there first (else they refuse the uninstall)")
+    uninstalling.add_argument("--sudo", action="store_true", default=None,
+                              help="with sudo -n for a system installation (the default when the SSH user is no root)")
+    uninstalling.add_argument("--no-sudo", dest="sudo", action="store_false", help="never sudo")
+    uninstalling.add_argument("--remove-from-list", action="store_true",
+                              help="also remove the host from this list afterwards (default: it stays; install "
+                                   "again with hosts install)")
+    uninstalling.add_argument("--dry-run", action="store_true",
+                              help="only show the host's own table of what would go; remove nothing")
+    uninstalling.add_argument("-y", "--yes", action="store_true",
+                              help="without asking here (needed without a terminal)")
+    uninstalling.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
     installing = commands.add_parser("install", help="install sandbox-ai on a host (from here, or its signed release)")
     installing.add_argument("name")
     target = installing.add_mutually_exclusive_group()
@@ -1653,10 +2232,12 @@ def cli(argv_, out=print):
     installing.add_argument("--dry-run", action="store_true",
                             help="only say what would be done (user or system, as root or with sudo)")
     installing.add_argument("--json", action="store_true", help="print the result as JSON (for programs)")
-    running = commands.add_parser("run", help="sandbox-ai ARGS on a host")
+    running = commands.add_parser("run", help="run sandbox-ai ARGS on a host")
     running.add_argument("name")
     running.add_argument("args", nargs=argparse.REMAINDER)
     a = parser.parse_args(argv_)
+    if a.command in ("test", "set") or a.command == "list" and not a.cached:  # (--cached asks no host)
+        shares_pending(getattr(a, "json", False), out)
     if a.command == "list":
         found = entries()
         remote = [entry["name"] for entry in found if entry["kind"] == "ssh"]
@@ -1688,6 +2269,8 @@ def cli(argv_, out=print):
                          terminal=not a.json and sys.stdin.isatty(), dry_run=a.dry_run)
         out(json.dumps(result, indent=2) if a.json else "\n".join(install_lines(result)))
         return 0 if not result.get("error") else 1
+    if a.command == "uninstall":
+        return uninstall_cli(a, out)
     if a.command == "update":
         if a.all == bool(a.names):
             raise ValueError("name the hosts to update, or --all (every host of the list)")
@@ -1698,9 +2281,9 @@ def cli(argv_, out=print):
         if a.at is not None and a.mode is None:
             raise ValueError("--at is the window of --mode auto")
         if a.mode is not None:
-            if a.release is not None or a.from_here or a.sudo is not None:
-                raise ValueError("--mode sets the host's update mode; --version, --from-here and --sudo are for an "
-                                 "update now")
+            if a.release is not None or a.from_here or a.sudo is not None or a.installation is not None:
+                raise ValueError("--mode sets the host's update mode; --version, --from-here, --sudo and "
+                                 "--installation are for an update now")
             hosts = load()
             for name in names:
                 if name != LOCAL and name not in hosts:
@@ -1734,10 +2317,13 @@ def cli(argv_, out=print):
                 raise ValueError(f"no host {printable(name)}; see: sandbox-ai hosts list")
         if not a.json:
             out(f"updating {', '.join(names)}" + (f" to {a.release}" if a.release else "") + " ...")
+        if a.installation is not None and LOCAL in names:
+            raise ValueError("--installation is for another host (this machine updates the installation it runs "
+                             "from: sandbox-ai update)")
         results = update_many(names, a.release, a.sudo, a.jobs,
                               done=None if a.json else lambda result: [out(line) for line in update_lines(result)]
                               if not (result.get("needs_password") and sys.stdin.isatty()) else None,
-                              from_here=a.from_here)
+                              from_here=a.from_here, installation_=a.installation)
         if not a.json and sys.stdin.isatty():
             for result in results:
                 if not result.get("needs_password"):
@@ -1754,14 +2340,21 @@ def cli(argv_, out=print):
                     for line in update_lines(result):
                         out(line)
                     continue
+                which = (result.get("installation") or {}) if a.installation == "all" else {}
+                which = (which.get("path") or "").rsplit("/versions/", 1)[0] if which.get("path") else a.installation
                 try:
-                    status = subprocess.run(update_terminal(result["name"], a.release)).returncode
+                    command = update_terminal(result["name"], a.release, installation_=which)
+                    status = subprocess.run(command).returncode
                 except (OSError, ValueError) as exc:
                     result["error"] = printable(exc)
                 else:
                     if status == 0:
                         result.update(error=None, needs_password=False)
-                        finish_update(result["name"], result)
+                        executable = None
+                        if which is not None:
+                            with contextlib.suppress(OSError, ValueError):
+                                executable = chosen_installation(installations(result["name"]), which)["executable"]
+                        finish_update(result["name"], result, newest=a.release is None, executable=executable)
                     else:
                         result["error"] = f"the update in the terminal ended with exit status {status}"
                 for line in update_lines(result):
@@ -1770,6 +2363,9 @@ def cli(argv_, out=print):
             out(json.dumps(results, indent=2))
         else:
             out(summary(results))
+        for result in results:  # an updated host gets what it could not take before (a shared LLM server)
+            if result.get("after") and result.get("name") != LOCAL:
+                shared_to_new_host(result["name"], (lambda line: print(line, file=sys.stderr)) if a.json else out)
         return 0 if all(not r.get("error") or r.get("after") for r in results) else 1
     if a.command == "add":
         entry = check(a.name, {"ssh": a.ssh, "port": a.port, **({"identity": a.identity} if a.identity else {}),
@@ -1788,6 +2384,7 @@ def cli(argv_, out=print):
             out(f"  key: {fixed_text(change)}")
         for warning in warnings:
             out(f"  note: {warning}")
+        shared_to_new_host(a.name, out)
         if not fixed:
             out(f"check it with: sandbox-ai hosts test {a.name}")
             return 0
@@ -1811,14 +2408,7 @@ def cli(argv_, out=print):
         out(f"host {a.name}: its update " + ("runs with sudo" if a.update_sudo == "on" else "runs without sudo"))
         return 0
     if a.command == "remove":
-        with hosts_file_lock():
-            hosts = load()
-            if a.name not in hosts:
-                raise ValueError(f"no host {printable(a.name)}")
-            removed = hosts.pop(a.name)
-            save(hosts)
-        forget_status(a.name)
-        stop_master(removed)  # its shared connection would otherwise serve commands for up to CONTROL_PERSIST s
+        remove_host(a.name, out)
         out(f"host {a.name} removed")
         return 0
     if a.command == "test":
@@ -1861,6 +2451,34 @@ def cli(argv_, out=print):
     else:
         LOG.log("DEBUG" if status == 0 else "INFO", "hosts", text)
     return status
+
+
+def uninstall_cli(a, out):
+    """hosts uninstall: the host's own table first and a question here (y/N; --yes answers it, and without a
+    terminal nothing is removed unless --yes), then its uninstall; sudo that wants a password asks in this terminal."""
+    uninstall_args(a.purge, a.secrets, a.mcp_data)  # (before any SSH: --secrets without --purge)
+    asking = not (a.yes or a.dry_run)
+    if asking and not sys.stdin.isatty():
+        raise ValueError("no terminal to ask on: add --yes to remove it (--dry-run shows what would go)")
+    common = dict(installation_=a.installation, purge=a.purge, secrets=a.secrets, mcp_data=a.mcp_data,
+                  stop_running=a.stop_running, sudo=a.sudo)
+    if a.dry_run or asking:
+        plan = uninstall(a.name, dry_run=True, **common)
+        if a.dry_run or plan["error"]:
+            out(json.dumps(plan, indent=2) if a.json else "\n".join(uninstall_lines(plan)))
+            return 0 if not plan["error"] else 1
+        for line in uninstall_lines(plan):
+            out(line)
+        try:
+            answer = input(f"Remove it on {a.name}? [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            out("nothing removed")
+            return 1
+    result = uninstall(a.name, remove=a.remove_from_list, terminal=not a.json and sys.stdin.isatty(), **common)
+    out(json.dumps(result, indent=2) if a.json else "\n".join(uninstall_lines(result)))
+    return 0 if not result["error"] else 1
 
 
 def hosts_entry_text(name):

@@ -87,16 +87,22 @@ def mac_unbundled(executable=None):
 
 
 def mac_notification(title, text, popen=None):
-    """Show TITLE and TEXT through osascript (macOS), without waiting for it; None, as the tray's notification."""
+    """Show TITLE and TEXT through osascript (macOS), without waiting for it; None, as the tray's notification. The
+    process is started in the background (a fork of the app and its exec are not the window's to wait for)."""
     import subprocess
+    from .widgets import background
     command = ["/usr/bin/osascript", *(part for line in OSASCRIPT_NOTIFICATION for part in ("-e", line)), "--", title,
                text]
-    try:
+
+    def start():
         (popen or subprocess.Popen)(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError as exc:  # no notification then, as when the desktop has none
-        from . import applog
-        applog.swallowed("notifications", "osascript could not show the notification", exc)
+
+    def started(_result, error):
+        if error is not None:  # no notification then, as when the desktop has none
+            from . import applog
+            applog.swallowed("notifications", "osascript could not show the notification", error)
+    background(start, timeout=30, done=started, what="osascript: a notification")
     return None
 
 

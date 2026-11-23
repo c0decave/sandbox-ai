@@ -31,26 +31,28 @@ def dry(host, *args, env_file=False):
 def test_cairn_with_a_lead_outside_the_team_image_was_told_to_add_with(host, lead):
     """Journey: the Board's Cairn part beside a Pi (or OpenCode 2, Hermes ...) agent. The start was refused with
     "start claude or codex, or add --with claude or --with codex" - and following that advice was refused in turn:
-    "--with: Pi is not in the team image". Since 0.1.98 every agent is in the team image (its layers): the advice
-    works for every lead, and following it passes (the team image with that lead's layer)."""
-    done, _ = dry(host, lead, "--cairn")
-    assert done.returncode != 0
-    assert "--cairn" in done.stderr and "add --with claude or --with codex" in done.stderr, done.stderr
-    host.add_image(f"localhost/team-{lead}-sandbox:latest")
-    done, plan = dry(host, lead, "--with", "claude", "--cairn")
+    "--with: Pi is not in the team image". Since 0.1.98 every agent is in the team image (its layers); since every
+    harness can be Cairn's worker (2026-11-22, "why workers only for claude and not all harnesses?") the lead alone
+    is its worker, and --with claude still passes (the team image with that lead's layer)."""
+    done, plan = dry(host, lead, "--cairn")
     if lead == "openhands":  # its own reason: its Canvas holds the port Cairn's board takes - never the team image
         assert done.returncode != 0 and "port 8000" in done.stderr and "team image" not in done.stderr
         return
     assert done.returncode == 0, done.stderr
+    assert [w["agent"] for w in plan["cairn"]["workers"]] == [lead] and plan["cairn"]["workers"][0]["mapped"]
+    host.add_image(f"localhost/team-{lead}-sandbox:latest")
+    done, plan = dry(host, lead, "--with", "claude", "--cairn")
+    assert done.returncode == 0, done.stderr
     assert plan["image"] == f"localhost/team-{lead}-sandbox:latest" and plan["companions"] == ["claude"]
+    assert [w["agent"] for w in plan["cairn"]["workers"]] == ["claude", lead], "the best supported first"
     # Claude Code with --cairn passes as before.
     done, plan = dry(host, "claude", "--cairn")
     assert done.returncode == 0, done.stderr
 
 
-def test_cairn_with_opencode_as_lead_keeps_the_with_advice_that_works(host):
-    done, _ = dry(host, "opencode", "--cairn")
-    assert done.returncode != 0 and "add --with claude or --with codex" in done.stderr, done.stderr
+def test_cairn_with_opencode_as_lead_is_its_own_worker_and_with_claude_still_works(host):
+    done, plan = dry(host, "opencode", "--cairn")
+    assert done.returncode == 0 and [w["agent"] for w in plan["cairn"]["workers"]] == ["opencode"], done.stderr
     done, _ = dry(host, "opencode", "--with", "claude", "--cairn")
     assert done.returncode == 0, done.stderr
 

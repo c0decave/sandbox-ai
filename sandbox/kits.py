@@ -1420,9 +1420,82 @@ def read_at_path(root, relative):
         os.close(fd)
 
 
-def stage_plugin_hooks(plugins, installed_plugins, store=None, records=None):
+def copy_plugin(source, target, limits=PLUGIN_LIMITS):
+    """Copy a plugin's installed folder SOURCE to TARGET (new) through directory descriptors, as hook_tree reads it
+    with LINKS: regular files with their executable bit, folders, and a symlink as a symlink (its target, never
+    followed); a bad name, a special file or a folder too deep is left out (the copy's hash then differs from the
+    approved one). ValueError beyond LIMITS (files, bytes, depth)."""
+    max_files, max_bytes, max_depth = limits
+    budget = {"files": 0, "bytes": 0}
+
+    def walk(source_fd, target_fd, depth):
+        with os.scandir(source_fd) as entries:
+            names = sorted(entry.name for entry in entries)
+        for name in names:
+            if bad_name(name):
+                continue
+            info = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode) or stat.S_ISREG(info.st_mode):
+                budget["files"] += 1
+                if budget["files"] > max_files:
+                    raise ValueError(f"more than {max_files} files")
+            if stat.S_ISLNK(info.st_mode):
+                os.symlink(os.readlink(name, dir_fd=source_fd), name, dir_fd=target_fd)
+            elif stat.S_ISDIR(info.st_mode) and depth + 1 < max_depth:
+                os.mkdir(name, 0o755, dir_fd=target_fd)
+                child, copy = os.open(name, DIR_FLAGS, dir_fd=source_fd), os.open(name, DIR_FLAGS, dir_fd=target_fd)
+                try:
+                    walk(child, copy, depth + 1)
+                finally:
+                    os.close(child)
+                    os.close(copy)
+            elif stat.S_ISREG(info.st_mode):
+                data, _ = read_at(source_fd, name, max_bytes)
+                if data is None:
+                    continue
+                budget["bytes"] += len(data)
+                if budget["bytes"] > max_bytes:
+                    raise ValueError(f"more than {max_bytes >> 20} MiB")
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target_fd)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                    os.fchmod(stream.fileno(), 0o755 if info.st_mode & 0o111 else 0o644)
+    Path(target).mkdir(mode=0o755, parents=True)
+    source_fd = os.open(source, DIR_FLAGS)
+    try:
+        target_fd = os.open(target, DIR_FLAGS)
+        try:
+            walk(source_fd, target_fd, 0)
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(source_fd)
+
+
+def checked_copy(info, copy, read):
+    """INFO (read from the plugin store, approved) once more from a copy of its folder at COPY (copy_plugin), READ(
+    copy) -> the copy's info: what runs is the copy, judged by its own hash - the store can change after the check
+    (the store's own sandbox writes there, an update installs into it), and a change then reaches no sandbox. A copy
+    that fails, or whose hash differs from INFO's (a change while it was made), is not trusted."""
+    try:
+        copy_plugin(info["path"], copy)
+    except (OSError, ValueError) as exc:
+        Path(copy).mkdir(mode=0o755, parents=True, exist_ok=True)
+        return {**info, "sha256": None, "trusted": False, "errors": [f"not copied for the run: {exc}"]}
+    again = read(copy)
+    errors = list(again["errors"])
+    if not errors and again["sha256"] != info["sha256"]:
+        errors.append("it changed while it was copied for the run: start again (and review it again if you did not "
+                      "change it)")
+    return {**info, **again, "sha256": again["sha256"] if not errors else None, "errors": errors,
+            "trusted": info["trusted"] and not errors, "copy": str(copy)}
+
+
+def stage_plugin_hooks(plugins, installed_plugins, store=None, records=None, staging=None, target_root=None):
     """The hooks of the run's PLUGINS (ids) as INSTALLED_PLUGINS lists them: [{"plugin", "label", "kit",
-    "trusted", "groups", "hooks", "notes", "errors", "sha256"}], only plugins with hooks."""
+    "trusted", "groups", "hooks", "notes", "errors", "sha256"}], only plugins with hooks. STAGING (a start): each
+    approved plugin's folder is copied to STAGING/N and read again from there (checked_copy), its hooks run from that
+    copy, TARGET_ROOT/N in the sandbox (${CLAUDE_PLUGIN_ROOT}) - never from the live store."""
     records = trust_records() if records is None else records
     staged = []
     for plugin in plugins:
@@ -1432,8 +1505,13 @@ def stage_plugin_hooks(plugins, installed_plugins, store=None, records=None):
         info = read_plugin_hooks(plugin, *where)
         if not info["declared"]:
             continue  # a plugin without hooks: nothing to approve
-        staged.append({**info, "label": f"plugin {plugin}", "kit": plugin_trust_key(plugin),
-                       "trusted": hooks_trusted("claude", info["sha256"], plugin_trust_key(plugin), records)})
+        info = {**info, "label": f"plugin {plugin}", "kit": plugin_trust_key(plugin),
+                "trusted": hooks_trusted("claude", info["sha256"], plugin_trust_key(plugin), records)}
+        if staging is not None and info["trusted"]:
+            number = len(staged) + 1
+            info = checked_copy(info, Path(staging) / str(number),
+                                lambda copy: read_plugin_hooks(plugin, copy, f"{target_root}/{number}"))
+        staged.append(info)
     return staged
 
 
@@ -1683,10 +1761,12 @@ def read_store_plugin(agent, plugin, host_root, claude_root):
     return read_plugin_hooks(plugin, host_root, where)
 
 
-def stage_store_plugins(agent, plugins, installed_plugins, store=None, records=None):
+def stage_store_plugins(agent, plugins, installed_plugins, store=None, records=None, staging=None):
     """Codex's and OpenCode 2's view of the run's PLUGINS (ids) as INSTALLED_PLUGINS lists them: [{read_store_plugin's
     keys, "host_root", "label", "kit", "trusted"}], every installed one (a plugin without hooks has nothing to
-    approve: "trusted" is then True for Codex)."""
+    approve: "trusted" is then True for Codex). STAGING (a start): an approved plugin with hooks (Codex) or code
+    (OpenCode 2) is copied to STAGING/N and read again from there (checked_copy); "host_root" is then the copy, which
+    the sandbox gets in the store's place - never the live store."""
     records = trust_records() if records is None else records
     staged = []
     for plugin in plugins:
@@ -1695,8 +1775,13 @@ def stage_store_plugins(agent, plugins, installed_plugins, store=None, records=N
             continue
         info = read_store_plugin(agent, plugin, *where)
         approved = hooks_trusted(agent, info["sha256"], plugin_trust_key(plugin), records)
-        staged.append({**info, "host_root": str(where[0]), "label": f"plugin {plugin}",
-                       "kit": plugin_trust_key(plugin), "trusted": approved})
+        info = {**info, "host_root": str(where[0]), "label": f"plugin {plugin}", "kit": plugin_trust_key(plugin),
+                "trusted": approved}
+        if staging is not None and approved and info.get("declared") and info.get("hooks"):
+            copy = Path(staging) / str(len(staged) + 1)
+            info = checked_copy(info, copy, lambda folder: read_store_plugin(agent, plugin, folder, where[1]))
+            info["host_root"] = str(copy)
+        staged.append(info)
     return staged
 
 

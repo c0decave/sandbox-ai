@@ -155,7 +155,8 @@ def test_this_checkout_is_newer_than_the_release_and_never_offered_a_downgrade(t
     assert found["result"]["signer"] == KEY and found["result"]["newer"] is False
     assert found["result"]["installed"] == installed
     code, out, err = run(command, env, "update", "mode")
-    assert f"up to date ({installed}; the newest release is {RELEASE})" in out
+    assert (f"{installed} is newer than the newest release {RELEASE}: nothing to update" if installed != RELEASE
+            else f"up to date ({installed}; the newest release is {RELEASE})") in out
     code, out, err = run(command, env, "update")  # (an update of a checkout is git's)
     assert code == 1 and "git checkout" in err
 
@@ -188,7 +189,8 @@ def test_an_installation_as_new_as_the_release_is_told_nothing(tmp_path, github,
     """notify's daily check of an installation that has the newest release: no notification."""
     env = environment(tmp_path, github)
     code, out, err = run([ROOT / "sandbox-ai"], env, "update", "--scheduled")
-    assert code == 0 and f"checked: up to date ({kit.VERSION}; the newest release is {RELEASE})" in out, out + err
+    assert code == 0 and f"checked: {kit.VERSION} is newer than the newest release {RELEASE}: nothing to update" \
+        in out, out + err
     calls = tmp_path / "stubs" / "calls"
     assert not calls.exists() or "notify-send" not in calls.read_text()
 

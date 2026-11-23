@@ -5,7 +5,7 @@ script_dir=$(dirname -- "$script_path")
 synopsis='Usage:  sandbox-ai build [OPTIONS] TARGET... [PODMAN BUILD OPTIONS]
 
 Targets: codex|claude|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi,
-         all, team, cairn, browser, vpn|tor, or one of your variants'
+         all, team, cairn, artex, browser, vpn|tor, or one of your variants'
 usage='Usage:  sandbox-ai build [OPTIONS] TARGET... [PODMAN BUILD OPTIONS]
 
 Build the images of sandbox-ai: an agent'"'"'s, a variant of yours, or a part beside the
@@ -15,10 +15,12 @@ Targets:
   AGENT       codex|claude|opencode|opencode2|hermes|dsh|qwen|goose|openhands|nanobot|letta|pi
   VARIANT     One of your variants (sandbox-ai images): its agent'"'"'s base, then the
               variant; NAME@AGENT where several agents have one of that name
-  all         Every image: the twelve agents, team, cairn, browser, vpn|tor and your variants
+  all         Every image: the twelve agents, team, cairn, artex, browser, vpn|tor and your
+              variants
   team        Claude Code, Codex and OpenCode in one image (a start with --with AGENT);
               team --with AGENT[,AGENT...]: that image with the other agents as layers
   cairn       The container of --cairn
+  artex       The container of --artex (ARTEX, built from its reviewed source)
   browser     The sandbox'"'"'s own browser (--browser)
   vpn|tor     The container of --vpn: a WireGuard, OpenVPN, Mullvad or Tailscale
               profile (vpn), or a Tor profile (tor)
@@ -46,8 +48,8 @@ reviewed (Containerfile.hermes: its tag and commit, its Python dependencies
 hash-pinned in Containerfile.hermes.lock); --pin and HERMES_VERSION take no other
 release; "all" builds it too.
 
-"all" builds every image sandbox-ai has: the twelve agents, team, cairn, browser,
-vpn, tor and each of your variants (sandbox-ai images), one build each, so one
+"all" builds every image sandbox-ai has: the twelve agents, team, cairn, artex,
+browser, vpn, tor and each of your variants (sandbox-ai images), one build each, so one
 that fails stops none of the others; the end says what was built and what
 failed. Several targets in a row (sandbox-ai build claude codex team) are built
 the same way, one after the other.
@@ -121,6 +123,14 @@ dependencies hash-pinned in Containerfile.cairn.lock, on a Debian base pinned by
 its digest (--build-arg DEBIAN_IMAGE=REPOSITORY@sha256:DIGEST for another one).
 No agent is in it: Cairn'"'"'s workers are the session'"'"'s agents.
 
+artex builds localhost/sandbox-ai-artex:latest, the container of --artex: ARTEX
+(AGPL-3.0) from GitHub'"'"'s archive of the commit sandbox-ai reviewed, its git tree
+checked, with sandbox-ai'"'"'s security patches (artex-build/; docs/ARTEX.md): no
+self-update, loopback-only listeners, the admin password set by sandbox-ai. Its
+console from its own npm lock, its server from Go'"'"'s checksummed modules; Debian,
+PostgreSQL, Chromium, nmap, Node and Playwright pinned (base images by digest, the
+Debian archive at a fixed snapshot). No other commit or base is taken.
+
 vpn builds localhost/sandbox-ai-vpn:latest, the container of --vpn with a
 WireGuard, OpenVPN, Mullvad or Tailscale profile (WireGuard, wireguard-go,
 OpenVPN, Tailscale, nftables); pin its parts with --build-arg
@@ -191,6 +201,7 @@ while [[ $# -gt 0 ]]; do
     browser) vpn=browser; shift; break ;;
     team) team=1; shift; break ;;
     cairn) team=cairn; shift; break ;;
+    artex) team=artex; shift; break ;;
     --variant)
       # The variant NAME even when NAME is also a target above (a variant of yours called tor, while "build tor" is
       # the Tor VPN's image).
@@ -206,7 +217,7 @@ while [[ $# -gt 0 ]]; do
       # images.py's own refusal (no such variant, a damaged one) is said once, in this command's name
       plan=$("${images[@]}" build-plan "$1" 2>/dev/null) || {
         why=$("${images[@]}" build-plan "$1" 2>&1 >/dev/null | tail -n 1) || true
-        echo "sandbox-ai build: $1 is neither codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, vpn, tor, browser nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
+        echo "sandbox-ai build: $1 is neither codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, artex, vpn, tor, browser nor a usable variant${why:+ (${why#sandbox-ai images: })}" >&2
         exit 2; }
       agents=("${plan%% *}") variant=$1; read -r _ variant_kind _ <<<"$plan"; shift; break ;;
     *) die_usage ;;
@@ -487,6 +498,31 @@ cairn_build() {
 
 if [[ "$team" == cairn ]]; then
   cairn_build "$@"
+fi
+
+# ARTEX's own container (--artex): the reviewed commit only, with sandbox-ai's patches (Containerfile.artex: its
+# commit, its tree, its pinned bases and packages; artex-build/). Nothing of it is chosen here: another commit, tree,
+# base or snapshot given as a build argument is refused.
+artex_build() {
+  [[ -z "$pin$extension_only$node$uv" ]] || {
+    echo "sandbox-ai build: --pin, --node, --uv and --extension-only apply to the agent images, not artex" >&2; exit 2; }
+  local commit arg
+  commit=$(sed -n 's/^ARG ARTEX_COMMIT=//p' "$script_dir/Containerfile.artex" | head -n 1)
+  for arg in "$@"; do
+    case "$arg" in
+      *ARTEX_COMMIT=*|*ARTEX_TREE=*|*DEBIAN_IMAGE=*|*NODE_IMAGE=*|*GO_IMAGE=*|*DEBIAN_SNAPSHOT=*)
+        echo "sandbox-ai build: ARTEX is built from the commit sandbox-ai reviewed ($commit) on the bases its" \
+             "Containerfile pins" >&2; exit 2 ;;
+    esac
+  done
+  echo "sandbox-ai build: artex -> $commit with sandbox-ai's patches (localhost/sandbox-ai-artex:latest)" >&2
+  last_step "${podman_cmd[@]}" build ${build_net[@]+"${build_net[@]}"} --tag localhost/sandbox-ai-artex:latest \
+    --label sandbox-ai.role=artex --label "sandbox-ai.artex-commit=$commit" \
+    --file "$script_dir/Containerfile.artex" "$@" "$script_dir"
+}
+
+if [[ "$team" == artex ]]; then
+  artex_build "$@"
 fi
 if [[ -n "$team" ]]; then
   team_build "$@"

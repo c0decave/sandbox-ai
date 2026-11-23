@@ -264,7 +264,7 @@ def test_a_use_case_without_tests_takes_its_related_one_and_says_so():
     assert found["status"] == "not tested"
     choice = found["choice"]
     assert choice["source"] == "related" and choice["related"] == "coding" and choice["model"] == "mid-35b"
-    assert "not tested for Large-Codebase" in choice["note"] and "Coding" in choice["note"]
+    assert "no data yet for Large-Codebase" in choice["note"] and "Coding" in choice["note"]
 
 
 def test_a_use_case_without_anything_says_not_tested_and_offers_the_traffic_light_only_as_such():
@@ -273,7 +273,7 @@ def test_a_use_case_without_anything_says_not_tested_and_offers_the_traffic_ligh
     found = uc.recommend(TABLE, servers, "code-review", profiles=profiles)
     assert found["status"] == "not tested" and found["unknown"] == ["reviews: not tested before round 5"]
     assert found["choice"]["source"] == "traffic light"
-    assert "not tested" in found["choice"]["note"]
+    assert "no data yet for this use case" in found["choice"]["note"]
     assert uc.recommend(TABLE, servers, "code-review")["choice"] is None  # without the profiles: nothing to go by
 
 

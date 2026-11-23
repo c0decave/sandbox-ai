@@ -36,8 +36,7 @@ OpenAI-compatible model on the loopback, every TCP connection of the process log
 refused (an `--import` preload in Node): headless (`pi -p`, with a tool call), interactive (the terminal UI in a tmux
 server of its own, a message typed, 40 s), with upstream's defaults and with sandbox-ai's settings (below); and
 sandbox-ai's extension (below) with an MCP server, the `--llm` provider and the loop guard. Not verified here: the
-image build (no Podman in this sandbox: the image builds in CI or on the host) and a start in a real sandbox; hence
-the release ships Pi as not live-tested yet (the start says so in one line; no opt-in).
+image build (no Podman in this sandbox: the image builds in CI or on the host) and a start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (pi)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -233,7 +232,7 @@ given with `-e` load first and also with `--no-extensions` (`resource-loader.ts`
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - With `PI_OFFLINE` and `PI_TELEMETRY=0`, Pi contacts nothing but its model: measured, headless and interactive. Its
   only telemetry has two off switches read before anything is sent, and the proxy refuses its paths even where pi.dev
@@ -244,5 +243,5 @@ given with `-e` load first and also with `--no-extensions` (`resource-loader.ts`
   read-only by sandbox-ai.
 - Against: Pi asks before nothing (by design; the sandbox is the boundary, and its extensions run as the agent); its
   release cadence is fast (the 14-day rule pins a release three behind); `/share` and Radius are on-demand uploads we
-  refuse or leave closed rather than switch off in Pi; not live-tested in a sandbox yet. Hence experimental, and the
+  refuse or leave closed rather than switch off in Pi; not live-tested in a sandbox when reviewed; it has been since (see above). The
   review is repeated for every release taken in.

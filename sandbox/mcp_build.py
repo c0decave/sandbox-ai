@@ -102,13 +102,100 @@ def http_get(url, limit, accept=None, fetch=None):
         return response.read(limit + 1)
 
 
-def git(directory, *args, run=subprocess.run, binary=False):
-    done = run(["git", "-C", str(directory), *args], capture_output=True, timeout=120, check=False,
-               stdin=subprocess.DEVNULL, **({} if binary else {"text": True}))
+# Git in a local catalog's checkout runs on the host, and such a checkout may lie in a workspace, the agent's to write:
+# nothing its configuration names may run - no hooks, fsmonitor, pager, transport, replacement objects - and no command
+# that hashes the work tree or writes files through the attributes' filters (git status runs a clean filter, git archive
+# a smudge filter): plumbing only (git_tree, git_blobs); the comparison (worktree_changes) and the archive
+# (git_archive) are made here.
+GIT_SAFE = ("--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "protocol.allow=never", "-c", "core.sshCommand=false", "-c", "core.alternateRefsCommand=")
+
+
+def git(directory, *args, run=subprocess.run, binary=False, data=None):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", LC_ALL="C", GIT_NO_LAZY_FETCH="1",
+               GIT_ALLOW_PROTOCOL="sandbox-ai-none")
+    done = run(["git", *GIT_SAFE, "-C", str(directory), *args], capture_output=True, timeout=120, check=False,
+               env=env, **({"input": data} if data is not None else {"stdin": subprocess.DEVNULL}),
+               **({} if binary else {"text": True}))
     if done.returncode != 0:
         said = done.stderr if isinstance(done.stderr, str) else (done.stderr or b"").decode("utf-8", "replace")
         raise ValueError(f"git {' '.join(args[:2])} in {directory}: {said.strip()[-300:] or 'failed'}")
     return done.stdout
+
+
+def git_tree(directory, commit, paths, run=subprocess.run):
+    """{path: (mode, object id)} of the files below PATHS in COMMIT (ls-tree: nothing read from the work tree)."""
+    found = {}
+    for record in git(directory, "ls-tree", "-r", "-z", "--full-tree", commit, "--", *paths, run=run,
+                      binary=True).split(b"\0"):
+        if record:
+            meta, _, path = record.partition(b"\t")
+            mode, kind, oid = meta.decode("ascii").split()
+            found[path.decode("utf-8", "surrogateescape")] = (mode, oid)
+    return found
+
+
+def git_blobs(directory, oids, run=subprocess.run):
+    """{object id: its bytes} of the blobs OIDS, as stored (cat-file --batch: no filter, no conversion)."""
+    oids = list(dict.fromkeys(oids))
+    if not oids:
+        return {}
+    raw = git(directory, "cat-file", "--batch", run=run, binary=True, data="".join(f"{oid}\n" for oid in oids).encode())
+    found, position = {}, 0
+    while position < len(raw):
+        end = raw.index(b"\n", position)
+        oid, kind, size = raw[position:end].decode("ascii").split()
+        found[oid] = raw[end + 1:end + 1 + int(size)]
+        position = end + 1 + int(size) + 1
+    return found
+
+
+def worktree_changes(directory, commit, paths, run=subprocess.run):
+    """[path] below PATHS whose file in the work tree is not as COMMIT has it, or that COMMIT does not have (and Git
+    does not ignore): read and hashed here as the bytes are (git status would run the repository's filters)."""
+    directory = Path(directory)
+    tree = git_tree(directory, commit, paths, run)
+    hasher = hashlib.sha256 if git(directory, "rev-parse", "--show-object-format", run=run).strip() == "sha256" \
+        else hashlib.sha1
+    changed = [path for path in git(directory, "ls-files", "-z", "-o", "--exclude-standard", "--", *paths, run=run,
+                                    binary=True).decode("utf-8", "surrogateescape").split("\0") if path]
+    for path, (mode, oid) in tree.items():
+        if mode == "160000":
+            continue  # a submodule: no file of this checkout
+        file = directory / path
+        try:
+            data = os.readlink(file).encode("utf-8", "surrogateescape") if mode == "120000" else \
+                (file.read_bytes() if not file.is_symlink() else None)
+        except OSError:
+            data = None
+        if data is None or hasher(b"blob %d\0" % len(data) + data).hexdigest() != oid or \
+                (mode == "120000") != file.is_symlink():
+            changed.append(path)
+    return sorted(set(changed))
+
+
+def git_archive(directory, commit, prefix, paths, run=subprocess.run):
+    """A tar archive of the files below PATHS in COMMIT under PREFIX (as git archive --format=tar makes one, but from
+    the blobs as stored: no smudge filter of the repository runs). The same commit gives the same bytes."""
+    tree = git_tree(directory, commit, paths, run)
+    blobs = git_blobs(directory, [oid for mode, oid in tree.values() if mode != "160000"], run)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for path in sorted(tree):
+            mode, oid = tree[path]
+            if mode == "160000":
+                continue
+            info = tarfile.TarInfo(prefix + path)
+            info.mtime, info.uname, info.gname = 0, "root", "root"
+            if mode == "120000":
+                info.type, info.linkname, info.mode = tarfile.SYMTYPE, blobs[oid].decode("utf-8", "surrogateescape"), \
+                    0o777
+                archive.addfile(info)
+                continue
+            info.size, info.mode = len(blobs[oid]), 0o755 if mode == "100755" else 0o644
+            archive.addfile(info, io.BytesIO(blobs[oid]))
+    return buffer.getvalue()
 
 
 def github_commit(owner, repo, ref, fetch=None):
@@ -155,11 +242,10 @@ def source_of(catalog, name, run=subprocess.run, fetch=None):
     commit = git(directory, "rev-parse", "HEAD", run=run).strip()
     if not COMMIT.fullmatch(commit):
         raise ValueError(f"{directory}: HEAD is not a commit")
-    changed = git(directory, "status", "--porcelain", "--untracked-files=all", "--", "catalog.json",
-                  f"servers/{name}", FIXTURES, run=run).strip()
+    changed = worktree_changes(directory, commit, ["catalog.json", f"servers/{name}", FIXTURES], run)
     if changed:
         raise ValueError(f"{directory}: catalog.json or servers/{name} differ from the commit {commit[:12]} "
-                         f"({m.launcher().printable(changed.splitlines()[0])[:120]}): only what is committed is built "
+                         f"({m.launcher().printable(changed[0])[:120]}): only what is committed is built "
                          "(commit it, or check it out clean)")
     return {"kind": "git", "directory": str(directory), "repository": str(directory), "commit": commit,
             "path": f"servers/{name}", "catalog": str(path)}
@@ -236,8 +322,7 @@ def archive_of(found, run=subprocess.run, http=None, out=print):
     of the commit (kept in cache_dir() by its commit, so the build after the question takes the bytes the question
     named), or `git archive` of the checkout's commit."""
     if found["kind"] == "git":
-        data = git(found["directory"], "archive", "--format=tar", "--prefix=source/", found["commit"], "--",
-                   found["path"], *([FIXTURES] if fixtures_tracked(found, run) else []), run=run, binary=True)
+        data = git_archive(found["directory"], found["commit"], "source/", [found["path"], FIXTURES], run)
         found["archive"] = f"git archive {found['commit']} ({found['directory']})"
     else:
         url = f"https://codeload.github.com/{found['owner']}/{found['repo']}/tar.gz/{found['commit']}"
@@ -262,13 +347,6 @@ def archive_of(found, run=subprocess.run, http=None, out=print):
                 os.replace(partial, cached)
     found["archive_sha256"] = hashlib.sha256(data).hexdigest()
     return data
-
-
-def fixtures_tracked(found, run=subprocess.run):
-    try:
-        return bool(git(found["directory"], "ls-files", "--", FIXTURES, run=run).strip())
-    except ValueError:
-        return False
 
 
 def extract(data, found, destination):

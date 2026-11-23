@@ -415,8 +415,8 @@ def test_x_without_mit_shm_for_an_agent_with_an_ipc_namespace_of_its_own(devices
 
 def test_the_live_test_names_the_runners_mqueue_refusal_as_a_known_limitation():
     """tests/test_nested_containers_live.py: a container run that crun refuses with the mqueue EPERM - while the agent
-    has an IPC namespace of its own - is skipped with that reason (the CI job "nested" takes that one skip, and the
-    option stays not live-tested); any other failure stays a failure."""
+    has an IPC namespace of its own - is skipped with that reason (the CI job "nested" takes that one skip as a
+    warning: that runner cannot run it); any other failure stays a failure."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("nested_live_for_unit_test",
                                                   Path(__file__).resolve().parent / "test_nested_containers_live.py")
@@ -513,12 +513,12 @@ def test_a_host_that_restricts_user_namespaces_is_named_with_the_way_out(tmp_pat
     monkeypatch.setattr(s, "USERNS_RESTRICTION", restriction)
     monkeypatch.setattr(s, "local_engine", lambda a: True)
     a = parsed("--nested-containers")
-    assert len(s.nested_notes(a)) == 3  # no such file: no restriction
+    assert len(s.nested_notes(a)) == 2  # no such file: no restriction
     restriction.write_text("0\n")
-    assert len(s.nested_notes(a)) == 3
+    assert len(s.nested_notes(a)) == 2
     restriction.write_text("1\n")
     notes = s.nested_notes(a)
-    assert len(notes) == 4 and "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in notes[3]
+    assert len(notes) == 3 and "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in notes[2]
     assert s.nested_notes(parsed()) == []
 
 
@@ -778,19 +778,18 @@ def test_a_sys_that_cannot_be_made_is_said_and_the_run_goes_on(tmp_path, capsys)
     assert "no /sys for the containers" in capsys.readouterr().err
 
 
-def test_it_starts_with_a_note(devices, monkeypatch, capsys):
-    """Not live-tested yet: choosing the option starts it, with a one-line note - never an opt-in (no
-    SANDBOX_AI_EXPERIMENTAL any more, not in the environment, the help or the CI job)."""
+def test_it_starts_without_an_opt_in_or_a_not_live_tested_note(devices, monkeypatch, capsys):
+    """Choosing the option starts it - never an opt-in (no SANDBOX_AI_EXPERIMENTAL any more, not in the environment,
+    the help or the CI job), and no "not live-tested yet" note, help word or dry-run flag (the user, 2026-11-22)."""
     monkeypatch.delenv("SANDBOX_AI_EXPERIMENTAL", raising=False)
     s.check_nested(parsed("--nested-containers"))
-    err = capsys.readouterr().err
-    assert "note: --nested-containers: not live-tested yet" in err and err.count("\n") == 1
-    s.check_nested(parsed())  # without the option nothing is said
+    assert capsys.readouterr().err == ""
+    s.check_nested(parsed())  # without the option nothing is said either
     assert capsys.readouterr().err == ""
     assert not hasattr(s, "experimental") and not hasattr(s, "EXPERIMENTAL_ENV")
-    assert "not live-tested yet" in s.option_actions()["--nested-containers"].help.lower()
+    assert "live-tested" not in s.option_actions()["--nested-containers"].help.lower()
     assert "SANDBOX_AI_EXPERIMENTAL" not in s.option_actions()["--nested-containers"].help
-    assert s.nested_plan(parsed("--nested-containers"))["experimental"] is True
-    assert "not live-tested yet" in s.nested_notes(parsed("--nested-containers"))[0]
+    assert "experimental" not in s.nested_plan(parsed("--nested-containers"))
+    assert not any("live-tested" in note for note in s.nested_notes(parsed("--nested-containers")))
     ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text()
     assert "SANDBOX_AI_EXPERIMENTAL" not in ci

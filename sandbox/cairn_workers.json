@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "about": "How each harness fares as Cairn's worker (sandbox/cairn_workers.py, sandbox-ai cairn workers). status: the traffic light's (model_profiles.LIGHTS: verified green, smoke-only and partial yellow, failing and known-bad red, untested grey); a status other than untested names the run it comes from in evidence (a CI job by name, or a live check's report: scripts/live_check.sh --only cairn-workers-live). tests: what sandbox-ai's own tests prove with stand-ins. limits: what Cairn expects that the harness cannot give. reason: why a red one does not work.",
+  "harnesses": {
+    "claude": {
+      "status": "smoke-only",
+      "evidence": "CI's job agents-live (cairn), tests/test_cairn_live.py: the real dispatcher in local execution mode in a real pod ran one task through the relay with the session's real Claude Code, which asked the model (a scripted one on the runner's loopback, --llm); that Cairn took a real answer as a fact is not measured there",
+      "tests": "tests/test_cairn_relay.py, tests/test_cairn_e2e.py: Cairn's own command lines, nothing else",
+      "limits": []
+    },
+    "codex": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay.py: Cairn's own codex command lines (exec, exec resume ID), nothing else; Cairn reads Codex's session from its error output as it comes",
+      "limits": []
+    },
+    "opencode": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion"]
+    },
+    "opencode2": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion", "model"]
+    },
+    "hermes": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion"]
+    },
+    "dsh": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line (the task on standard input), the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion", "model"]
+    },
+    "qwen": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion"]
+    },
+    "goose": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion", "model"]
+    },
+    "openhands": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion", "model", "openhands-lead"]
+    },
+    "nanobot": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line (a session of its own per task, the conclusion in it), the answer after its header, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["model", "nanobot-workspace"]
+    },
+    "letta": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion"]
+    },
+    "pi": {
+      "status": "untested",
+      "evidence": null,
+      "tests": "tests/test_cairn_relay_harnesses.py: the command line, the answer, the refusals; tests/test_cairn_real_dispatcher.py: real Cairn completes a project with a stand-in of it",
+      "limits": ["conclusion"]
+    }
+  }
+}

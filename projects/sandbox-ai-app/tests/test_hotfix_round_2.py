@@ -101,6 +101,9 @@ def test_start_while_the_presets_mcp_server_is_added_waits_and_then_starts(board
     preparation (said as information, not refused) and the start goes on once the server is there."""
     import json
     page = board_page
+    # (the agent's image is there: one that is not built is asked about with the rest and built first - the
+    # launcher's own plan, read on the start's host; here the story is the MCP server alone)
+    user.add_image("localhost/claude-sandbox:latest")
     gallery(page, "sandbox-ai:sai-coding-memory", user.workspace)
     (argv, title, ended), = page.tabs  # the preset's preparation runs in its tab
     page.tabs.clear()

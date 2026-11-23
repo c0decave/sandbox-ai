@@ -247,8 +247,10 @@ def credentials(skip=(), entries=None, origin="git-logins"):
         token = token.strip()  # (a line end or blanks around it: never part of a token)
         problem = launcher().token_problem(token)
         if problem is not None:  # (kept, but not a token: said what is wrong, never the value)
+            # (the usual cause: a line break or a blank pasted with it - said, with the command that takes it again)
             notes.append(f"{origin}: {credential['url']} left out: the secret {entry['secret']} is no access token - "
-                         f"{problem} (sandbox-ai secrets set {entry['secret']})")
+                         f"{problem} (enter it again: sandbox-ai secrets set {entry['secret']} - a line break or a "
+                         "blank pasted with it is the usual cause)")
             continue
         pairs.append(({**credential, "user": entry["user"]}, token))
     return pairs, notes

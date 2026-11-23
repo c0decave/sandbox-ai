@@ -285,7 +285,7 @@ def test_the_background_script_runs_in_a_shell(tmp_path):
 
 def test_plan_says_what_is_on_and_off():
     plan = goose.plan(ns("goose", "scheduler"))
-    assert plan["version"] == goose.VERSION and plan["commit"] == goose.COMMIT and plan["experimental"]
+    assert plan["version"] == goose.VERSION and plan["commit"] == goose.COMMIT and "experimental" not in plan
     assert plan["telemetry"]["switchable"] is False and plan["background"] == ["serve"]
     assert plan["enabled"] == [{"feature": "scheduler", "hosts": [], "secrets": []}]
     assert plan["off"] == ["gateway:telegram", "local-inference", "model-catalog", "updates"]

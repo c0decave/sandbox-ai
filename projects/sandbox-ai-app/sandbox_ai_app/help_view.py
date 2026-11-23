@@ -30,6 +30,8 @@ OPENER = None   # the window's show_help(section id): set by the main window
 VIDEO_OPENER = None  # the window's watch_video(page key): set by the main window (else video_player.open_video)
 VIDEO_SAI = []  # the window's SandboxAI (where the videos are looked for, the version they are downloaded for)
 OPENED = []     # the ids of the explanations opened in this run (a tour step waits for one)
+WINDOW = []     # the main window (a weak reference), whose pages the Help's screenshots show
+SHOW_ME = None  # the window's show_me(page, target): shows the page and outlines the control, as a tour does
 SIZE = 18
 _SHOWN = [True]  # the setting help_buttons: the (?)s are shown (the Help page, tours and F1 stay either way)
 _BUTTONS = weakref.WeakSet()  # every HelpButton made, to hide or show them when the setting changes
@@ -608,32 +610,178 @@ def explain_windows(app):
 
 # -- the Help area --
 
-def render(section, language):
-    """SECTION as HTML (its texts escaped: nothing in them is markup but `code`, - bullets and paragraphs)."""
-    def inline(text):
-        return re.sub(r"`([^`]+)`", r"<code>\1</code>", html.escape(text))
-    parts = [f"<h2>{html.escape(H.say(section.title, language))}</h2>"]
-    for block in H.say(section.body, language).split("\n\n"):
-        lines = [line.strip() for line in block.strip().splitlines() if line.strip()]
-        bullets = [line[2:] for line in lines if line.startswith("- ")]
-        text = " ".join(line for line in lines if not line.startswith("- "))
-        if text:
-            parts.append(f"<p>{inline(text)}</p>")
-        if bullets:
-            parts.append("<ul>" + "".join(f"<li>{inline(b)}</li>" for b in bullets) + "</ul>")
-    if section.cli:
-        label = html.escape(tr_in(language, N_("Command line")))
-        parts.append(f"<p><b>{label}:</b> " + ", ".join(f"<code>{html.escape(c)}</code>" for c in section.cli)
-                     + "</p>")
-    from . import help_content
-    links = [f'<a href="section:{s}">{html.escape(H.say(help_content.BY_ID[s].title, language))}</a>'
-             for s in section.see if s in help_content.BY_ID]
-    if section.id == VIDEO_SECTION:  # the list itself: with a click on a video, or the download when none is here
-        parts.append(f'<p><a href="section:{VIDEOS}">{html.escape(tr_in(language, N_("The list of the videos")))}</a>'
-                     "</p>")
-    if links:
-        parts.append(f"<p><b>{html.escape(tr_in(language, N_('See also')))}:</b> " + " · ".join(links) + "</p>")
-    return "\n".join(parts)
+def render(section, language, open_folds=(), shot=None, sections=None):
+    """SECTION as HTML in LANGUAGE (help_document.render: the folds OPEN_FOLDS open, SHOT its screenshot, SECTIONS
+    for the Related links) and its commands. The section on the videos leads to their list (with a click on a video,
+    or the download when none is here) right below its sentence, in the first view - the window draws every section
+    through here, so the link is in the real window (user 2026-11-22: "Videos zu dieser Seite anklicken passiert
+    nichts")."""
+    from . import help_document
+    page, commands = help_document.render(section, language, lambda key: tr_in(language, key), open_folds, shot,
+                                          sections)
+    if section.id == VIDEO_SECTION:
+        link = (f'<p class="lead"><a href="section:{VIDEOS}">'
+                f'{html.escape(tr_in(language, N_("The list of the videos")))}</a></p>')
+        lead = page.find('<p class="lead">')
+        end = page.find("</p>", lead) if lead >= 0 else -1
+        page = page[:end + 4] + "\n" + link + page[end + 4:] if end >= 0 else page + "\n" + link
+    return page, commands
+
+
+# -- the Help's look: a readable font and size, a centred column, colours with enough contrast --
+
+def mixed(a, b, share):
+    """Colour A with SHARE of colour B."""
+    a, b = QColor(a), QColor(b)
+    return QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * share, a.greenF() + (b.greenF() - a.greenF()) * share,
+                           a.blueF() + (b.blueF() - a.blueF()) * share)
+
+
+def readable(foreground, background, minimum=4.5):
+    """FOREGROUND moved towards black or white just enough for MINIMUM contrast on BACKGROUND (WCAG: 4.5 for
+    text, AA)."""
+    colour, background = QColor(foreground), QColor(background)
+    if theme.contrast(colour.name(), background.name()) >= minimum:
+        return colour
+    target = QColor("#000000") if theme.luminance(background) > 0.18 else QColor("#ffffff")
+    for step in range(1, 41):
+        candidate = mixed(colour, target, step / 40)
+        if theme.contrast(candidate.name(), background.name()) >= minimum:
+            return candidate
+    return target
+
+
+class HelpStyle:
+    """The Help text's look in the theme now: its font (the reading font, else Atkinson Hyperlegible Next, else the
+    theme's), about 1.2 times the app's size (16 px at the default 10 pt), its mono font for commands, and colours
+    that keep WCAG AA contrast (4.5:1) on the page's background."""
+    SCALE = 1.2
+    LINE_HEIGHT = 150  # per cent
+
+    def __init__(self, widget=None):
+        from PySide6.QtWidgets import QApplication
+        from . import reading_fonts
+        reading_fonts.register()
+        palette = widget.palette() if widget is not None else QApplication.palette()
+        app_font = QApplication.font()
+        points = app_font.pointSizeF() if app_font.pointSizeF() > 0 else app_font.pixelSize() * 0.75
+        self.points = round(max(10.5, points * self.SCALE), 1)
+        self.families = reading_fonts.text_families(list(app_font.families()))
+        self.mono = reading_fonts.mono_families(list(MONO.families()))
+        role = palette.ColorRole
+        self.background = QColor(palette.color(role.Base))
+        self.text = readable(palette.color(role.Text), self.background, 7.0)
+        self.secondary = readable(mixed(self.text, self.background, 0.3), self.background)
+        self.link = readable(palette.color(role.Link), self.background)
+        dark = theme.luminance(self.background) < 0.18
+        self.code_background = mixed(self.background, self.text, 0.12 if dark else 0.06)
+        self.code_text = readable(self.text, self.code_background, 7.0)
+        self.rule = mixed(self.background, self.text, 0.25)
+
+    def font(self):
+        font = QFont()
+        font.setFamilies(self.families)
+        font.setPointSizeF(self.points)
+        return font
+
+    def pairs(self):
+        """(name, foreground, background) of every colour pair the Help shows text in (for the contrast check)."""
+        return (("text", self.text, self.background), ("secondary", self.secondary, self.background),
+                ("link", self.link, self.background), ("code", self.code_text, self.code_background))
+
+    def css(self):
+        def families(names):
+            return ", ".join(f"'{n}'" for n in names)
+        pt = self.points
+        return (f"body {{ color: {self.text.name()}; }}"
+                f"h1 {{ font-size: {round(pt * 1.6, 1)}pt; font-weight: 700; margin-top: 4px; margin-bottom: 6px; }}"
+                f"h2 {{ font-size: {round(pt * 1.25, 1)}pt; font-weight: 700; margin-top: 22px; "
+                f"margin-bottom: 6px; }}"
+                f"h3 {{ font-size: {round(pt * 1.02, 1)}pt; font-weight: 700; margin-top: 14px; "
+                f"margin-bottom: 2px; }}"
+                f"p {{ margin-top: 0px; margin-bottom: 10px; }}"
+                f"p.lead {{ font-size: {round(pt * 1.12, 1)}pt; margin-bottom: 14px; }}"
+                f"p.fold {{ margin-top: 6px; margin-bottom: 6px; font-weight: 600; }}"
+                f"p.related {{ margin-top: 18px; color: {self.secondary.name()}; }}"
+                f"span.note {{ color: {self.secondary.name()}; }}"
+                f"li {{ margin-bottom: 1px; }}"
+                f"ol {{ margin-top: 0px; margin-bottom: 6px; }}"
+                f"a {{ color: {self.link.name()}; text-decoration: underline; }}"
+                f"code {{ font-family: {families(self.mono)}; font-size: {round(pt * 0.92, 1)}pt; "
+                f"color: {self.code_text.name()}; background-color: {self.code_background.name()}; }}"
+                f"td.code {{ background-color: {self.code_background.name()}; }}"
+                f"td.copy {{ background-color: {self.code_background.name()}; font-size: {round(pt * 0.9, 1)}pt; }}"
+                f"table.code {{ margin-top: 4px; margin-bottom: 10px; }}"
+                f"table.legend {{ margin-top: 4px; margin-bottom: 4px; }}")
+
+
+class HelpText(QTextBrowser):
+    """The Help's text: a column of at most help_document.LINE_CHARACTERS characters in the middle of the space it
+    has, the lines 1.5 apart; the screenshot and the numbered circles as images of its own."""
+    resized = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.images = {}
+        self.style_ = None
+        self.setOpenLinks(False)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+    def loadResource(self, kind, url):  # noqa: N802 - Qt's name
+        image = self.images.get(url.toString())
+        return image if image is not None else super().loadResource(kind, url)
+
+    def column(self):
+        """The width of the text column in pixels: LINE_CHARACTERS average characters of the font, at most the space."""
+        from PySide6.QtGui import QFontMetricsF
+        from .help_document import LINE_CHARACTERS
+        metrics = QFontMetricsF(self.document().defaultFont())
+        return int(min(self.viewport().width() - 32, metrics.averageCharWidth() * LINE_CHARACTERS))
+
+    def picture_width(self):
+        """How wide a picture may be in the column: its width less the document's own margins (no sideways
+        scrolling)."""
+        return int(self.column() - 2 * self.document().documentMargin() - 4)
+
+    def place_column(self):
+        """The column in the middle: the document's left and right margins take what is left over."""
+        side = max(16, (self.viewport().width() - self.column()) // 2)
+        frame = self.document().rootFrame()
+        form = frame.frameFormat()
+        if (form.leftMargin(), form.rightMargin()) != (side, side):
+            form.setLeftMargin(side)
+            form.setRightMargin(side)
+            form.setTopMargin(18)
+            form.setBottomMargin(24)
+            frame.setFrameFormat(form)
+
+    def show_html(self, text, style):
+        """TEXT (help_document HTML) in STYLE: the font, the style sheet, the lines spaced, the column placed."""
+        from PySide6.QtGui import QTextBlockFormat, QTextCursor
+        self.style_ = style
+        document = self.document()
+        document.setDefaultFont(style.font())
+        document.setDefaultStyleSheet(style.css())
+        document.setDocumentMargin(4)
+        self.setHtml(text)
+        cursor = QTextCursor(document)
+        block = document.begin()
+        while block.isValid():
+            fmt = block.blockFormat()
+            # (not a line with a picture: the screenshot's and the legend's lines keep the picture's height)
+            if fmt.lineHeightType() == QTextBlockFormat.LineHeightTypes.SingleHeight.value and \
+                    "\ufffc" not in block.text():
+                fmt.setLineHeight(style.LINE_HEIGHT, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+                cursor.setPosition(block.position())
+                cursor.setBlockFormat(fmt)
+            block = block.next()
+        self.place_column()
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self.place_column()
+        if event.oldSize().width() != event.size().width():
+            self.resized.emit()
 
 
 def tr_in(language, key, **values):
@@ -732,10 +880,15 @@ class HelpPage(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.text = QTextBrowser()
+        self.text = HelpText()
         self.text.setAccessibleName(tr("Help text"))
-        self.text.setOpenLinks(False)
+        self.open_folds = {}  # section id -> the numbers of its folds the human opened
+        self.commands = []  # what the copy:N links of the section shown copy
+        self.shot = None  # the section's screenshot (help_shots.Shot), when its page could be shown
+        self.shot_of = None  # the section it was made for
+        self.restyle_timer = None
         self.text.anchorClicked.connect(lambda url: self.link(url.toString()))
+        self.text.resized.connect(self.refit)
         right_layout.addWidget(self.text, 1)
         self.tours = QWidget()
         tours_row = QHBoxLayout(self.tours)
@@ -815,8 +968,9 @@ class HelpPage(QWidget):
                                    for lang in i18n.LANGUAGES] + ["video videos film"])
         else:
             section = self.content.BY_ID[ident]
+            first = [text for lang in i18n.LANGUAGES for text in self.first_view_texts(section, lang)]
             haystack = " ".join([section.title.en, section.title.de, section.body.en, section.body.de,
-                                 " ".join(section.cli)])
+                                 " ".join(section.cli), *first])
         haystack = haystack.lower()
         return all(word in haystack for word in words)
 
@@ -856,7 +1010,7 @@ class HelpPage(QWidget):
         self.shown = ident
         language = self.lang()
         if ident == ALL_TOURS:
-            rows = [f"<h2>{html.escape(tr_in(language, N_('All tours')))}</h2>"]
+            rows = [f"<h1>{html.escape(tr_in(language, N_('All tours')))}</h1>"]
             for tour in tours.TASK_TOURS.values():
                 rows.append(f'<p><a href="tour:{tour.id}"><b>{html.escape(H.say(tour.title, language))}</b></a><br>'
                             f"{html.escape(H.say(tour.summary, language))}</p>")
@@ -864,14 +1018,14 @@ class HelpPage(QWidget):
             rows.append(" · ".join(f'<a href="tour:area:{page}">{html.escape(tour_title("area:" + page, language))}'
                                    f"</a>" for page in tours.AREA_TOURS))
             rows.append("</p>")
-            self.text.setHtml("\n".join(rows))
+            self.text.show_html("\n".join(rows), HelpStyle(self.text))
             wanted = tuple(tours.TASK_TOURS)
         elif ident == VIDEOS:
             self.show_videos()
             wanted = ()
         else:
             section = self.content.BY_ID[ident]
-            self.text.setHtml(render(section, language))
+            self.render_section(section, fresh=True)
             wanted = section.tours
         self.set_tours(wanted if self.with_tours else ())
         item = self.items.get(ident)
@@ -883,10 +1037,149 @@ class HelpPage(QWidget):
         self.section_shown.emit(ident)
         return True
 
+    @staticmethod
+    def first_view_texts(section, language):
+        from . import help_document
+        return help_document.first_view_paragraphs(section, language)
+
+    def search_folds(self, section):
+        """The folds of SECTION holding a word searched for (they open by themselves), in the language shown."""
+        from . import help_document
+        words = self.search.text().lower().split()
+        if not words:
+            return set()
+        return {number for number, (heading, text) in enumerate(help_document.fold_texts(section, self.lang()))
+                if any(word in (heading + " " + text).lower() for word in words)}
+
+    def render_section(self, section, fresh=False, picture=True):
+        """SECTION in its pattern (help_document.render): its screenshot made now from the window's page (PICTURE
+        False: the one made last, when it is this section's - a fold opened needs no new one), the folds opened by
+        the human (or by the search) open; the place scrolled to kept when it is drawn again."""
+        from PySide6.QtGui import QGuiApplication
+        from . import help_shots
+        style = HelpStyle(self.text)
+        language = self.lang()
+        ratio = max(1.0, self.devicePixelRatioF() or QGuiApplication.primaryScreen().devicePixelRatio())
+        if fresh:
+            self.open_folds[section.id] = set(self.open_folds.get(section.id, set())) | self.search_folds(section)
+        shot_info = None
+        kept = self.shot if not picture and self.shot_of == section.id else None
+        self.shot, self.shot_of = kept, section.id
+        self.text.images = {}
+        window = WINDOW[0]() if WINDOW else None
+        if kept is None and section.shot and window is not None:
+            column = max(80, self.text.picture_width())
+            try:
+                self.shot = help_shots.capture(window, section.shot, section.callouts, column, ratio, self.palette())
+            except RuntimeError:  # a page that is being deleted
+                self.shot = None
+        if self.shot is not None:
+            self.text.images[f"shot:{section.id}"] = self.shot.image
+            legend = []
+            numbers = {mark.target: mark.number for mark in self.shot.marks}
+            for target in section.callouts:
+                name = tours.control(section.shot, target)
+                label = H.say(name, language) if name is not None else target
+                legend.append((numbers.get(target, 0), target, label, target in numbers))
+            for number, *_ in legend:
+                if number:
+                    self.text.images[f"badge:{number}"] = help_shots.badge_image(number, 22, ratio, self.palette())
+            width = max(80, min(self.shot.width, self.text.picture_width()))  # never wider than the column
+            shot_info = (width, max(1, round(self.shot.height * width / self.shot.width)), legend)
+        scroll = self.text.verticalScrollBar().value() if not fresh else 0
+        text, self.commands = render(section, language, self.open_folds.get(section.id, set()), shot_info,
+                                     self.content.BY_ID)
+        self.text.document().clear()  # (the images of the section shown before go with it)
+        self.text.show_html(text, style)
+        self.text.verticalScrollBar().setValue(scroll)
+
+    def toggle_fold(self, number):
+        section = self.content.BY_ID.get(self.shown)
+        if section is None:
+            return
+        opened = self.open_folds.setdefault(section.id, set())
+        opened.symmetric_difference_update({number})
+        self.render_section(section, picture=False)
+
+    def copy_command(self, number):
+        from PySide6.QtGui import QGuiApplication
+        if 0 <= number < len(self.commands):
+            QGuiApplication.clipboard().setText(self.commands[number])
+            QToolTip.showText(self.text.mapToGlobal(self.text.rect().center()), tr("Copied: {text}",
+                                                                                   text=self.commands[number]))
+
+    def show_me(self, target):
+        """Show the control TARGET of the section's page in the window, outlined (as its tour does)."""
+        section = self.content.BY_ID.get(self.shown)
+        if section is not None and section.shot and SHOW_ME is not None:
+            SHOW_ME(section.shot, target)
+
+    def zoom(self):
+        """The screenshot at the size of the page itself, in a window of its own."""
+        section = self.content.BY_ID.get(self.shown)
+        window = WINDOW[0]() if WINDOW else None
+        if section is None or not section.shot or window is None:
+            return None
+        from . import help_shots
+        page = getattr(window, section.shot, None)
+        width = page.width() if isinstance(page, QWidget) else 1200
+        shot = help_shots.capture(window, section.shot, section.callouts, width, self.devicePixelRatioF() or 1.0,
+                                  self.palette())
+        if shot is None:
+            return None
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle(H.say(section.title, self.lang()))
+        layout = QVBoxLayout(dialog)
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        picture = QLabel()
+        picture.setPixmap(QPixmap.fromImage(shot.image))
+        scroll.setWidget(picture)
+        layout.addWidget(scroll)
+        dialog.resize(min(shot.width + 40, 1400), min(shot.height + 60, 900))
+        dialog.show()
+        self.zoomed = dialog
+        return dialog
+
+    def changeEvent(self, event):  # noqa: N802
+        """A new theme, font or reading font: the section is drawn again in it (once, after the change settled)."""
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.FontChange, QEvent.Type.StyleChange,
+                            QEvent.Type.ApplicationFontChange):
+            from PySide6.QtCore import QTimer
+            if self.restyle_timer is None:
+                self.restyle_timer = QTimer(self)
+                self.restyle_timer.setSingleShot(True)
+                self.restyle_timer.setInterval(60)
+                self.restyle_timer.timeout.connect(self.restyle)
+            self.restyle_timer.start()
+
+    def refit(self):
+        """The text column changed its width: a screenshot made for another width is made again (once it settled)."""
+        if self.shot is None or getattr(self, "refitting", False):
+            return
+        wanted = min(max(80, self.text.picture_width()), self.shot.page_width or 10 ** 6)
+        if abs(self.shot.width - wanted) > 24:
+            section = self.content.BY_ID.get(self.shown)
+            if section is not None and self.shot.width > wanted:  # at once the picture made smaller: no sideways
+                self.refitting = True  # scrolling, not even for a moment (a new one at the right size follows)
+                try:
+                    self.render_section(section, picture=False)
+                finally:
+                    self.refitting = False
+            self.changeEvent(QEvent(QEvent.Type.FontChange))
+
+    def restyle(self):
+        section = self.content.BY_ID.get(self.shown)
+        if section is not None:
+            self.render_section(section)
+
     def set_tours(self, idents):
         while self.tour_flow.count():
             taken = self.tour_flow.takeAt(0)
             if taken.widget() is not None:
+                taken.widget().hide()  # at once: deleteLater waits for the event loop, and they overlapped the new
                 taken.widget().deleteLater()
         for ident in idents:
             if not ident.startswith("area:") and ident not in tours.TASK_TOURS:
@@ -915,7 +1208,15 @@ class HelpPage(QWidget):
         self.text.setHtml(videos_html(self.found_videos, self.lang(), places))
 
     def link(self, target):
-        if target.startswith("section:"):
+        if target.startswith("fold:") and target[5:].isdigit():
+            self.toggle_fold(int(target[5:]))
+        elif target.startswith("copy:") and target[5:].isdigit():
+            self.copy_command(int(target[5:]))
+        elif target.startswith("show:"):
+            self.show_me(target[5:])
+        elif target == "zoom:shot":
+            self.zoom()
+        elif target.startswith("section:"):
             self.show_section(target[len("section:"):])
         elif target.startswith("tour:"):
             self.tour_requested.emit(target[len("tour:"):])

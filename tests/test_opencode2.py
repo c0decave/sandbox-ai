@@ -201,7 +201,7 @@ def test_a_service_already_off_is_left_alone():
 
 def test_plan_says_what_is_on_and_off():
     plan = oc2.plan(ns("opencode2", "plugins"))
-    assert plan["version"] == oc2.VERSION and plan["commit"] == oc2.COMMIT and plan["experimental"]
+    assert plan["version"] == oc2.VERSION and plan["commit"] == oc2.COMMIT and "experimental" not in plan
     assert plan["telemetry"]["switchable"] is False and plan["background_service"] is False
     assert plan["enabled"] == [{"feature": "plugins", "hosts": ["registry.npmjs.org"]}]
     assert plan["off"] == ["models-catalog", "updates", "web-search"] and plan["own_sandbox"] is False
@@ -334,8 +334,6 @@ def test_the_option_counts_as_weakening_and_the_launcher_knows_opencode2():
     assert s.DANGER_ENV["opencode2"] == {}, "no OPENCODE_PERMISSION in OpenCode 2"
     assert s.UNSWITCHABLE_TELEMETRY["opencode2"] == "OpenCode 2" and "opencode2" in s.COMPANION_AGENTS
     assert s.pinned_telemetry_environment("opencode2") == oc2.TELEMETRY_ENV
-    assert s.EXPERIMENTAL_PARTS["opencode2"] == {"agent": "opencode2"} and s.experimental_needs(["opencode2"]) == ["opencode2"]
-    assert "opencode" not in s.EXPERIMENTAL_PARTS, "OpenCode 1 is not experimental"
     assert "opencode2" in s.AGENT_PROGRAMS
 
 
@@ -375,7 +373,8 @@ def test_a_presets_first_task_is_its_prompt():
     for name in ("default-opencode2", "coding-opencode2", "opencode2-local-llm"):
         preset = json.loads((ROOT / f"sandbox/presets/{name}.json").read_text())
         assert preset["agents"] == ["opencode2"] and preset["category"] == "agents" and preset["translations"]["de"]
-        assert any("not live-tested yet" in note for note in preset["notes"])
+        assert any("sandbox-ai build opencode2" in note for note in preset["notes"])
+        assert not any("live-tested" in note for note in preset["notes"])
     basic = json.loads((ROOT / "sandbox/presets/default-opencode2.json").read_text())
     assert basic["translations"]["de"]["title"] == "OpenCode 2 (Standard)", "every agent's basic preset"
     assert set(basic["options"]) <= {"--api-key", "--model"} and "values" not in basic and "mcp" not in basic

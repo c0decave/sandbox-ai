@@ -231,11 +231,12 @@ def test_resume_with_offers_the_mcp_servers_of_the_starts_host(sandboxes, sai, m
     page, instance = sandboxes
     answer(sai, ["mcp", "list", "--json"], [{"name": "fetch", "status": "stopped"}, {"name": "git", "status": "x"}])
     seen = []
-    monkeypatch.setattr(ui.ResumeDialog, "__init__", lambda self, parent, name, host, running, servers, draft=None: (
-        seen.append((name, host, servers)), QtWidgets.QDialog.__init__(self, parent))[-1])
+    # (start: the options a session of this machine was created with, for "On the Start page…" - none for a host's)
+    monkeypatch.setattr(ui.ResumeDialog, "__init__", lambda self, parent, name, host, running, servers, draft=None,
+                        start=None: (seen.append((name, host, servers, start)), QtWidgets.QDialog.__init__(self, parent))[-1])
     monkeypatch.setattr(ui.ResumeDialog, "exec", lambda self: QtWidgets.QDialog.DialogCode.Rejected)
     page.resume_with(instance)
-    assert seen == [("wild-dromouse", "ct1", ["fetch", "git"])]
+    assert seen == [("wild-dromouse", "ct1", ["fetch", "git"], None)]
     assert ("mcp", "list", "--json") in asked(sai)
 
 

@@ -33,6 +33,6 @@
     "Register the server once: sandbox-ai llm add NAME --kind ollama|lmstudio|llamacpp|vllm|openai-compatible --url URL --model MODEL; sandbox-ai llm check NAME --agent pi asks it for the API Pi uses.",
     "sandbox-ai's extension gives Pi the server as its provider sandbox-ai (OpenAI chat completions at the server's /v1 URL, the key a placeholder the connection proxy replaces, the model's context window as the start's num_ctx or the server says), and Pi starts with --model sandbox-ai/MODEL. LM Studio, Ollama, vLLM and llama.cpp all work.",
     "The loop guard: its instructions in Pi's system prompt and its turn limit (the extension ends a run there), the relay's model parameters (sandbox-ai llm params) on the wire. Agents need a model with tool calls and a long context (qwen3-coder, gpt-oss, ...; Ollama: OLLAMA_CONTEXT_LENGTH=32768 or more). On this host's loopback (http://127.0.0.1:PORT) only with Podman.",
-    "Pi is not live-tested yet (a start says so); its image first: sandbox-ai build pi."
+    "Its image first: sandbox-ai build pi."
   ]
 }

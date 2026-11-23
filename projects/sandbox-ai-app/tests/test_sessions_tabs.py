@@ -298,6 +298,15 @@ def test_german(qapp, env, monkeypatch):  # noqa: F811
         QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
 
 
+def settle(qapp, rounds=5):
+    """The layouts done: a row that wraps (the button texts on) asks its parents for room again, one event loop pass
+    at a time - measured after one pass, a label of the Schedules tab was still at its old height in one full run
+    (round 2, 2026-11-22: "needs 112 px high, has 32", passed alone)."""
+    for _ in range(rounds):
+        QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.LayoutRequest)
+        qapp.processEvents()
+
+
 @pytest.mark.parametrize("language", ["en", "de"])
 @pytest.mark.parametrize("mode", ["light", "dark", "win311"])
 def test_nothing_is_clipped_on_either_tab_at_the_smallest_window(qapp, env, monkeypatch, language, mode):  # noqa: F811
@@ -321,7 +330,7 @@ def test_nothing_is_clipped_on_either_tab_at_the_smallest_window(qapp, env, monk
             button_icons.set_texts_shown(texts)
             for index in range(page.tabs.count()):
                 page.tabs.setCurrentIndex(index)
-                qapp.processEvents()
+                settle(qapp)
                 found += [f"texts {texts}, tab {index}: {item}" for item in clipped(page)]
                 right = page.width()
                 for button in session_row(page) + run_row(page):

@@ -15,8 +15,12 @@ def test_json_has_status_check_detail_hint_and_group(monkeypatch, capsys):
     monkeypatch.setattr(d, "checks", lambda backend, podman_url=None: results)
     assert d.cli(["--json"]) == 1, "a failed check: status 1"
     out = json.loads(capsys.readouterr().out)
+    fix = out[1].pop("fix")  # what fixes it, as a start's fix plan says it (sandbox/fixes.py)
     assert out[1] == {"status": "warn", "check": "Image claude", "detail": "missing", "hint": "sandbox-ai build claude",
                       "group": "Engine"}
+    assert fix["commands"] == [["sandbox-ai", "build", "claude"]] and fix["verdict"] == "offered"
+    assert out[2]["fix"]["commands"] == [["sandbox-ai", "login", "codex"]] and out[2]["fix"]["terminal"] is True
+    assert "fix" not in out[0] and "fix" not in out[3]
     assert [entry["group"] for entry in out] == ["System", "Engine", "Agents", "Project"]
     monkeypatch.setattr(d, "checks", lambda backend, podman_url=None: results[:1])
     assert d.cli(["--json"]) == 0

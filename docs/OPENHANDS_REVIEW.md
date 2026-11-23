@@ -33,8 +33,7 @@ connection sent to a logging proxy that refuses it, while every non-loopback soc
 API in each, a consent granted through the API in each, and `openhands task` (one task without the UI, twice, the
 second resuming the first). Not verified here: the image build and a start in a real sandbox (no Podman in this
 sandbox: the image builds in CI or on the host), and the Canvas page in a browser (no browser here; its kill switch
-was checked in the HTML the Canvas serves and in the page's code); hence the release ships OpenHands as not
-live-tested yet (the start says so in one line; no opt-in).
+was checked in the HTML the Canvas serves and in the page's code); hence it was not live-tested when this review was made (since then CI's job `agents-live (openhands)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -196,7 +195,7 @@ kit hooks likewise. What holds: the network, MCP and device rules, its web fetch
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - With sandbox-ai's settings OpenHands contacts nothing by default but its model (measured); the parts that reach out
   (the automation backend, the model catalog) are off and each switchable with only its own hosts; the remote runtimes
@@ -209,5 +208,4 @@ kit hooks likewise. What holds: the network, MCP and device rules, its web fetch
 - Against: a young structure (the CLI deprecated this year, four repositories) that releases very fast (Canvas
   1.34 -> 1.40 in 16 days), so the 14-day rule keeps it several releases behind; a large install (about 1.3 GB);
   the page's install event before consent upstream (never here); the settings are applied through the agent server's
-  API after it starts rather than read from a file it cannot change; not live-tested in a sandbox yet. Hence
-  experimental, and the review is repeated for every release taken in.
+  API after it starts rather than read from a file it cannot change; not live-tested in a sandbox when reviewed; it has been since (see above). The review is repeated for every release taken in.

@@ -27,8 +27,7 @@ logged and every one off the loopback refused (a `--require` preload in Node; Le
 proxy variable): headless (`letta -p`), interactive (the TUI in tmux, a message typed, 30 s and 135 s), with
 upstream's defaults and with sandbox-ai's settings (below); `letta connect`, `letta agents create`, `letta mcp tools`
 and sandbox-ai's start script with an MCP server. Not verified here: the image build (no Podman in this sandbox: the
-image builds in CI or on the host) and a start in a real sandbox; hence the release ships Letta Code as not
-live-tested yet (the start says so in one line; no opt-in).
+image builds in CI or on the host) and a start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (letta)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -212,7 +211,7 @@ Timeouts are milliseconds.
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line), **with the local backend only**;
+**Go** (choosing it starts it like any other agent), **with the local backend only**;
 Letta Cloud is an explicit opt-in (`--letta-enable cloud`) that opens only its two hosts.
 
 - With its telemetry and update check off and Letta Cloud's address closed, Letta Code contacts nothing but its model
@@ -226,4 +225,4 @@ Letta Cloud is an explicit opt-in (`--letta-enable cloud`) that opens only its t
 - Against: the local backend is still called experimental upstream; the release cadence is extreme (several a day:
   the 14-day rule pins a release about 20 behind); the agents rewrite their own memory, skills and mods (all inside
   the sandbox's HOME, shown by `--review-home`); MCP servers are per agent, laid in by sandbox-ai's start script;
-  not live-tested in a sandbox yet. Hence experimental, and the review is repeated for every release taken in.
+  not live-tested in a sandbox when reviewed; it has been since (see above). The review is repeated for every release taken in.

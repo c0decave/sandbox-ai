@@ -198,6 +198,63 @@ def test_the_wheel_holds_the_command_line_the_web_interface_and_the_app(built):
     assert not [n for n in names if n.startswith(("tests/", "projects/", "sandbox/"))]
 
 
+RUNTIME = (("sandbox/", "sandbox_ai/"), ("projects/sandbox-ai-app/sandbox_ai_app/", "sandbox_ai_app/"))
+# Files added since 0.1.188 that the program reads at run time; package-data's patterns are lists, so a new kind of
+# file (a JSON beside the code, a font, a subfolder of web/) is easily left out of the wheel while the checkout and
+# the bundle work.
+RUNTIME_SINCE_0_1_188 = (
+    "sandbox/cairn_workers.json", "sandbox/live_evidence.json", "sandbox/model_evidence.json",
+    "sandbox/toolchains.py", "sandbox/pid1.py", "sandbox/hostinit.py", "sandbox/fixes.py", "sandbox/llm_share.py",
+    "sandbox/mcp_build.py", "sandbox/session_state.py", "sandbox/cairn_workers.py", "sandbox/web/help.json",
+    "sandbox/web/fonts/fonts.json", "sandbox/web/fonts/Lexend-Regular.woff2", "sandbox/web/fonts/OFL-Lexend.txt",
+    "sandbox/presets/android-development.json", "sandbox/presets/android-development.rules.json",
+    "sandbox/presets/pair-reviewer.json", "sandbox/presets/docs-from-code.json",
+    "sandbox/recipes/android-dev/sdk.lock", "sandbox/recipes/android-dev/install.sh",
+    "sandbox/recipes/android-dev/android-emulator", "sandbox/recipes/android-dev/android-sdk-license",
+    "sandbox/recipes/android-dev/package-xml/platform-tools.xml",
+    "projects/sandbox-ai-app/sandbox_ai_app/typefaces/fonts.json",
+    "projects/sandbox-ai-app/sandbox_ai_app/typefaces/OpenDyslexic-Regular.otf",
+    "projects/sandbox-ai-app/sandbox_ai_app/typefaces/AtkinsonHyperlegibleNext-Regular.ttf",
+    "projects/sandbox-ai-app/sandbox_ai_app/typefaces/OFL-OpenDyslexic.txt",
+    "projects/sandbox-ai-app/sandbox_ai_app/icons/board/toolchains.svg",
+    "projects/sandbox-ai-app/sandbox_ai_app/reading_fonts.py", "projects/sandbox-ai-app/sandbox_ai_app/help_pages.py")
+
+
+def runtime_files():
+    """Every release file of the two packages (make_dist.py's list: what git tracks), with its name in the wheel."""
+    make_dist = load("make_dist_runtime", ROOT / "scripts/make_dist.py")
+    found = {}
+    for name in make_dist.release_files():
+        for prefix, package in RUNTIME:
+            if name.startswith(prefix) and "/__pycache__/" not in name:
+                found[name] = package + name[len(prefix):]
+    return found
+
+
+def test_the_runtime_files_since_0_1_188_are_release_files():
+    files = runtime_files()
+    assert set(RUNTIME_SINCE_0_1_188) <= set(files), sorted(set(RUNTIME_SINCE_0_1_188) - set(files))
+
+
+def test_the_wheel_holds_every_file_of_both_packages(built):
+    """Not only the code: every file of sandbox/ and the app's package that a release ships is in the wheel too."""
+    wheel, _ = built
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+    missing = sorted(name for name, inside in runtime_files().items() if inside not in names)
+    # pyproject.toml's package-data, and MANIFEST.in, which setuptools includes in the wheel too
+    assert not missing, f"{len(missing)} files not in the wheel: {missing[:20]}"
+
+
+def test_the_sdist_holds_every_file_of_both_packages(built):
+    _, sdist = built
+    import tarfile
+    with tarfile.open(sdist) as archive:
+        names = {member.name.split("/", 1)[1] for member in archive.getmembers() if "/" in member.name}
+    missing = sorted(set(runtime_files()) - names)
+    assert not missing, f"{len(missing)} files not in the sdist (MANIFEST.in): {missing[:20]}"
+
+
 def test_the_sdist_builds_the_same_wheel(built):
     """The wheel above is built from the sdist (python -m build): the app is in it, its tests are not needed."""
     _, sdist = built
@@ -265,6 +322,39 @@ def test_the_installed_command_line_runs_and_says_it_is_a_pip_installation(insta
                           text=True, env=env, cwd=tmp_path, timeout=120)
     status = json.loads(mode.stdout)
     assert status["installed"] == version() and status["kind"] == "pip" and status["self_updating"] is True
+
+
+def test_the_installed_command_line_reads_its_data_files(installed, tmp_path):
+    """The commands that read the files added since 0.1.188 (the presets, Cairn's workers and their evidence, the
+    fix plan's host facts, the toolchains, the MCP catalog) run from the installed wheel; offline, the catalogs say
+    they cannot be read - never a traceback."""
+    env = clean_env(tmp_path, installed)
+    nowhere = "http://127.0.0.1:9"
+    env.update(https_proxy=nowhere, HTTPS_PROXY=nowhere, http_proxy=nowhere, HTTP_PROXY=nowhere)
+    env.pop("NO_PROXY", None), env.pop("no_proxy", None)
+
+    def run(*args):
+        done = subprocess.run([str(installed / "bin/sandbox-ai"), *args], capture_output=True, text=True, env=env,
+                              cwd=tmp_path, timeout=300)
+        assert "Traceback" not in done.stdout + done.stderr, (args, done.stderr[-3000:])
+        return done
+
+    presets = run("presets", "list")
+    assert presets.returncode == 0, presets.stderr
+    for name in ("android-development", "pair-reviewer", "docs-from-code"):
+        assert name in presets.stdout, name
+    shown = run("presets", "show", "android-development")
+    assert shown.returncode == 0 and "android-development" in shown.stdout, shown.stderr
+    workers = run("cairn", "workers")
+    assert workers.returncode == 0 and "claude" in workers.stdout, workers.stderr
+    doctor = run("doctor", "--json")
+    checks = {c.get("check") for c in json.loads(doctor.stdout)}
+    assert "sandbox-ai" in checks, sorted(checks)
+    if sys.platform.startswith("linux"):  # hostinit.py: Podman's init binary (macOS: Podman's VM has its own)
+        assert "Podman init" in checks, sorted(checks)
+    assert run("mcp", "catalog").returncode in (0, 1)
+    assert run("toolchain", "catalog").returncode in (0, 1)
+    assert run("toolchain", "--help").returncode == 0
 
 
 def test_the_installed_doctor_reports_the_pip_installation(installed, tmp_path):

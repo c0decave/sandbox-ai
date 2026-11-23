@@ -1,7 +1,8 @@
 """The fonts the settings offer: an interface font for the app's text and a monospace font for the terminal tabs,
 code and logs, each from a list of well-liked ones. Only installed fonts are used (QFontDatabase); one that is
 not installed is listed as such with how to get it - a package name of the usual distributions and the project's
-site, as text. Nothing is downloaded or bundled and nothing is fetched from the network.
+site, as text. Nothing is downloaded or fetched from the network. The reading fonts (reading_fonts.py) are the
+exception to "installed only": they come with the app, and one chosen is used before the interface font.
 
 The chosen font goes first, the theme's after it: a font that is missing (uninstalled since) falls back to the
 theme's font, or the system's.
@@ -101,10 +102,14 @@ def mono_families(mono=None):
 def use(settings=None, app=None):
     """Use the fonts the settings name (installed ones only; else the theme's): the app's monospace font
     (widgets.MONO and the widgets that show it), the terminal's and, with the theme's next apply(), the
-    interface font. Returns {"ui": family or None, "mono": family or None}."""
+    interface font - the reading font when one is chosen (reading_fonts.py), else the interface font. Returns
+    {"ui": family or None, "mono": family or None}."""
     from . import backend, theme, widgets
+    from . import reading_fonts
     settings = backend.app_settings() if settings is None else settings
     chosen = {kind: pick(kind, backend.setting(SETTING[kind], settings)) for kind in KINDS}
+    # the reading font (Settings > Appearance, one of the fonts that come with the app) before the interface font
+    chosen["ui"] = reading_fonts.family_of(reading_fonts.chosen(settings)) or chosen["ui"]
     theme.set_fonts(chosen["ui"], chosen["mono"])
     before = widgets.MONO.families()
     after = mono_families(chosen["mono"])

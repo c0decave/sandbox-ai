@@ -118,26 +118,34 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 
 
 def test_pages_and_preview(window, env):
+    # (Start is one entry: its two views, Board and Expert, are under it - test_start_merge_page.py)
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
-        "PROJECT", "Start", "Board", "RUNNING", "Sandboxes & sessions", "Terminals", "Approvals", "MANAGE",
+        "PROJECT", "Start", "RUNNING", "Sandboxes & sessions", "Terminals", "Approvals", "MANAGE",
         "File manager", "Kits & plugins", "MCP servers", "LLM servers", "Images", "Credentials", "Teams", "MONITORING",
         "Connections", "Activity", "LLM traffic", "Statistics", "System monitor",
         "SYSTEM", "System", "Hosts", "Help"]
-    launch = window.launch
-    launch.agent.setCurrentText("codex")
-    launch.form.widgets["--dangerously-skip-permissions"].setChecked(True)
-    launch.form.widgets["--allow-host"].set_value(["example.org"])
-    launch.form.widgets["--profile"].boxes["development"].setChecked(True)
-    launch.agent_args.setText("--model gpt")
+    launch = window.launch  # the Expert view of the Start page: its fields are the board's start
+
+    def set_fields():
+        launch.agent.setCurrentText("codex")
+        launch.form.widgets["--dangerously-skip-permissions"].setChecked(True)
+        launch.form.widgets["--allow-host"].set_value(["example.org"])
+        launch.form.widgets["--profile"].boxes["development"].setChecked(True)
+        launch.agent_args.setText("--model gpt")
+        window.start_link.flush()
+    set_fields()
     assert launch.preview.toPlainText() == ("sandbox-ai codex --profile development --allow-host example.org "
                                             "--dangerously-skip-permissions -- --model gpt")
     assert launch.start() is False, "no workspace: the app's own folder never becomes /work (review 5, M3)"
-    launch.project = str(env)  # the project chosen fills the empty field
+    assert widgets.SHOWN[-1][0] == "Not started" and not window.started
+    window.set_project(str(env))  # the project's own start: its folder is the workspace
+    set_fields()
     launch.start()
     started = window.started[-1]
     assert started[0] == "term" and started[2:4] == ["-I", str(window.sai.directory / "main.py")]
     assert started[4:] == ["codex", "--workspace", str(env), "--profile", "development", "--allow-host", "example.org",
-                           "--dangerously-skip-permissions", "--workspaces-as-given", "--", "--model", "gpt"]
+                           "--dangerously-skip-permissions", "--no-config", "--workspaces-as-given", "--", "--model",
+                           "gpt"]
 
 
 def test_the_intro_can_be_watched_again(window, qapp):
@@ -195,7 +203,7 @@ def test_loading_a_profile_keeps_the_projects_workspace(window, env):
     project = env / "project"
     project.mkdir()
     launch = window.launch
-    launch.set_project(str(project))
+    window.set_project(str(project))
     window.sai.save_profile("pypi", "codex", ["--allow-pypi"])
     window.sai.save_profile("elsewhere", "codex", ["-w", "/tmp/x"])
     launch.refresh_profiles()
@@ -203,7 +211,8 @@ def test_loading_a_profile_keeps_the_projects_workspace(window, env):
     launch.load_profile()
     assert launch.argv() == ["--workspace", str(project), "--allow-pypi"] and launch.workspace() == str(project)
     launch.start()
-    assert window.started[-1][4:] == ["codex", "--workspace", str(project), "--allow-pypi", "--workspaces-as-given"]
+    assert window.started[-1][4:] == ["codex", "--workspace", str(project), "--allow-pypi", "--no-config",
+                                      "--workspaces-as-given"]
     launch.profile.setCurrentText("elsewhere")
     launch.load_profile()
     assert launch.workspace() == "/tmp/x", "a profile's own workspace wins"
@@ -1067,7 +1076,7 @@ def test_credentials_page_logins_and_secrets(window, env, wait):
 
 def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path, wait):
     from sandbox_ai_app import terminal
-    window.launch.form.widgets["--workspace"].set_value([str(env)])
+    window.set_project(str(env))
     # Without QtWebEngine or xterm.js: a terminal window.
     window.launch.start_in_app()
     assert window.started[-1][0] == "term" and window.terminals.tabs.count() == 0
@@ -1086,7 +1095,7 @@ def test_terminal_tabs_or_the_terminal_window(window, env, monkeypatch, tmp_path
     window.launch.start_in_app()  # the tab follows Chromium's sandbox check, in a thread
     assert wait(lambda: window.terminals.tabs.count() == 1, 30) and len(window.started) == count
     view = window.terminals.views()[0]
-    assert view.argv[-4:] == ["codex", "--workspace", str(env), "--workspaces-as-given"]
+    assert view.argv[-5:] == ["codex", "--workspace", str(env), "--no-config", "--workspaces-as-given"]
     assert window.pages.currentWidget() is window.terminals
     assert window.terminals.tabs.tabText(0) == "codex"
     # A session attached in the app.
@@ -1128,7 +1137,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     monkeypatch.setattr(ui.PrivacyDialog, "exec", lambda dialog: (dialog.paths.set_value([str(env)]),
                                                                   QtWidgets.QDialog.DialogCode.Accepted)[-1])
     run = fake_run(env)
-    window.launch.form.widgets["--workspace"].set_value([str(env)])
+    window.set_project(str(env))
     began = time.monotonic()
     window.system.privacy()
     window.system.check()
@@ -1775,27 +1784,39 @@ def test_open_project_folder_reviews_before_it_trusts(window, env, monkeypatch):
     project.mkdir()
     (project / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "opencode",
                                                           "options": ["--allow-pypi"]}))
-    launch = window.launch
+    launch = window.launch  # the Expert view of the Start page: a folder opened is the Board's to open
+    # Opened: the file is shown as the start of both views - and trusted by nobody; Start waits for Apply.
+    assert launch.load_project(str(project))
+    assert window.sai.launcher.trusted_configs() == {}
+    assert window.board.directory == str(project) and window.project == str(project)
+    assert launch.agent.currentText() == "opencode" and launch.workspace() == str(project)
+    assert "--allow-pypi" in launch.argv(), "the start names every option itself (a start passes --no-config)"
+    assert widgets.SHOWN[-1][0] == "Board" and "not trusted yet" in widgets.SHOWN[-1][1]
+    assert launch.start() is False and not window.started
+    assert widgets.SHOWN[-1][0] == "Not started" and "not trusted" in widgets.SHOWN[-1][1]
+    # Review and trust… (the project's own folder again) is the Board's Apply: the file shown, then - only after a
+    # yes - written and trusted exactly as shown.
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # the human says no
-    assert not launch.load_project(str(project))
+    launch.load_project(str(project))
     assert window.sai.launcher.trusted_configs() == {}
     title, text, details = widgets.SHOWN[-1]
-    assert title == "Review the project configuration" and "--allow-pypi" in text and '"opencode"' in details
+    assert "--allow-pypi" in text + str(details) and "opencode" in text + str(details)
     monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
-    assert launch.load_project(str(project))
-    assert window.sai.review_project(project).trusted
-    assert launch.agent.currentText() == "opencode" and launch.workspace() == str(project)
-    assert "--allow-pypi" not in launch.argv(), "the launcher applies the trusted file; the form does not copy it"
+    launch.review_button.click()
+    from conftest import wait_until
+    assert wait_until(QtWidgets.QApplication.instance(), lambda: window.sai.review_project(project).trusted, 30)
     # A file the launcher would refuse is shown, never trusted.
     evil = env / "evil"
     evil.mkdir()
     (evil / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "claude",
                                                        "options": ["--config", "/tmp/elsewhere.json"]}))
-    assert not launch.load_project(str(evil))
-    assert widgets.SHOWN[-1][0] == "This project configuration cannot be used"
+    count = len(window.started)
+    launch.load_project(str(evil))
     assert not window.sai.review_project(evil).trusted
-    assert not launch.load_project(str(env / "nothing-here"))
-    assert widgets.SHOWN[-1][0] == "No project configuration"
+    assert window.board.untrusted.get(window.board.key_of(str(evil))), "shown on the board as not trusted"
+    assert "--config" in launch.preview.toPlainText() and "not trusted yet" in widgets.SHOWN[-1][1]
+    assert launch.start() is False and len(window.started) == count
+    assert not window.sai.review_project(evil).trusted
 
 
 # -- updates, themes, languages --
@@ -1839,6 +1860,7 @@ def test_themes_are_applied_and_saved(window, qapp):
         tints = {image.pixelColor(x, y).name() for x in range(20) for y in range(20) if image.pixelColor(x, y).alpha() > 200}
         assert theme.colors()["nav_text"] in tints, "the navigation's icons take the theme's colour"
     system.theme.setCurrentIndex(system.theme.findData("system"))
+    qapp.processEvents()  # (applied now: left pending, it was applied in a later test's event loop - round 2)
     assert window.sai.settings()["theme"] == "system"
     system.language.setCurrentIndex(system.language.findData("de"))
     assert window.sai.settings()["language"] == "de"
@@ -1851,8 +1873,9 @@ def test_the_window_in_german(qapp, env, monkeypatch):
     i18n.set_language("de")
     w = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=0)
     try:
-        assert [w.nav.item(i).text() for i in range(w.nav.count())][:7] == [
-            "PROJEKT", "Start", "Board", "LAUFEND", "Sandboxen & Sitzungen", "Terminals", "Freigaben"]
+        assert [w.nav.item(i).text() for i in range(w.nav.count())][:6] == [
+            "PROJEKT", "Start", "LAUFEND", "Sandboxen & Sitzungen", "Terminals", "Freigaben"]
+        assert [w.view_switch.buttons[key].text() for key in ("board", "launch")] == ["Board", "Experte"]
         assert w.approvals.allow_button.text() == "Einmal erlauben"
         assert w.launch.form.tabText(1) == "Netzwerk"
     finally:

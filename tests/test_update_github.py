@@ -31,6 +31,7 @@ pytestmark = pytest.mark.skipif(not (fake_github.available() and shutil.which("s
 OLD, NEW = kit.VERSION, kit.later(kit.VERSION)
 GOLDEN = Path(__file__).resolve().parent / "golden" / "release-0.1.94"
 LAST_PUBLIC = "0.1.94"
+NEWEST_PUBLIC = "0.1.188"  # the newest release on GitHub (2026-11-21): what releases/latest serves until the next one
 
 
 @pytest.fixture(scope="module")
@@ -267,15 +268,15 @@ def test_an_installation_from_a_checkout_updates_from_github(tmp_path, world, gi
     assert version_of(command, env) == f"sandbox-ai {NEW}"
 
 
-def last_public_installation(tmp_path, world, full):
+def last_public_installation(tmp_path, world, full, release=LAST_PUBLIC):
     """~/.local/share/sandbox-ai as install.sh of the last public release (0.1.94) left it: its own install.sh, main.py
-    and launcher (tests/golden/release-0.1.94, the files of the tag v0.1.94) - FULL: the whole tree of that tag, from
-    this repository's history - trusting the tests' release key as the real 0.1.94 trusts the real one."""
+    and launcher (tests/golden/release-0.1.94, the files of the tag v0.1.94) - FULL: the whole tree of that tag (or of
+    RELEASE's), from this repository's history - trusting the tests' release key as the real one trusts the real one."""
     data = tmp_path / "home/.local/share/sandbox-ai"
-    tree = data / "versions" / LAST_PUBLIC
+    tree = data / "versions" / release
     if full:
         tree.mkdir(parents=True)
-        archive = subprocess.run(["git", "-C", str(kit.REPOSITORY), "archive", f"v{LAST_PUBLIC}"],
+        archive = subprocess.run(["git", "-C", str(kit.REPOSITORY), "archive", f"v{release}"],
                                  capture_output=True, check=True).stdout
         subprocess.run(["tar", "-x", "-C", str(tree)], input=archive, check=True)
     else:
@@ -285,7 +286,7 @@ def last_public_installation(tmp_path, world, full):
         shutil.copy2(GOLDEN / "main.py", tree / "sandbox/main.py")
         (tree / "sandbox/agent_sandbox.py").write_text(f'"""sandbox-ai"""\n__version__ = "{LAST_PUBLIC}"\n')
     (tree / "sandbox/release-signers").write_text(f"# the tests' key\n{world.key.line} release\n")
-    os.symlink(f"versions/{LAST_PUBLIC}", data / "current")
+    os.symlink(f"versions/{release}", data / "current")
     bin_dir = tmp_path / "home/.local/bin"
     bin_dir.mkdir(parents=True)
     os.symlink(data / "current/sandbox-ai", bin_dir / "sandbox-ai")
@@ -317,6 +318,87 @@ def test_the_last_public_release_updates_to_the_next_one_over_github(full, tmp_p
     # ... and what it became updates itself from then on (the new release's own updater).
     assert run([command, "update", "--check"], env).returncode == 0
     assert (tmp_path / "home/.local/bin/sandbox-ai-update").resolve().name == "install.sh"
+
+
+@pytest.mark.skipif(not has_tag(f"v{NEWEST_PUBLIC}"), reason=f"this checkout has no tag v{NEWEST_PUBLIC}")
+def test_the_newest_public_release_updates_to_the_next_one_over_github(tmp_path, world, github, stubs):
+    """0.1.188 is what GitHub's releases/latest serves now: the whole tree of its tag, installed as its install.sh
+    leaves it, must see the next release signed and take it with its own updater (its install.sh and update code,
+    not this checkout's)."""
+    env = environment(tmp_path, github, stubs)
+    command = last_public_installation(tmp_path, world, True, NEWEST_PUBLIC)
+    assert version_of([command], env) == f"sandbox-ai {NEWEST_PUBLIC}"
+    github.publish(NEW, world.dists[NEW])
+    check = run([command, "update", "--check"], env)
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert f"installed: {NEWEST_PUBLIC}" in check.stdout and f"available: {NEW} " in check.stdout
+    assert f"signature: good, by the trusted key {world.key.fingerprint}" in check.stdout
+    update = run([command, "update", *APP_OFF], env)
+    assert update.returncode == 0, update.stdout[-3000:] + update.stderr[-3000:]
+    assert f"installed sandbox-ai {NEW} (was {NEWEST_PUBLIC})" in update.stderr
+    assert version_of([command], env) == f"sandbox-ai {NEW}"
+    again = run([command, "update", "--check"], env)
+    assert again.returncode == 0 and f"installed: {NEW}" in again.stdout, again.stdout + again.stderr
+
+
+@pytest.fixture(scope="module")
+def newest_public(world):
+    """The release files of the tag v0.1.188 as its own make_dist.py builds them (its .pyz, wheel, AppImage layout),
+    trusting the tests' key: the copies people run now, with their own update code."""
+    base = world.base / f"public-{NEWEST_PUBLIC}"
+    tree = base / "tree"
+    tree.mkdir(parents=True)
+    archive = subprocess.run(["git", "-C", str(kit.REPOSITORY), "archive", f"v{NEWEST_PUBLIC}"],
+                             capture_output=True, check=True).stdout
+    subprocess.run(["tar", "-x", "-C", str(tree)], input=archive, check=True)
+    kit.set_keys(tree, [world.key])
+    kit.commit(tree, f"v{NEWEST_PUBLIC}")
+    dist = kit.make_dist(tree, base / "dist")
+    kit.fake_appimage(tree, dist / kit.assets.bundle(NEWEST_PUBLIC), dist, kit.assets.APPIMAGE_ARCHES[0])
+    yield dist
+    kit.remove(base)
+
+
+def newest_public_takes_the_next(command, env, github, world):
+    assert version_of(command, env) == f"sandbox-ai {NEWEST_PUBLIC}"
+    github.publish(NEW, world.dists[NEW])
+    check = run([*command, "update", "--check"], env)
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert f"installed: {NEWEST_PUBLIC}" in check.stdout and f"available: {NEW} " in check.stdout
+    assert f"signature: good, by the trusted key {world.key.fingerprint}" in check.stdout
+    update = run([*command, "update"], env)
+    assert update.returncode == 0, update.stdout[-3000:] + update.stderr[-3000:]
+    assert f"installed {NEW} (was {NEWEST_PUBLIC})" in update.stdout + update.stderr
+    assert version_of(command, env) == f"sandbox-ai {NEW}"
+
+
+@pytest.mark.skipif(not has_tag(f"v{NEWEST_PUBLIC}"), reason=f"this checkout has no tag v{NEWEST_PUBLIC}")
+@pytest.mark.parametrize("kind", ["pyz", "pip", "appimage"])
+def test_the_newest_public_package_replaces_itself_with_the_next_release(kind, tmp_path, world, github, stubs,
+                                                                         newest_public):
+    """0.1.188's .pyz, wheel and AppImage (its own dist_boot.py and package_update.py) take the next release."""
+    env = environment(tmp_path, github, stubs)
+    if kind == "pyz":
+        pyz = tmp_path / "home/bin/sandbox-ai.pyz"
+        pyz.parent.mkdir(parents=True)
+        shutil.copy2(newest_public / "sandbox-ai.pyz", pyz)
+        command = [pyz]
+    elif kind == "pip":
+        venv = tmp_path / "home/venv"
+        assert run([sys.executable, "-m", "venv", venv], env).returncode == 0
+        done = run([venv / "bin/python", "-m", "pip", "install", "--no-index", "--no-deps", "-q",
+                    newest_public / kit.assets.wheel(NEWEST_PUBLIC)], env)
+        assert done.returncode == 0, done.stderr
+        command = [venv / "bin/sandbox-ai"]
+    else:
+        if kit.assets.arch_of("appimage", MACHINE) != kit.assets.APPIMAGE_ARCHES[0]:
+            pytest.skip(f"the stand-in AppImage is built for {kit.assets.APPIMAGE_ARCHES[0]}")
+        name = kit.assets.appimage(kit.assets.APPIMAGE_ARCHES[0])
+        image = tmp_path / "home/Applications" / name
+        image.parent.mkdir(parents=True)
+        shutil.copy2(newest_public / name, image)
+        command = [image, "cli"]
+    newest_public_takes_the_next(command, env, github, world)
 
 
 # -- the packages: the .pyz, the AppImage, the macOS app --------------------------------------------------------------
@@ -532,7 +614,17 @@ def test_the_pyz_refuses_what_is_not_the_signed_release(case, words, tmp_path, w
         github.releases.clear()
         github.publish(NEW, world.dists[NEW])
         pyz = latest(github, env, "sandbox-ai.pyz", tmp_path / "home/bin/sandbox-ai.pyz")
-        github.publish(OLD, world.dists[OLD])  # (the source serves the older release as its newest)
+        # Never seen a release there: a copy newer than the newest release has nothing to update (said, status 0).
+        # (the cases share one cache: what the others saw is forgotten here)
+        shutil.rmtree(world.base / "cache-refusals" / "sandbox-ai" / "update-seen", ignore_errors=True)
+        github.publish(OLD, world.dists[OLD])
+        plain = run([pyz, "update"], env)
+        assert plain.returncode == 0 and f"sandbox-ai {NEW} is newer than the newest release {OLD}: nothing to " \
+            "update" in plain.stdout, plain.stdout + plain.stderr
+        github.releases.clear()
+        github.publish(NEW, world.dists[NEW])
+        assert run([pyz, "update", "--check"], env).returncode == 0  # (NEW seen there, signed)
+        github.publish(OLD, world.dists[OLD])  # (then the source serves the older release as its newest: a replay)
     else:
         pyz = latest(github, env, "sandbox-ai.pyz", tmp_path / "home/bin/sandbox-ai.pyz")
         github.publish(NEW, {"unsigned": lambda: resigned(world, tmp_path),

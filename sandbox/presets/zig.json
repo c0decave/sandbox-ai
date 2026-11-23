@@ -1,0 +1,30 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "zig",
+  "title": "Zig",
+  "description": "Zig projects: the Zig compiler mounted in; GitHub open, everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Zig",
+      "description": "Zig-Projekte: der Zig-Compiler eingehängt; GitHub offen, alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--toolchain",
+    "zig",
+    "--allow-github"
+  ],
+  "notes": [
+    "The Zig compiler (with its own C and C++ compiler, zig cc and zig c++) comes with the preset (--toolchain zig): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add it (sandbox-ai toolchain add zig: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. Its registries are the ones this preset opens.",
+    "Packages of a build.zig.zon come from the URLs it names: GitHub is open, another host needs --allow-host NAME on the command line. Its caches are in the sandbox's HOME (~/.cache/zig) and the project (.zig-cache).",
+    "C and C++ with CMake and Ninja: the preset c-cpp.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

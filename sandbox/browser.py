@@ -383,6 +383,7 @@ def mounts(a, session, l=None, ca=None):
     found = [(session / "resolv.conf", "/etc/resolv.conf", "ro"), (session / "hosts", "/etc/hosts", "ro"),
              (HERE / "runtime.py", f"{MOUNT}/runtime.py", "ro"),
              (HERE / "browser_runtime.py", f"{MOUNT}/browser_runtime.py", "ro"),
+             (HERE / "pid1.py", f"{MOUNT}/pid1.py", "ro"),  # its PID 1: sandbox-ai's own init, nothing of the host
              (session / CONFIG_FILE, f"{MOUNT}/config.json", "ro"), (vnc_dir(a, l), f"{MOUNT}/vnc", "rw")]
     if ca is not None:
         found.append((ca, f"{MOUNT}/ca.pem", "ro"))
@@ -410,7 +411,9 @@ def create_command(a, pod, service, session, l=None, limits=None):
         raise ValueError(f"the browser's image was not checked ({BUILD})")
     argv = l.podman_command(a, "create", "--pull=never", "--pod", pod, "--name", services.container_name(pod, service),
                             "--label", f"{l.RUN_LABEL}={a.run_id}", "--label", f"{services.SERVICE_LABEL}={NAME}",
-                            "--user", USER, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--init",
+                            "--user", USER, "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                            # (no --init: that is the host's catatonit, which a host need not have - its PID 1 is
+                            # sandbox-ai's own init, pid1.py, run by the image's Python: the entrypoint below)
                             "--read-only", "--log-driver=k8s-file", "--log-opt", "max-size=10mb",
                             "--image-volume=tmpfs", "--tmpfs", "/tmp:rw,nosuid,nodev,size=1g,mode=1777",
                             # A /dev/shm of its own: the pod's (its IPC namespace's) is the agent's too. Chromium keeps
@@ -425,7 +428,8 @@ def create_command(a, pod, service, session, l=None, limits=None):
         argv += ["--pids-limit", str(service["pids"])]
     for source, target, mode in mounts(a, session, l, ca):
         argv += l.mount_option(source, target, mode)
-    return argv + ["--entrypoint", "/usr/bin/python3", image, "-I", f"{MOUNT}/browser_runtime.py"], {}
+    return argv + ["--entrypoint", "/usr/bin/python3", image, "-I", f"{MOUNT}/pid1.py",
+                   "/usr/bin/python3", "-I", f"{MOUNT}/browser_runtime.py"], {}
 
 
 def write_config(a, session):

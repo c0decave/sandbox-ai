@@ -30,14 +30,24 @@ def sections():
     return help_content.SECTIONS
 
 
+def both(text):
+    return {"en": text.en, "de": text.de}
+
+
 def export(found=None):
-    """{"source", "sections": [{"id", "title": {en, de}, "body": {en, de}, "cli": [...], "see": [ids]}]} of the
-    sections of GROUP, in the app's order; "see" only names sections that are exported too."""
+    """{"source", "sections": [{"id", "title": {en, de}, "summary": {en, de}, "tasks": [{"title": {en, de},
+    "steps": [{en, de}]}], "body": {en, de}, "cli": [...], "see": [ids]}]} of the sections of GROUP, in the app's
+    order - the same pattern as the app's Help (help_pages.py): one sentence, "How do I…" in steps (a step that starts
+    with "$ " is a command), the details (a line "## Heading" starts a fold); "see" only names sections that are
+    exported too. The app's screenshots stay out: they show the desktop app's pages, which the web page is not."""
     chosen = [s for s in (found if found is not None else sections()) if s.group == GROUP]
     ids = {s.id for s in chosen}
     return {"source": "projects/sandbox-ai-app/sandbox_ai_app/help_content.py (scripts/export_web_help.py)",
-            "sections": [{"id": s.id, "title": {"en": s.title.en, "de": s.title.de},
-                          "body": {"en": s.body.en, "de": s.body.de}, "cli": list(s.cli),
+            "sections": [{"id": s.id, "title": both(s.title),
+                          **({"summary": both(s.summary)} if getattr(s, "summary", None) is not None else {}),
+                          "tasks": [{"title": both(t.title), "steps": [both(step) for step in t.steps]}
+                                    for t in getattr(s, "tasks", ())],
+                          "body": both(s.body), "cli": list(s.cli),
                           "see": [other for other in s.see if other in ids]} for s in chosen]}
 
 

@@ -6,7 +6,9 @@ secrets): the configuration, sessions, kits and secrets of whoever runs them are
 sees the real HOME (scripts/live_gaps.py's wrapper first on PATH), so the images built there are used. Every session
 a test starts is stopped and deleted at its end. Inputs from the script (all optional, a test without its input is
 skipped and says what it needs): SAI_LIVE_TOKEN (a made-up token), SAI_LIVE_DEVICE, SAI_LIVE_HOST +
-SAI_LIVE_HOSTS_DIR, SAI_LIVE_LLM_ENDPOINT + SAI_LIVE_LLM_MODELS, SAI_LIVE_REAL_HOME."""
+SAI_LIVE_HOSTS_DIR, SAI_LIVE_LLM_ENDPOINT + SAI_LIVE_LLM_MODELS, SAI_LIVE_REAL_HOME, SAI_LIVE_HARNESS_DIR (where
+harnesses-live and cairn-workers-live note what each harness's image took), SAI_LIVE_CAIRN_SECONDS (how long
+cairn-workers-live waits for a worker's fact on Cairn's board; default 900)."""
 import base64
 import hashlib
 import importlib.util
@@ -921,9 +923,7 @@ def test_live_remote_mcp_on_a_real_host(tmp_path):
 # --- local models through the real launcher (optional; LOCAL_LLM_REPORT.md section 7) --------------------------------
 
 MODELS = [model for model in (os.environ.get("SAI_LIVE_LLM_MODELS") or ",".join(LG.LLM_MODELS)).split(",") if model]
-ONE_SHOT = {"claude": lambda prompt: ["-p", prompt],
-            "codex": lambda prompt: ["exec", "--skip-git-repo-check", prompt],
-            "opencode": lambda prompt: ["run", prompt]}
+LLM_AGENTS = ("claude", "codex", "opencode")  # local-llm's (the research's three); harnesses-live: LG.HARNESSES
 
 
 # Models these runs loaded on the server (not loaded before): {model: (server, environment)}. LM Studio refuses a
@@ -947,11 +947,9 @@ def models_unloaded_after():
     unload_loaded_here()
 
 
-@pytest.mark.parametrize("agent", list(ONE_SHOT))
-@pytest.mark.parametrize("model", MODELS)
-def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model, models_unloaded_after):
-    """AGENT with --llm SERVER:MODEL (SAI_LIVE_LLM_ENDPOINT: the server's entry, without secrets) and nothing else
-    open: it writes live.txt with a nonce through its own tool and replies with it."""
+def llm_server(tmp_path, model):
+    """(entry, env) of the server SAI_LIVE_LLM_ENDPOINT names (its entry, without secrets) in a configuration of this
+    test's own, MODEL on offer there (it is unloaded after, when these runs loaded it); skipped without them."""
     path = os.environ.get("SAI_LIVE_LLM_ENDPOINT")
     if not path:
         pytest.skip("give scripts/live_check.sh --llm NAME")
@@ -975,6 +973,13 @@ def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model, mo
     if model not in LOADED_HERE and not any((m.get("name") or m.get("key") or m.get("id")) == model and m.get("loaded")
                                             for m in listed):
         LOADED_HERE[model] = (entry["name"], env)
+    return entry, env
+
+
+def smoke_run(request, backend, tmp_path, agent, entry, model, env):
+    """AGENT with --llm SERVER:MODEL and nothing else open, in a workspace of its own: it writes live.txt with a nonce
+    through its own tool and replies with it (asserted). A server that could not load MODEL, or one that only the
+    Podman backend reaches (this host's loopback), is a skip with that reason, not a failure."""
     work = tmp_path / "w"
     work.mkdir()
     nonce = "LIVE" + secrets.token_hex(4).upper()
@@ -984,7 +989,7 @@ def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model, mo
     try:
         stdout, stderr = once(request, backend, agent, work,
                               ["--no-auth", "--no-provider-defaults", "--dangerously-skip-permissions", "--llm",
-                               f"{entry['name']}:{model}"], ONE_SHOT[agent](prompt), env, timeout=1800)
+                               f"{entry['name']}:{model}"], LG.one_shot(agent, prompt), env, timeout=1800)
     except AssertionError as failed:
         # Live check 2026-11-22: LM Studio refused to load the 122b model ("Model loading was stopped due to
         # insufficient system resources") - the server's memory, not the sandbox: said as such, not as a failure.
@@ -993,9 +998,699 @@ def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model, mo
             pytest.skip(f"{entry['name']} could not load {model} (its server's resources): "
                         + next((line.strip() for line in text.splitlines()
                                 if "insufficient system resources" in line or "did not load" in line), "")[:300])
+        if "which only the Podman backend" in text:
+            pytest.skip(f"{entry['name']} is on this host's loopback, which only the Podman backend reaches")
         raise
     spent = time.monotonic() - begin
-    print(f"{agent} x {model}: {spent:.0f} s")
+    print(f"{backend}/{agent} x {model}: {spent:.0f} s")
     written = (work / "live.txt").read_text().strip() if (work / "live.txt").is_file() else None
     assert written == nonce, (written, stdout[-2000:], stderr[-2000:])
     assert nonce in stdout, (stdout[-2000:], stderr[-2000:])
+
+
+@pytest.mark.parametrize("agent", LLM_AGENTS)
+@pytest.mark.parametrize("model", MODELS)
+def test_live_local_model_smoke_run(request, backend, tmp_path, agent, model, models_unloaded_after):
+    """AGENT with --llm SERVER:MODEL (SAI_LIVE_LLM_ENDPOINT: the server's entry, without secrets) and nothing else
+    open: it writes live.txt with a nonce through its own tool and replies with it."""
+    entry, env = llm_server(tmp_path, model)
+    smoke_run(request, backend, tmp_path, agent, entry, model, env)
+
+
+# --- every harness through the real launcher (optional; the user, 2026-11-22) ----------------------------------------
+
+def harness_image(agent, env):
+    """AGENT's image for Podman: there, or built now with `sandbox-ai build AGENT` (how long it took said, and kept
+    in SAI_LIVE_HARNESS_DIR/AGENT.json for the report); a skip with the reason when it cannot be built here."""
+    image = f"localhost/{agent}-sandbox:latest"
+    facts = Path(os.environ["SAI_LIVE_HARNESS_DIR"]) / f"{agent}.json" if os.environ.get("SAI_LIVE_HARNESS_DIR") \
+        else None
+    known = json.loads(facts.read_text()) if facts and facts.is_file() else {}
+    if known.get("problem"):
+        pytest.skip(f"its image cannot be built here: {known['problem']}")
+    if subprocess.run(["podman", "image", "exists", image], env=env, capture_output=True).returncode == 0:
+        if facts and not known:
+            facts.write_text(json.dumps({"present": True}) + "\n")
+        return image
+    begin = time.monotonic()
+    built = sai(env, "build", agent, timeout=3600)
+    seconds = time.monotonic() - begin
+    problem = None if built.returncode == 0 else \
+        (next((line for line in reversed((built.stderr + built.stdout).splitlines()) if line.strip()), "")
+         or f"exit {built.returncode}")[-300:]
+    if facts:
+        facts.write_text(json.dumps({"built": problem is None, "seconds": round(seconds, 1), "problem": problem}) + "\n")
+    print(f"sandbox-ai build {agent}: {'built' if problem is None else 'failed'} in {seconds:.0f} s")
+    if problem:
+        pytest.skip(f"its image cannot be built here (sandbox-ai build {agent}, {seconds:.0f} s): {problem}")
+    return image
+
+
+@pytest.mark.parametrize("agent", list(LG.HARNESSES))
+def test_live_harness_smoke_run(request, backend, tmp_path, agent, models_unloaded_after):
+    """Every harness the launcher knows, through the real launcher with --llm SERVER:MODEL (the first of
+    SAI_LIVE_LLM_MODELS) and nothing else open: it writes live.txt with a nonce through its own tool and replies with
+    it. Podman: its image, built first when missing; Bubblewrap: this host's own installation of it."""
+    entry, env = llm_server(tmp_path, MODELS[0])
+    if backend == "podman":
+        harness_image(agent, env)
+    elif not shutil.which(agent, path=env.get("PATH")):
+        pytest.skip(f"Bubblewrap runs this host's own `{agent}`, which is not on PATH here (Podman runs its image)")
+    smoke_run(request, backend, tmp_path, agent, entry, MODELS[0], env)
+
+
+# --- every built-in preset through the real launcher (optional; the user, 2026-11-22) --------------------------------
+
+PRESETS = LG.builtin_presets()
+
+
+def preset_record(name, backend, **found):
+    """What presets-live found for preset NAME with BACKEND, for the report (SAI_LIVE_PRESET_DIR/NAME.BACKEND.json):
+    outcome (passed, failed, skipped), why, parts [(part, seen)], agent, seconds."""
+    folder = os.environ.get("SAI_LIVE_PRESET_DIR")
+    if folder:
+        Path(folder, f"{name}.{backend}.json").write_text(json.dumps({"preset": name, "backend": backend, **found}))
+
+
+def preset_environment(tmp_path):
+    """(env, the --llm value "SERVER:MODEL" or None, provider_login) of a preset's run: --llm's server in a
+    configuration of this run's own (llm_server), and with --provider-login (SAI_LIVE_PROVIDER_LOGIN) your HOME and
+    data folder for the agents' logins - sandbox-ai's configuration, state, cache and runtime stay this run's own."""
+    login = os.environ.get("SAI_LIVE_PROVIDER_LOGIN") == "1"
+    if os.environ.get("SAI_LIVE_LLM_ENDPOINT"):
+        entry, env = llm_server(tmp_path, MODELS[0])
+        value = f"{entry['name']}:{MODELS[0]}"
+    elif login:
+        env, value = environment(tmp_path), None
+    else:
+        pytest.skip("give scripts/live_check.sh --llm NAME (or --provider-login)")
+    if login:
+        env["HOME"] = os.environ.get("SAI_LIVE_REAL_HOME") or os.path.expanduser("~")
+        env["XDG_DATA_HOME"] = os.environ.get("SAI_LIVE_REAL_DATA_HOME") or str(Path(env["HOME"]) / ".local/share")
+    return env, value, login
+
+
+def preset_setup(plan, env, tmp_path):
+    """What PLAN needs in this run's own configuration: its folders (with one small file), a made-up key for each
+    --api-key (its host stays closed: --no-provider-defaults), a Tor profile for its VPN value, each MCP server it
+    names added from the catalog with folders of this run's own (by the catalog the preset names: mcp:binwalk, which
+    axross-mcp-hub has too), each toolchain it brings added to this run's store (the signed catalog, or
+    SAI_LIVE_TOOLCHAINS's own builds, unsigned), your images (user-images.json, read only: no secret in it) for its
+    services. A problem (the command and its last line) or None."""
+    for folder in plan["folders"]:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        Path(folder, "README.txt").write_text("a folder of the sandbox-ai live check\n")
+    for name in plan["api_keys"]:
+        done = sai({**env, "SAI_LIVE_MADE_UP": token()}, "secrets", "set", name, "--from-env", "SAI_LIVE_MADE_UP")
+        if done.returncode != 0:
+            return f"sandbox-ai secrets set {name}: {said(done)[-300:]}"
+    config = Path(env["XDG_CONFIG_HOME"]) / "sandbox-ai"
+    config.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if plan.get("vpn"):  # the VPN value's Tor profile, of this run's own (no key in it)
+        done = sai(env, "vpn", "add", plan["vpn"], "--tor", timeout=300)
+        if done.returncode != 0 and "exists" not in (done.stderr + done.stdout):
+            return f"sandbox-ai vpn add {plan['vpn']} --tor: {said(done)[-300:]}"
+    mine = Path(os.environ.get("SAI_LIVE_REAL_CONFIG", "/nonexistent")) / "user-images.json"
+    if plan["services"] and mine.is_file() and not (config / "user-images.json").exists():
+        shutil.copy(mine, config / "user-images.json")
+    for server, targets in plan["mcp"]:
+        entry = next((item for item in PRESETS[plan["preset"]].get("mcp") or [] if item.split(":")[-1] == server),
+                     server)
+        mounts = []
+        for target in targets:
+            host = tmp_path / "mcp" / server / target.strip("/").replace("/", "-")
+            host.mkdir(parents=True, exist_ok=True)
+            mounts += ["--mount", f"{target}={host}:rw"]
+        done = sai(env, "mcp", "add", entry, *mounts, timeout=1800)
+        if done.returncode != 0:
+            last = next((line for line in reversed((done.stderr + done.stdout).splitlines()) if line.strip()), "")
+            return f"sandbox-ai mcp add {entry}: {last[-300:] or f'exit {done.returncode}'}"
+    own = os.environ.get("SAI_LIVE_TOOLCHAINS")
+    for name in plan.get("toolchains") or []:
+        done = sai(env, "toolchain", "add", name, *(["--catalog", own, "--unsigned"] if own else []), timeout=1800)
+        if done.returncode != 0:
+            last = next((line for line in reversed((done.stderr + done.stdout).splitlines()) if line.strip()), "")
+            return f"sandbox-ai toolchain add {name}: {last[-300:] or f'exit {done.returncode}'}"
+    return None
+
+
+@pytest.mark.parametrize("name", list(PRESETS))
+def test_live_preset_smoke_run(request, backend, tmp_path, name, models_unloaded_after):
+    """Every built-in preset, started for real (sandbox-ai AGENT --preset NAME, its first agent) with --llm's model
+    (SAI_LIVE_LLM_ENDPOINT) and nothing else open, or with the agent's own provider (SAI_LIVE_PROVIDER_LOGIN): it
+    writes live.txt with a nonce through its own tool and replies with it (a read-only workspace: it reads the nonce
+    from a file there instead), and each MCP server it names starts, each service it runs is ready. A value only you
+    can give comes from SAI_LIVE_PRESET_VALUES (--preset-values FILE); without it the preset is skipped with the
+    reason and the command to run it yourself."""
+    chosen = [n for n in (os.environ.get("SAI_LIVE_PRESETS") or "").split(",") if n]
+    if chosen and name not in chosen:
+        pytest.skip("not among --presets")
+    given = LG.preset_values(os.environ["SAI_LIVE_PRESET_VALUES"]).get(name) \
+        if os.environ.get("SAI_LIVE_PRESET_VALUES") else None
+    env, value, login = preset_environment(tmp_path)
+    plan = LG.preset_plan(PRESETS[name], given, llm=value, provider_login=login, folders=tmp_path / "v")
+    record = {"agent": plan["agent"], "parts": [], "by_hand": plan["by_hand"]}
+    if plan["skip"]:
+        preset_record(name, backend, outcome="skipped", why=plan["skip"], **record)
+        pytest.skip(plan["skip"])
+    if backend not in plan["backends"]:
+        why = f"Podman only: {', '.join(plan['podman_only'])} (Bubblewrap has no pod for it)"
+        preset_record(name, backend, outcome="skipped", why=why, **record)
+        pytest.skip(why)
+    agent = plan["agent"]
+    if backend == "podman":
+        harness_image(agent, env)
+    elif not shutil.which(agent, path=env.get("PATH")):
+        why = f"Bubblewrap runs this host's own `{agent}`, which is not on PATH here (Podman runs its image)"
+        preset_record(name, backend, outcome="skipped", why=why, **record)
+        pytest.skip(why)
+    problem = preset_setup(plan, env, tmp_path)
+    if problem:
+        preset_record(name, backend, outcome="failed", why=problem, **record)
+        pytest.fail(problem)
+    work = tmp_path / "w"
+    work.mkdir()
+    nonce = "LIVE" + secrets.token_hex(4).upper()
+    read_only = "--workspace-ro" in plan["options"] or "--workspace-ro" in PRESETS[name].get("options", [])
+    if read_only:  # the agent cannot write the workspace: it reads the nonce there, which the prompt never names
+        (work / "nonce.txt").write_text(nonce + "\n")
+        prompt = "Read the file nonce.txt in the current directory and reply with exactly its content and nothing else."
+    else:
+        prompt = (f"Create a file named live.txt in the current directory that contains exactly {nonce}. Then reply "
+                  f"with exactly {nonce} and nothing else.")
+    command = [str(SAI), agent, "--backend", backend, "--workspace", str(work), *plan["options"],
+               "--dangerously-skip-permissions", "--", *LG.one_shot(agent, prompt)]
+    # What this host lacks for it (your service image, say) the launcher's dry run says first: skipped with its line
+    dry = subprocess.run([*command[:command.index("--")], "--dry-run", *command[command.index("--"):]],
+                         capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=300)
+    if dry.returncode != 0:
+        line = next((text for text in reversed(dry.stderr.splitlines()) if text.strip()), f"exit {dry.returncode}")
+        why = f"the launcher refuses this start here: {line[-300:]}; run: {plan['by_hand']}"
+        preset_record(name, backend, outcome="skipped", why=why, **record)
+        pytest.skip(why)
+    begin = time.monotonic()
+    process = subprocess.run(command, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+                             timeout=3600)
+    record["seconds"] = round(time.monotonic() - begin, 1)
+    out, err = process.stdout, process.stderr
+    last = next((line for line in reversed((err + out).splitlines()) if line.strip()), f"exit {process.returncode}")
+    if process.returncode != 0:
+        if "which only the Podman backend" in err:
+            why = "the LLM server is on this host's loopback, which only the Podman backend reaches"
+            preset_record(name, backend, outcome="skipped", why=why, **record)
+            pytest.skip(why)
+        preset_record(name, backend, outcome="failed", why=last[-300:], **record)
+        pytest.fail(f"{name} ({backend}/{agent}): exit {process.returncode}\n{out[-3000:]}\n{err[-3000:]}")
+    written = (work / "live.txt").read_text().strip() if (work / "live.txt").is_file() else None
+    if (not read_only and written != nonce) or nonce not in out:
+        why = (f"the smoke task: live.txt {'missing' if written is None else 'wrong'}" if not read_only and
+               written != nonce else "the smoke task: the nonce is not in its reply") + f" ({last[-200:]})"
+        preset_record(name, backend, outcome="failed", why=why, **record)
+        pytest.fail(f"{name}: {why}\n{out[-2000:]}\n{err[-2000:]}")
+    record["parts"] = LG.parts_seen(plan, err)
+    missing = [part for part, seen in record["parts"] if not seen]
+    if missing:
+        why = f"started, but did not come up: {', '.join(missing)}"
+        preset_record(name, backend, outcome="failed", why=why, **record)
+        pytest.fail(f"{name}: {why}\n{err[-3000:]}")
+    preset_record(name, backend, outcome="passed", why="", **record)
+    print(f"{backend}/{agent} --preset {name}: {record['seconds']:.0f} s" +
+          (f"; came up: {', '.join(part for part, _ in record['parts'])}" if record["parts"] else ""))
+
+
+# --- every MCP server of the signed catalog through a start's path (optional; the user, 2026-11-23) ------------------
+
+# The agent's side of an MCP connection, run in the session's sandbox (sandbox-ai shell): the bridge the agent's own
+# configuration runs (/sandbox/runtime.py --internal-mcp-bridge) to the socket the supervisor's relay serves there;
+# initialize, notifications/initialized, tools/list and each call, every answer awaited for its own time at most.
+MCP_CLIENT = r"""
+import json, os, select, subprocess, sys, time
+server, payload = sys.argv[1], json.loads(sys.argv[2])
+bridge = subprocess.Popen(["python3", "-I", "/sandbox/runtime.py", "--internal-mcp-bridge",
+                           f"/run/sandbox-mcp/{server}/server.sock"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+buffer = b""
+def answer(ident, seconds):
+    global buffer
+    deadline = time.monotonic() + seconds
+    while True:
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(message, dict) and message.get("id") == ident:
+                return message
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return {"timeout": seconds}
+        ready, _, _ = select.select([bridge.stdout], [], [], left)
+        if ready:
+            chunk = os.read(bridge.stdout.fileno(), 65536)
+            if not chunk:
+                return {"ended": bridge.stderr.read().decode(errors="replace")[-1500:]}
+            buffer += chunk
+def send(message):
+    bridge.stdin.write((json.dumps(message) + "\n").encode()); bridge.stdin.flush()
+found = {"calls": []}
+begin = time.monotonic()
+send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18",
+      "capabilities": {}, "clientInfo": {"name": "sandbox-ai-live-check", "version": "1"}}})
+found["initialize"] = answer(1, payload.get("start_timeout", 60) + 60)
+found["handshake_seconds"] = round(time.monotonic() - begin, 1)
+if "result" in found["initialize"]:
+    send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    found["tools"] = answer(2, 120)
+    for number, call in enumerate(payload["calls"], 3):
+        started = time.monotonic()
+        send({"jsonrpc": "2.0", "id": number, "method": "tools/call",
+              "params": {"name": call["tool"], "arguments": call.get("arguments") or {}}})
+        found["calls"].append({"answer": answer(number, call.get("timeout", 120) + 30),
+                               "seconds": round(time.monotonic() - started, 1)})
+bridge.stdin.close()
+try:
+    bridge.wait(timeout=30)
+except subprocess.TimeoutExpired:
+    bridge.kill()
+print("MCP_LIVE_RESULT " + json.dumps(found))
+"""
+MCP_NAMES = [name for name in (os.environ.get("SAI_LIVE_MCP_SERVERS") or "").split(",") if name] or ["(none)"]
+
+
+def mcp_record(name, backend, **found):
+    """What mcp-live found for server NAME with BACKEND, for the report (SAI_LIVE_MCP_DIR/NAME.BACKEND.json)."""
+    folder = os.environ.get("SAI_LIVE_MCP_DIR")
+    if folder:
+        Path(folder, f"{name}.{backend}.json").write_text(json.dumps({"server": name, "backend": backend, **found}))
+
+
+def mcp_environment():
+    """The sandbox-ai of every mcp-live test (its HOME and data folders: SAI_LIVE_MCP_HOME): a server is added there
+    once and every test reaches it; never yours."""
+    return LG.isolated_environment(Path(os.environ["SAI_LIVE_MCP_HOME"]), os.environ)
+
+
+def mcp_workspace(path, plan, marker):
+    """A workspace for PLAN's /work: the smoke files (SAI_LIVE_MCP_FIXTURES) or its seed, and its own MARKER file
+    (the other workspace's must never show)."""
+    path.mkdir(parents=True, exist_ok=True)
+    if plan["work"] == "fixtures":
+        shutil.copytree(os.environ["SAI_LIVE_MCP_FIXTURES"], path, symlinks=True, dirs_exist_ok=True)
+    for item in plan.get("seed") or []:
+        target = path.joinpath(*str(item["path"]).split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if "symlink" in item:
+            target.symlink_to(item["symlink"])
+        else:
+            target.write_text(item["text"])
+    (path / marker).write_text("the sandbox-ai live check's own file of this workspace\n")
+    return path
+
+
+def supervisor_tail(env, name, lines=40):
+    """The last lines of the newest supervisor.log of server NAME's instances (where a server that died says why)."""
+    logs = sorted((Path(env["XDG_STATE_HOME"]) / "sandbox-ai" / "mcp").glob(f"{name}*/supervisor.log"),
+                  key=lambda path: path.stat().st_mtime)
+    return "\n".join(logs[-1].read_text(errors="replace").splitlines()[-lines:]) if logs else ""
+
+
+def mcp_added(env, name, plan, backend):
+    """`sandbox-ai mcp add NAME` with PLAN's options (its defaults otherwise), once for every test (a marker in
+    SAI_LIVE_MCP_HOME): (said, problem)."""
+    marker = Path(os.environ["SAI_LIVE_MCP_HOME"]) / f"added-{name}.json"
+    if marker.is_file():
+        known = json.loads(marker.read_text())
+        return known["said"], known.get("problem")
+    folders = []
+    for target, content in plan["folders"].items():  # a folder its smoke spec fills: one of the check's own
+        host = Path(os.environ["SAI_LIVE_MCP_HOME"]) / "folders" / name / target.strip("/").replace("/", "-")
+        mcp_workspace(host, {"work": "fixtures" if content == "fixtures" else None,
+                             "seed": content if isinstance(content, list) else []}, "README.txt")
+        folders += ["--mount", f"{target}={host}:rw"]
+    begin = time.monotonic()
+    # The signed catalog's entry by its prefix: a server of the same name in another catalog (axross's hub: binwalk,
+    # radare2) made a bare NAME ambiguous - `mcp add` asks which one (the user's first mcp-live run, 2026-11-23).
+    done = sai(env, "mcp", "add", f"{LG.MCP_PREFIX}:{name}", *plan["add"], *folders, timeout=3600)
+    seconds = time.monotonic() - begin
+    problem = None if done.returncode == 0 else (next((line for line in reversed(
+        (done.stderr + done.stdout).splitlines()) if line.strip()), "") or f"exit {done.returncode}")[-300:]
+    said = f"yes ({seconds:.0f} s)" if problem is None else "no"
+    marker.write_text(json.dumps({"said": said, "problem": problem}))
+    return said, problem
+
+
+def mcp_calls(started, plan):
+    """PLAN's calls made by the agent side of STARTED through its relay (MCP_CLIENT): its MCP_LIVE_RESULT."""
+    payload = {"calls": plan["calls"], "start_timeout": plan.get("start_timeout", 60)}
+    timeout = 300 + sum(int(call.get("timeout", 120)) + 30 for call in plan["calls"])
+    done = started.python(MCP_CLIENT, plan["server"], json.dumps(payload), timeout=timeout)
+    assert done.returncode == 0, said(done)
+    return answer(done.stdout, "MCP_LIVE_RESULT")
+
+
+def mcp_verdict(plan, found):
+    """(handshake, tools, calls {passed, failed, skipped, first_failure}, problems) of a session's FOUND."""
+    problems = []
+    init = found.get("initialize") or {}
+    if "result" not in init:
+        why = init.get("error", {}).get("message") if isinstance(init.get("error"), dict) else \
+            ("no answer within its time" if "timeout" in init else f"the bridge ended: {init.get('ended', '')[-300:]}")
+        return f"no: {why}", "-", {}, [f"no handshake: {why}"]
+    handshake = f"yes ({found.get('handshake_seconds', 0):.0f} s)"
+    names = [tool.get("name") for tool in ((found.get("tools") or {}).get("result") or {}).get("tools") or []
+             if isinstance(tool, dict)]
+    missing = [tool for tool in plan["expect_tools"] if tool not in names]
+    recorded = plan.get("tools")
+    added = sorted(set(names) - set(recorded)) if recorded is not None else []
+    gone = sorted(set(recorded) - set(names)) if recorded is not None else []
+    tools = f"{len(names)}" + (" = tools.json" if recorded is not None and not added and not gone else "")
+    if missing or added or gone:
+        tools += "; " + "; ".join(part for part in (f"missing {', '.join(missing or gone)}" if missing or gone else "",
+                                                     f"not recorded {', '.join(added)}" if added else "") if part)
+        problems.append(f"tools/list: {tools}")
+    counts = {"passed": 0, "failed": 0, "skipped": len(plan["skipped_calls"])}
+    for call, made in zip(plan["calls"], found.get("calls") or []):
+        passed, text, limited = LG.mcp_call_passed(call, made.get("answer"))
+        if limited:
+            counts["skipped"] += 1
+        elif passed:
+            counts["passed"] += 1
+        else:
+            counts["failed"] += 1
+            counts.setdefault("first_failure", f"{call.get('tool')}: {' '.join(text.split())[:200] or made}")
+            problems.append(f"{call.get('tool')}: wanted {call.get('expect')!r}, got {' '.join(text.split())[:300]}")
+    return handshake, tools, counts, problems
+
+
+@pytest.mark.parametrize("name", MCP_NAMES)
+def test_live_mcp_server(request, backend, tmp_path, name, sessions):
+    """Every server of the signed MCP catalog through the path a start uses: `sandbox-ai mcp add NAME` with its
+    defaults (the catalog's current digest), a kept session with --mcp NAME, the server started by sandbox-ai (its
+    supervisor, bridge and each connection's container or Bubblewrap sandbox), the agent side's connection through
+    the session's relay: initialize, tools/list against the MCP repository's tools.json, and its smoke calls. A server
+    on the start's workspace gets a second session in a second workspace: neither instance sees the other's files."""
+    if name == "(none)":
+        pytest.skip("give scripts/live_check.sh --only mcp-live (it reads the signed catalog and asks first)")
+    catalog = json.loads(Path(os.environ["SAI_LIVE_MCP_CATALOG"]).read_text())
+    entry = next(e for e in catalog["entries"] if e.get("prefix") == LG.MCP_PREFIX and e.get("name") == name)
+    repo = os.environ.get("SAI_LIVE_MCP_REPO") or "/nonexistent"
+    plan = LG.mcp_plan(entry, LG.mcp_spec(repo, name), backend, LG.mcp_tools(repo, name))
+    record = {"by_hand": plan["by_hand"]}
+    if plan["skip"]:
+        mcp_record(name, backend, outcome="skipped", why=plan["skip"], **record)
+        pytest.skip(plan["skip"])
+    env = mcp_environment()
+    if backend == "podman":
+        harness_image("codex", env)
+    begin = time.monotonic()
+    record["added"], problem = mcp_added(env, name, plan, backend)
+    if problem:
+        mcp_record(name, backend, outcome="failed", why=f"sandbox-ai mcp add {name}: {problem}", **record)
+        pytest.fail(f"sandbox-ai mcp add {name}: {problem}")
+    options = ["--mcp", name]
+    for var, value, secret in plan["env"]:  # (the smoke spec's own made-up values: a secret of the check's own)
+        if secret:
+            key = f"LIVE_{name.upper().replace('-', '_')}_{var}"
+            done = sai({**env, "SAI_LIVE_MADE_UP": value}, "secrets", "set", key, "--from-env", "SAI_LIVE_MADE_UP")
+            assert done.returncode == 0, said(done)
+            options += ["--mcp-env", f"{name}:{var}@{key}"]
+        else:
+            options += ["--mcp-env", f"{name}:{var}={value}"]
+    works = [mcp_workspace(tmp_path / "wa", plan, LG.MCP_MARKERS[0])]
+    if plan["isolation"]:
+        works.append(mcp_workspace(tmp_path / "wb", plan, LG.MCP_MARKERS[1]))
+    found = []
+    for index, work in enumerate(works):
+        started = session(sessions, request, backend, tmp_path, env=env, work=work, options=[*options, *SLEEP])
+        done = subprocess.run(started.command, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL,
+                              timeout=1800)
+        if done.returncode != 0:
+            last = next((line for line in reversed(done.stderr.splitlines()) if line.strip()), f"exit {done.returncode}")
+            mcp_record(name, backend, outcome="failed", started="no", why=last[-300:],
+                       supervisor=supervisor_tail(env, name), seconds=round(time.monotonic() - begin, 1), **record)
+            pytest.fail(f"{name} ({backend}): the session did not start: {said(done)}")
+        started.started = True
+        record["started"] = "yes"
+        found.append(mcp_calls(started, plan))
+    handshake, tools, counts, problems = mcp_verdict(plan, found[0])
+    record.update(handshake=handshake, tools=tools, calls=counts)
+    if handshake.startswith("no"):
+        record["supervisor"] = supervisor_tail(env, name)
+    if plan["isolation"]:
+        # Each workspace its own instance, mounting its own workspace only; neither's answers name the other's file.
+        listed = json.loads(sai(env, "mcp", "list", "--json").stdout or "[]")
+        mounts = [[m.get("host") for m in i.get("mounts") or []] for e in listed if e.get("name") == name
+                  for i in e.get("instances") or []]
+        a, b = (str(work.resolve()) for work in works)
+        crossed = [hosts for hosts in mounts if a in hosts and b in hosts]
+        seen = [LG.MCP_MARKERS[1 - index] for index, result in enumerate(found)
+                if LG.MCP_MARKERS[1 - index] in json.dumps(result)]
+        apart = sum(1 for hosts in mounts if a in hosts) >= 1 and sum(1 for hosts in mounts if b in hosts) >= 1
+        if crossed or seen or not apart:
+            record["isolation"] = "failed: " + ("an instance mounts both workspaces" if crossed else
+                                                f"an answer names {seen[0]}" if seen else
+                                                "not one instance per workspace")
+            problems.append(f"isolation: {record['isolation']}")
+        else:
+            record["isolation"] = "ok (one instance per workspace)"
+    record["seconds"] = round(time.monotonic() - begin, 1)
+    if problems:
+        mcp_record(name, backend, outcome="failed", why="; ".join(problems)[:600], **record)
+        pytest.fail(f"{name} ({backend}): " + "\n".join(problems))
+    mcp_record(name, backend, outcome="passed", **record)
+    print(f"{backend}/{name}: handshake {handshake}, tools {tools}, calls {counts}, isolation "
+          f"{record.get('isolation', '-')}")
+
+
+# --- every harness as Cairn's worker (optional; the user, 2026-11-22) ------------------------------------------------
+
+CAIRN_SCRIPT = r"""
+set -u
+python3 -I - <<'WATCH'
+import json, os, time, urllib.request
+base = "http://127.0.0.1:8000"
+nonce = "__NONCE__"
+
+
+def get(path):
+    with urllib.request.urlopen(base + path, timeout=30) as answer:
+        return json.loads(answer.read())
+
+
+def put(path, body):
+    request = urllib.request.Request(base + path, data=json.dumps(body).encode(), method="PUT",
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as answer:
+        return answer.status
+
+
+project = None
+for _ in range(300):
+    try:
+        found = [p for p in get("/projects") if nonce in (p.get("title") or "")]
+        if found:
+            project = found[0]["id"]
+            break
+    except OSError:
+        pass
+    time.sleep(1)
+print("RESULT project", project or "none", flush=True)
+detail, deadline = {}, time.monotonic() + __SECONDS__
+while project and time.monotonic() < deadline:
+    try:
+        detail = get(f"/projects/{project}")
+    except OSError:
+        time.sleep(5)
+        continue
+    facts = [f.get("description") or "" for f in detail.get("facts") or []]
+    if any(nonce.lower() in text for text in facts) or (detail.get("project") or {}).get("status") == "completed":
+        break
+    time.sleep(5)
+print("RESULT facts", json.dumps([f.get("description") for f in detail.get("facts") or []])[:4000], flush=True)
+print("RESULT intents", json.dumps([{"worker": i.get("worker"), "creator": i.get("creator"),
+                                     "concluded": bool(i.get("concluded_at"))} for i in detail.get("intents") or []]),
+      flush=True)
+print("RESULT status", (detail.get("project") or {}).get("status"), flush=True)
+if project:
+    try:  # nothing more spent: the project stops here whatever it reached
+        put(f"/projects/{project}/status", {"status": "stopped"})
+    except OSError:
+        pass
+try:
+    print("RESULT relay", json.dumps(open("/sandbox/cairn/relay.log").read()[-4000:]), flush=True)
+except OSError as exc:
+    print("RESULT relay", json.dumps(f"no relay log: {exc}"), flush=True)
+WATCH
+exit 0
+"""
+
+
+def part_image(name, env):
+    """sandbox-ai's own image NAME (cairn, browser) for Podman: there, or built now (as harness_image does)."""
+    image = f"localhost/sandbox-ai-{name}:latest"
+    if subprocess.run(["podman", "image", "exists", image], env=env, capture_output=True).returncode == 0:
+        return image
+    begin = time.monotonic()
+    built = sai(env, "build", name, timeout=3600)
+    print(f"sandbox-ai build {name}: {'built' if built.returncode == 0 else 'failed'} in "
+          f"{time.monotonic() - begin:.0f} s")
+    if built.returncode != 0:
+        pytest.skip(f"its image cannot be built here (sandbox-ai build {name}): "
+                    + (next((line for line in reversed((built.stderr + built.stdout).splitlines()) if line.strip()),
+                            "") or f"exit {built.returncode}")[-300:])
+    return image
+
+
+def cairn_results(stdout):
+    found = {}
+    for line in stdout.splitlines():
+        if line.startswith("RESULT "):
+            _, name, value = (line.split(" ", 2) + [""])[:3]
+            found[name] = value
+    return found
+
+
+@pytest.mark.parametrize("agent", list(LG.CAIRN_WORKERS))
+def test_live_cairn_worker(request, tmp_path, agent, models_unloaded_after):
+    """Every harness as one of Cairn's workers, through real Cairn in a real pod: the harness is the lead with --llm
+    SERVER:MODEL (the first of SAI_LIVE_LLM_MODELS) and nothing else open, --cairn --cairn-workers AGENT, a project
+    made at the start whose goal is a code word in lower case. Cairn's dispatcher hands its first task through the
+    relay to the harness's own one-shot run (the lead's process is a script that watches the board); the board must
+    get a fact with the code word in lower case, from the worker sandbox-AGENT. The project is stopped at the end."""
+    if agent in LG.CAIRN_SKIPPED:
+        pytest.skip(f"{agent}: {LG.CAIRN_SKIPPED[agent]}")
+    entry, env = llm_server(tmp_path, MODELS[0])
+    harness_image(agent, env)
+    part_image("cairn", env)
+    part_image("browser", env)
+    work = tmp_path / "w"
+    work.mkdir()
+    nonce = "LIVE" + secrets.token_hex(4).upper()
+    seconds = int(os.environ.get("SAI_LIVE_CAIRN_SECONDS") or 900)
+    script = CAIRN_SCRIPT.replace("__NONCE__", nonce).replace("__SECONDS__", str(seconds))
+    begin = time.monotonic()
+    stdout, stderr = once(request, "podman", agent, work,
+                          ["--no-auth", "--no-provider-defaults", "--llm", f"{entry['name']}:{MODELS[0]}",
+                           "--cairn", "--cairn-workers", agent, "--cairn-origin", f"The code word is {nonce}.",
+                           "--cairn-goal", f"A fact on the board states the code word {nonce} in lower case.",
+                           "--cairn-hint", "Answer at once with the fact and complete the project; nothing to "
+                           "explore.", "--binary", "/bin/bash"],
+                          ["-c", script], env, timeout=seconds + 900)
+    print(f"cairn worker {agent} x {MODELS[0]}: {time.monotonic() - begin:.0f} s")
+    found = cairn_results(stdout)
+    text = f"{json.dumps(found, indent=1)[:6000]}\n{stderr[-2000:]}"
+    assert found.get("project", "none") != "none", f"the start's project is not on Cairn's board\n{text}"
+    relay_log = json.loads(found.get("relay") or '""')
+    assert f"started {agent} task" in relay_log, f"the relay never ran {agent} for a task\n{text}"
+    facts = json.loads(found.get("facts") or "[]")
+    assert any(nonce.lower() in (fact or "") for fact in facts), \
+        f"Cairn took no answer of {agent}'s as a fact with the code word\n{text}"
+    intents = json.loads(found.get("intents") or "[]")
+    assert any(i.get("worker") == f"sandbox-{agent}" or i.get("creator") == f"sandbox-{agent}" for i in intents) or \
+        found.get("status") == "completed", f"no task of the worker sandbox-{agent} on the board\n{text}"
+
+
+# --- ARTEX beside the agent (optional; the user, 2026-11-22: "check for backdoors ... we still have to be careful") --
+
+ARTEX_PROBE = r'''
+import json, os
+found = {"uid": os.getuid(), "listeners": [], "artex_env_password": None}
+for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        lines = open(name).read().splitlines()[1:]
+    except OSError:
+        continue
+    for line in lines:
+        fields = line.split()
+        if fields[3] == "0A":  # LISTEN
+            address, port = fields[1].rsplit(":", 1)
+            found["listeners"].append([address, int(port, 16)])
+for pid in os.listdir("/proc"):
+    if not pid.isdigit():
+        continue
+    try:
+        command = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        if command and command[0] == b"/opt/artex/bin/artex":
+            found["artex_env_password"] = b"SANDBOX_AI_ARTEX_PASSWORD" in open(f"/proc/{pid}/environ", "rb").read()
+    except OSError:
+        pass
+print("ARTEX " + json.dumps(found))
+'''
+LOOPBACK_V4 = "0100007F"  # 127.0.0.1 as /proc/net/tcp writes it
+LOOPBACK_V6 = "00000000000000000000000001000000"  # ::1
+
+
+def artex_request(url, path, method="GET", body=None, headers=None, timeout=30):
+    """(status, body) of one request to the forwarded console."""
+    import urllib.error
+    import urllib.request
+    request = urllib.request.Request(url + path, method=method, data=json.dumps(body).encode() if body else None,
+                                     headers={"Content-Type": "application/json", **(headers or {})})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as answer:
+            return answer.status, answer.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+
+
+def test_live_artex_beside_the_agent(request, backend, tmp_path, sessions):
+    """ARTEX's image built from the reviewed source with sandbox-ai's patches (sandbox-ai build artex, when missing),
+    started beside an agent (--artex): its console forwarded to this computer's 127.0.0.1 only, the password of
+    sandbox-ai artex console logs in, the first-caller setup and the self-update routes are gone, another Host or
+    Origin and a token in the URL are refused; in its container it runs as user 1000, listens on the loopback only
+    (PostgreSQL on no TCP port at all), and ARTEX's own environment holds no password."""
+    if backend != "podman":
+        pytest.skip("--artex runs with Podman only")
+    env = environment(tmp_path)
+    image = "localhost/sandbox-ai-artex:latest"
+    if subprocess.run(["podman", "image", "exists", image], env=env, capture_output=True).returncode != 0:
+        begin = time.monotonic()
+        built = sai(env, "build", "artex", timeout=3 * 3600)
+        print(f"sandbox-ai build artex: exit {built.returncode} in {time.monotonic() - begin:.0f} s")
+        assert built.returncode == 0, "sandbox-ai build artex: " + said(built)
+    started = session(sessions, request, backend, tmp_path, agent="codex", env=env,
+                      options=["--artex", "--allow-tcp", "192.0.2.1:80", *SLEEP])
+    started.start(timeout=900)
+    console = None
+    for _ in range(300):
+        done = started.sai("artex", "console", started.name, "--json")
+        if done.returncode == 0:
+            console = json.loads(done.stdout)
+            break
+        time.sleep(2)
+    assert console, "no console: " + said(done)
+    url, password = console["url"], console["password"]
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+", url), url
+    status, body = artex_request(url, "/api/health")
+    assert status == 200 and json.loads(body)["service"] == "artex", body
+    status, _ = artex_request(url, "/api/auth/init", "POST", {"password": "someone-else-1"})
+    assert status in (403, 404, 405), "the first caller never becomes the admin"
+    assert artex_request(url, "/api/auth/login", "POST", {"username": "ARTEX", "password": "wrong-password"})[0] == 401
+    status, body = artex_request(url, "/api/auth/login", "POST", {"username": "ARTEX", "password": password})
+    assert status == 200, body
+    bearer = {"Authorization": "Bearer " + json.loads(body)["token"]}
+    assert artex_request(url, "/api/stats", headers=bearer)[0] == 200
+    assert artex_request(url, "/api/update/check", headers=bearer)[0] == 404, "no self-update"
+    assert artex_request(url, "/api/stats", headers={**bearer, "Origin": "http://evil.example"})[0] == 403
+    assert artex_request(url, "/api/stats", headers={**bearer, "Host": "evil.example"})[0] == 403
+    token = json.loads(body)["token"]
+    assert artex_request(url, f"/api/stats?token={token}")[0] == 401, "a token in the URL only for event streams"
+    # On this computer: the forward listens on 127.0.0.1 only.
+    port = int(url.rsplit(":", 1)[1])
+    listening = [line.split()[1] for name in ("/proc/net/tcp", "/proc/net/tcp6") if Path(name).exists()
+                 for line in Path(name).read_text().splitlines()[1:]
+                 if line.split()[3] == "0A" and int(line.split()[1].rsplit(":", 1)[1], 16) == port]
+    assert listening and all(entry.startswith(LOOPBACK_V4 + ":") for entry in listening), listening
+    # In its container.
+    probe = subprocess.run(["podman", "exec", console["container"], "/usr/bin/python3", "-I", "-c", ARTEX_PROBE],
+                           env=env, capture_output=True, text=True, timeout=120)
+    assert probe.returncode == 0, probe.stderr
+    found = answer(probe.stdout, "ARTEX")
+    assert found["uid"] == 1000 and found["artex_env_password"] is False, found
+    ports = {port for _, port in found["listeners"]}
+    assert {8787, 8788} <= ports and 5432 not in ports, found
+    assert all(address in (LOOPBACK_V4, LOOPBACK_V6) for address, port in found["listeners"]
+               if port in (8787, 8788)), found
+    print("ARTEX live:", json.dumps({"url": url, "listeners": found["listeners"]}))

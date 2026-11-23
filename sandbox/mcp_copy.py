@@ -18,8 +18,11 @@ What the target cannot take as it is, is shown and must be resolved - never carr
   secrets   only their names travel (never a value); the ones the target has no secret of are named, with
             `secrets set` there to keep one (--secrets-later: copied anyway, the server needs them before it starts).
   paths     a host folder of the source is never mounted on the target unasked: each one is given a folder there
-            (--path OLD=NEW; NEW=OLD keeps it) or left out (--drop-path OLD); the folders you give are checked and
-            warned about as `mcp add --mount` does.
+            (--path OLD=NEW; NEW=OLD keeps it) or dropped (--drop-path OLD: OLD is a path of the source that
+            means nothing there, so the server gets its default folder there, as `mcp add` without --mount gives
+            it - /work the start's workspace, any other a folder of its own made there, new and empty; a command
+            server's option naming it is left out); the folders you give are checked and warned about as `mcp add
+            --mount` does.
   images    a catalog's is pulled there by digest; one of your own that is not there is pulled by its digest
             (--pull-image) or sent from the source (--copy-image: podman save | podman load, its size said) and used
             only if it still answers to its pinned digest there.
@@ -286,7 +289,10 @@ def size_text(size):
 
 def path_label(path):
     if path.get("kind") == "mount":
-        return f"{path.get('target')} in the container <- {path['path']} ({path.get('mode') or 'ro'})"
+        source = path["path"]
+        source = "the start's workspace" if source == m.WORKSPACE_HOST else \
+            f"its own folder {source}" if default_folder(source) == m.DEFAULT_HOST else source
+        return f"{path.get('target')} in the container <- {source} ({path.get('mode') or 'ro'})"
     if path.get("kind") == "workspace":
         return f"workspace {path['path']}"
     return f"{path.get('option')} {path.get('value')}"
@@ -346,7 +352,8 @@ def described(kind, definition):
 
 
 def parse_paths(values):
-    """{OLD: NEW} of --path OLD=NEW values (absolute paths, or ~/...)."""
+    """{OLD: NEW} of --path OLD=NEW values (absolute paths, or ~/...; @workspace: the workspace of the start that
+    uses the server - as the source names it, or as the folder it becomes here)."""
     found = {}
     for value in values or ():
         old, sep, new = str(value).partition("=")
@@ -354,6 +361,8 @@ def parse_paths(values):
             raise ValueError(f"--path OLD=NEW: OLD the folder the source names, NEW one of the target (NEW=OLD "
                              f"keeps it); not {shown(value, 200)}")
         for path in (old, new):
+            if path == m.WORKSPACE_HOST:
+                continue
             if not os.path.isabs(os.path.expanduser(path)) or any(c in path for c in ("\n", "\r", "\0")):
                 raise ValueError(f"--path {shown(value, 200)}: give absolute paths (or ~/...)")
         if old in found:
@@ -404,7 +413,7 @@ def plan_import(document, as_name=None, replace=False, paths=None, drop_paths=()
             "how": "catalog" if document["kind"] == "catalog" else "definition", "exists": False, "replace": False,
             "definition": None, "changes": [], "copied": [], "secrets": {}, "paths": [], "image": None,
             "network": document.get("network") if isinstance(document.get("network"), dict) else {},
-            "warnings": [], "notes": [], "problems": [], "ok": False, "here": here}
+            "warnings": [], "notes": [], "problems": [], "ok": False, "here": here, "capped": []}
     if not isinstance(name, str) or not re.fullmatch(m.launcher().MCP_NAME, name) or name in m.BUILTIN:
         problem(plan, "name", f"{shown(name)} is not a name a server of yours can have (letters, digits, - and _, at "
                               "most 32; not a built-in one's)", "--as NEWNAME")
@@ -454,17 +463,46 @@ def plan_import(document, as_name=None, replace=False, paths=None, drop_paths=()
         entry = {**{k: path.get(k) for k in ("kind", "target", "option", "value", "path", "mode") if k in path},
                  "to": None, "dropped": False}
         if path["path"] in drop_paths:
+            # A folder of the source is a path of that machine, which means nothing here: dropped, the server gets
+            # its default folder here, as `mcp add` without --mount gives it (the start's workspace for /work, else
+            # a folder of its own made here, new and empty). A command server's option has no default: left out.
             entry["dropped"] = True
+            if path.get("kind") == "mount":
+                entry["to"] = m.WORKSPACE_HOST if path.get("target") == m.WORKSPACE_TARGET else m.DEFAULT_HOST
         elif path["path"] in paths:
             entry["to"] = paths[path["path"]]
+        elif path.get("kind") == "mount" and default_folder(path["path"]) and (
+                default_folder(path["path"]) != m.WORKSPACE_HOST
+                or document["kind"] == "catalog" and path.get("target") == m.WORKSPACE_TARGET):
+            # A folder default of the source (the start's workspace, a folder of the server's own there): the same
+            # default here - the workspace of the start that uses it here, a folder of its own made here (empty: the
+            # source's files stay there). Nothing of the source's folders is mounted. The workspace only where it is
+            # the default here too: a catalog server's /work (its mode as the catalog declares: plan_catalog) - at
+            # another target, or for an image of your own, the source's word would bind it unasked (asked below).
+            entry["to"] = default_folder(path["path"])
+            plan["notes"].append(f"{path['target']}: " + (
+                "the workspace of the start that uses it, as on the source" if entry["to"] == m.WORKSPACE_HOST else
+                f"a folder of its own here, new and empty (the source's {shown(path['path'], 200)} stays there)"))
         else:
             unresolved.append(path)
         plan["paths"].append(entry)
     for path in unresolved:
+        if path["path"] == m.WORKSPACE_HOST:
+            problem(plan, "path", f"the folder {path_label(path)} is the workspace of the start, where the source puts "
+                                  "it: it is not mounted so here unless you say so",
+                    f"--path {m.WORKSPACE_HOST}={m.WORKSPACE_HOST} (the workspace of the start that uses it on {here}"
+                    + (", as writable as its catalog entry declares" if document["kind"] == "catalog" else
+                       f", {path.get('mode') or 'ro'} as the source has it")
+                    + f"), --path {m.WORKSPACE_HOST}=FOLDER (a folder of {here}) or --drop-path {m.WORKSPACE_HOST} "
+                      f"(the server's default folder on {here})")
+            continue
         problem(plan, "path", f"the folder {path_label(path)} is the source's: it is not mounted here unless you say "
                               "which folder of this host it is", f"--path {path['path']}=FOLDER (a folder of {here}; "
                                                                  f"{path['path']}={path['path']} keeps it) or "
-                                                                 f"--drop-path {path['path']}")
+                                                                 f"--drop-path {path['path']}"
+                                                                 + (f" (the server's default folder on {here})"
+                                                                    if path.get("kind") == "mount" else
+                                                                    " (left out)"))
     # Secrets: names only; those this host has no secret of are named.
     names = secret_names() if secrets is None else set(secrets)
     unnamed = sorted({shown(s["secret"], 80) for s in named_secrets if not re.fullmatch(m.ENV_NAME.pattern, s["secret"])})
@@ -507,7 +545,7 @@ def plan_import(document, as_name=None, replace=False, paths=None, drop_paths=()
         plan_checks(plan, name, definition)
     if definition is not None:
         changed = sorted(key for key in set(source) | set(definition) if source.get(key) != definition.get(key)
-                         and key not in ("signed_by",))
+                         and key not in ("signed_by",) and not (key == "mounts" and mounts_said(plan, definition)))
         plan["changes"] = [f"{key}: {shown(json.dumps(source.get(key)), 200)} -> "
                            f"{shown(json.dumps(definition.get(key)), 200)}" for key in changed]
         network = network_of(definition)
@@ -517,9 +555,38 @@ def plan_import(document, as_name=None, replace=False, paths=None, drop_paths=()
     return plan
 
 
+def mounts_said(plan, definition):
+    """Whether the folder lines of PLAN say every folder of DEFINITION already (each target with its mode, a default
+    as a default): then its "changed: mounts" line would only repeat them as JSON (a server's own folder is another
+    path on every host)."""
+    paths = {p.get("target"): p for p in plan["paths"] if p.get("kind") == "mount"}
+    mounts = definition.get("mounts")
+    if not isinstance(mounts, list) or len(mounts) != len(paths):
+        return False
+    for mount in mounts:
+        path = paths.get(mount.get("target")) if isinstance(mount, dict) else None
+        if path is None or path.get("to") not in (m.WORKSPACE_HOST, m.DEFAULT_HOST) or \
+                (path.get("mode") or "ro") != (mount.get("mode") or "ro"):
+            return False
+        if path["to"] == m.WORKSPACE_HOST and mount.get("host") != m.WORKSPACE_HOST:
+            return False
+    return True
+
+
+def default_folder(path):
+    """m.WORKSPACE_HOST or m.DEFAULT_HOST for a source's folder PATH that is a folder default there (the start's
+    workspace, a folder of a server's own: .../sandbox-ai/mcp-folders/NAME/TARGET); None for any other folder."""
+    if path == m.WORKSPACE_HOST:
+        return m.WORKSPACE_HOST
+    return m.DEFAULT_HOST if re.search(r"/sandbox-ai/mcp-folders/[A-Za-z0-9_-]{1,32}/[A-Za-z0-9._-]+$", str(path)) \
+        else None
+
+
 def mount_values(plan):
-    """The --mount TARGET=HOST[:mode] values of an image server's folders as resolved (the left-out ones not)."""
-    return [f"{p['target']}={p['to']}:{p.get('mode') or 'ro'}" for p in plan["paths"]
+    """The --mount TARGET=HOST[:mode] values of a catalog server's folders as resolved (the dropped ones not: the
+    entry's defaults give them their default folder, its mode the catalog's), each no more writable than the entry
+    declares (cap_modes)."""
+    return [f"{p['target']}={p['to']}:{p.get('mode_here') or p.get('mode') or 'ro'}" for p in plan["paths"]
             if p.get("kind") == "mount" and p["to"] and not p["dropped"]]
 
 
@@ -605,9 +672,10 @@ def plan_catalog(plan, document, unsigned, no_vpn, current_pin, catalogs, fetch)
         vpn = None
     elif source.get("vpn") and no_vpn:
         plan["notes"].append(f"without the VPN {source['vpn']} (--no-vpn)")
+    cap_modes(plan, entry)
     limits = {key: source.get(key) for key in ("memory", "cpus", "pids", "tmp")}
     definition = m.definition_from_entry(entry, mount_values(plan), env_specs(source), source.get("network", "none"),
-                                         limits["memory"], limits["pids"], vpn,
+                                         limits["memory"], limits["pids"], vpn, local=plan["server"],
                                          cpus=str(limits["cpus"]) if limits["cpus"] is not None else None,
                                          tmp=limits["tmp"], allow_private=source.get("allow_private", ()),
                                          allow_tcp=source.get("allow_tcp", ()))
@@ -641,6 +709,26 @@ def plan_catalog(plan, document, unsigned, no_vpn, current_pin, catalogs, fetch)
                           "checks them)")
 
 
+def capped_text(plan, path, why, folder):
+    return (f"{path['target']}: read-only, {why} (the source has it writable; sandbox-ai mcp set {plan['server']} "
+            f"--mount {path['target']}={folder}:rw there makes it writable, if you mean it)")
+
+
+def cap_modes(plan, entry):
+    """Each folder of a catalog server's PLAN no more writable than its catalog ENTRY declares it (mcp.declared_mode):
+    the source's mode is the other host's word - a folder the catalog has read-only stays so here, said in
+    plan["capped"]. A folder you make writable yourself is `mcp set --mount ...:rw` there, as with `mcp add`."""
+    known = {mount.get("target"): mount for mount in entry.get("mounts", []) if isinstance(mount, dict)}
+    for path in plan["paths"]:
+        if path.get("kind") != "mount" or path.get("target") not in known or (path.get("mode") or "ro") != "rw":
+            continue
+        if m.declared_mode(entry, known[path["target"]]) == "ro":
+            path["mode_here"] = "ro"  # ("mode" stays the source's: what its folder is there)
+            folder = path["to"] if path["to"] and not path["dropped"] else \
+                m.WORKSPACE_HOST if path["target"] == m.WORKSPACE_TARGET else m.DEFAULT_HOST
+            plan["capped"].append(capped_text(plan, path, "as its catalog entry declares", folder))
+
+
 def vpn_known(name):
     try:
         m.launcher().load_vpn_module().load_profile(name)
@@ -657,9 +745,19 @@ def plan_image(plan, document, pull_image, no_vpn):
         definition.pop(key, None)
     mounts = []
     for path in plan["paths"]:
-        if path.get("kind") != "mount" or path["dropped"] or not path["to"]:
+        if path.get("kind") != "mount" or not path["to"]:  # (a dropped one: its default, the to set by plan_import)
             continue
         mode = path.get("mode") or "ro"
+        if path["to"] in (m.WORKSPACE_HOST, m.DEFAULT_HOST):  # (its default here: the start's, its own folder)
+            host = m.WORKSPACE_HOST if path["to"] == m.WORKSPACE_HOST or path["target"] == m.WORKSPACE_TARGET else \
+                str(m.own_folder(plan["server"], path["target"]))
+            if path["dropped"] and host == m.WORKSPACE_HOST and mode == "rw":
+                # /work's default (--drop-path) is the workspace: read-only, as `mcp add` gives it - the source's "rw"
+                # is the other host's word (--path @workspace=@workspace takes it as the source has it).
+                mode = "ro"
+                plan["capped"].append(capped_text(plan, path, "as the workspace is by default", m.WORKSPACE_HOST))
+            mounts.append({"target": path["target"], "host": host, "mode": mode})
+            continue
         m.mount_host(f"{path['target']}={path['to']}:{mode}", path["to"], mode, create=False)
         mounts.append({"target": path["target"], "host": path["to"], "mode": mode})
     definition["mounts"] = mounts
@@ -770,7 +868,7 @@ def apply_import(plan, out=print, fetch=None):
     elif plan["kind"] == "image" and plan["image"] and plan["image"]["action"] == "pull":
         m.pull_image(definition["image"], name, out)
     if "image" in definition or "rootfs" in definition:
-        m.create_mounts(definition, out)
+        m.create_mounts(definition, out, name)
     m.write_definition(name, definition)
     m.LOG.info("mcp", f"{name} imported ({plan['kind']}, from {plan['from_name']}"
                + (", replacing the one there" if plan["replace"] else "") + ")")
@@ -787,6 +885,21 @@ def problems_text(plan, host=None):
     return "\n".join(lines)
 
 
+def folder_state(path, host):
+    """What becomes of the source's folder PATH (a plan's) on HOST, for people."""
+    if path.get("dropped") and path.get("kind") == "mount" and path.get("to"):
+        return f"the default folder on {host} (" + (
+            "the workspace of the start that uses it there" if path["to"] == m.WORKSPACE_HOST else
+            "a folder of its own there, new and empty, made by sandbox-ai there") + ")"
+    if path.get("dropped"):
+        return "left out"
+    if path.get("kind") == "mount" and path.get("to") == m.WORKSPACE_HOST:
+        return f"the workspace of the start that uses it on {host}"
+    if path.get("kind") == "mount" and path.get("to") == m.DEFAULT_HOST:
+        return f"a folder of its own on {host}, new and empty"
+    return f"-> {path['to']}" if path.get("to") else "not resolved"
+
+
 def plan_text(plan, host=None):
     """What PLAN does, for people."""
     where = f" on {host}" if host else ""
@@ -799,8 +912,7 @@ def plan_text(plan, host=None):
     for text in plan["copied"]:
         lines.append(f"  copied: {text}")
     for path in plan["paths"]:
-        lines.append(f"  folder {path_label(path)}: " + ("left out" if path.get("dropped") else
-                                                         f"-> {path['to']}" if path.get("to") else "not resolved"))
+        lines.append(f"  folder {path_label(path)}: " + folder_state(path, host or plan.get("here") or "this host"))
     secrets = plan.get("secrets") or {}
     if secrets.get("needed"):
         lines.append("  secrets (names only, never a value): " + ", ".join(
@@ -813,6 +925,8 @@ def plan_text(plan, host=None):
             image.get("action"), str(image.get("action"))))
     for text in plan["changes"]:
         lines.append(f"  changed: {text}")
+    for text in plan.get("capped") or ():
+        lines.append(f"  capped: {text}")
     for text in plan["notes"]:
         lines.append(f"  note: {text}")
     for text in plan["warnings"]:
@@ -963,6 +1077,7 @@ def received_plan(plan):
         all(isinstance(plan.get(key), str) for key in ("server", "from_name"))
         and isinstance(plan.get("replace"), bool) and text_or_none(plan.get("how"))
         and all(texts(plan.get(key)) for key in ("copied", "notes", "warnings", "changes"))
+        and texts(plan.get("capped", []))
         and isinstance(plan.get("problems"), list)
         and all(isinstance(item, dict) and isinstance(item.get("text"), str)
                 and all(text_or_none(item.get(key)) for key in ("kind", "fix")) for item in plan["problems"])

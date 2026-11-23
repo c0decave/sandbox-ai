@@ -105,6 +105,22 @@ def images_module():
     return _images
 
 
+_fixes = None
+
+
+def fixes_module():
+    """fixes.py (the fix plan: what a start lacks and what makes each), loaded once."""
+    global _fixes
+    if _fixes is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_fixes_for_services", HERE / "fixes.py")
+        with LOADING:
+            if _fixes is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _fixes = loaded
+    return _fixes
+
+
 _launcher = None
 
 
@@ -1011,17 +1027,31 @@ def service_record(value, service, found, damaged=None):
         raise ValueError(f"--service {name}: the record of your image {image} in {registry_path()} is damaged "
                          f"({damaged[image]}); correct or delete it there, then add the image again")
     mine = ", ".join(sorted(found)[:20]) + (", ..." if len(found) > 20 else "") if found else "none yet"
+    f = fixes_module()
     if image in builtin_images():
-        raise ValueError(f"--service {name}: no image {image} of yours; it is one of sandbox-ai's own Containerfiles, "
-                         f"built once with: sandbox-ai images build-image {image} --builtin {image} (the app's start "
-                         f"builds it when needed, after asking), or give image=NAME of one of yours; your images: "
-                         f"{mine}; see sandbox-ai images list")
+        # One of sandbox-ai's own Containerfiles: offered to be built (fixes.py) - its FROM is a third party's image,
+        # pulled once and pinned by digest, UNCHECKED like your images (said in the question).
+        raise f.Missing(
+            f"--service {name}: no image {image} of yours; it is one of sandbox-ai's own Containerfiles, built once "
+            f"with: sandbox-ai images build-image {image} --builtin {image} (the app's start builds it when needed, "
+            f"after asking), or give image=NAME of one of yours; your images: {mine}; see sandbox-ai images list",
+            [f.fix("service", image, f"the service image {image} (sandbox-ai's own Containerfile) is not built on "
+                                     "this host", "build it from sandbox-ai's own Containerfile (its RUN steps get "
+                                                  "no network)",
+                   [["sandbox-ai", "images", "build-image", image, "--builtin", image]], duration="a minute or two",
+                   security="its FROM is a third party's image (pulled once, pinned by digest), not reviewed by "
+                            "sandbox-ai: UNCHECKED, like your images")])
     given = any(item.partition("=")[0].strip() == "image" for item in value.partition(":")[2].split(",") if item)
     lacks = (f"no image {image} of yours" if given else
              f"no image of yours named {image} (without image= a service's name is its image)")
-    raise ValueError(f"--service {name}: {lacks}; add it with: sandbox-ai images pull REFERENCE --as {image} (or "
-                     f"sandbox-ai images build-image {image} --file Containerfile), or give image=NAME of one of "
-                     f"yours; your images: {mine}; see sandbox-ai images list")
+    raise f.Missing(f"--service {name}: {lacks}; add it with: sandbox-ai images pull REFERENCE --as {image} (or "
+                    f"sandbox-ai images build-image {image} --file Containerfile), or give image=NAME of one of "
+                    f"yours; your images: {mine}; see sandbox-ai images list",
+                    [f.fix("service", image, f"there is no image {image} of yours for the service {name}",
+                           "add it: pull it from its registry, or build your Containerfile",
+                           [["sandbox-ai", "images", "pull", "REFERENCE", "--as", image]],
+                           manual="which image it is (its registry's reference, or your Containerfile: sandbox-ai "
+                                  f"images build-image {image} --file Containerfile) is yours to say")])
 
 
 def check(a, l=None, found=None):
@@ -1139,7 +1169,10 @@ def create_command(a, pod, service, session, l=None, limits=None):
     argv = l.podman_command(a, "create", "--pull=never", "--pod", pod, "--name", container_name(pod, service),
                             "--label", f"{l.RUN_LABEL}={a.run_id}", "--label", f"{SERVICE_LABEL}={service['name']}",
                             "--user", service["user"], "--cap-drop=ALL", "--security-opt=no-new-privileges",
-                            "--init", "--log-driver=k8s-file", "--log-opt", "max-size=10mb",
+                            # --init: the host's catatonit as its PID 1 - not where the host has none and the
+                            # image's ENTRYPOINT is an init of its own (prepare: service["init"])
+                            *(["--init"] if service.get("init", True) else []),
+                            "--log-driver=k8s-file", "--log-opt", "max-size=10mb",
                             # The image's own VOLUMEs: a tmpfs each, gone with the run (never a volume left behind).
                             "--image-volume=tmpfs")
     if service.get("read_only", True):
@@ -1208,6 +1241,71 @@ def add_again(name, entry):
     return f"sandbox-ai images build-image {name} --file {entry.get('containerfile')} --replace"
 
 
+def again_fix(service, entry):
+    """The fix (fixes.py) for the image of SERVICE whose record ENTRY Podman's store no longer has: added again as it
+    was - a pulled one by the digest it was added with (the same image), sandbox-ai's own Containerfile or yours
+    built again. Offered: it is the image you added, UNCHECKED as before (said)."""
+    f, name = fixes_module(), service["image"]
+    if entry["kind"] == "pulled":
+        command = ["sandbox-ai", "images", "pull", entry.get("image") or entry.get("ref"), "--as", name, "--replace"]
+        title, security = ("pull it again by the digest it was added with (the same image)",
+                           "your image, UNCHECKED as before (not reviewed by sandbox-ai)")
+    elif entry.get("builtin"):
+        command = ["sandbox-ai", "images", "build-image", name, "--builtin", entry["builtin"], "--replace"]
+        title, security = ("build it again from sandbox-ai's own Containerfile",
+                           "its FROM is a third party's image, UNCHECKED like your images")
+    elif entry.get("containerfile"):
+        command = ["sandbox-ai", "images", "build-image", name, "--file", entry["containerfile"], "--replace"]
+        title, security = ("build it again from your Containerfile", "your Containerfile is built on this host again "
+                                                                     "(its RUN steps get no network)")
+    else:
+        return f.fix("service", name, f"the image {name} of the service {service['name']} is not in Podman's store",
+                     "add it again", manual="its record names neither a reference nor a Containerfile")
+    return f.fix("service", name, f"the image {name} of the service {service['name']} is not in Podman's store "
+                                  "(removed, or replaced since it was added)", title, [command],
+                 duration="a minute or two", security=security)
+
+
+# sandbox-ai's own Containerfiles for services whose program is a proper PID 1 itself: it reaps every child it gets
+# (orphans too) and ends on the stop signals - so their containers need no init of the host (Podman's --init and its
+# catatonit), as the browser's and Cairn's do not. A new Containerfile of service-images is named here or brings an
+# init as its ENTRYPOINT (tini, dumb-init: hostinit.image_init) - tests/test_helpful_round2.py holds every one to it.
+OWN_INIT = {
+    "showcase-web": "nginx runs as PID 1 (the image's entry point execs it): its master process reaps every child "
+                    "with waitpid(-1) and ends on SIGTERM/SIGQUIT, as nginx's official image runs it",
+}
+
+
+def ready_fixes(a, l=None, run=None):
+    """The fixes (fixes.py) of what prepare() would refuse for the services of the start A (services.check filled
+    a.services), all at once and without raising: an image Podman's store no longer has (again_fix), a secret that is
+    not kept (fixes.secret_fix). What the start lists with everything else it lacks - also for --fix-plan, whose dry
+    run prepares nothing."""
+    l = l or launcher()
+    run = run or subprocess.run
+    f, found, store = fixes_module(), [], None
+    for service in getattr(a, "services", None) or []:
+        entry = service.get("record") or {}
+        if service.get("browser") or service.get("cairn") or not entry.get("id"):
+            continue
+        try:
+            done = run(l.podman_command(a, "image", "exists", entry["id"].removeprefix("sha256:")),
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+            if done.returncode != 0:
+                found.append(again_fix(service, entry))
+        except (OSError, subprocess.SubprocessError):
+            pass  # (no Podman here: the start says so itself)
+        for item in service.get("secrets") or []:
+            store = store or l.load_secret_store_module()
+            try:
+                kept = store.get(item["secret"]) is not None
+            except (OSError, ValueError):
+                kept = True  # (a store that cannot be read: the start says why)
+            if not kept:
+                found.append(f.secret_fix(item["secret"], f"the service {service['name']} takes it"))
+    return found
+
+
 def prepare(a, l=None, run=None):
     """At a real start (not a dry run): every service's image present with its recorded ID, its secrets and your
     variables there. Fills in the secrets' values (never printed)."""
@@ -1224,13 +1322,29 @@ def prepare(a, l=None, run=None):
             raise ValueError("Required tool missing: podman") from None
         if done.returncode != 0:
             how = add_again(service["image"], entry)
-            raise ValueError(f"--service {service['name']}: the image {service['image']} ({entry['image']}, "
-                             f"{image_id[:12]}) is not in Podman's store (removed, or replaced since it was added); "
-                             f"nothing is pulled at a start: {how}")
+            raise fixes_module().Missing(
+                f"--service {service['name']}: the image {service['image']} ({entry['image']}, {image_id[:12]}) is "
+                f"not in Podman's store (removed, or replaced since it was added); nothing is pulled at a start: "
+                f"{how}", [again_fix(service, entry)])
+        if not (service.get("browser") or service.get("cairn")):
+            # Its PID 1: Podman's --init (the host's catatonit) where the host has it, the image's own init where its
+            # ENTRYPOINT is one - else it is not started, said now with the package command (hostinit.wants_init).
+            # (The browser's and Cairn's containers bring sandbox-ai's own init, pid1.py; sandbox-ai's own service
+            # Containerfiles name theirs: OWN_INIT.)
+            service["init"] = hostinit_module().wants_init(
+                f"--service {service['name']}", image=image_id, own_pid1=entry.get("builtin") in OWN_INIT,
+                local=l.local_engine(a), podman=l.podman_command(a), run=run)
         for item in service["env"]:
             if item.get("from_host") and item["name"] not in os.environ:
-                raise ValueError(f"--service {service['name']}: env={item['name']}: your environment has no "
-                                 f"{item['name']}")
+                f = fixes_module()
+                raise f.Missing(f"--service {service['name']}: env={item['name']}: your environment has no "
+                                f"{item['name']}", [f.fix(
+                                    "service", f"{service['name']}:{item['name']}",
+                                    f"the variable {item['name']} the service {service['name']} takes from your "
+                                    "environment is not set", f"set it where you start: export {item['name']}=...",
+                                    manual="its value is yours: set it in the environment that starts the sandbox, "
+                                           f"or keep it as a secret (sandbox-ai secrets set {item['name']}) and give "
+                                           f"secret={item['name']} instead")])
         for item in service["secrets"]:
             store = store or l.load_secret_store_module()
             value = store.get(item["secret"])
@@ -1241,15 +1355,35 @@ def prepare(a, l=None, run=None):
 
 
 def members(a):
-    """The containers started beside the agent: the services (--service), Cairn's board (--cairn: cairn.check) and
-    the sandbox's browser (--browser: browser.check), the last two services of sandbox-ai's own images. Cairn's
-    before the browser, which starts on its board."""
+    """The containers started beside the agent: the services (--service), Cairn's board (--cairn: cairn.check),
+    ARTEX (--artex: artex.check) and the sandbox's browser (--browser: browser.check), the last three services of
+    sandbox-ai's own images. Cairn's before the browser, which starts on its board."""
     cairn, browser = getattr(a, "cairn_container", None), getattr(a, "browser_container", None)
-    return [*(getattr(a, "services", None) or []), *([cairn] if cairn else []), *([browser] if browser else [])]
+    artex = getattr(a, "artex_container", None)
+    return [*(getattr(a, "services", None) or []), *([cairn] if cairn else []), *([artex] if artex else []),
+            *([browser] if browser else [])]
 
 
 _browser = None
 _cairn = None
+_artex = None
+
+
+_hostinit = None  # hostinit.py, loaded once
+
+
+def hostinit_module():
+    """hostinit.py: whether Podman's --init works on this host (its init binary catatonit), and what a container gets
+    instead, loaded once."""
+    global _hostinit
+    if _hostinit is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_hostinit", HERE / "hostinit.py")
+        with LOADING:
+            if _hostinit is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _hostinit = loaded
+    return _hostinit
 
 
 def cairn_module():
@@ -1263,6 +1397,19 @@ def cairn_module():
                 spec.loader.exec_module(loaded)
                 _cairn = loaded
     return _cairn
+
+
+def artex_module():
+    """artex.py (ARTEX's container: its podman create line), loaded once."""
+    global _artex
+    if _artex is None:
+        spec = importlib.util.spec_from_file_location("artex_for_services", HERE / "artex.py")
+        loaded = importlib.util.module_from_spec(spec)
+        with LOADING:
+            if _artex is None:
+                spec.loader.exec_module(loaded)
+                _artex = loaded
+    return _artex
 
 
 def browser_module():
@@ -1279,10 +1426,10 @@ def browser_module():
 
 
 def supervisor_config(a):
-    """What the sandbox's supervisor waits for before the agent starts (runtime.await_services). The browser's entry
-    asks for the run's CA ("ca": the supervisor puts it into the run's directory before the go)."""
+    """What the sandbox's supervisor waits for before the agent starts (runtime.await_services). The browser's and
+    ARTEX's entries ask for the run's CA ("ca": the supervisor puts it into the run's directory before the go)."""
     return [{"name": service["name"], "ready": ready_port(service), "timeout": service["ready_timeout"],
-             **({"ca": True} if service.get("browser") else {})}
+             **({"ca": True} if service.get("browser") or service.get("artex") else {})}
             for service in members(a)]
 
 
@@ -1406,7 +1553,8 @@ def launch(a, pod, session, alive, l=None, run=None, sleep=time.sleep, out=None,
             # Created, initialised (its namespaces made, nothing of the image run: podman init), proven, and only then
             # started: nothing of it ever runs outside the pod's user namespace or the VPN's network namespace.
             argv, env = (browser_module().create_command if service.get("browser") else
-                         cairn_module().create_command if service.get("cairn") else create_command)(
+                         cairn_module().create_command if service.get("cairn") else
+                         artex_module().create_command if service.get("artex") else create_command)(
                 a, pod, service, session, l, limits)
             done = run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
                        env={**os.environ, **env})

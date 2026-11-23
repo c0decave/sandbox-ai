@@ -129,7 +129,9 @@ def test_a_catalog_server_is_added_from_the_catalog_there_never_copied_raw(two, 
         assert definition["description"] == "binwalk firmware analysis"  # the catalog's, not the source's file
         assert definition["image"] == f"ghcr.io/c0decave/axross-mcp-binwalk@{DIGEST}"
         assert definition["signed_by"] and definition["mounts"] == [
-            {"target": "/work", "host": str(target_firmware.resolve()), "mode": "ro"}]
+            {"target": "/work", "host": str(target_firmware.resolve()), "mode": "ro"},
+            # (0.1.212) /out was the source's default, a folder of its own: here a folder of its own too
+            {"target": "/out", "host": str(m.own_folder("binwalk", "/out")), "mode": "ro"}]
         assert definition["memory"] == "1g" and definition["env_values"] == {"BINWALK_DEPTH": "3"}
         pulled = []
         monkeypatch.setattr(m, "pull_image", lambda image, local, out=None: pulled.append(image))
@@ -213,8 +215,9 @@ def test_source_folders_are_never_mounted_on_the_target_unasked(two, tmp_path):
         with pytest.raises(ValueError, match="not copied"):
             mc.apply_import(plan)
         assert not m.config_file().exists()
-        dropped = mc.plan_import(exported, drop_paths=[str(shared)])
-        assert dropped["ok"] and "mounts" not in dropped["definition"]
+        dropped = mc.plan_import(exported, drop_paths=[str(shared)])  # (its default there: a new folder of its own)
+        assert dropped["ok"] and dropped["definition"]["mounts"] == [
+            {"target": "/data", "host": str(m.own_folder("own", "/data")), "mode": "rw"}]
         other = tmp_path / "elsewhere"
         moved = mc.plan_import(exported, paths={str(shared): str(other)})
         assert moved["ok"] and moved["definition"]["mounts"] == [{"target": "/data", "host": str(other), "mode": "rw"}]
@@ -784,6 +787,39 @@ def test_e2e_a_catalog_server_is_added_there_from_its_catalog(fleet, tmp_path):
     assert "binwalk2" not in fleet.mcp_json(host1)
 
 
+def test_e2e_copy_drop_path_gives_the_default_folder_there(fleet, tmp_path):
+    """(2026-11-22) Through the real ./sandbox-ai: a catalog server's folder of the source dropped with --drop-path
+    is that server's default folder on the target - a folder of its own made there - and the output says so."""
+    laptop, host1 = fleet.laptop, fleet.hosts["host1"]
+    catalog = tmp_path / "shared" / "catalog.json"
+    catalog.parent.mkdir()
+    catalog.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [
+        {**BINWALK, "env": [], "mounts": [{"target": "/out"}]}]}))
+    image = f"ghcr.io/c0decave/axross-mcp-binwalk@{DIGEST}"
+    laptop.add_image(image)
+    results = tmp_path / "laptop-results"
+    results.mkdir()
+    done = laptop.run("mcp", "add", "binwalk", "--catalog", str(catalog), "--unsigned", "--no-pull", "--mount",
+                      f"/out={results}:rw")
+    assert done.returncode == 0, done.stderr + done.stdout
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps([image]))
+    host1.env["FAKE_PODMAN_REGISTRY"] = str(registry)
+    fleet.save("host1")
+    copy = ["mcp", "copy", "binwalk", "--from", "local", "--to", "host1", "--catalog", str(catalog), "--unsigned"]
+    done = laptop.run(*copy)
+    assert done.returncode == 1 and f"--drop-path {results} (the server's default folder on" in done.stdout, \
+        done.stdout
+    done = laptop.run(*copy, "--drop-path", str(results))
+    assert done.returncode == 0, done.stderr + done.stdout
+    said = " ".join(done.stdout.split())
+    assert f"folder /out in the container <- {results} (rw): the default folder on host1 (a folder of its own " \
+           "there, new and empty, made by sandbox-ai there)" in said, said
+    (folder,) = [mount["host"] for mount in fleet.mcp_json(host1)["binwalk"]["mounts"] if mount["target"] == "/out"]
+    assert folder.startswith(str(host1.home)) and folder.endswith("sandbox-ai/mcp-folders/binwalk/out")
+    assert Path(folder).is_dir() and str(results) not in json.dumps(fleet.mcp_json(host1))
+
+
 def test_e2e_an_older_sandbox_ai_there_is_named_with_the_update(fleet):
     laptop, host1 = fleet.laptop, fleet.hosts["host1"]
     old = host1.bin / "sandbox-ai"
@@ -862,3 +898,217 @@ def test_a_catalog_server_from_before_0_1_78_is_re_added_too(two):
         plan = mc.plan_import(exported, paths={str(firmware): str(firmware)}, catalogs=two.sources, secrets_later=True)
         assert plan["ok"] and plan["how"] == "catalog" and plan["definition"]["signed_by"]
         assert plan["definition"]["description"] == "binwalk firmware analysis"
+
+
+def test_folder_defaults_travel_as_defaults(two, monkeypatch):
+    """(0.1.212, folder defaults) A server added without --mount - /work the start's workspace, /out a folder of its
+    own - is copied with the same defaults there: the workspace of the start that uses it there, a new folder of its
+    own made there (the source's own folder and its files stay where they are), without --path."""
+    with two.on("laptop") as laptop:
+        m.add("binwalk", env=["BINWALK_TOKEN"], catalogs=two.sources, pull=False, out=lambda line: None)
+        source_out = m.own_folder("binwalk", "/out")
+        exported = mc.export("binwalk")
+    assert str(laptop) in str(source_out)
+    with two.on("host1") as host1:
+        plan = mc.plan_import(exported, catalogs=two.sources, secrets_later=True)
+        assert plan["ok"], plan["problems"]
+        folders = {mount["target"]: mount for mount in plan["definition"]["mounts"]}
+        assert folders["/work"]["host"] == "@workspace"
+        assert folders["/out"]["host"] == str(m.own_folder("binwalk", "/out")) and str(host1) in folders["/out"]["host"]
+        assert any("a folder of its own here, new and empty" in note for note in plan["notes"])
+        monkeypatch.setattr(m, "pull_image", lambda image, local, out=None: None)
+        mc.apply_import(plan, out=lambda line: None)
+        assert m.own_folder("binwalk", "/out").is_dir()
+
+
+def test_a_dropped_folder_gets_the_servers_default_folder_there(two, capsys):
+    """(2026-11-22) --drop-path OLD: OLD is a folder of the source - a path of that machine that means nothing on the
+    target - so the copy there gets that server's default folder there, made by sandbox-ai there (/work: the
+    workspace of the start that uses it; any other folder: a folder of its own, new and empty). Said as such, never
+    "left out" while a folder is mounted after all. A command server's option has no default: it is left out."""
+    firmware, results = two.tmp / "firmware", two.tmp / "results"
+    firmware.mkdir()
+    results.mkdir()
+    with two.on("laptop"):
+        m.add("binwalk", mounts=[f"/work={firmware}", f"/out={results}:rw"], env=["BINWALK_TOKEN"],
+              catalogs=two.sources, pull=False, out=lambda line: None)
+        exported = mc.export("binwalk")
+    with two.on("host1"):
+        plan = mc.plan_import(exported, drop_paths=[str(firmware), str(results)], catalogs=two.sources,
+                              secrets_later=True)
+        assert plan["ok"], plan["problems"]
+        folders = {mount["target"]: mount for mount in plan["definition"]["mounts"]}
+        assert folders["/work"]["host"] == "@workspace"
+        assert folders["/out"]["host"] == str(m.own_folder("binwalk", "/out"))
+        assert str(results) not in json.dumps(plan["definition"]) and str(firmware) not in json.dumps(
+            plan["definition"])
+        paths = {path["target"]: path for path in plan["paths"]}
+        assert paths["/work"]["dropped"] and paths["/work"]["to"] == "@workspace"
+        assert paths["/out"]["dropped"] and paths["/out"]["to"] == "default"
+        text = mc.plan_text(plan, "host1")
+        assert f"folder /out in the container <- {results} (rw): the default folder on host1 (a folder of its " \
+               "own there, new and empty, made by sandbox-ai there)" in text, text
+        assert f"folder /work in the container <- {firmware} (ro): the default folder on host1 (the workspace of " \
+               "the start that uses it there)" in text, text
+        assert "left out" not in text
+    # An image server of your own: the same - its own folder there.
+    data = two.tmp / "data"
+    data.mkdir()
+    with two.on("laptop"):
+        write_config({"own": {"image": OWN_IMAGE, "mounts": [{"target": "/data", "host": str(data), "mode": "rw"}]}})
+        exported = mc.export("own")
+    with two.on("host1"):
+        plan = mc.plan_import(exported, drop_paths=[str(data)])
+        assert plan["ok"], plan["problems"]
+        assert plan["definition"]["mounts"] == [{"target": "/data", "host": str(m.own_folder("own", "/data")),
+                                                 "mode": "rw"}]
+        assert "/data in the container" in mc.plan_text(plan, "host1") and "the default folder on host1" in \
+            mc.plan_text(plan, "host1")
+    # --help says it.
+    with pytest.raises(SystemExit):
+        m.cli(["copy", "--help"])
+    said = " ".join(capsys.readouterr().out.split())
+    assert "the server's default folder there" in said, said
+
+
+# --- round-1 review: a hostile source (a host of sandbox-ai hosts: its answer is data) ----------------------------
+# Its export named @workspace as a folder, and that was resolved without asking, with the SOURCE's mode: a catalog
+# server's folder the catalog declares read-only became writable, an image of your own had the workspace at any of
+# its targets. Now: a catalog server's modes are capped to what its entry declares (the plan says what), @workspace
+# is taken unasked only where it is the entry's own default (/work), never for an image of your own.
+
+def hostile_binwalk(two):
+    """binwalk as a hostile source exports it: /work the workspace writable, /out the workspace too."""
+    with two.on("laptop"):
+        m.add("binwalk", env=["BINWALK_TOKEN"], catalogs=two.sources, pull=False, out=lambda line: None)
+        exported = mc.export("binwalk")
+    exported["definition"]["mounts"] = [{"target": "/work", "host": "@workspace", "mode": "rw"},
+                                        {"target": "/out", "host": "@workspace", "mode": "rw"}]
+    return exported
+
+
+def test_a_hostile_catalog_export_cannot_widen_a_folder_or_put_the_workspace_elsewhere(two):
+    exported = hostile_binwalk(two)
+    with two.on("host1"):
+        plan = mc.plan_import(exported, catalogs=two.sources, secrets_later=True)
+        assert not plan["ok"] and [p["kind"] for p in plan["problems"]] == ["path"]
+        problem = plan["problems"][0]
+        assert "/out in the container <- the start's workspace (rw)" in problem["text"]
+        assert "--path @workspace=@workspace" in problem["fix"] and "--drop-path @workspace" in problem["fix"]
+        # Asked for (--path @workspace=@workspace): both the workspace, each only as writable as the catalog says.
+        kept = mc.plan_import(exported, paths=mc.parse_paths(["@workspace=@workspace"]), catalogs=two.sources,
+                              secrets_later=True)
+        assert kept["ok"], kept["problems"]
+        assert kept["definition"]["mounts"] == [{"target": "/work", "host": "@workspace", "mode": "ro"},
+                                                {"target": "/out", "host": "@workspace", "mode": "ro"}]
+        assert len(kept["capped"]) == 2 and all("read-only, as its catalog entry declares" in text
+                                                for text in kept["capped"])
+        text = mc.plan_text(kept, "host1")
+        assert "capped: /work: read-only, as its catalog entry declares (the source has it writable" in text, text
+        assert f"sandbox-ai mcp set binwalk --mount /work=@workspace:rw" in text
+        # Only the workspace at /work (the entry's own default): taken unasked, its mode capped all the same.
+        alone = {**exported, "definition": {**exported["definition"], "mounts": [
+            {"target": "/work", "host": "@workspace", "mode": "rw"}]}}
+        plan = mc.plan_import(alone, catalogs=two.sources, secrets_later=True)
+        assert plan["ok"], plan["problems"]
+        folders = {mount["target"]: mount for mount in plan["definition"]["mounts"]}
+        assert folders["/work"] == {"target": "/work", "host": "@workspace", "mode": "ro"} and plan["capped"]
+
+
+def test_a_catalog_folder_the_entry_declares_writable_stays_writable(two, monkeypatch):
+    entry = {**BINWALK, "mounts": [{"target": "/work", "required": True, "mode": "rw"}, {"target": "/out"}]}
+    monkeypatch.setattr(m, "catalog_entries", lambda sources=None, fetch=None: (
+        [("c0", {**entry, "_signature": {"state": "good", "signer": "SHA256:x"}, "_catalog": str(two.catalog)})], []))
+    exported = hostile_binwalk(two)
+    exported["definition"]["mounts"] = exported["definition"]["mounts"][:1]
+    with two.on("host1"):
+        plan = mc.plan_import(exported, catalogs=two.sources, secrets_later=True)
+        assert plan["ok"], plan["problems"]
+        assert plan["definition"]["mounts"][0] == {"target": "/work", "host": "@workspace", "mode": "rw"}
+        assert plan["capped"] == []
+
+
+def test_an_own_image_export_never_has_the_workspace_bound_unasked(two):
+    with two.on("laptop"):
+        write_config({"own": {"image": OWN_IMAGE, "mounts": [{"target": "/data", "host": "@workspace", "mode": "rw"}]}})
+        exported = mc.export("own")
+    with two.on("host1"):
+        plan = mc.plan_import(exported)
+        assert not plan["ok"] and [p["kind"] for p in plan["problems"]] == ["path"]
+        assert "/data in the container <- the start's workspace (rw)" in plan["problems"][0]["text"]
+        assert "--path @workspace=@workspace" in plan["problems"][0]["fix"]
+        kept = mc.plan_import(exported, paths=mc.parse_paths(["@workspace=@workspace"]))
+        assert kept["ok"] and kept["definition"]["mounts"] == [{"target": "/data", "host": "@workspace", "mode": "rw"}]
+        assert ("folder /data in the container <- the start's workspace (rw): the workspace of the start that uses it "
+                "on host1") in mc.plan_text(kept, "host1")
+        dropped = mc.plan_import(exported, drop_paths=["@workspace"])  # (its default: a folder of its own there)
+        assert dropped["ok"] and dropped["definition"]["mounts"] == [
+            {"target": "/data", "host": str(m.own_folder("own", "/data")), "mode": "rw"}]
+    # At /work dropped: its default is the workspace of the start - read-only, the source's "rw" is not taken.
+    with two.on("laptop"):
+        write_config({"own": {"image": OWN_IMAGE, "mounts": [{"target": "/work", "host": "@workspace", "mode": "rw"}]}})
+        exported = mc.export("own")
+    with two.on("host1"):
+        assert not mc.plan_import(exported)["ok"]
+        dropped = mc.plan_import(exported, drop_paths=["@workspace"])
+        assert dropped["ok"] and dropped["definition"]["mounts"] == [
+            {"target": "/work", "host": "@workspace", "mode": "ro"}]
+        assert any("/work: read-only" in text for text in dropped["capped"])
+
+
+def test_path_takes_the_workspace_by_its_name():
+    assert mc.parse_paths(["@workspace=@workspace", "@workspace=/srv/x"][:1]) == {"@workspace": "@workspace"}
+    assert mc.parse_paths(["@workspace=/srv/x"]) == {"@workspace": "/srv/x"}
+    with pytest.raises(ValueError, match="absolute"):
+        mc.parse_paths(["@other=/srv/x"])
+
+
+def test_e2e_a_hostile_host_cannot_widen_a_folder_or_bind_the_workspace_here(fleet, tmp_path):
+    """Through ./sandbox-ai: copied FROM a host whose mcp.json says /work and /out are the workspace, writable."""
+    laptop, host1 = fleet.laptop, fleet.hosts["host1"]
+    catalog = tmp_path / "shared" / "catalog.json"
+    catalog.parent.mkdir()
+    catalog.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [{**BINWALK, "env": []}]}))
+    image = f"ghcr.io/c0decave/axross-mcp-binwalk@{DIGEST}"
+    host1.add_image(image)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps([image]))
+    laptop.env["FAKE_PODMAN_REGISTRY"] = str(registry)
+    fleet.define(host1, {"binwalk": {"image": image, "source": "hub:binwalk", "catalog": str(catalog),
+                                     "signed_by": None, "network": "none",
+                                     "mounts": [{"target": "/work", "host": "@workspace", "mode": "rw"},
+                                                {"target": "/out", "host": "@workspace", "mode": "rw"}]}})
+    copy = ["mcp", "copy", "binwalk", "--from", "host1", "--to", "local", "--catalog", str(catalog), "--unsigned"]
+    done = laptop.run(*copy)
+    assert done.returncode == 1 and "--path @workspace=@workspace" in done.stdout, done.stdout + done.stderr
+    assert fleet.mcp_json(laptop) == {}
+    done = laptop.run(*copy, "--path", "@workspace=@workspace")
+    assert done.returncode == 0, done.stdout + done.stderr
+    said = " ".join(done.stdout.split())
+    assert "capped: /work: read-only, as its catalog entry declares" in said and "capped: /out" in said, said
+    assert fleet.mcp_json(laptop)["binwalk"]["mounts"] == [{"target": "/work", "host": "@workspace", "mode": "ro"},
+                                                           {"target": "/out", "host": "@workspace", "mode": "ro"}]
+
+
+def test_e2e_a_server_with_its_default_folders_is_copied_in_words(fleet, tmp_path):
+    """Journeys round 1: binwalk added without --mount, `mcp copy binwalk --to host1 --dry-run` showed the
+    definition's marker ("<- @workspace (ro): -> @workspace", "-> default") and a line of raw JSON ("changed: mounts:
+    [{...}] -> [{...}]") for folders that are defaults on both hosts. The plan says them in words, the JSON goes."""
+    laptop, host1 = fleet.laptop, fleet.hosts["host1"]
+    catalog = tmp_path / "shared" / "catalog.json"
+    catalog.parent.mkdir()
+    catalog.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [
+        {**BINWALK, "env": []}]}))
+    laptop.add_image(f"ghcr.io/c0decave/axross-mcp-binwalk@{DIGEST}")
+    done = laptop.run("mcp", "add", "binwalk", "--catalog", str(catalog), "--unsigned", "--no-pull")
+    assert done.returncode == 0, done.stderr + done.stdout
+    done = laptop.run("mcp", "copy", "binwalk", "--from", "local", "--to", "host1", "--catalog", str(catalog),
+                      "--unsigned", "--dry-run")
+    assert done.returncode == 0, done.stderr + done.stdout
+    said = done.stdout
+    assert "@workspace" not in said and "-> default" not in said and "changed: mounts" not in said, said
+    lines = [" ".join(line.split()) for line in said.splitlines()]
+    assert "folder /work in the container <- the start's workspace (ro): the workspace of the start that uses it " \
+           "on host1" in lines, said
+    assert any(line.startswith("folder /out in the container <- its own folder ") and line.endswith(
+        "): a folder of its own on host1, new and empty") for line in lines), said

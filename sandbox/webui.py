@@ -110,6 +110,14 @@ STATIC_FILES = {"index.html": "text/html; charset=utf-8", "app.js": "text/javasc
                 "i18n.js": "text/javascript; charset=utf-8",
                 "app.css": "text/css; charset=utf-8", "themes.json": "application/json",
                 "help.json": "application/json", "icon.svg": "image/svg+xml"}
+# The fonts of the help and the reading fonts (web/fonts, the same families as the desktop app's, fonts.json says
+# where from); served from here only, never from another host.
+FONT_FILES = {name: ("font/woff2" if name.endswith(".woff2") else "text/plain; charset=utf-8")
+              for name in ("AtkinsonHyperlegibleNext-Regular.woff2", "AtkinsonHyperlegibleNext-Bold.woff2",
+                           "AtkinsonHyperlegibleMono-Regular.woff2", "OpenDyslexic-Regular.woff2",
+                           "OpenDyslexic-Bold.woff2", "Lexend-Regular.woff2", "Lexend-Bold.woff2",
+                           "OFL-AtkinsonHyperlegibleNext.txt", "OFL-AtkinsonHyperlegibleMono.txt",
+                           "OFL-OpenDyslexic.txt", "OFL-Lexend.txt")}
 VENDOR_FILES = {"xterm.js": "text/javascript; charset=utf-8", "xterm.css": "text/css; charset=utf-8",
                 "addon-fit.js": "text/javascript; charset=utf-8"}
 DEFAULT_LISTEN = "127.0.0.1:8443"
@@ -510,6 +518,8 @@ def with_beyond_the_trio(args):
 
 
 NEWER = (
+    ((0, 1, 213), "llm share, unshare and sync (an LLM server for all hosts)",
+     lambda a: a[:2] in (["llm", "share"], ["llm", "unshare"], ["llm", "sync"])),
     ((0, 1, 196), "mcp add --build (an MCP server its catalog has no signed image of, built from its source)",
      lambda a: a[:2] == ["mcp", "add"] and any(x in ("--build", "--build-plan") for x in a)),
     ((0, 1, 168), "net allow --allow-shared-wildcard (a wildcard below a shared service, after its confirmation)",
@@ -524,6 +534,8 @@ NEWER = (
         x.startswith(("--role=", "--member-model=", "--member-llm=", "--member-mode=")) or x == "--dry-run"
         for x in team_start_words(a)) or (a[:2] == ["team", "start"] and "--no-config" in a[a.index("--"):]
                                           if "--" in a else False)),
+    ((0, 1, 217), "the fix plan of a start (--fix-plan, --fix-only: what it lacks, asked about in the page)",
+     lambda a: any(x in ("--fix-plan", "--fix-only") for x in a[:a.index("--") if "--" in a else len(a)])),
     ((0, 1, 99), "sandbox-ai board export and import", lambda a: a[:1] == ["board"]),
     ((0, 1, 99), "sandbox-ai checkpoint", lambda a: a[:1] == ["checkpoint"]),
     ((0, 1, 99), "sandbox-ai session memory, files and export", lambda a: a[:1] == ["session"] and
@@ -701,6 +713,16 @@ INSTALL_KEYS = ("mode", "prefix", "sudo", "source", "version")
 
 def install_route_timeout():
     return 2 * getattr(module("hosts"), "INSTALL_TIMEOUT", 900) + 120
+
+
+def uninstall_argv(name, which, flags, dry_run=False):
+    """`sandbox-ai hosts uninstall NAME --json ...` of a checked choice (Api.uninstall_choice)."""
+    return ["hosts", "uninstall", name, "--json", *(["--installation", which] if which else []),
+            *(["--purge"] if flags.get("purge") else []), *(["--secrets"] if flags.get("secrets") else []),
+            *(["--mcp-data"] if flags.get("mcp_data") else []),
+            *(["--stop-running"] if flags.get("stop_running") and not dry_run else []),
+            *(["--remove-from-list"] if flags.get("remove") and not dry_run else []),
+            "--dry-run" if dry_run else "--yes"]
 
 
 def install_choice(body):
@@ -994,7 +1016,7 @@ MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot
 SIZE_VALUE = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?[kmgtKMGT]?")
 NET_PRESETS = ("pypi", "github", "gitlab", "kernel-org", "duckduckgo", "npm")  # agent_sandbox.PRESETS (a test agrees)
 NETWORK = re.compile(r"[0-9A-Fa-f:.]{2,45}(?:/[0-9]{1,3})?")
-BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}(?:@[a-z]{1,20})?")  # (NAME@AGENT: that agent's variant NAME)  # codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, vpn, tor, browser or a variant
+BUILD_TARGET = re.compile(r"[a-z0-9][a-z0-9_.-]{0,29}(?:@[a-z]{1,20})?")  # (NAME@AGENT: that agent's variant NAME)  # codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, artex, vpn, tor, browser or a variant
 HOOK_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 HOOK_EVENT = re.compile(r"[A-Z][A-Za-z]{1,40}")
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
@@ -1190,6 +1212,8 @@ NEEDS_CONFIRM = {
                    "continues its conversation)",
     "host-edit": "changing a host's SSH target, port, key, command or sudo setting changes where and how this "
                  "service's commands run",
+    "host-uninstall": "uninstalling sandbox-ai on a host removes that installation there (with --purge also the "
+                      "SSH user's data, with --secrets its secrets and logins, which cannot be recovered)",
     "host-install": "installing sandbox-ai on a host puts this machine's copy (or the signed release) there, for the "
                     "SSH user or for every user, as root or with sudo",
     "secret-delete": "deleting a secret takes it from every start, VPN profile and Git login that names it",
@@ -1198,6 +1222,8 @@ NEEDS_CONFIRM = {
     "project-forget": "a project configuration no longer trusted stops the starts of that project from starting "
                       "until it is trusted again",
     "mcp-stop": "stopping an MCP server ends it for every start that uses it now",
+    "mcp-update": "the server's image is replaced by the newer one its catalog pins (its signature checked again; its "
+                  "folders, variables, limits and network stay): every later start runs that image",
     "mcp-detach": "detaching an MCP server from a running start closes its relay there now: the agent's "
                   "connections to it end and its calls fail (its later starts go without it)",
     "mcp-unsigned": "an MCP server from a catalog no trusted key signed is taken without that check",
@@ -1225,6 +1251,10 @@ NEEDS_CONFIRM = {
     "vpn-replace": "replacing a VPN profile of that name changes the tunnel of every start that uses it",
     "llm-replace": "replacing an LLM server of that name changes where every start that uses it sends its prompts "
                    "and its key",
+    "llm-share-key": "the key of a server shared with all hosts is kept in the secret store of each host it is sent "
+                     "to from then on: whoever controls that host can use it",
+    "llm-unshare": "unsharing removes the server's copies (and the keys sent) from every host it was shared with: "
+                   "sessions there cannot start with it any more",
     "team-stop": "stopping a team ends what runs in every member and its board",
     "team-delete": "deleting a team removes its members with their HOMEs and its board",
     "image-file": "a host file added to an image's extension is built into the image: every later start of it can "
@@ -1275,8 +1305,10 @@ DEFAULT_KEYS = ("ask_timeout", "budget", "canaries", "checkpoint_count", "checkp
                 "subnet6", "telemetry", "hide_secrets",
                 # the storage check and its automatic rules (storage.py checks each value)
                 "storage_check", "storage_threshold_gb", "storage_growth_gb", "storage_caches_days",
-                "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days")
+                "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days",
+                "fix_questions")
 # (and the update mode's, changed by /update-mode: it makes the timer too)
+FIX_QUESTIONS = ("all", "each")  # fixes.QUESTIONS: fix_questions' values
 FILE_READS = ("folders", "files", "off")  # runtime.FILE_READS: file_reads' values
 CONNECTION_BODIES = ("text", "all")  # runtime.CONNECTION_BODIES
 LLM_TRAFFIC_MODES = ("off", "llm", "all")  # runtime.LLM_TRAFFIC_MODES: llm_traffic's values
@@ -1497,8 +1529,9 @@ class Api:
         self.runner = runner or (lambda host, args, timeout=120, input=None:
                                  module("hosts").run(host, args, input=input, timeout=timeout))
         # hosts update and hosts list's status (several commands each; tests give their own)
-        self.updater = updater or (lambda host, version=None, sudo=None, from_here=False:
-                                    module("hosts").update(host, version, sudo, from_here=from_here))
+        self.updater = updater or (lambda host, version=None, sudo=None, from_here=False, installation=None:
+                                    module("hosts").update(host, version, sudo, from_here=from_here,
+                                                           installation_=installation))
         self.statuses = statuses or (lambda names, refresh=False: module("hosts").statuses(names, refresh=refresh))
         # wrong primary passwords per host: three at once, then 5 s doubling up to 5 minutes (the host's store slows
         # them down too, whatever way they come in)
@@ -1529,6 +1562,8 @@ class Api:
             ("POST", H + r"/update", self.update_host, ()),
             ("POST", H + r"/install", self.install_host, ("host-install",)),
             ("GET", H + r"/install", self.install_status, ()),
+            ("POST", H + r"/uninstall-plan", self.uninstall_plan, ()),  # (read only: the host's --dry-run)
+            ("POST", H + r"/uninstall", self.uninstall_host, ("host-uninstall",)),
             ("GET", H + r"/starts", self.starts, ()),
             ("POST", H + r"/starts/(?P<name>[^/]+)/(?P<action>pause|resume|stop|delete)", self.start_action,
              ("start-stop", "start-delete", "start-restart", "workspace-writable", "mcp-attach")),
@@ -1605,6 +1640,8 @@ class Api:
             ("POST", H + r"/llm-models", self.llm_models_of_url, ("llm-insecure",)),
             ("POST", H + r"/llm", self.add_llm, ("llm-insecure", "llm-replace")),
             ("POST", H + r"/llm/(?P<name>[^/]+)/check", self.check_llm, ()),
+            # for all hosts: llm share NAME --key-to HOST,...|--no-key, or llm unshare NAME
+            ("POST", H + r"/llm/(?P<name>[^/]+)/share", self.share_llm, ("llm-share-key", "llm-unshare")),
             ("DELETE", H + r"/llm/(?P<name>[^/]+)", self.remove_llm, ("llm-remove",)),
             ("GET", H + r"/defaults", self.defaults, ()),
             ("POST", H + r"/defaults", self.set_default, ("defaults-lower",)),
@@ -1689,6 +1726,8 @@ class Api:
             ("POST", H + r"/mcp-copy", self.mcp_copy, ("mcp-copy",)),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/start", self.mcp_start, ("mcp-attach", "mcp-restart")),
             ("POST", H + r"/mcp/(?P<name>[^/]+)/stop", self.mcp_stop, ("mcp-stop",)),
+            # the newer image a server's catalog pins (sandbox-ai mcp update [NAME...]): one server, or all of yours
+            ("POST", H + r"/mcp-update", self.mcp_update, ("mcp-update",)),
             # logins and identities (sandbox-ai git-logins, publish-logins, identities): secrets only by name
             # phone notifications (sandbox-ai notify): channels with secret names, never a token
             ("GET", H + r"/notify", self.notify_list, ()),
@@ -1741,6 +1780,8 @@ class Api:
             ("POST", H + r"/net/(?P<name>[^/]+)/keep", self.net_keep, ("net-keep",)),
             ("GET", r"/api/starts/all", lambda params, body: self.all_starts(params, body, every=True), ()),
             ("GET", H + r"/starts/all", self.starts_every, ()),
+            # what a new start lacks, and what would fix each (the page asks before it opens the start's terminal)
+            ("POST", H + r"/fix-plan", self.fix_plan, ()),
             # presets and their directories
             ("GET", H + r"/presets/(?P<name>[^/]+)", self.preset_show, ()),
             ("POST", H + r"/presets/(?P<name>[^/]+)/check", self.preset_check, ()),
@@ -1908,6 +1949,14 @@ class Api:
 
     def remove_host(self, params, body):
         hosts = module("hosts")
+        notes = []
+        current = hosts_file()
+        if params["host"] in current:
+            confirmed(body, "host-remove", f"{params['host']} ({current[params['host']]['ssh']})")
+            with contextlib.suppress(Exception):  # a shared LLM server's copy (and key) leaves that host first
+                shares = hosts.llm_shares() if hasattr(hosts, "llm_shares") else None
+                if shares is not None:
+                    shares.host_leaving(params["host"], notes.append)
         with hosts_locked():
             current = hosts_file()
             if params["host"] not in current:
@@ -1919,7 +1968,7 @@ class Api:
         self.forget_host(params["host"])
         with contextlib.suppress(Exception):  # its shared SSH connection would serve commands for a minute more
             getattr(hosts, "stop_master", lambda entry: None)(removed)
-        return {"removed": params["host"]}
+        return {"removed": params["host"], **({"notes": [printable(n)[:600] for n in notes]} if notes else {})}
 
     def forget_host(self, name):
         """What the fan-outs keep of NAME (its questions, its starts): it was added, changed or removed."""
@@ -2008,6 +2057,10 @@ class Api:
         page opens a terminal (kind=update), where sudo asks."""
         name = host_name(params["host"])
         sudo, version, from_here = body.get("sudo"), body.get("version"), body.get("from_here", False)
+        which = body.get("installation") or None  # (a host with the user's own and a system one: which)
+        if which not in (None, "user", "system"):
+            raise Refused(400, "installation is user or system (or null: the one the host's commands run)")
+        chosen = {"installation": which} if which else {}
         if sudo not in (None, True, False):
             raise Refused(400, "sudo is true, false or null (the host's setting)")
         if from_here not in (True, False):
@@ -2033,18 +2086,85 @@ class Api:
                                   code="busy", params={"host": name})
                 self.installing[name] = time.monotonic()
             try:
-                return self.updater(name, None, sudo, from_here=True)
+                return self.updater(name, None, sudo, from_here=True, **chosen)
             except ValueError as exc:
                 raise Refused(400, printable(exc)) from None
             finally:
                 with self.install_lock:
                     self.installing.pop(name, None)
         try:
-            return self.updater(name, version, sudo)
+            return self.updater(name, version, sudo, **chosen)
         except ValueError as exc:
             if name != hosts.LOCAL:
                 hosts_file()  # a damaged hosts.json: that, as a 500 with why
             raise Refused(404 if "no host" in str(exc) else 400, printable(exc)) from None
+
+    def uninstall_choice(self, params, values):
+        """(host, the hosts.uninstall options) of a request: installation user|system (or none: the only one), purge,
+        secrets, mcp_data (booleans; the last two with purge), stop_running, remove."""
+        hosts = module("hosts")
+        name = host_name(params["host"])
+        if name == hosts.LOCAL:
+            raise Refused(400, "this machine's sandbox-ai is the one this service runs from: remove it in a terminal "
+                               "there with sandbox-ai uninstall")
+        if name not in hosts_file():
+            raise Refused(404, "no such host", code="no-host", params={"host": name})
+        which = values.get("installation") or None
+        if which not in (None, "user", "system"):
+            raise Refused(400, "installation is user or system")
+        flags = {}
+        for key in ("purge", "secrets", "mcp_data", "stop_running", "remove"):
+            value = values.get(key, False)
+            if value in ("1", "true"):
+                value = True
+            elif value in ("0", "false", ""):
+                value = False
+            if value not in (True, False):
+                raise Refused(400, f"{key} is true or false")
+            flags[key] = value
+        if (flags["secrets"] or flags["mcp_data"]) and not flags["purge"]:
+            raise Refused(400, "secrets and mcp_data go with purge")
+        return name, which, flags
+
+    def uninstall_result(self, name, args):
+        """The JSON `sandbox-ai hosts uninstall ...` (ARGS) printed here (it reaches the host over SSH)."""
+        status, out, err = self.run(module("hosts").LOCAL, args, install_route_timeout())
+        try:
+            result = json.loads(out)
+        except (ValueError, RecursionError):
+            result = None
+        if not isinstance(result, dict):  # refused before it began (two installations and none chosen, no host)
+            raise Refused(400 if status in (1, 2) else 502, printable((err or out).strip()[-600:])
+                          or f"sandbox-ai hosts uninstall {name}: exit status {status}")
+        return result
+
+    def uninstall_plan(self, params, body):
+        """What `sandbox-ai uninstall` would remove on the host (its own table: --dry-run there), for the question
+        before the uninstall: {"plan", "installation", "sudo", "error"} ({installation, purge, secrets, mcp_data}:
+        as the uninstall's); nothing is removed."""
+        name, which, flags = self.uninstall_choice(params, body)
+        return self.uninstall_result(name, uninstall_argv(name, which, flags, dry_run=True))
+
+    def uninstall_host(self, params, body):
+        """As `sandbox-ai hosts uninstall NAME --yes --json`, run by the local sandbox-ai: the installation chosen
+        removed there by its own sandbox-ai uninstall (sudo -n for a system one; when sudo wants a password,
+        "needs_password" says so and the page opens a terminal, kind=uninstall). Asked first (host-uninstall),
+        naming the host and what goes."""
+        name, which, flags = self.uninstall_choice(params, body)
+        confirmed(body, "host-uninstall", f"{name}: the {which or 'only'} installation"
+                  + (", with the SSH user's data" if flags["purge"] else "")
+                  + (", its secrets and logins" if flags["secrets"] else ""))
+        with self.install_lock:
+            if name in self.installing:
+                raise Refused(409, f"sandbox-ai is being installed on {name}: wait for its end", code="busy",
+                              params={"host": name})
+            self.installing[name] = time.monotonic()
+        try:
+            return self.uninstall_result(name, uninstall_argv(name, which, flags))
+        finally:
+            with self.install_lock:
+                self.installing.pop(name, None)
+            self.forget_host(name)
 
     def install_host(self, params, body):
         """As `sandbox-ai hosts install NAME --json`, run by the local sandbox-ai (it reaches the host over SSH):
@@ -3754,6 +3874,43 @@ class Api:
                                     90)
         return {"ok": status == 0, "output": printable((out + err).strip()[-4000:])}
 
+    def share_llm(self, params, body):
+        """For all hosts: {"shared": true, "key_to": [HOST]} runs `llm share NAME --key-to HOST,...` (none: --no-key)
+        on the host - the entry copied to every host of its sandbox-ai hosts, the key only to KEY_TO -, {"shared":
+        false} `llm unshare NAME` (llm-unshare, confirmed first). A host that gets the key and did not have it from
+        this share before (llm show --json says whom it goes to now; not read for a confirmed request) is confirmed
+        first (llm-share-key). Answers
+        {"ok", "output"}: a host that did not answer is said in the output, the share stands."""
+        name = params["name"]
+        if name.startswith("-") or not MCP_NAME.fullmatch(name):
+            raise Refused(400, "no such server")
+        shared = body.get("shared")
+        if not isinstance(shared, bool):
+            raise Refused(400, "shared is true or false")
+        if not shared:
+            confirmed(body, "llm-unshare", printable(name)[:64])
+            args = ["llm", "unshare", name]
+        else:
+            hosts = module("hosts")
+            key_to = body.get("key_to", [])
+            if not isinstance(key_to, list) or len(key_to) > 64 or any(
+                    not (isinstance(h, str) and hosts.NAME.fullmatch(h)) or h == hosts.LOCAL for h in key_to):
+                raise Refused(400, "key_to is a list of hosts of that host's sandbox-ai hosts")
+            key_to = sorted(set(key_to))
+            before = []
+            if key_to and body.get("confirm") is not True:  # (confirmed: whoever gets it now was asked about)
+                status, out, _ = self.run(params["host"], ["llm", "show", name, "--json"], 30)
+                with contextlib.suppress(ValueError, TypeError, AttributeError):
+                    before = list((json.loads(out).get("shared") or {}).get("key_to") or []) if status == 0 else []
+            new = [h for h in key_to if h not in before]
+            if new:
+                confirmed(body, "llm-share-key", f"{printable(name)[:64]} to {', '.join(new)}")
+            args = ["llm", "share", name, *(["--key-to", ",".join(key_to)] if key_to else ["--no-key"])]
+        status, out, err = self.run(params["host"], args, 600)
+        if status != 0 and not out.strip():
+            raise self.failed(params["host"], args, status, out, err)
+        return {"ok": status == 0, "output": printable((out + err).strip()[-4000:])}
+
     def remove_llm(self, params, body):
         if params["name"].startswith("-"):
             raise Refused(400, "no such server")
@@ -3799,6 +3956,8 @@ class Api:
             raise Refused(400, f"file_reads is {', '.join(FILE_READS)}")
         if key == "connection_bodies" and value is not None and value not in CONNECTION_BODIES:
             raise Refused(400, f"connection_bodies is {' or '.join(CONNECTION_BODIES)}")
+        if key == "fix_questions" and value is not None and value not in FIX_QUESTIONS:
+            raise Refused(400, f"fix_questions is {' or '.join(FIX_QUESTIONS)}")
         if key == "ask_timeout" and value is not None and not (
                 isinstance(value, int) and not isinstance(value, bool) and 5 <= value <= 3600):
             raise Refused(400, "ask_timeout is a number of seconds from 5 to 3600")
@@ -3938,8 +4097,9 @@ class Api:
                 "the launchers show nothing on that host's desktop while its app is closed, not even a canary's "
                 "alarm" if after == "none" else "only a canary's alarm is shown on that host's desktop while its "
                 "app is closed, no question or safeguard"))
-        if key in ("file_reads", "connection_bodies", "ask_timeout"):
-            return None  # what the logs keep of reads and downloads: no protection either way (both checked above)
+        if key in ("file_reads", "connection_bodies", "ask_timeout", "fix_questions"):
+            # what the logs keep of reads and downloads, how what a start lacks is asked about (asked either way):
+            return None  # no protection either way (all checked above)
         if key.startswith("checkpoint_"):
             return None  # the checkpoints' timing and limits (checked above; turning them off is asked above)
         if key in ("subnet", "subnet6"):
@@ -4087,6 +4247,23 @@ class Api:
                       + (", replacing one of that name" if body.get("replace") else ""))
         return self.json_of(module("hosts").LOCAL, args, timeout=3600)
 
+    def mcp_update(self, params, body):
+        """sandbox-ai mcp update [NAME...] --json: {"check": true} says which servers have a newer image (nothing
+        changed), else asked first (mcp-update) and done with --yes - the catalogs read again on that host, each
+        signature checked there; "names" (none: every server of yours from a catalog), "unsigned" (a server added
+        unsigned takes its unsigned catalog's image; the host's security mode still refuses that in high/paranoid)."""
+        names = strings(body.get("names", []), "names", 64)
+        if not all(MCP_NAME.fullmatch(name) for name in names):
+            raise Refused(400, "names: MCP servers' names (1-32 letters, digits, '_' or '-' each)")
+        for key in ("check", "unsigned"):
+            if not isinstance(body.get(key, False), bool):
+                raise Refused(400, f"{key} is true or false")
+        args = ["mcp", "update", *dict.fromkeys(names), "--json", *(["--unsigned"] if body.get("unsigned") else [])]
+        if body.get("check"):
+            return self.json_of(params["host"], [*args, "--check"], 600, ok=(0,))
+        confirmed(body, "mcp-update", ", ".join(names) or "every server of yours from a catalog")
+        return self.json_of(params["host"], [*args, "--yes"], 3600, ok=(0,))
+
     def mcp_stop(self, params, body):
         name = self.mcp_server(params["name"])
         confirmed(body, "mcp-stop", name)
@@ -4173,12 +4350,16 @@ class Api:
         for mount in mounts:
             if not isinstance(mount, dict) or set(mount) - {"target", "host", "mode"}:
                 raise Refused(400, "a mount is {target, host, mode: ro or rw}")
-            target, source = clean_path(mount.get("target"), "a mount's target"), clean_path(mount.get("host"), "a mount's host directory")
+            # HOST default: the folder's default there (/work the start's workspace, else a folder of the server's
+            # own, made by sandbox-ai there) - no folder of yours, so none that is asked about as writable.
+            default = mount.get("host") == "default"
+            target = clean_path(mount.get("target"), "a mount's target")
+            source = "default" if default else clean_path(mount.get("host"), "a mount's host directory")
             mode = mount.get("mode") or "ro"
             if mode not in ("ro", "rw") or "=" in target + source or ":" in target + source:
                 raise Refused(400, "a mount is TARGET=HOST with ro or rw (no '=' or ':' in the paths)")
             args.append(f"--mount={target}={source}:{mode}")
-            if mode == "rw":
+            if mode == "rw" and not default:
                 writable.append(source)
         for value in strings(body.get("env", []), "env", 64):
             args.append(f"--env={mcp_env_spec(value)}")
@@ -4654,6 +4835,42 @@ class Api:
             raise Refused(400, "no such preset", code="no-preset", params={"preset": name})
         return self.json_of(params["host"], ["presets", "show", "--json", name], 30)
 
+    def fix_plan(self, params, body):
+        """What a new start lacks on that host and what would fix each (`sandbox-ai AGENT ... --fix-plan`: nothing
+        is made): {"fixes": [{id, kind, missing, title, command, duration, unsigned, security, needed, verdict,
+        why}], "questions": all|each, "mode"} - the page asks about it before it opens the start's terminal. BODY:
+        the form's {agent, name, workspace, options}."""
+        query = {"agent": body.get("agent"), "name": body.get("name") or "", "workspace": body.get("workspace") or "",
+                 "options": json.dumps(strings(body.get("options", []), "options"))}
+        if not all(isinstance(query[key], str) for key in ("name", "workspace")):
+            raise Refused(400, "name and workspace are text")
+        args = [*start_args(params["host"], query, self.runner), "--fix-plan"]
+        older = newer_needed(params["host"], args)  # (a host whose sandbox-ai has no fix plan yet: said so)
+        if older:
+            raise older
+        plan = self.json_of(params["host"], args, 180, ok=(0,))
+        if not isinstance(plan, dict) or not isinstance(plan.get("fixes"), list):
+            raise Refused(502, f"sandbox-ai on {params['host']}: not a fix plan")
+
+        def line(value, limit=600):
+            return printable(" ".join(str(value if value is not None else "").split()))[:limit]
+        fixes = [{"id": line(item.get("id"), 200), "kind": line(item.get("kind"), 40),
+                  "missing": line(item.get("missing")), "title": line(item.get("title")),
+                  "command": line(item.get("command"), 2000), "duration": line(item.get("duration"), 80),
+                  "unsigned": item.get("unsigned") is True, "security": line(item.get("security")),
+                  "terminal": item.get("terminal") is True, "needed": item.get("needed") is not False,
+                  # (a choice between ways to start: its answers share "choice"; "start": the start as it would be)
+                  "choice": line(item.get("choice"), 200), "start": line(item.get("start"), 2000),
+                  "verdict": item.get("verdict") if item.get("verdict") in ("offered", "manual", "refused")
+                  else "manual", "why": line(item.get("why"))}
+                 for item in plan["fixes"][:64] if isinstance(item, dict)]
+        # (only an id the terminal's --fix-only takes is one the page can ask for)
+        for item in fixes:
+            if item["verdict"] == "offered" and not FIX_ID.fullmatch(item["id"]):
+                item["verdict"], item["why"] = "manual", "run its command yourself"
+        return {"fixes": fixes, "questions": plan.get("questions") if plan.get("questions") in FIX_QUESTIONS
+                else FIX_QUESTIONS[0], "mode": line(plan.get("mode"), 40)}
+
     def preset_check(self, params, body):
         """sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]: what is missing before it starts."""
         name = params["name"]
@@ -5092,6 +5309,55 @@ def as_given_on(host, runner=None):
     return module("hosts").knows_workspaces_as_given(host, ask=ask)
 
 
+FIX_ID = re.compile(r"[a-z]{2,12}:[A-Za-z0-9@._:/+=-]{1,200}")  # a fix's id as --fix-plan names it (fixes.py)
+
+
+def start_args(host, query, runner=None):
+    """`sandbox-ai AGENT ...` of a new start as the page's form describes it (QUERY: agent, name, workspace, options -
+    a JSON list -, fix - a JSON list of the ids of the fixes the page asked about: --fix-only each)."""
+    agent = query.get("agent")
+    if agent not in AGENTS:
+        raise Refused(400, agent_words())
+    args = [agent]
+    if query.get("name"):
+        args += ["--name", new_start_name(query["name"])]
+    options = strings(json.loads(query.get("options") or "[]"), "options")
+    if query.get("workspace"):
+        workspace = query["workspace"]
+        # (a folder of another machine, sshfs://...: that host mounts it with sshfs for the start)
+        workspace = remote_source(workspace, "the workspace") or workspace
+        if not workspace.startswith(("/", "~")) and not remote_source(workspace, "the workspace") \
+                or "\0" in workspace:
+            raise Refused(400, "the workspace is an absolute path (or ~/..., or sshfs://[USER@]HOST/PATH)")
+        args += ["--workspace", workspace]
+    elif not names_workspace(options):
+        # Without one the launcher takes the directory it runs in: this service's own, or the SSH login's HOME.
+        raise Refused(400, "which workspace? Name the folder the agent works on (its /work), in the field or "
+                           "with --workspace in the options")
+    if as_given_on(host, runner):
+        # The workspace is the one chosen here (or in the options): a project file in the directory the start
+        # runs in (the web service's own, the SSH login's HOME) must not take the start over. Passed wherever
+        # the host's sandbox-ai knows it (0.1.78, which brought that rule; an older one has neither); a host
+        # whose version is not known yet (just added) is asked for it first.
+        args.append("--workspaces-as-given")
+    # What the start lacked and the page asked about (POST .../fix-plan): exactly those fixes, done by the start in
+    # its terminal before it goes on (--fix-only ID); never --fix (everything unasked) from a page.
+    fixes = strings(json.loads(query.get("fix") or "[]"), "fix", 32)
+    for ident in fixes:
+        if not FIX_ID.fullmatch(ident):
+            raise Refused(400, "fix is a list of fix ids (KIND:NAME, as the fix plan names them)")
+        args += ["--fix-only", ident]
+    if any(word in ("--fix", "-fx") or word.startswith(("--fix-only", "-fo", "--fix=")) for word in options[
+            :options.index("--") if "--" in options else len(options)]):
+        raise Refused(400, "--fix and --fix-only are not options of the form: the page asks what the start lacks and "
+                           "names the fixes itself")
+    args += options
+    older = newer_needed(host, args)  # an option value that host's sandbox-ai does not know (--ask allow)
+    if older:
+        raise older
+    return args
+
+
 def terminal_command(query, runner=None):
     """argv of a terminal the browser opens (QUERY: the WebSocket URL's parameters): attach to a start, a shell in a
     running one, or a new start of an agent (in its own terminal, detachable as every start)."""
@@ -5107,35 +5373,7 @@ def terminal_command(query, runner=None):
             raise older
         return host, hosts.argv(host, args, tty=True)
     if kind == "start":
-        agent = query.get("agent")
-        if agent not in AGENTS:
-            raise Refused(400, agent_words())
-        args = [agent]
-        if query.get("name"):
-            args += ["--name", new_start_name(query["name"])]
-        options = strings(json.loads(query.get("options") or "[]"), "options")
-        if query.get("workspace"):
-            workspace = query["workspace"]
-            # (a folder of another machine, sshfs://...: that host mounts it with sshfs for the start)
-            workspace = remote_source(workspace, "the workspace") or workspace
-            if not workspace.startswith(("/", "~")) and not remote_source(workspace, "the workspace") \
-                    or "\0" in workspace:
-                raise Refused(400, "the workspace is an absolute path (or ~/..., or sshfs://[USER@]HOST/PATH)")
-            args += ["--workspace", workspace]
-        elif not names_workspace(options):
-            # Without one the launcher takes the directory it runs in: this service's own, or the SSH login's HOME.
-            raise Refused(400, "which workspace? Name the folder the agent works on (its /work), in the field or "
-                               "with --workspace in the options")
-        if as_given_on(host, runner):
-            # The workspace is the one chosen here (or in the options): a project file in the directory the start
-            # runs in (the web service's own, the SSH login's HOME) must not take the start over. Passed wherever
-            # the host's sandbox-ai knows it (0.1.78, which brought that rule; an older one has neither); a host
-            # whose version is not known yet (just added) is asked for it first.
-            args.append("--workspaces-as-given")
-        args += options
-        older = newer_needed(host, args)  # an option value that host's sandbox-ai does not know (--ask allow)
-        if older:
-            raise older
+        args = start_args(host, query, runner)
         return host, hosts.argv(host, args, tty=True)
     if kind == "update":
         # The host's update where sudo may ask for its password (hosts update said it wants one).
@@ -5144,8 +5382,27 @@ def terminal_command(query, runner=None):
             raise Refused(400, "version is X.Y.Z")
         if host == hosts.LOCAL:
             raise Refused(400, "this machine updates with: sandbox-ai update (in a terminal of its own)")
+        which = query.get("installation") or None
+        if which not in (None, "user", "system"):
+            raise Refused(400, "installation is user or system")
         try:
-            return host, hosts.update_terminal(host, version)
+            return host, hosts.update_terminal(host, version, **({"installation_": which} if which else {}))
+        except ValueError as exc:
+            raise Refused(400, printable(exc)) from None
+    if kind == "uninstall":
+        # The host's uninstall where sudo may ask for its password (hosts uninstall said it wants one).
+        if host == hosts.LOCAL:
+            raise Refused(400, "this machine: sandbox-ai uninstall (in a terminal of its own)")
+        if host not in hosts_file():
+            raise Refused(404, "no such host", code="no-host", params={"host": host})
+        if query.get("confirm") != "1":  # asked in the page first, as the uninstall route asks (host-uninstall)
+            raise Refused(400, f"{NEEDS_CONFIRM['host-uninstall']}: confirm=1", confirm="host-uninstall")
+        which = query.get("installation") or None
+        if which not in (None, "user", "system"):
+            raise Refused(400, "installation is user or system")
+        flags = {key: query.get(key) == "1" for key in ("purge", "secrets", "mcp_data")}
+        try:
+            return host, hosts.uninstall_terminal(host, which, flags["purge"], flags["secrets"], flags["mcp_data"])
         except ValueError as exc:
             raise Refused(400, printable(exc)) from None
     if kind == "install":
@@ -5165,8 +5422,8 @@ def terminal_command(query, runner=None):
         return host, hosts.argv(hosts.LOCAL, install_argv(host, choice, as_json=False), tty=True)
     args = tool_command(kind, query, runner)
     if args is None:
-        raise Refused(400, "kind is attach, start, update, install, login, plugins, build, trust-hooks, team-start or "
-                           "demo-device")
+        raise Refused(400, "kind is attach, start, update, install, uninstall, login, plugins, build, trust-hooks, "
+                           "team-start or demo-device")
     older = newer_needed(host, args)  # an option that host's sandbox-ai does not know: said, not run
     if older:
         raise older
@@ -5316,7 +5573,7 @@ def tool_command(kind, query, runner=None):
     if kind == "build":
         target = query.get("target")
         if not (isinstance(target, str) and BUILD_TARGET.fullmatch(target)):
-            raise Refused(400, "target is codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, vpn, tor, browser "
+            raise Refused(400, "target is codex, claude, opencode, opencode2, hermes, dsh, qwen, goose, openhands, nanobot, letta, pi, all, team, cairn, artex, vpn, tor, browser "
                                 "or a "
                                 "variant's name")
         only = {"1": True, "0": False, None: False, "": False}.get(query.get("extension_only"), "bad")
@@ -5853,6 +6110,8 @@ class Service:
             if path.startswith("/static/") else None
         if name in STATIC_FILES:
             file, kind = STATIC / name, STATIC_FILES[name]
+        elif name and name.startswith("fonts/") and name[len("fonts/"):] in FONT_FILES:
+            file, kind = STATIC / name, FONT_FILES[name[len("fonts/"):]]
         elif name and name.startswith("vendor/") and name[len("vendor/"):] in VENDOR_FILES:
             file, kind = vendor_dir() / name[len("vendor/"):], VENDOR_FILES[name[len("vendor/"):]]
         else:

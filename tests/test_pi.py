@@ -232,7 +232,7 @@ console.log(JSON.stringify({calls, sections: event.systemPromptOptions.sections,
 
 def test_plan_says_what_is_on_and_off():
     plan = pi.plan(ns("pi", "updates"))
-    assert plan["version"] == pi.VERSION and plan["commit"] == pi.COMMIT and plan["experimental"]
+    assert plan["version"] == pi.VERSION and plan["commit"] == pi.COMMIT and "experimental" not in plan
     assert plan["telemetry"]["switchable"] is False and plan["approvals"] is False
     assert plan["enabled"] == [{"feature": "updates", "hosts": ["pi.dev"]}]
     assert plan["off"] == ["model-catalog", "packages", "share"] and plan["own_sandbox"] is False
@@ -371,7 +371,6 @@ def test_the_option_counts_as_weakening_and_the_launcher_knows_pi():
     assert s.PROVIDERS["pi"] == [] and s.DANGER_ARGS["pi"] == pi.DANGER_ARGS == []
     assert s.UNSWITCHABLE_TELEMETRY["pi"] == "Pi" and "pi" in s.COMPANION_AGENTS and "pi" in s.AGENT_PROGRAMS
     assert s.pinned_telemetry_environment("pi") == pi.TELEMETRY_ENV
-    assert s.EXPERIMENTAL_PARTS["pi"] == {"agent": "pi"} and s.experimental_needs(["pi"]) == ["pi"]
     assert s.AGENT_EFFORTS["pi"] == pi.EFFORTS
 
 
@@ -416,7 +415,8 @@ def test_a_presets_first_task_is_its_first_message():
     for name in ("default-pi", "coding-pi", "pi-local-llm"):
         preset = json.loads((ROOT / f"sandbox/presets/{name}.json").read_text())
         assert preset["agents"] == ["pi"] and preset["category"] == "agents" and preset["translations"]["de"]
-        assert any("not live-tested yet" in note for note in preset["notes"])
+        assert any("sandbox-ai build pi" in note for note in preset["notes"])
+        assert not any("live-tested" in note for note in preset["notes"])
 
 
 def test_kits_and_memory_for_pi():

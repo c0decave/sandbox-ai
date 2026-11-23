@@ -29,7 +29,6 @@ KIT_SKILLS = "/root/.agents/skills"  # the kits' skills (kits.LAYOUT), read-only
 # Hermes' CLI starts its gateway itself, in the background (hermes gateway run --idle-exit, a process of this
 # sandbox): cron, the Kanban dispatcher and the messaging platforms live there. It stays up while a platform is
 # connected or the board has work, and ends itself when idle. Its log: ~/.hermes/logs/.
-EXPERIMENTAL = "hermes"  # not live-tested yet: the start says so (a note, never a refusal)
 # The placeholder Hermes gets for OpenRouter's key: Hermes ignores an OpenRouter key without OpenRouter's prefix
 # (hermes_cli/auth.py, KNOWN_PROVIDER_KEY_PREFIXES), so the proxy's placeholder is shaped like one (llm.py keeps the
 # same values: llm.placeholder_for, llm.hermes_config).
@@ -410,10 +409,6 @@ def telemetry_rules():
              "reason": "Hermes' telemetry is always off"} for number, host in enumerate(rule_hosts(), 1)]
 
 
-def experimental_note():
-    return ("Hermes: not live-tested yet (its image and a real start have not passed their live test)")
-
-
 def mcp_servers(names, bridge_args, timeouts=None):
     """Hermes' mcp_servers for the --mcp servers NAMES: each the launcher's stdio bridge (BRIDGE_ARGS(name)), the
     servers' own LLM requests (MCP sampling) off: they would spend the agent's model on a server's behalf. Its wait
@@ -578,9 +573,9 @@ def environment(a, placeholder=None):
 
 def plan(a):
     """The dry run's "hermes": the reviewed release, the managed configuration's place, what is on and what stays
-    off, and whether it is experimental here."""
+    off."""
     names = features(a)
-    return {"version": VERSION, "commit": COMMIT, "experimental": True, "managed_config": f"{MANAGED_DIR}/config.yaml",
+    return {"version": VERSION, "commit": COMMIT, "managed_config": f"{MANAGED_DIR}/config.yaml",
             "terminal_backend": "local", "gateway": gateway(a),
             # Never switchable: pinned off, opt-out variables set, these hosts never opened and refused by the proxy.
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),

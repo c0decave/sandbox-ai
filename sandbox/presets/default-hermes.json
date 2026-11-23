@@ -19,6 +19,6 @@
     "The model: the Nous Portal (your login: sandbox-ai login hermes once); its hosts are open by default, nothing else of the provider's. A server of yours instead: the preset hermes-local-llm.",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-hermes or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on.",
-    "Hermes Agent is not live-tested yet (a start says so); its image first: sandbox-ai build hermes (a start builds it when it is missing)."
+    "Its image first: sandbox-ai build hermes (a start builds it when it is missing)."
   ]
 }

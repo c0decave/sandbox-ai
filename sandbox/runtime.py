@@ -1430,14 +1430,51 @@ MCP_CONNECT_SECONDS = 5  # how long a relay waits for a running server to take a
 MCP_PROBE_SECONDS = 5  # how long a relay waits for a server's lists (its capabilities: McpConnection.handshake)
 
 
-def relay_server_stderr(stream, out=None):
+def relay_server_stderr(stream, out=None, tail=None):
     """The MCP server's stderr into the log, every line prefixed: the server cannot write a line that reads as
-    one of our `sandbox-ai-mcp-call` records."""
+    one of our `sandbox-ai-mcp-call` records. TAIL (StderrTail): its last lines kept, for what an early end says."""
     out = out or sys.stderr
     with contextlib.suppress(OSError, ValueError):
         for line in iter(lambda: stream.readline(64 << 10), b""):
-            out.write("mcp-server: " + line.decode("utf-8", "replace").rstrip("\n") + "\n")
+            text = line.decode("utf-8", "replace").rstrip("\n")
+            if tail is not None:
+                tail.add(text)
+            out.write("mcp-server: " + text + "\n")
             out.flush()
+
+
+class StderrTail:
+    """The last lines an MCP server's process wrote to its error output (relay_server_stderr), and why it ended."""
+    LINES = 8
+    SAID = 300  # characters of its line in the agent's error answer
+
+    def __init__(self):
+        self.lines, self.lock = [], threading.Lock()
+
+    def add(self, text):
+        with self.lock:
+            self.lines = [*self.lines, text][-self.LINES:]
+
+    def why(self, process, reader=None, wait=2.0):
+        """"exit status N: ITS LAST LINE" (redacted, printable, bounded) of PROCESS once it ended (waited for WAIT
+        seconds, its stderr READER thread too), "" while it still runs: Podman's own error ("crun: the requested
+        cgroup controller ...", "statfs ...: no such file or directory") or the server's last word."""
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError, AttributeError):
+            process.wait(timeout=wait)
+        if reader is not None:
+            reader.join(wait)
+        code = getattr(process, "returncode", None)
+        if code is None:
+            return ""
+        with self.lock:
+            lines = [line.strip() for line in self.lines if line.strip()]
+        # Podman's error line where there is one (it comes last but a warning may follow), else the last line.
+        line = next((text for text in reversed(lines) if text.startswith(("Error:", "error:", "Error "))),
+                    lines[-1] if lines else "")
+        status = f"exit status {code}" if code >= 0 else f"ended by signal {-code}"
+        if not line:
+            return f"{status}, nothing on its error output"
+        return f"{status}: {printable_text(redact_text(line), self.SAID)}"
 
 
 def mounts_changed(mounts):
@@ -2089,8 +2126,9 @@ class McpConnection:
              "prompts": (("prompts/list", "prompts"),)}
     ASKED = "sandbox-ai: capabilities"  # in pending: one of the relay's own questions (no method of the protocol)
 
-    def __init__(self, gateway, connection, process):
+    def __init__(self, gateway, connection, process, ended=None):
         self.gateway, self.connection, self.process = gateway, connection, process
+        self.ended = ended  # () -> why the server's process ended (StderrTail.why), said with the open requests' error
         self.write_lock, self.lock, self.forward_lock = threading.Lock(), threading.Lock(), threading.Lock()
         self.pending = {}  # JSON of a request's id: {"method", "tool", "started"}
         self.client = gateway.client(connection)
@@ -2259,6 +2297,14 @@ class McpConnection:
             held["timer"].cancel()
             with contextlib.suppress(OSError):
                 self.send(held["line"])
+        said = "sandbox-ai: the MCP server ended before it answered"
+        if self.ended is not None and any(request["method"] != self.ASKED for request in open_requests.values()):
+            # Why it ended (Podman's own line, its exit status): an agent and its human see the reason instead of a
+            # server that "ends before the handshake" (the user, 2026-11-23); its supervisor.log has all of it.
+            with contextlib.suppress(Exception):
+                why = self.ended()
+                if why:
+                    said += f" ({why})"
         for key, request in open_requests.items():
             if request["method"] == self.ASKED:
                 continue  # the relay's own question: no answer the agent waits for
@@ -2268,7 +2314,7 @@ class McpConnection:
                     self.gateway.emit("sandbox-ai-mcp-call", {
                         "event": "result", "id": ident, "tool": request.get("tool"), "bytes": 0, "is_error": True,
                         "server_ended": True, "ms": int((time.monotonic() - request["started"]) * 1000)})
-                self.reply(ident, error=(-32000, "sandbox-ai: the MCP server ended before it answered"))
+                self.reply(ident, error=(-32000, said))
         with contextlib.suppress(OSError):
             self.connection.shutdown(socket.SHUT_RDWR)
 
@@ -2757,9 +2803,14 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                 try:
                     # Inside the try: a thread that cannot start (the sandbox's process limit) ends this connection
                     # with its server instance and gives its slot back, instead of keeping both for good.
+                    ended = None
                     if isinstance(process, subprocess.Popen):
-                        threading.Thread(target=relay_server_stderr, args=(process.stderr,), daemon=True).start()
-                    session = McpConnection(gate, connection, process)
+                        tail = StderrTail()
+                        reader = threading.Thread(target=relay_server_stderr, args=(process.stderr, None, tail),
+                                                  daemon=True)
+                        reader.start()
+                        ended = (lambda process=process, reader=reader, tail=tail: tail.why(process, reader))
+                    session = McpConnection(gate, connection, process, ended=ended)
                     pump = threading.Thread(target=session.pump, daemon=True)
                     pump.start()
                     stream = connection.makefile("rb")
@@ -4915,6 +4966,74 @@ def poll_denied(seen, who=None):
                     log_event("egress-denied.jsonl", {"address": key[0], "protocol": key[1], "port": key[2], **found})
 
 
+def dns_query_fault(query):
+    """Why QUERY is not one plain DNS query the stub may answer or forward, or None. The stub checks one name (the
+    canaries, the log, the human's question): a query must carry exactly that one - a standard query (QR 0, opcode
+    0) with one question of plain labels (no compression pointer, none longer than 63 bytes), no answer or
+    authority records, and in the additional section an EDNS OPT record (root name, type 41) at most, the packet
+    ending there. Anything else (a second question, a pointer to a name further on, an UPDATE's records) would reach
+    the nameserver with a name nobody looked at."""
+    if len(query) < 12:
+        return "a malformed DNS query: shorter than its header"
+    flags, qdcount, ancount, nscount, arcount = struct.unpack("!HHHHH", query[2:12])
+    if flags & 0x8000 or (flags >> 11) & 0xF:
+        return "a malformed DNS query: not a standard query (a response, or another opcode)"
+    if qdcount != 1:
+        return f"a DNS query with {qdcount} questions: only one is answered"
+    if ancount or nscount or arcount > 1:
+        return "a malformed DNS query: records beside its question"
+    end, size = 12, 0
+    while True:
+        if end >= len(query):
+            return "a malformed DNS query: its name does not end"
+        length = query[end]
+        if not length:
+            break
+        if length > 63:
+            return "a malformed DNS query: a compressed name or a label longer than 63 bytes"
+        end, size = end + 1 + length, size + 1 + length
+        if size > 254:
+            return "a malformed DNS query: a name longer than 255 bytes"
+    end += 5  # the final zero, type and class
+    if end > len(query):
+        return "a malformed DNS query: its question is cut off"
+    if arcount:
+        if query[end:end + 3] != b"\0\0\x29" or end + 11 > len(query):
+            return "a malformed DNS query: an additional record other than EDNS"
+        end += 11 + struct.unpack("!H", query[end + 9:end + 11])[0]
+    if end != len(query):
+        return "a malformed DNS query: bytes past its records"
+    return None
+
+
+def dns_query_names(query, limit=16):
+    """The names of every question of QUERY that reads as plain labels (at most LIMIT): those of a refused query,
+    each looked at for a canary token."""
+    names, pos = [], 12
+    try:
+        count = struct.unpack("!H", query[4:6])[0]
+    except struct.error:
+        return names
+    for _ in range(min(count, limit)):
+        found = []
+        while pos < len(query) and query[pos] and query[pos] <= 63:
+            found.append(query[pos + 1:pos + 1 + query[pos]].decode("ascii", "replace"))
+            pos += 1 + query[pos]
+        if pos >= len(query) or query[pos]:
+            if found:
+                names.append(".".join(found).lower())
+            break
+        names.append(".".join(found).lower())
+        pos += 5
+    return names
+
+
+def dns_refusal(query, rcode=1):
+    """FORMERR (RCODE 1) for QUERY (a header at least), its id and RD bit kept, no sections."""
+    flags = 0x8000 | rcode | (struct.unpack("!H", query[2:4])[0] & 0x0100)
+    return query[:2] + struct.pack("!HHHHH", flags, 0, 0, 0, 0)
+
+
 def dns_reply(query):
     # NXDOMAIN for the single question, preserving id, RD bit and question.
     end = 12
@@ -5254,6 +5373,22 @@ DNS_WORKERS = 8      # lookups the DNS stub forwards at once
 DNS_BACKOFF = 30.0   # seconds a nameserver that did not answer is skipped while another one is there to ask
 
 
+# The DNS stub's own questions to the nameservers `sandbox-ai net allow --dns` gave: marked, and the firewall's runtime
+# chain lets only marked packets through to them (runtime_rules). The agent runs as the sandbox's root, as the
+# supervisor does, so no uid tells them apart; a mark does: only a process with CAP_NET_ADMIN sets one, and the agent
+# has none. A question the agent sends them itself is dropped - it would pass the stub's log and its canary search.
+DNS_STUB_MARK = 0x5a1e
+
+
+def dns_upstream(family):
+    """A UDP socket for one of the stub's questions to a nameserver, marked DNS_STUB_MARK. Where the mark cannot be
+    set (no CAP_NET_ADMIN: a test run, never the supervisor) the socket goes unmarked, and the firewall decides."""
+    upstream = socket.socket(family, socket.SOCK_DGRAM)
+    with contextlib.suppress(OSError):
+        upstream.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_MARK", 36), DNS_STUB_MARK)
+    return upstream
+
+
 def forward_dns(query, servers, timeout=2.0, port=53, failed=None):
     """(answer, server) of the first of SERVERS (UDP PORT) to answer QUERY with the query's id, or None. FAILED
     ({server: when it last did not answer}, kept by the caller): a server that did not answer within DNS_BACKOFF
@@ -5265,7 +5400,7 @@ def forward_dns(query, servers, timeout=2.0, port=53, failed=None):
     for server in servers:
         family = socket.AF_INET6 if ":" in server else socket.AF_INET
         with contextlib.suppress(OSError):
-            with socket.socket(family, socket.SOCK_DGRAM) as upstream:
+            with dns_upstream(family) as upstream:
                 upstream.settimeout(timeout)
                 upstream.connect((server, port))  # answers from anywhere else are not taken
                 upstream.send(query)
@@ -5326,6 +5461,20 @@ def dns_logger(pinned, port=53, stop=None, broker=None, quiet=(), who=None, cana
     while stop is None or not stop.is_set():
         try:
             query, peer = sock.recvfrom(4096)
+            if len(query) < 12:
+                continue  # no header: nothing to answer
+            fault = dns_query_fault(query)
+            if fault:  # never forwarded, never asked about: refused at once, every name it holds looked at
+                found = who.lookup("udp", peer[0], peer[1]) if who is not None else {}
+                names = dns_query_names(query)
+                log_event("egress-denied.jsonl", {**({"host": names[0]} if names else {}),
+                                                  **({"names": names} if len(names) > 1 else {}),
+                                                  "reason": fault, **found})
+                if canaries is not None:
+                    for each in names:
+                        canaries.lookup(each, found)
+                sock.sendto(dns_refusal(query), peer)
+                continue
             name, reply = dns_reply(query)
             if name not in pinned and broker is not None and wildcards is not None and \
                     re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}",
@@ -7411,8 +7560,13 @@ class Stream:
             return b""
         return self.take(limit)
 
-    def body(self, framing):
-        """(raw, payload) pieces of a message body: framing ("length", n), ("chunked",), ("close",) or None."""
+    def body(self, framing, request=False):
+        """(raw, payload) pieces of a message body: framing ("length", n), ("chunked",), ("close",) or None.
+        REQUEST: a request's chunked body goes on without chunk extensions and trailer fields (each chunk as its size
+        alone, the last as 0 and a blank line). Neither is payload, so neither was searched (canaries, the secret
+        guard, the rules' body), and a trailer line a lenient server ends early (nginx takes a bare LF for a line
+        break: "X\n\nPOST /gists ...") would put a request of the agent's own behind the one checked. Servers
+        ignore extensions they do not know and may drop trailer fields (RFC 9112 7.1.1, RFC 9110 6.5.1)."""
         if framing is None:
             return
         if framing[0] == "length":
@@ -7439,9 +7593,9 @@ class Stream:
                             break
                         if len(trailer) > HEAD_LIMIT:
                             raise ValueError("chunk trailer too large")
-                    yield trailer, b""
+                    yield (b"0\r\n\r\n" if request else trailer), b""
                     return
-                yield line, b""
+                yield (b"%x\r\n" % size if request else line), b""
                 left = size
                 while left:
                     data = self.some(min(left, 65536))
@@ -7472,16 +7626,21 @@ class Capture:
             self.data += payload[:self.limit - len(self.data)]
 
 
-def request_framing(headers):
-    """Body framing of a request; ambiguous framing (smuggling) is refused."""
+def request_framing(headers, line=None):
+    """Body framing of a request (LINE: its request line); ambiguous framing (smuggling) is refused - also what
+    servers read apart: Transfer-Encoding in an HTTP/1.0 request (RFC 9112 6.1: faulty; an HTTP/1.0 server reads the
+    chunked body as the next request) and a Content-Length past 2^63 - 1 (a 64-bit parser wraps it)."""
     encodings = [value for name, value in headers if name.lower() == "transfer-encoding"]
     lengths = {value.strip() for name, value in headers if name.lower() == "content-length"}
     if encodings:
         if lengths or [value.strip().lower() for value in encodings] != ["chunked"]:
             raise ValueError("ambiguous request framing (Transfer-Encoding)")
+        if line is not None and line.endswith("HTTP/1.0"):
+            raise ValueError("ambiguous request framing (Transfer-Encoding in an HTTP/1.0 request)")
         return ("chunked",)
     if lengths:
-        if len(lengths) > 1 or not next(iter(lengths)).isdigit():
+        if len(lengths) > 1 or not re.fullmatch(r"[0-9]{1,19}", next(iter(lengths))) or \
+                int(next(iter(lengths))) > (1 << 63) - 1:
             raise ValueError("bad Content-Length")
         length = int(next(iter(lengths)))
         return ("length", length) if length else None
@@ -7530,6 +7689,57 @@ def normal_path(target):
     path = "/".join(segment.split(";", 1)[0] for segment in path.split("/"))
     path = posixpath.normpath("/" + re.sub(r"/+", "/", path).lstrip("/"))
     return "" if path == "/" else path.rstrip("/")
+
+
+# A forge's API beside Git on one server (Gitea's and Forgejo's /api/v1 and /api/packages, GitLab's /api/v4 and
+# /api/graphql): a file it writes may be named git-upload-pack, and its URL then ends as Git's does.
+GIT_API_PREFIXES = ("api",)
+GIT_SERVICES = ("git-upload-pack", "git-receive-pack")
+
+
+def git_transport_request(method, path, target, headers):
+    """The request is one of Git's smart HTTP requests, which alone get a Git login of the human's: GET
+    REPO/info/refs?service=git-upload-pack|git-receive-pack, or a POST to REPO/git-upload-pack|git-receive-pack with
+    Git's own Content-Type (exactly: a server reads a body as JSON or a form by that header, Gitea's API by
+    "json" anywhere in it) - never below a forge's API (GIT_API_PREFIXES), where a file named git-upload-pack is
+    written by the URL's end. PATH: the normalised path (normal_path) of TARGET."""
+    segments = [segment for segment in str(path).split("/") if segment]
+    if len(segments) < 2 or segments[0].lower() in GIT_API_PREFIXES:
+        return False
+    if method.upper() == "GET" and segments[-2:] == ["info", "refs"]:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)
+        return query.get("service") in [[service] for service in GIT_SERVICES]
+    if method.upper() != "POST" or segments[-1] not in GIT_SERVICES:
+        return False
+    types = [value.strip().lower() for name, value in headers if name.lower() == "content-type"]
+    return types == [f"application/x-{segments[-1]}-request"]
+
+
+# Git LFS (git lfs pre-push, git lfs push): the files go to the LFS server through its batch API (POST
+# LFS_URL/objects/batch, operation "upload"), then a PUT each to the address it answers - before Git's own push, whose
+# privacy check reads only the pointer files. While the check is on, an upload is asked (an http question; refused
+# without approvals); a download is not.
+LFS_UPLOAD_REASON = ("uploads Git LFS files, whose contents the privacy check of pushes does not read (it sees only "
+                     "their pointer files); refused unless you allow it here, or start with --privacy-check off")
+LFS_OBJECT_PATH = re.compile(r".*/(?:info/lfs/objects|gitlab-lfs/objects)/[0-9a-fA-F]{64}(?:/.*)?")
+
+
+def lfs_request_kind(method, path, headers):
+    """"batch" (a request to an LFS server's batch API: POST .../objects/batch, or Git LFS's own media type),
+    "object" (a PUT or POST of one object to the paths Gitea, GitHub and GitLab serve them at), or None."""
+    method = method.upper()
+    types = [value.split(";")[0].strip().lower() for name, value in headers if name.lower() == "content-type"]
+    if method == "POST" and (str(path).endswith("/objects/batch") or "application/vnd.git-lfs+json" in types):
+        return "batch"
+    if method in ("PUT", "POST", "PATCH") and LFS_OBJECT_PATH.fullmatch(str(path)):
+        return "object"
+    return None
+
+
+def lfs_batch_uploads(body):
+    """A batch request BODY (Ruleset.body: JSON, or unknown) may upload: everything but an object whose operation is
+    exactly "download" (a key given twice, a body that cannot be read: held)."""
+    return not (isinstance(body, dict) and Ruleset.member(body, "operation") == "download")
 
 
 def ambiguous_path(target):
@@ -11953,6 +12163,10 @@ class ProxyServer:
         # LIVE: {connection number: {"sockets", "address", "port", "name"}} of the open connections, which the kill
         # switch closes when it forbids them (watch_cut); the sockets are duplicates, as TLS takes over the originals.
         self.connect, self.live = connect or socket.create_connection, {}
+        # STOPPED (close): the accept loops and the kill switch's watch end. The proxy's own process never closes its
+        # server (it ends with the run); a process that makes many (the tests) closes each, so that no thread of one
+        # keeps polling, or holds a listener, after it.
+        self.stopped = threading.Event()
         # ASKER puts questions to the supervisor; WHO (the same channel, also with --ask off) asks it which
         # process a connection belongs to. DEBUG (--log-debug) logs more of what a refused client sent.
         self.asker, self.who, self.debug = asker, who, bool(config.get("debug"))
@@ -12310,7 +12524,15 @@ class ProxyServer:
     def serve(self, listeners):
         for listener in listeners:
             threading.Thread(target=self.accept_loop, args=(listener,), daemon=True).start()
-        threading.Thread(target=self.watch_cut, name="proxy-cut", daemon=True).start()
+        threading.Thread(target=self.watch_cut, kwargs={"stop": self.stopped}, name="proxy-cut", daemon=True).start()
+
+    def close(self, listeners=()):
+        """End what serve started: the kill switch's watch, and the accept loops of LISTENERS, which are shut down
+        (an accept() blocked on one returns) - their sockets stay their owner's to close."""
+        self.stopped.set()
+        for listener in listeners:
+            with contextlib.suppress(OSError):
+                listener.shutdown(socket.SHUT_RDWR)
 
     # -- the kill switch --
 
@@ -12376,12 +12598,16 @@ class ProxyServer:
             time.sleep(every)
 
     def accept_loop(self, listener):
-        while True:
+        stopped = getattr(self, "stopped", None) or threading.Event()  # (close: see __init__)
+        while not stopped.is_set():
             try:
                 client, _ = listener.accept()
             except OSError:
                 time.sleep(0.1)  # e.g. out of file descriptors: no busy loop
                 continue
+            if stopped.is_set():  # (closed while it waited: the connection is not taken)
+                client.close()
+                return
             if not self.slots.acquire(blocking=False):
                 self.refuse_many(client)
                 continue
@@ -12750,11 +12976,7 @@ class ProxyServer:
         destination = str(record.get("destination", ""))
         port = destination.rsplit(":", 1)[-1]
         address = destination.rsplit(":", 1)[0].strip("[]")
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(target).query)
-        git = path.endswith(("/git-upload-pack", "/git-receive-pack")) and method.upper() == "POST" or \
-            path.endswith("/info/refs") and method.upper() == "GET" and \
-            query.get("service", [""])[0] in ("git-upload-pack", "git-receive-pack")
-        if not git:
+        if not git_transport_request(method, path, target, headers):
             return None
         for entry in tokens:
             if str(entry["port"]) != port:
@@ -13031,9 +13253,9 @@ class ProxyServer:
                         entry["tainted"] = facts["taint"].get("since")
                     if self.rules.needs_body(facts):
                         # Read before the decision and before anything reaches the server; passed on as it came.
-                        framing = request_framing(headers)
+                        framing = request_framing(headers, line)
                         head = self.continued(client, head, headers)
-                        parts = stream.body(framing)
+                        parts = stream.body(framing, request=True)
                         early, facts["body"] = self.http_rule_body(parts, headers)
                         facts["body_read"] = True
                         parts = itertools.chain(early, parts)
@@ -13078,10 +13300,31 @@ class ProxyServer:
                     else:
                         found = None
                 if parts is None:
-                    framing = request_framing(headers)
+                    framing = request_framing(headers, line)
                     head = self.continued(client, head, headers)
-                    parts = stream.body(framing)
+                    parts = stream.body(framing, request=True)
                 parts = canary_request(self, head, parts, headers, entry, record, origin)
+                kind = lfs_request_kind(method, path, headers) if self.checker is not None else None
+                if kind:
+                    body = None
+                    if kind == "batch":  # (a download's batch goes on: only an upload is held)
+                        early, body = self.http_rule_body(parts, headers)
+                        parts = itertools.chain(early, parts)
+                    if kind != "batch" or lfs_batch_uploads(body):
+                        held = {"rule": "lfs-upload", "ruleset": "privacy-check", "reason": LFS_UPLOAD_REASON}
+                        answer = self.http_ask(held, method, redact_text(url), authority, path or "/", body,
+                                               self.asked_by(record), exact=[target, header(headers, "host")])
+                        entry.update(lfs=kind, approval=approval_record(answer))
+                        if answer.get("decision") != "allow":
+                            refusal = not_approved(answer, LFS_UPLOAD_REASON)
+                            message = json.dumps({"message": f"sandbox-ai: {refusal}"}).encode() + b"\n"
+                            send_all(client, b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/vnd.git-lfs+json"
+                                     b"\r\nConnection: close\r\n" + f"Content-Length: {len(message)}\r\n\r\n".encode()
+                                     + message)
+                            self.log({**entry, "event": "denied", "reason": refusal,
+                                      "request": {"headers": redact_headers(headers)}})
+                            current.pop("entry", None)
+                            return
                 pending, captured = [], Capture(limit)
                 content_type = (header(headers, "content-type") or "").split(";")[0].strip().lower()
                 if (method.upper() == "POST" and path.endswith("git-receive-pack")) or \
@@ -13603,7 +13846,7 @@ class ProxyServer:
         captured = Capture(limit)
         with contextlib.suppress(OSError, ValueError):
             client.settimeout(2)
-            for _, payload in parts if parts is not None else stream.body(request_framing(headers)):
+            for _, payload in parts if parts is not None else stream.body(request_framing(headers), request=True):
                 captured.add(payload)
                 if captured.total > limit:
                     break
@@ -16094,10 +16337,13 @@ def runtime_rules(state):
     for address, port in sorted(state["tcp"]):
         family = "ip" if ipaddress.ip_address(address).version == 4 else "ip6"
         lines.append(f"add rule inet agent_sandbox runtime {family} daddr {address} tcp dport {port} accept")
-    for address in sorted(state.get("dns", ())):  # DNS allowed during the run: port 53 of these nameservers
+    for address in sorted(state.get("dns", ())):
+        # DNS allowed during the run: port 53 of these nameservers, for the DNS stub's questions alone (DNS_STUB_MARK,
+        # UDP: the stub asks nothing over TCP). The agent asking them itself would pass the stub's log and canary
+        # search; its TCP would reach them through the proxy (unmarked, another user's), which no longer lists them.
         family = "ip" if ipaddress.ip_address(address).version == 4 else "ip6"
-        lines.append(f"add rule inet agent_sandbox runtime {family} daddr {address} udp dport 53 accept")
-        lines.append(f"add rule inet agent_sandbox runtime {family} daddr {address} tcp dport 53 accept")
+        lines.append(f"add rule inet agent_sandbox runtime meta mark {DNS_STUB_MARK:#x} {family} daddr {address} "
+                     "udp dport 53 accept")
     return "\n".join(lines) + "\n"
 
 
@@ -16286,8 +16532,8 @@ def merged_allow(base, state, no_ssh=()):
     allow = dict(base)
     allow["nets"] = [*base.get("nets", []), *sorted(state["nets"])]
     allow["https"] = [*base.get("https", []), *sorted(state["https"])]
-    allow["tcp"] = [*base.get("tcp", []), *[[a, p] for a, p in sorted(state["tcp"])],
-                    *[[a, 53] for a in sorted(state.get("dns", ()))]]  # DNS over TCP to the allowed nameservers
+    # (The nameservers of `net allow --dns` are not listed: only the DNS stub asks them, see runtime_rules.)
+    allow["tcp"] = [*base.get("tcp", []), *[[a, p] for a, p in sorted(state["tcp"])]]
     # Explicit destinations may also take SSH, as at the start (--allow, --allow-tcp); approved ones
     # (NO_SSH) may not.
     allow["ssh"] = sorted(state["nets"])
@@ -18920,10 +19166,18 @@ def canary_found(server, hit, where, entry, record, origin=None):
 
 
 def canary_request(server, head, parts, headers, entry, record, origin=None):
-    """PARTS of a request whose HEAD carried no token (else CanaryRefused), searched as they pass."""
+    """PARTS of a request whose HEAD carried no token (else CanaryRefused), searched as they pass. ORIGIN (the server
+    the proxy verified) counts as where the request goes only when its Host header names it too: a front end routes by
+    the Host header, so a request at the provider's address that names another site behind it (domain fronting) is
+    no part of the agent's conversation - a token in it is refused as anywhere else."""
     forms, names, _, _ = canary_matchers(server)
     if not forms and not names:
         return parts
+    given = header(headers, "host")
+    port = str(record.get("destination", "")).rsplit(":", 1)[-1]
+    if given is not None and not host_agrees(given, {str(origin or "").lower().rstrip(".")},
+                                             int(port) if port.isdigit() else None):
+        origin = None
     found, where = forms.find(head.split(b"\r\n", 1)[0]), "url"
     if found is None:
         found, where = forms.find(head) or names.name(header(headers, "host")), "header"

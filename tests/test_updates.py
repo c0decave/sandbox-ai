@@ -904,3 +904,50 @@ def test_one_timer_run_at_a_time(home, installed):
         fake = FakeInstaller(installed["data"])
         assert U.scheduled(installed, runner=fake, tell=told()[1], out=lines.append) == 0
     assert lines == ["another update run is under way: nothing done"] and fake.calls == []
+
+
+def test_a_download_that_does_not_check_out_any_more_is_fetched_again(home, installed, systemctl):
+    """A release download fetched, then spoiled before its install (a half-written disk, a changed file): install.sh
+    --from --verify refuses it - and the next day's run fetched nothing new (the folder still held that version),
+    refused it again, for ever. Now a refused download is removed, and the next run fetches it anew."""
+    U.set_mode("auto", "03:00-05:00", info=installed, out=lambda line: None, run=systemctl[1])
+    fake = FakeInstaller(installed["data"])
+    said, tell = told()
+    noon = local(2026, 11, 18, 12, 0)
+    U.scheduled(installed, clock=lambda: noon, runner=fake, busy=lambda at: [], tell=tell, out=lambda line: None)
+    assert U.pending_release(installed) and fake.count("--fetch") == 1
+    real = fake.__call__
+
+    def spoiled(command, **kwargs):
+        if "--from" in command:
+            fake.calls.append(list(command))
+            return subprocess.CompletedProcess(command, 1, "", "install.sh: error: checksum mismatch for "
+                                                               "sandbox-ai-bundle-9.9.9.tar.gz; nothing installed\n")
+        return real(command, **kwargs)
+    lines = []
+    U.scheduled(installed, clock=lambda: local(2026, 11, 19, 3, 30), runner=spoiled, busy=lambda at: [], tell=tell,
+                out=lines.append)
+    assert "install failed: install.sh: error: checksum mismatch" in lines[-1] or "checksum mismatch" in lines[-1]
+    assert U.pending_release(installed) is None, "the refused download is removed"
+    U.scheduled(installed, clock=lambda: local(2026, 11, 20, 3, 30), runner=fake, busy=lambda at: [], tell=tell,
+                out=lines.append)
+    assert fake.count("--fetch") == 2 and U.own_version() == "9.9.9", lines
+
+
+def test_the_status_says_whether_this_user_can_roll_back(home, tmp_path, monkeypatch):
+    """update mode --json's rollback_now: a system installation keeps a version, but only who may write it goes back
+    (the app greys Roll back… and names sudo)."""
+    data = tmp_path / "usr" / "lib" / "sandbox-ai"
+    for version in ("0.9.0", "1.0.0"):
+        make_tree(data / "versions" / version, version)
+    os.symlink("versions/1.0.0", data / "current")
+    monkeypatch.setattr(U, "own_version", lambda: "1.0.0")
+    info = {"kind": "system", "tree": str(data / "versions/1.0.0"), "data": str(data), "prefix": str(tmp_path / "usr"),
+            "package": None}
+    monkeypatch.setattr(U, "timer_state", lambda run=None: {"installed": False, "active": None, "kind": "systemd",
+                                                             "files": []})
+    monkeypatch.setattr(U.os, "access", lambda path, mode: False)
+    found = U.status(info)
+    assert found["rollback"] == "0.9.0" and found["rollback_now"] is False
+    monkeypatch.setattr(U.os, "access", lambda path, mode: True)
+    assert U.status(info)["rollback_now"] is True

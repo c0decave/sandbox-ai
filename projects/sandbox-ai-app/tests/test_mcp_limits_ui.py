@@ -204,7 +204,8 @@ def test_the_servers_menu_repeats_the_buttons_and_properties_opens_by_double_cli
     select(page.servers, "pw")
     from sandbox_ai_app import kits_page
     menu = kits_page.context_menu(page.servers, page.server_buttons)
-    assert [a.text() for a in menu.actions()] == ["Start…", "Stop", "Attach to…", "Properties…"]
+    assert [a.text() for a in menu.actions()] == ["Start…", "Stop", "Attach to…", "Properties…", "Update",
+                                                  "Update all"]
     opened = []
     monkeypatch.setattr(page, "properties", lambda *args: opened.append(args))
     page.servers.setFocus()

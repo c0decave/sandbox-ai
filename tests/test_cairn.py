@@ -207,11 +207,12 @@ def test_workers_with_their_own_models():
     """"Cairn natürlich auch mit anderen Modellen": a model per worker, else what the session gave the agent."""
     a = checked("--cairn", "--with", "codex", "--cairn-workers", "codex=gpt-5.2-codex,claude=opus", "--model", "sonnet")
     assert a.cairn_workers == [{"agent": "codex", "model": "gpt-5.2-codex"}, {"agent": "claude", "model": "opus"}]
-    assert cairn.relay_config(a, s.launcher_namespace())["workers"] == {"codex": ["--model", "gpt-5.2-codex"],
-                                                                         "claude": ["--model", "opus"]}
+    telemetry = s.codex_telemetry_args(s.telemetry_level(a))  # (Codex's telemetry off on its command line too)
+    assert cairn.relay_config(a, s.launcher_namespace())["workers"] == {
+        "codex": [*telemetry, "--model", "gpt-5.2-codex"], "claude": ["--model", "opus"]}
     lead = checked("--cairn", "--with", "codex", "--model", "sonnet", "--effort", "high")
     assert cairn.relay_config(lead, s.launcher_namespace())["workers"] == {
-        "claude": ["--model", "sonnet", "--effort", "high"], "codex": []}, "an agent --with keeps its own default"
+        "claude": ["--model", "sonnet", "--effort", "high"], "codex": telemetry}, "an agent --with keeps its own default"
     dispatch = cairn.dispatch(a)
     assert [w["type"] for w in dispatch["workers"]] == ["codex", "claudecode"]
     assert dispatch["workers"][0]["task_types"] == ["bootstrap", "reason", "explore"]
@@ -223,16 +224,18 @@ def test_codex_on_an_llm_server_keeps_its_profile(monkeypatch):
     a.llm = "ollama"
     monkeypatch.setattr(s, "load_llm_module", lambda: argparse.Namespace(agent_arguments=lambda a: ["--profile",
                                                                                                    "sandbox-ai-llm"]))
-    assert cairn.relay_config(a, s.launcher_namespace())["workers"] == {"codex": ["--profile", "sandbox-ai-llm"]}
+    assert cairn.relay_config(a, s.launcher_namespace())["workers"] == {
+        "codex": [*s.codex_telemetry_args(s.telemetry_level(a)), "--profile", "sandbox-ai-llm"]}
 
 
 @pytest.mark.parametrize("options, agent, said", [
     (("--cairn-goal", "x"), "claude", "add --cairn"),
-    (("--cairn", "--cairn-workers", "pi"), "claude", "pi driver"),
+    (("--cairn", "--cairn-workers", "pi"), "claude", "add --with pi"),
+    (("--cairn", "--cairn-workers", "bash"), "claude", "none of the launcher's harnesses"),
     (("--cairn", "--cairn-workers", "codex"), "claude", "add --with codex"),
     (("--cairn", "--cairn-workers", "claude,claude"), "claude", "twice"),
     (("--cairn", "--cairn-workers", "claude=a b"), "claude", "not a model name"),
-    (("--cairn",), "hermes", "none of Cairn's"),
+    (("--cairn",), "openhands", "Agent Canvas holds port 8000"),
     (("--cairn", "--cairn-origin", "10.0.0.5"), "claude", "go together"),
     (("--cairn", "--cairn-hint", "port 80"), "claude", "first hint"),
     (("--cairn", "--cairn-board", "session", "--no-keep"), "claude", "keeps none"),
@@ -284,7 +287,10 @@ def test_cairn_s_container_has_no_rights_beyond_the_pod_and_only_the_relay_s_fol
     assert env == {}
     assert argv[argv.index("--pod") + 1] == "agent-claude-1234abcd" and "--cap-drop=ALL" in argv
     assert "--security-opt=no-new-privileges" in argv and "--read-only" in argv and argv[argv.index("--user") + 1] == "0:0"
-    assert "--pull=never" in argv and argv[-3:] == [IMAGE_ID, "-I", "/sandbox-cairn/cairn_runtime.py"]
+    # (no --init: that would be the host's catatonit - its PID 1 is sandbox-ai's own init, run by the image's Python)
+    assert "--pull=never" in argv and "--init" not in argv and argv[-6:] == [
+        IMAGE_ID, "-I", "/sandbox-cairn/pid1.py", "/opt/cairn/venv/bin/python", "-I", "/sandbox-cairn/cairn_runtime.py"]
+    assert any("dst=/sandbox-cairn/pid1.py,ro" in argv[i + 1] for i, word in enumerate(argv) if word == "--mount")
     assert argv[argv.index("--entrypoint") + 1] == "/opt/cairn/venv/bin/python"
     mounts = [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
     relay = next(m for m in mounts if "dst=/sandbox-cairn/relay" in m)
@@ -351,15 +357,17 @@ def test_the_dispatcher_runs_only_locally_with_the_session_s_agents():
     assert "docker" not in json.dumps(dispatch).lower() and "common_env" not in dispatch
     assert dispatch["local"]["workspace_root"] == "/work/cairn/runs"
     assert dispatch["runtime"]["max_workers"] == 2 and dispatch["runtime"]["max_running_projects"] == 1
-    assert set(cairn.DRIVERS) == {"claude", "codex"}, "not pi: its local driver runs a shell line"
+    assert set(cairn.DRIVERS) == s.AGENT_PROGRAMS, "every harness of the launcher"
+    assert set(cairn.DRIVERS.values()) == {"claudecode", "codex"}, "never Cairn's pi driver: it runs a shell line"
 
 
 def test_the_dry_run_plan_and_run_json(config):
     a = checked("--cairn", "--with", "codex", "--model", "sonnet")
     plan = cairn.plan(a, s.launcher_namespace())
     assert plan["image"] == cairn.IMAGE and plan["board"] == "http://127.0.0.1:8000" and plan["commit"] == cairn.COMMIT
-    assert plan["workers"][0] == {"agent": "claude", "driver": "claudecode", "model": "the agent's own",
-                                  "arguments": ["--model", "sonnet"]}
+    assert {k: plan["workers"][0][k] for k in ("agent", "driver", "model", "arguments")} == {
+        "agent": "claude", "driver": "claudecode", "model": "the agent's own", "arguments": ["--model", "sonnet"]}
+    assert plan["workers"][0]["light"] == "yellow" and plan["workers"][1]["light"] == "grey"
     assert "never a shell line" in plan["relay"]["takes"] and plan["browser"] == "starts on the board"
     assert cairn.record(a, "agent-x") == {"board": "http://127.0.0.1:8000", "container": "agent-x-service-cairn",
                                          "workers": ["claude", "codex"]}

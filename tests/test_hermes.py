@@ -228,7 +228,7 @@ def test_environment_and_plan():
     assert "HERMES_DISABLE_LAZY_INSTALLS" not in hermes.environment(ns("hermes", "lazy-installs"))
     assert hermes.environment(ns(), placeholder="p")["OPENROUTER_API_KEY"] == "p"
     plan = hermes.plan(ns("hermes", "gateway:telegram"))
-    assert plan["version"] == hermes.VERSION and plan["gateway"] and plan["experimental"]
+    assert plan["version"] == hermes.VERSION and plan["gateway"] and "experimental" not in plan
     assert plan["enabled"] == [{"feature": "gateway:telegram", "hosts": ["api.telegram.org"],
                                 "secrets": ["hermes_telegram"]}]
     assert "gateway:telegram" not in plan["off"] and "kanban" in plan["off"]

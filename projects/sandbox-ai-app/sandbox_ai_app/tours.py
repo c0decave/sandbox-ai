@@ -36,14 +36,27 @@ def step(target, title, text, try_):
 
 
 AREA_TOURS = {
+    # The Start page has two views of one start (start_link.py): "launch" is its Expert view, "board" its Board
+    # view; view_switch is the window's switch between them (an attribute of both pages).
     "launch": (
-        step(None, ("Start a sandbox", "Eine Sandbox starten"),
-             ("This page starts one agent in one sandbox: choose what it runs, what it may reach, and see the exact "
-              "command before anything starts.",
-              "Diese Seite startet einen Agenten in einer Sandbox: Sie wählen, was er ausführt und was er erreichen "
-              "darf, und sehen den genauen Befehl, bevor etwas startet."),
+        step(None, ("Start a sandbox: the Expert view", "Eine Sandbox starten: die Ansicht Experte"),
+             ("The Start page starts one agent in one sandbox. It shows the start in two views: Board (parts and "
+              "connections; the page opens with it) and Expert, this one - every option a field, and the exact "
+              "command as text you can edit. Both are always the same start.",
+              "Die Seite Start startet einen Agenten in einer Sandbox. Sie zeigt den Start in zwei Ansichten: Board "
+              "(Teile und Verbindungen; damit öffnet sich die Seite) und Experte, diese hier - jede Option ein Feld "
+              "und der genaue Befehl als Text, den Sie bearbeiten können. Beide sind immer derselbe Start."),
              ("Open a project folder first (File > Open project folder).",
               "Öffnen Sie zuerst einen Projektordner (Datei > Projektordner öffnen).")),
+        step("view_switch", ("The switch: Board or Expert", "Der Schalter: Board oder Experte"),
+             ("Above the page: Board shows the start as parts, Expert as fields and its command line. Switching "
+              "loses nothing - what you set here is on the Board at once, and what you build there is here. F6 "
+              "switches too; the page opens in the view you chose last.",
+              "Über der Seite: Board zeigt den Start als Teile, Experte als Felder und seine Befehlszeile. Beim "
+              "Umschalten geht nichts verloren - was Sie hier einstellen, ist sofort auf dem Board, und was Sie dort "
+              "bauen, steht hier. F6 schaltet ebenfalls um; die Seite öffnet sich in der zuletzt gewählten Ansicht."),
+             ("Choose Board, look at the parts, and come back with Expert.",
+              "Wählen Sie Board, sehen Sie sich die Teile an und kommen Sie mit Experte zurück.")),
         step("agent", ("The agent", "Der Agent"),
              ("Claude Code, Codex or OpenCode. Each has its own image; the System page says whether it is built.",
               "Claude Code, Codex oder OpenCode. Jeder hat sein eigenes Image; die Seite System sagt, ob es gebaut ist."),
@@ -59,10 +72,12 @@ AREA_TOURS = {
               "Wählen Sie einen Host und sehen Sie, wie die Befehlszeile mit hosts run beginnt.")),
         step("model_choice", ("The model", "Das Modell"),
              ("The agent's own provider, or a model server registered on the chosen host (NAME or NAME:MODEL): "
-              "--llm, without --model. Only this server lets the agent reach nothing but that server.",
+              "--llm, without --model. Only this server lets the agent reach nothing but that server. The models are "
+              "listed by their traffic light for the agent chosen: green first, then yellow, red and grey.",
               "Der eigene Anbieter des Agenten oder ein auf dem gewählten Host registrierter Modellserver (NAME "
               "oder NAME:MODELL): --llm, ohne --model. Nur dieser Server lässt den Agenten nichts als diesen Server "
-              "erreichen."),
+              "erreichen. Die Modelle stehen nach ihrer Ampel für den gewählten Agenten: zuerst grün, dann gelb, rot "
+              "und grau."),
              ("Choose a server of yours, then the agent's provider again.",
               "Wählen Sie einen Ihrer Server, dann wieder den Anbieter des Agenten.")),
         step("profile", ("Your saved settings", "Ihre gespeicherten Einstellungen"),
@@ -77,45 +92,120 @@ AREA_TOURS = {
               "Start mit Laden.")),
         step("form", ("Every other option", "Alle weiteren Optionen"),
              ("The launcher's options in groups: network, proxy and privacy, Git, logins, kits, display, hardware. "
-              "Each field says what it does; the ones that widen the sandbox are marked.",
+              "Each field says what it does; the ones that widen the sandbox are marked. The mouse wheel scrolls the "
+              "page: a drop-down or a number field takes it only once you clicked it.",
               "Die Optionen des Launchers in Gruppen: Netzwerk, Proxy und Datenschutz, Git, Logins, Kits, Anzeige, "
-              "Hardware. Jedes Feld sagt, was es tut; die, die die Sandbox erweitern, sind markiert."),
+              "Hardware. Jedes Feld sagt, was es tut; die, die die Sandbox erweitern, sind markiert. Das Mausrad "
+              "scrollt die Seite: Eine Auswahlliste oder ein Zahlenfeld nimmt es erst, wenn Sie sie angeklickt haben."),
              ("Open the Network group and look at --allow-host.", "Öffnen Sie die Gruppe Netzwerk und sehen Sie sich "
               "--allow-host an.")),
-        step("preview", ("The command", "Der Befehl"),
-             ("What you chose, as the command line the app will run: copy it into a terminal to start the same "
-              "sandbox there.",
-              "Ihre Auswahl als die Befehlszeile, die die App ausführt: Kopieren Sie sie in ein Terminal, um dort "
-              "dieselbe Sandbox zu starten."),
-             ("Change an option and watch the command follow.", "Ändern Sie eine Option und sehen Sie, wie der Befehl "
-              "folgt.")),
+        step("preview", ("The command line", "Die Befehlszeile"),
+             ("The whole start as the command line the app will run - and a field you can type into: edit an "
+              "option or paste a whole line, and once it can be read the fields above and the Board show it. A "
+              "line that cannot be read changes nothing; the reason is below it. Copy command copies it for a "
+              "terminal.",
+              "Der ganze Start als die Befehlszeile, die die App ausführt - und ein Feld, in das Sie tippen können: "
+              "Bearbeiten Sie eine Option oder fügen Sie eine ganze Zeile ein; sobald sie lesbar ist, zeigen die "
+              "Felder darüber und das Board sie. Eine Zeile, die sich nicht lesen lässt, ändert nichts; der Grund "
+              "steht darunter. Befehl kopieren kopiert sie für ein Terminal."),
+             ("Type --offline into the line and watch the Network group's Offline follow.",
+              "Tippen Sie --offline in die Zeile und sehen Sie, wie Offline in der Gruppe Netzwerk folgt.")),
+        step("line_note", ("What is wrong", "Was nicht stimmt"),
+             ("Below the command line: why a line as typed is not taken, what the board finds wrong with the start, "
+              "or the launcher's verdict of its last check. Show on the Board leads to the view that lists every "
+              "finding.",
+              "Unter der Befehlszeile: warum eine getippte Zeile nicht übernommen wird, was das Board am Start "
+              "falsch findet, oder das Urteil des Launchers aus seiner letzten Prüfung. Auf dem Board zeigen führt "
+              "zur Ansicht, die jeden Befund auflistet."),
+             ("Type --memory lots into the line and read what the launcher says; then Undo.",
+              "Tippen Sie --memory lots in die Zeile und lesen Sie, was der Launcher sagt; dann Rückgängig.")),
+        step("undo_redo", ("Undo and Redo", "Rückgängig und Wiederholen"),
+             ("One history for both views: a change made on the Board is undone here, and the other way round. A "
+              "value typed letter by letter is one step.",
+              "Ein Verlauf für beide Ansichten: Eine Änderung auf dem Board wird hier rückgängig gemacht und "
+              "umgekehrt. Ein Buchstabe für Buchstabe getippter Wert ist ein Schritt."),
+             ("Change a field, press Undo, then Redo.",
+              "Ändern Sie ein Feld, drücken Sie Rückgängig, dann Wiederholen.")),
         step("dry_button", ("Check before starting", "Vor dem Start prüfen"),
              ("A dry run: the launcher checks everything (options, policy, images, network) and shows its plan, "
-              "without starting anything.",
+              "without starting anything. It is the same check as the Board's, of the same start.",
               "Ein Probelauf: Der Launcher prüft alles (Optionen, Richtlinie, Images, Netzwerk) und zeigt seinen "
-              "Plan, ohne etwas zu starten."),
+              "Plan, ohne etwas zu starten. Es ist dieselbe Prüfung wie die des Boards, desselben Starts."),
              ("Press it once before your first start.", "Drücken Sie ihn einmal vor Ihrem ersten Start.")),
+        step("start_controls", ("Start", "Starten"),
+             ("Start runs the command line above, in a terminal tab of the app or a terminal window, as a session if "
+              "you like - the same start whichever view you press it in.",
+              "Start führt die Befehlszeile oben aus, in einem Terminal-Tab der App oder einem Terminalfenster, auf "
+              "Wunsch als Sitzung - derselbe Start, in welcher Ansicht Sie ihn auch drücken."),
+             ("Press Start once Dry run shows a plan.",
+              "Drücken Sie Start, sobald der Probelauf einen Plan zeigt.")),
     ),
     "board": (
-        step(None, ("The board", "Das Board"),
-             ("One sandbox as parts you connect: the agent, its folders, the network, MCP servers, rules. It writes "
-              "the project's .sandbox-ai.json.",
-              "Eine Sandbox als Teile, die Sie verbinden: der Agent, seine Ordner, das Netzwerk, MCP-Server, Regeln. "
-              "Es schreibt die .sandbox-ai.json des Projekts."),
+        step(None, ("The Start page: the Board", "Die Seite Start: das Board"),
+             ("The Start page opens as its Board: one start as parts you connect - the agent, its folders, the "
+              "network, MCP servers, rules. It starts the sandbox and writes the project's .sandbox-ai.json. The "
+              "Expert view shows the same start as fields and a command line.",
+              "Die Seite Start öffnet sich als ihr Board: ein Start als Teile, die Sie verbinden - der Agent, seine "
+              "Ordner, das Netzwerk, MCP-Server, Regeln. Es startet die Sandbox und schreibt die .sandbox-ai.json des "
+              "Projekts. Die Ansicht Experte zeigt denselben Start als Felder und eine Befehlszeile."),
              ("Open a project, or start from a preset of the gallery.", "Öffnen Sie ein Projekt oder beginnen Sie mit "
               "einer Vorlage aus der Galerie.")),
+        step("view_switch", ("The switch: Board or Expert", "Der Schalter: Board oder Experte"),
+             ("Above the page: Expert shows this very start as text - every option a field, and its command line "
+              "to edit or paste. Both views are always in step, Undo covers both, and F6 switches.",
+              "Über der Seite: Experte zeigt genau diesen Start als Text - jede Option ein Feld und seine "
+              "Befehlszeile zum Bearbeiten oder Einfügen. Beide Ansichten sind immer im Gleichschritt, Rückgängig "
+              "gilt für beide, und F6 schaltet um."),
+             ("Choose Expert, read the command line, and come back with Board.",
+              "Wählen Sie Experte, lesen Sie die Befehlszeile und kommen Sie mit Board zurück.")),
         step("palette", ("Parts", "Teile"),
-             ("Everything you can add. Double-click a part: the guide asks the few things it needs and explains "
-              "each.",
-              "Alles, was Sie hinzufügen können. Doppelklicken Sie ein Teil: Der Guide fragt das Wenige, das es "
-              "braucht, und erklärt jedes."),
+             ("Everything you can add, in categories; Other options takes any option no part shows, one per line. "
+              "Double-click a part: the guide asks the few things it needs and explains each.",
+              "Alles, was Sie hinzufügen können, in Kategorien; Weitere Optionen nimmt jede Option, die kein Teil "
+              "zeigt, eine pro Zeile. Doppelklicken Sie ein Teil: Der Guide fragt das Wenige, das es braucht, und "
+              "erklärt jedes."),
              ("Add a folder (a mount) read-only.", "Fügen Sie einen Ordner (ein Mount) nur lesbar hinzu.")),
+        step("palette", ("Build toolchains", "Bau-Toolchains"),
+             ("The part Toolchains mounts build tools of the signed catalog - Go, Rust, a JDK, Node … - read-only at "
+              "/opt/toolchains/NAME, their commands on the agent's PATH and their registries opened (Without their "
+              "registries keeps those closed). Nothing of them runs on your host.",
+              "Das Teil Toolchains hängt Bauwerkzeuge aus dem signierten Katalog - Go, Rust, ein JDK, Node … - nur "
+              "lesbar unter /opt/toolchains/NAME ein, ihre Befehle im PATH des Agenten und ihre Registrys geöffnet "
+              "(Ohne ihre Registrys lässt diese geschlossen). Nichts davon läuft auf Ihrem Host."),
+             ("Add Toolchains and name go.", "Fügen Sie Toolchains hinzu und nennen Sie go.")),
+        step("view", ("Parts and connections", "Teile und Verbindungen"),
+             ("Drag from a part's right port onto the agent to connect them: a folder, a server or a device counts "
+              "only while it is connected. Every change is one step of Undo.",
+              "Ziehen Sie vom rechten Anschluss eines Teils auf den Agenten, um sie zu verbinden: Ein Ordner, ein "
+              "Server oder ein Gerät zählt nur, solange er verbunden ist. Jede Änderung ist ein Schritt von "
+              "Rückgängig."),
+             ("Connect the folder you added to the agent.", "Verbinden Sie den hinzugefügten Ordner mit dem Agenten.")),
+        step("side", ("A part's settings", "Die Einstellungen eines Teils"),
+             ("Select a part: its settings are here. The agent's part lists the models of a server by their traffic "
+              "light for that agent - green first, then yellow, red and grey.",
+              "Wählen Sie ein Teil: Hier stehen seine Einstellungen. Das Teil des Agenten listet die Modelle eines "
+              "Servers nach ihrer Ampel für diesen Agenten - zuerst grün, dann gelb, rot und grau."),
+             ("Select the agent and look at its models.",
+              "Wählen Sie den Agenten und sehen Sie sich seine Modelle an.")),
         step("findings", ("What is wrong", "Was nicht stimmt"),
              ("The board checks itself after every change: a missing value, a part that is not connected, an "
               "option the policy refuses. Click a finding to see the part.",
               "Das Board prüft sich nach jeder Änderung: ein fehlender Wert, ein nicht verbundenes Teil, eine "
               "Option, die die Richtlinie ablehnt. Klicken Sie einen Befund an, um das Teil zu sehen."),
              ("Make the list empty before you apply.", "Leeren Sie die Liste, bevor Sie übernehmen.")),
+        step("gallery_button", ("Start from a preset", "Mit einer Vorlage beginnen"),
+             ("New from preset… opens the gallery: tested setups as cards, sandbox-ai's own and yours, each with its "
+              "board and what it leaves to fill in. Create builds the board from one.",
+              "Neu aus Vorlage… öffnet die Galerie: erprobte Setups als Karten, die von sandbox-ai und Ihre eigenen, "
+              "jede mit ihrem Board und dem, was noch auszufüllen ist. Anlegen baut das Board daraus."),
+             ("Open the gallery and search for offline.", "Öffnen Sie die Galerie und suchen Sie nach offline.")),
+        step("save_preset_button", ("Save it as a preset", "Als Vorlage speichern"),
+             ("Save as preset… keeps this board under a title of yours, without workspaces and secrets, under My "
+              "presets of the gallery. Save (Ctrl+S) keeps it where it came from.",
+              "Als Vorlage speichern… bewahrt dieses Board unter einem Titel Ihrer Wahl auf, ohne Arbeitsordner und "
+              "Geheimnisse, unter Meine Vorlagen der Galerie. Speichern (Strg+S) legt es dort ab, woher es kam."),
+             ("Save the board as a preset and find it in New from preset….",
+              "Speichern Sie das Board als Vorlage und finden Sie es unter Neu aus Vorlage….")),
         step("dry_button", ("Ask the launcher", "Den Launcher fragen"),
              ("A dry run of what the board says, by the launcher itself: its verdict is the one a start would give.",
               "Ein Probelauf dessen, was das Board sagt, durch den Launcher selbst: Sein Urteil ist das eines Starts."),
@@ -125,7 +215,14 @@ AREA_TOURS = {
               "uses it.",
               "Zeigt die .sandbox-ai.json, die es schreiben wird, schreibt und vertraut ihr dann: Der nächste Start "
               "des Projekts nutzt sie."),
-             ("Apply, then start from the Start page.", "Übernehmen Sie und starten Sie dann von der Seite Start.")),
+             ("Apply, then press Start below the board.",
+              "Übernehmen Sie und drücken Sie dann Start unter dem Board.")),
+        step("start_controls", ("Start", "Starten"),
+             ("Start runs exactly this board, in a terminal tab of the app or a terminal window, as a session if you "
+              "like. Copy command (beside CLI command) puts its command line on the clipboard.",
+              "Start führt genau dieses Board aus, in einem Terminal-Tab der App oder einem Terminalfenster, auf "
+              "Wunsch als Sitzung. Befehl kopieren (neben Cli-Befehl) legt seine Befehlszeile in die Zwischenablage."),
+             ("Press Start once the findings are empty.", "Drücken Sie Start, sobald die Befunde leer sind.")),
     ),
     "sandboxes": (
         step("table", ("What runs and what is kept", "Was läuft und was bleibt"),
@@ -181,14 +278,25 @@ AREA_TOURS = {
              ("For a running start: allow or revoke destinations, devices and limits until it ends; Add workspace… "
               "mounts a folder or a single file of its host (with a name of its own); Add MCP server… gives it a "
               "server or a helper agent now, without a restart, and keeps it for its later starts, offering the "
-              "agent's restart where it needs one; Remove MCP server… takes one away.",
+              "agent's restart where it needs one; Remove MCP server… takes one away; Add toolchain… mounts a build "
+              "toolchain.",
               "Für einen laufenden Start: Ziele, Geräte und Grenzen erlauben oder zurücknehmen, bis er endet; "
               "Arbeitsordner hinzufügen… bindet einen Ordner oder eine einzelne Datei seines Hosts ein (mit eigenem "
               "Namen); MCP-Server hinzufügen… gibt ihm sofort und ohne Neustart einen Server oder einen "
               "Helfer-Agenten, behält ihn für die späteren Starts und bietet den Neustart des Agenten an, wo er "
-              "einen braucht; MCP-Server entfernen… nimmt einen weg."),
+              "einen braucht; MCP-Server entfernen… nimmt einen weg; Toolchain hinzufügen… hängt eine Bau-Toolchain "
+              "ein."),
              ("Select a running session and add a read-only folder.",
               "Wählen Sie eine laufende Sitzung und fügen Sie einen nur lesbaren Ordner hinzu.")),
+        step("toolchain_button", ("Add a toolchain", "Eine Toolchain hinzufügen"),
+             ("Add toolchain… mounts a build toolchain of its host's store - Go, Rust, a JDK, Node … - read-only into "
+              "the selected running sandbox, its commands on the agent's PATH, without a restart; Remove toolchain… "
+              "takes one out again. A toolchain of the signed catalog that the store lacks is fetched first.",
+              "Toolchain hinzufügen… hängt eine Bau-Toolchain aus dem Speicher seines Hosts - Go, Rust, ein JDK, "
+              "Node … - nur lesbar in die gewählte laufende Sandbox ein, ihre Befehle im PATH des Agenten, ohne "
+              "Neustart; Toolchain entfernen… nimmt eine wieder heraus. Eine Toolchain des signierten Katalogs, die "
+              "dem Speicher fehlt, wird zuerst geholt."),
+             ("Give a running session the Go toolchain.", "Geben Sie einer laufenden Sitzung die Go-Toolchain.")),
         step("resume_with_button", ("Resume with", "Fortsetzen mit"),
              ("Starts a kept start again with workspaces, mounts or MCP servers added (kept for its later starts), "
               "or restarts a running one now; the agent continues its conversation.",
@@ -202,6 +310,15 @@ AREA_TOURS = {
               "Stoppt die gewählte Sandbox; ihr Launcher räumt auf. Eine Sitzung lässt sich auch pausieren und "
               "fortsetzen."),
              ("Stop a run you no longer need.", "Stoppen Sie einen Lauf, den Sie nicht mehr brauchen.")),
+        step("cut_button", ("Cut its network", "Das Netz kappen"),
+             ("Kill switch cuts the network of the selected sandboxes at once, without a question: the internet, the "
+              "local network, all but the model API, or everything - their MCP servers and helpers too. Lift the cut "
+              "gives back exactly what they had; the emergency stop (Ctrl+Shift+X) cuts every sandbox on every host.",
+              "Kill-Switch kappt das Netz der gewählten Sandboxen sofort, ohne Rückfrage: das Internet, das lokale "
+              "Netz, alles außer der Modell-API oder alles - auch ihrer MCP-Server und Helfer. Kappung aufheben gibt "
+              "genau das zurück, was sie hatten; der Notaus (Strg+Umschalt+X) kappt jede Sandbox auf jedem Host."),
+             ("Open its menu and read the cuts it offers.", "Öffnen Sie sein Menü und lesen Sie die angebotenen "
+              "Kappungen.")),
         step("schedules_box", ("Schedules", "Zeitpläne"),
              ("The tab Schedules lists the scheduled runs of this machine or a host: an agent started on a "
               "timetable or a trigger, with a report of each run. Add…, Run now, Pause, History… and the timer that "
@@ -247,18 +364,21 @@ AREA_TOURS = {
               "bei jedem späteren Start - jedes sofort, Rückgängig nimmt es einige Sekunden lang zurück."),
              ("Answer the next question here.", "Beantworten Sie die nächste Frage hier.")),
         step("always", ("What you allowed always", "Was Sie immer erlaubt haben"),
-             ("Your standing answers, of this machine or of a host you choose below. Forget one and it is asked "
-              "again.",
-              "Ihre dauerhaften Antworten, die dieses Rechners oder eines Hosts, den Sie darunter wählen. Vergessen "
-              "Sie eine, wird wieder gefragt."),
+             ("Your standing answers, of this machine or of a host you choose below. Forget… one and it is asked "
+              "again; Ask again does the same for what a run decided.",
+              "Ihre dauerhaften Antworten, die dieses Rechners oder eines Hosts, den Sie darunter wählen. Vergessen… "
+              "Sie eine, wird wieder gefragt; Wieder fragen tut dasselbe für das, was ein Lauf entschied."),
              ("Look through them now and then.", "Sehen Sie sie ab und zu durch.")),
     ),
     "terminals": (
         step("tabs", ("Terminals in the app", "Terminals in der App"),
              ("The sandboxes started in the app, builds and logins, each in a tab. The agent runs in tmux window 0, a "
-              "shell in window 1.",
+              "shell in window 1. Right-click a tab for its session: Rename…, Restart, its files, a shell, Add "
+              "folder… and While it runs - allow, devices, MCP servers, toolchains.",
               "Die in der App gestarteten Sandboxen, Builds und Logins, jede in einem Tab. Der Agent läuft in "
-              "tmux-Fenster 0, eine Shell in Fenster 1."),
+              "tmux-Fenster 0, eine Shell in Fenster 1. Ein Rechtsklick auf einen Tab für seine Sitzung: "
+              "Umbenennen…, Neu starten, ihre Dateien, eine Shell, Ordner hinzufügen… und Während sie läuft - "
+              "erlauben, Geräte, MCP-Server, Toolchains."),
              ("Ctrl-b d detaches from a session: it keeps running.", "Strg-b d löst sich von einer Sitzung: Sie "
               "läuft weiter.")),
         step("starts", ("Sessions", "Sitzungen"),
@@ -333,14 +453,18 @@ AREA_TOURS = {
               "seit der Antwort davor."),
              ("Switch it off to read the whole conversation.", "Schalten Sie es aus, um das ganze Gespräch zu lesen.")),
         step("tabs", ("Parameters and raw", "Parameter und Rohdaten"),
-             ("The parameters as sent, the relay's changes marked; the raw record for everything else.",
-              "Die Parameter wie gesendet, die Änderungen des Relays markiert; der rohe Eintrag für alles Weitere."),
+             ("The parameters as sent, the relay's changes marked; the raw record for everything else. Export… "
+              "writes this request or the whole run as Markdown or JSON.",
+              "Die Parameter wie gesendet, die Änderungen des Relays markiert; der rohe Eintrag für alles Weitere. "
+              "Exportieren… schreibt diese Anfrage oder den ganzen Lauf als Markdown oder JSON."),
              ("Open Parameters.", "Öffnen Sie Parameter.")),
     ),
     "statistics": (
         step("directory", ("Tokens and calls", "Tokens und Aufrufe"),
-             ("Tokens, requests and tool calls per run and per agent, from a project's logs.",
-              "Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro Agent, aus den Protokollen eines Projekts."),
+             ("Tokens, requests and tool calls per run and per agent, from a project's logs. Report… writes them as "
+              "PDF, HTML or Markdown.",
+              "Tokens, Anfragen und Werkzeugaufrufe pro Lauf und pro Agent, aus den Protokollen eines Projekts. "
+              "Bericht… schreibt sie als PDF, HTML oder Markdown."),
              ("Pick a project and compare two runs.", "Wählen Sie ein Projekt und vergleichen Sie zwei Läufe.")),
     ),
     "monitor": (
@@ -355,8 +479,10 @@ AREA_TOURS = {
               "CPUs und Speicher über den gewählten Zeitraum, des gewählten Laufs oder Projekts, sonst des Hosts."),
              ("Choose 7 days.", "Wählen Sie 7 Tage.")),
         step("warnings", ("Warnings", "Warnungen"),
-             ("What needs a look, and what helps: a higher limit, or stopping an idle run.",
-              "Was einen Blick braucht, und was hilft: eine höhere Grenze oder einen untätigen Lauf stoppen."),
+             ("What needs a look, and what helps: a higher limit, or stopping an idle run. Do what it suggests… does "
+              "it, after asking.",
+              "Was einen Blick braucht, und was hilft: eine höhere Grenze oder einen untätigen Lauf stoppen. "
+              "Vorschlag ausführen… tut es, nach Rückfrage."),
              ("Select a warning.", "Wählen Sie eine Warnung.")),
     ),
     "files": (
@@ -380,9 +506,9 @@ AREA_TOURS = {
     "kits": (
         step("table", ("Kits", "Kits"),
              ("Skills, agents, commands, prompts, memory templates, hooks and plugins, in kits a project uses with "
-              "--kit.",
+              "--kit. New kit… makes one of your own.",
               "Skills, Agenten, Befehle, Prompts, Memory-Vorlagen, Hooks und Plugins, in Kits, die ein Projekt mit "
-              "--kit nutzt."),
+              "--kit nutzt. Neues Kit… legt ein eigenes an."),
              ("Select a kit to see what it holds.", "Wählen Sie ein Kit, um zu sehen, was es enthält.")),
         step("add_menu_button", ("Your own skill", "Ein eigener Skill"),
              ("Add to the kit › New skill…: a SKILL.md in a kit of yours, which the agent reads when it fits the "
@@ -403,10 +529,11 @@ AREA_TOURS = {
         step("market", ("Marketplaces", "Marktplätze"),
              ("Every plugin marketplace of the host with its plugins and their state: add a plugin to the kit chosen "
               "(the default kit or one of yours), turn it on or off, or take it out; the agents' own configuration "
-              "is only read.",
+              "is only read. Install the kits' plugins installs what the kits name.",
               "Jeder Plugin-Marktplatz des Hosts mit seinen Plugins und deren Zustand: ein Plugin zum gewählten Kit "
               "(dem Standard-Kit oder einem Ihrer Kits) hinzufügen, ein- oder ausschalten oder herausnehmen; die "
-              "eigene Konfiguration der Agenten wird nur gelesen."),
+              "eigene Konfiguration der Agenten wird nur gelesen. Plugins der Kits installieren installiert, was die "
+              "Kits nennen."),
              ("Pick a marketplace and look at its plugins.", "Wählen Sie einen Marktplatz und sehen Sie seine "
               "Plugins an.")),
     ),
@@ -424,6 +551,37 @@ AREA_TOURS = {
               "definiert ihn; ein Start nennt ihn mit --mcp."),
              ("Add a search server and connect it on the board.", "Fügen Sie einen Suchserver hinzu und verbinden "
               "Sie ihn auf dem Board.")),
+        step("properties_button", ("Its properties", "Seine Eigenschaften"),
+             ("Properties… (or a double-click) sets the selected server's limits for every start, its network, VPN, "
+              "folders and variables, each checked as you type.",
+              "Eigenschaften… (oder ein Doppelklick) setzt die Grenzen des gewählten Servers für jeden Start, sein "
+              "Netzwerk, VPN, seine Ordner und Variablen, jedes beim Tippen geprüft."),
+             ("Open the properties of a server and look at its folders.",
+              "Öffnen Sie die Eigenschaften eines Servers und sehen Sie sich seine Ordner an.")),
+        step("attach_button", ("Give it to a start", "Einem Start geben"),
+             ("Attach to… connects the selected server to an agent start; on Sandboxes & sessions, Add MCP server… "
+              "gives one to a running sandbox without a restart.",
+              "Verbinden mit… verbindet den gewählten Server mit einem Start eines Agenten; unter Sandboxen & "
+              "Sitzungen gibt MCP-Server hinzufügen… einer laufenden Sandbox einen ohne Neustart."),
+             ("Attach a server to a running start.", "Verbinden Sie einen Server mit einem laufenden Start.")),
+        step("copy_button", ("From another host", "Von einem anderen Host"),
+             ("From another host… copies a server of another host to the one shown (sandbox-ai mcp copy): a catalog "
+              "server is added from its catalog here, one of your own is checked first; what it takes is shown "
+              "before anything is copied.",
+              "Von einem anderen Host… kopiert einen Server eines anderen Hosts auf den gezeigten (sandbox-ai mcp "
+              "copy): Ein Katalog-Server wird hier aus seinem Katalog hinzugefügt, ein eigener zuerst geprüft; was "
+              "er braucht, wird gezeigt, bevor etwas kopiert wird."),
+             ("Copy a server of a host here, then Check it.", "Kopieren Sie einen Server eines Hosts hierher und "
+              "prüfen Sie ihn dann.")),
+        step("copy_to_button", ("To another host", "Auf einen anderen Host"),
+             ("Copy NAME to another host… copies the server selected to a host you choose (sandbox-ai mcp copy): "
+              "checked there first, and what it takes is shown before anything is copied. The right-click menu of "
+              "a server has it too.",
+              "NAME auf einen anderen Host kopieren… kopiert den gewählten Server auf einen Host Ihrer Wahl "
+              "(sandbox-ai mcp copy): dort zuerst geprüft, und was er braucht, wird gezeigt, bevor etwas kopiert "
+              "wird. Das Kontextmenü eines Servers hat es auch."),
+             ("Select a server and copy it to one of your hosts.",
+              "Wählen Sie einen Server und kopieren Sie ihn auf einen Ihrer Hosts.")),
     ),
     "llm": (
         step("host_box", ("Whose servers", "Wessen Server"),
@@ -452,10 +610,28 @@ AREA_TOURS = {
               "Start davon abhängt."),
              ("Check the server for the agent you use.", "Prüfen Sie den Server für den Agenten, den Sie nutzen.")),
         step("models_button", ("Its models", "Seine Modelle"),
-             ("What the server offers now; a start picks one with --llm NAME:MODEL.",
-              "Was der Server gerade anbietet; ein Start wählt eines mit --llm NAME:MODELL."),
+             ("What the server offers now, each with its traffic light for the agent chosen beside Check - green "
+              "first, then yellow, red and grey; a start picks one with --llm NAME:MODEL.",
+              "Was der Server gerade anbietet, jedes mit seiner Ampel für den neben Prüfen gewählten Agenten - zuerst "
+              "grün, dann gelb, rot und grau; ein Start wählt eines mit --llm NAME:MODELL."),
              ("List the models and note one for your next start.", "Listen Sie die Modelle auf und merken Sie sich "
               "eines für Ihren nächsten Start.")),
+        step("loaded_button", ("What it has loaded", "Was er geladen hat"),
+             ("Models on the server… shows what the server has loaded now and which running sandboxes use each "
+              "model: load or unload one, or Keep loaded so that two sandboxes do not unload each other's model.",
+              "Modelle auf dem Server… zeigt, was der Server gerade geladen hat und welche laufenden Sandboxen jedes "
+              "Modell nutzen: eines laden oder entladen oder Geladen halten, damit zwei Sandboxen einander nicht das "
+              "Modell entladen."),
+             ("Keep the model you use loaded.", "Halten Sie das Modell geladen, das Sie nutzen.")),
+        step("share_button", ("For all hosts", "Für alle Hosts"),
+             ("For all hosts… makes the selected server reachable from every host of sandbox-ai hosts: its entry is "
+              "copied there and kept in sync, its key only to the hosts you tick, with each host's state. The column "
+              "For all hosts says it for every server.",
+              "Für alle Hosts… macht den gewählten Server von jedem Host von sandbox-ai hosts aus erreichbar: Sein "
+              "Eintrag wird dorthin kopiert und abgeglichen, sein Schlüssel nur an die Hosts, die Sie ankreuzen, mit "
+              "dem Stand jedes Hosts. Die Spalte Für alle Hosts sagt es für jeden Server."),
+             ("Share a server with your hosts, its key with one of them.",
+              "Teilen Sie einen Server mit Ihren Hosts, seinen Schlüssel mit einem davon.")),
     ),
     "images": (
         step("images", ("The images", "Die Images"),
@@ -487,16 +663,27 @@ AREA_TOURS = {
              ("Save, then build.", "Speichern Sie, dann bauen Sie.")),
     ),
     "credentials": (
+        step("tabs", ("Logins, secrets, VPN", "Logins, Geheimnisse, VPN"),
+             ("Everything a sandbox may be handed, by kind: agents' logins, secrets, VPN profiles, Git logins and "
+              "identities, each on a tab of its own.",
+              "Alles, was eine Sandbox bekommen darf, nach Art: Logins der Agenten, Geheimnisse, VPN-Profile, "
+              "Git-Logins und Identitäten, jedes auf einem eigenen Tab."),
+             ("Open each tab once to see what is kept.", "Öffnen Sie jeden Tab einmal, um zu sehen, was aufbewahrt "
+              "wird.")),
         step("logins", ("Agent logins", "Logins der Agenten"),
-             ("Each agent's login, kept on this computer; a sandbox gets it when it starts, never more.",
+             ("Each agent's login, kept on this computer; a sandbox gets it when it starts, never more. Sign in to a "
+              "cloud subscription… opens the provider's sign-in in the app's browser; Give to a running sandbox… "
+              "hands a login to one that runs already.",
               "Der Login jedes Agenten, auf diesem Rechner aufbewahrt; eine Sandbox bekommt ihn beim Start, nie "
-              "mehr."),
+              "mehr. Bei einem Cloud-Abo anmelden… öffnet die Anmeldung des Anbieters im Browser der App; An "
+              "laufende Sandbox übergeben… gibt einen Login einer, die schon läuft."),
              ("Log in to your agent once.", "Melden Sie sich einmal bei Ihrem Agenten an.")),
         step("secrets", ("Secrets", "Geheimnisse"),
              ("API keys and tokens in your keyring (or private files). A start names them; with --api-key or "
-              "--publish they never enter the sandbox at all.",
+              "--publish they never enter the sandbox at all. Give to a running sandbox… hands one over later.",
               "API-Schlüssel und Tokens in Ihrem Schlüsselbund (oder privaten Dateien). Ein Start nennt sie; mit "
-              "--api-key oder --publish kommen sie nie in die Sandbox."),
+              "--api-key oder --publish kommen sie nie in die Sandbox. An laufende Sandbox übergeben… gibt eines "
+              "später."),
              ("Keep one secret by name.", "Bewahren Sie ein Geheimnis unter einem Namen auf.")),
         step("vpn", ("VPN profiles", "VPN-Profile"),
              ("WireGuard, OpenVPN, Mullvad or Tailscale in front of a sandbox; keys and configs stay here.",
@@ -515,31 +702,39 @@ AREA_TOURS = {
               "sehen."),
              ("Select a team.", "Wählen Sie ein Team.")),
         step("start_button", ("Start one", "Eines starten"),
-             ("Two or three agents on one workspace, the first leads; each member starts in a sandbox of its own.",
+             ("Two or three agents on one workspace, the first leads; each member starts in a sandbox of its own. "
+              "Talk to the lead opens the lead's terminal.",
               "Zwei oder drei Agenten auf einem Arbeitsordner, der erste leitet; jedes Mitglied startet in einer "
-              "eigenen Sandbox."),
+              "eigenen Sandbox. Mit der Leitung sprechen öffnet das Terminal der Leitung."),
              ("Start Claude Code with Codex on the current project.", "Starten Sie Claude Code mit Codex auf dem "
               "aktuellen Projekt.")),
         step("board", ("The board", "Das Board"),
-             ("The tasks between the members, and those you post: who for, their state, what they ask.",
-              "Die Aufgaben zwischen den Mitgliedern und die, die Sie stellen: für wen, ihr Stand, was sie verlangen."),
+             ("The tasks between the members, and those you post with Post a task…: who for, their state, what they "
+              "ask.",
+              "Die Aufgaben zwischen den Mitgliedern und die, die Sie mit Aufgabe stellen… stellen: für wen, ihr "
+              "Stand, was sie verlangen."),
              ("Post a task for a member and watch it change to done.", "Stellen Sie einem Mitglied eine Aufgabe und "
               "sehen Sie zu, wie sie erledigt wird.")),
     ),
     "system": (
         step("checks", ("What sandbox-ai needs", "Was sandbox-ai braucht"),
-             ("Podman or Bubblewrap, the images, the network, the keyring: each check with what fixes it.",
+             ("Podman or Bubblewrap, the images, the network, the keyring: each check with what fixes it. Beside "
+              "Administrator policy, Show… says what the administrator's policy allows.",
               "Podman oder Bubblewrap, die Images, das Netzwerk, der Schlüsselbund: jede Prüfung mit dem, was sie "
-              "behebt."),
+              "behebt. Neben Richtlinie des Administrators sagt Anzeigen…, was dessen Richtlinie erlaubt."),
              ("Run the checks and fix the first red one.", "Führen Sie die Prüfungen aus und beheben Sie die erste "
               "rote.")),
         step("theme", ("Look and language", "Aussehen und Sprache"),
-             ("The app's theme and language; the theme also follows your desktop when set to system.",
-              "Farbschema und Sprache der App; das Farbschema folgt Ihrem Desktop, wenn es auf System steht."),
+             ("The app's theme and language; the theme also follows your desktop when set to system. All settings… "
+              "has every other setting: fonts, notifications, the tray.",
+              "Farbschema und Sprache der App; das Farbschema folgt Ihrem Desktop, wenn es auf System steht. Alle "
+              "Einstellungen… hat jede weitere Einstellung: Schriften, Benachrichtigungen, das Tray."),
              ("Try another theme.", "Probieren Sie ein anderes Farbschema.")),
         step("update_button", ("Update", "Aktualisieren"),
-             ("Installs the newest sandbox-ai and the app; the old version stays until the new one works.",
-              "Installiert das neueste sandbox-ai und die App; die alte Version bleibt, bis die neue funktioniert."),
+             ("Check for updates looks for a newer sandbox-ai and app; Update sandbox-ai installs it, and the old "
+              "version stays until the new one works.",
+              "Auf Updates prüfen sucht ein neueres sandbox-ai und eine neuere App; sandbox-ai aktualisieren "
+              "installiert es, und die alte Version bleibt, bis die neue funktioniert."),
              ("Look for an update.", "Suchen Sie nach einem Update.")),
     ),
     "hosts": (
@@ -548,7 +743,8 @@ AREA_TOURS = {
               "its sandbox-ai version, the starts running and the questions waiting there.",
               "Rechner, deren sandbox-ai diese App über SSH verwaltet, etwa LXC-Container: ob jeder antwortete, "
               "seine sandbox-ai-Version, die dort laufenden Starts und die wartenden Fragen."),
-             ("Add a host with its SSH address.", "Fügen Sie einen Host mit seiner SSH-Adresse hinzu.")),
+             ("Add… a host with its SSH address.", "Fügen Sie mit Hinzufügen… einen Host mit seiner SSH-Adresse "
+              "hinzu.")),
         step("test_button", ("Test it", "Testen"),
              ("SSH, the host's sandbox-ai and its doctor: whether everything a sandbox needs is there.",
               "SSH, das sandbox-ai des Hosts und sein doctor: ob alles da ist, was eine Sandbox braucht."),
@@ -593,6 +789,12 @@ AREA_TOURS = {
               "Wege durch ganze Aufgaben über mehrere Seiten: der erste Start, ein eigenes Konstrukt als Vorlage, "
               "Freigaben, die Vorlagen-Galerie und diese Hilfe."),
              ("Start the tour of your own construct.", "Starten Sie die Tour zum eigenen Konstrukt.")),
+        step("tour_about_button", ("A tour about a topic", "Eine Tour zu einem Thema"),
+             ("Tour about… (Ctrl+F1) asks for a topic - network, presets, toolchains - and lists the best tours and "
+              "sections on it first.",
+              "Tour zu… (Strg+F1) fragt nach einem Thema - Netzwerk, Vorlagen, Toolchains - und listet die besten "
+              "Touren und Abschnitte dazu zuerst."),
+             ("Ask for a tour about toolchains.", "Fragen Sie nach einer Tour zu Toolchains.")),
     ),
 }
 
@@ -654,6 +856,14 @@ TASK_TOURS = {tour.id: tour for tour in (
               "Der Login des Agenten wird hier aufbewahrt, außerhalb jeder Sandbox; jeder Start bekommt eine "
               "Kopie."),
              ("Log in to your agent.", "Melden Sie sich bei Ihrem Agenten an."), "page:credentials"),
+        task("board", "view_switch", ("The Start page", "Die Seite Start"),
+             ("The Start page opens as a Board: the start as parts. This tour uses its other view, Expert - every "
+              "option a field and the command line as text. Both show the same start; the switch above the page "
+              "(or F6) changes the view.",
+              "Die Seite Start öffnet sich als Board: der Start als Teile. Diese Tour nutzt ihre andere Ansicht, "
+              "Experte - jede Option ein Feld und die Befehlszeile als Text. Beide zeigen denselben Start; der "
+              "Schalter über der Seite (oder F6) wechselt die Ansicht."),
+             ("Choose Expert above the page.", "Wählen Sie Experte über der Seite."), "page:launch"),
         task("launch", "open_button", ("Open the project", "Das Projekt öffnen"),
              ("The project folder becomes /work in the sandbox; nothing else of your home is visible.",
               "Der Projektordner wird in der Sandbox zu /work; sonst ist nichts von Ihrem Home sichtbar."),
@@ -748,13 +958,22 @@ TASK_TOURS = {tour.id: tour for tour in (
              ("Writes .sandbox-ai.json into the project after showing it, and trusts exactly that.",
               "Schreibt .sandbox-ai.json ins Projekt, nachdem es sie gezeigt hat, und vertraut genau dieser."),
              ("Press Apply… and confirm.", "Drücken Sie Übernehmen… und bestätigen Sie."), "board-applied"),
-        task("board", "gallery_button", ("Save it as your preset", "Als Ihre Vorlage speichern"),
-             ("New from preset… opens the gallery. Save the board as a preset… keeps this board under a title of "
-              "yours, without workspaces and secrets, under My presets.",
-              "Neu aus Vorlage… öffnet die Galerie. Board als Vorlage speichern… bewahrt dieses Board unter einem "
-              "Titel Ihrer Wahl auf, ohne Arbeitsordner und Geheimnisse, unter Meine Vorlagen."),
-             ("Open the gallery and save the board as a preset.", "Öffnen Sie die Galerie und speichern Sie das Board"
-                                                                  " als Vorlage."), "preset-mine"),
+        task("launch", "preview", ("The same start as text", "Derselbe Start als Text"),
+             ("The Expert view of the page shows what you built as fields and one command line - the mount, the "
+              "host, the limit. Edit the line and the Board follows; Copy command takes it to a terminal.",
+              "Die Ansicht Experte der Seite zeigt, was Sie gebaut haben, als Felder und eine Befehlszeile - die "
+              "Einbindung, den Host, die Grenze. Bearbeiten Sie die Zeile, und das Board folgt; Befehl kopieren "
+              "nimmt sie mit ins Terminal."),
+             ("Choose Expert above the page (or F6) and find --mount in the command line.",
+              "Wählen Sie Experte über der Seite (oder F6) und finden Sie --mount in der Befehlszeile."),
+             "page:launch"),
+        task("board", "save_preset_button", ("Save it as your preset", "Als Ihre Vorlage speichern"),
+             ("Save as preset… keeps this board under a title of yours, without workspaces and secrets, under My "
+              "presets of the gallery (New from preset…).",
+              "Als Vorlage speichern… bewahrt dieses Board unter einem Titel Ihrer Wahl auf, ohne Arbeitsordner und "
+              "Geheimnisse, unter Meine Vorlagen der Galerie (Neu aus Vorlage…)."),
+             ("Press Save as preset… and give it a title.", "Drücken Sie Als Vorlage speichern… und geben Sie ihr "
+                                                            "einen Titel."), "preset-mine"),
         task("board", "gallery_button", ("Start from your preset", "Von Ihrer Vorlage starten"),
              ("In any project, open the gallery, select your preset under My presets and press Create: the board "
               "is built from it. Then Start.",
@@ -893,3 +1112,17 @@ TASK_TOURS = {tour.id: tour for tour in (
 def task_tour(ident):
     """The TaskTour IDENT (KeyError for an unknown one)."""
     return TASK_TOURS[ident]
+
+
+def control(page, target):
+    """The name of PAGE's control TARGET as the tours call it (Text): its step in the page's tour, else the first
+    step of a task tour that points at it; None for a control no tour names. The Help's screenshots number and name
+    the controls by this, and its "Show me" outlines the same attribute as the tours: one definition for both."""
+    for one in AREA_TOURS.get(page, ()):
+        if one.target == target:
+            return one.title
+    for tour in TASK_TOURS.values():
+        for one in tour.steps:
+            if one.page == page and one.target == target:
+                return one.title
+    return None

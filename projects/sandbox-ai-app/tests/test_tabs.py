@@ -64,26 +64,27 @@ def test_the_terminals_sessions_are_folded_until_opened_and_kept_so(window, monk
 
 
 def test_the_start_page_shows_each_projects_own_values_as_the_tabs_switch(window, env, wait, monkeypatch):
-    """The Start page's form per project: what was entered for a project comes back with its tab; a project shown
-    the first time shows its trusted .sandbox-ai.json's values (left out of the command line: the launcher takes them
-    from the file) or, for a session, the options it was started with; kept for the next start."""
+    """The Start page's start per project (its board, shown by both views; here the Expert view's fields): what was
+    entered for a project comes back with its tab; a project shown the first time shows its .sandbox-ai.json's values
+    (all of them on the command line: a start of the page passes --no-config) or, with nothing of its own, the
+    options its session that runs was started with; kept for the next start."""
     one, two, three = project(env, "one"), project(env, "two"), project(env, "three")
     (two / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex",
                                                       "options": ["--offline", "--allow", "pypi.org"]}))
     window.sai.trust_project(window.sai.review_project(two))
-    launch = window.launch
+    launch, flush = window.launch, window.start_link.flush
     window.set_project(one)
     launch.agent.setCurrentText("claude")
     launch.form.widgets["--cpus"].setText("3")
-    window.set_project(two)
-    assert wait(lambda: launch.agent.currentText() == "codex", 10), "its trusted file's values, read in a thread"
+    window.set_project(two)  # (what was typed for the first project is its board's before the tab is left)
+    assert launch.agent.currentText() == "codex", "its file's values: the board is read from it"
     values = launch.form.values()
     assert values["--offline"] is True and values["--allow"] == ["pypi.org"] and values["--cpus"] == ""
     assert values["--workspace"] == [str(two)]
     argv = launch.argv()
-    assert "--offline" not in argv and "pypi.org" not in argv, "the launcher applies the file: not given twice"
+    assert "--offline" in argv and "pypi.org" in argv, "the start names every option itself"
     launch.form.widgets["--allow"].set_value(["pypi.org", "example.org"])
-    assert launch.argv()[-2:] == ["--allow", "example.org"], "what is added goes on the command line"
+    assert launch.argv()[-5:] == ["--allow", "pypi.org", "--allow", "example.org", "--offline"]
     window.tabs.setCurrentIndex(window.tabs.find(f"project:{one}"))
     assert launch.agent.currentText() == "claude" and launch.form.values()["--cpus"] == "3"
     assert launch.form.values()["--offline"] is False and launch.form.values()["--workspace"] == [str(one)]
@@ -100,8 +101,11 @@ def test_the_start_page_shows_each_projects_own_values_as_the_tabs_switch(window
     window.open_tab(instance_entry(window.sandboxes.instances["session:work"]))
     assert launch.agent.currentText() == "opencode" and launch.form.values()["--cpus"] == "2"
     assert launch.agent_args.text() == "--verbose" and launch.form.values()["--workspace"] == [str(three)]
+    assert window.board.board.first("limits").props == {"--cpus": "2"} and not window.board.dirty(), \
+        "the board's own base: nothing to undo or to apply"
     # Kept for the next start: the current tab's project shows its own values again.
     window.tabs.setCurrentIndex(window.tabs.find(f"project:{one}"))
+    flush()
     window.state.flush()
     again = make_window(monkeypatch)
     try:
@@ -114,27 +118,33 @@ def test_the_start_page_shows_each_projects_own_values_as_the_tabs_switch(window
         close(again)
 
 
-def test_a_project_shown_first_keeps_what_was_typed_before_its_file_is_read(window, env, wait, monkeypatch):
-    """The trusted file is read in a thread: when the human changed the form meanwhile, it is not overwritten."""
+def test_a_project_shown_first_keeps_what_was_typed_before_its_file_is_read(qapp, env, wait, monkeypatch):
+    """The Start form on its own (no Board beside it): the trusted file is read in a thread - when the human changed
+    the form meanwhile, it is not overwritten. (In the window the project's board is read from its file at once.)"""
+    from sandbox_ai_app.ui import LaunchPage
     one, two = project(env, "one"), project(env, "two")
     (two / ".sandbox-ai.json").write_text(json.dumps({"version": 1, "agent": "codex", "options": ["--offline"]}))
-    window.sai.trust_project(window.sai.review_project(two))
-    launch = window.launch
-    window.set_project(one)
-    held = []
-    monkeypatch.setattr("sandbox_ai_app.ui.background",
-                        lambda function, *args, done, **kw: held.append((function, args, done)))
-    window.set_project(two)
-    launch.form.widgets["--cpus"].setText("5")
-    for function, args, done in held:
-        done(function(*args), None)
-    assert launch.form.values()["--cpus"] == "5" and launch.form.values()["--offline"] is False
-    assert launch.file_values[str(two)] == {"--offline": True}, "known for the command line all the same"
+    sai = backend.SandboxAI()
+    sai.trust_project(sai.review_project(two))
+    launch = LaunchPage(sai, lambda *a, **k: None)
+    try:
+        launch.set_project(str(one))
+        held = []
+        monkeypatch.setattr("sandbox_ai_app.ui.background",
+                            lambda function, *args, done, **kw: held.append((function, args, done)))
+        launch.set_project(str(two))
+        launch.form.widgets["--cpus"].setText("5")
+        for function, args, done in held:
+            done(function(*args), None)
+        assert launch.form.values()["--cpus"] == "5" and launch.form.values()["--offline"] is False
+        assert launch.file_values[str(two)] == {"--offline": True}, "known for the command line all the same"
+    finally:
+        launch.deleteLater()
 
 
 def test_a_new_project_never_gets_the_last_projects_folders_or_limits(window, env, wait):
     """A project shown the first time with nothing of its own (no file, no session) starts from the defaults: the
-    last project's mounts, devices or limits are not carried over to it."""
+    last project's mounts, devices or limits are not carried over to it (each project has its own start)."""
     one, two = project(env, "carry-one"), project(env, "carry-two")
     launch = window.launch
     window.set_project(one)
@@ -143,8 +153,10 @@ def test_a_new_project_never_gets_the_last_projects_folders_or_limits(window, en
     window.set_project(two)
     values = launch.form.values()
     assert values["--cpus"] == "" and not values["--mount"] and values["--workspace"] == [str(two)]
+    assert not window.board.board.of_kind("mount") and window.board.board.first("limits") is None
     window.set_project(one)
     assert launch.form.values()["--cpus"] == "3", "the first project keeps its own"
+    assert launch.form.values()["--mount"] == [f"{env}:/mnt/secret:rw"]
 
 
 def test_without_file_values():

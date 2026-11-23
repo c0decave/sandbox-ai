@@ -77,8 +77,9 @@ def _page_tips():
 KIND_SECTIONS = {"workspace": "workspaces-mounts", "mount": "workspaces-mounts", "home": "secrets", "kits": "kits",
                  "agent": "sandbox", "approvals": "approvals", "proxy": "proxy", "git": "secrets", "mcp": "mcp",
                  "llm": "llm", "service": "services", "network": "network", "vpn": "vpn-tor", "devices": "devices", "toolchains": "toolchains", "limits": "limits",
-                 "display": "display", "browser": "browser", "cairn": "cairn", "session": "sessions", "logs": "logs",
-                 "engine": "sandbox", "bridge": "bridges", "team": "page-team"}
+                 "display": "display", "browser": "browser", "cairn": "cairn", "artex": "artex", "session": "sessions",
+                 "logs": "logs",
+                 "engine": "sandbox", "bridge": "bridges", "team": "page-team", "other": "page-launch"}
 KIND_DOES = {
     "workspace": ("Connected to the agent, its folder is mounted: the first at /work (the project file is written "
                   "there), further ones at /workspaces/NAME. Not connected, it does not count.",
@@ -155,11 +156,21 @@ KIND_DOES = {
                 "Sitzungen) zeigt ihn als Tab unter Terminals neben dem Terminal der Sitzung. Sein Image wird einmal "
                 "gebaut: sandbox-ai build browser."),
     "cairn": ("Cairn's board in its own container beside the agent, on the agent's network, opened in the sandbox's "
-              "browser; the session's agents are its workers, reached through a relay that takes only Cairn's own "
-              "command lines. Its image is built once: sandbox-ai build cairn.",
+              "browser; the session's agents of any harness are its workers, each with its traffic light, reached "
+              "through a relay that takes only Cairn's own command lines. Its image is built once: sandbox-ai build "
+              "cairn.",
               "Cairns Brett in einem eigenen Container neben dem Agenten, im Netz des Agenten, geöffnet im Browser "
-              "der Sandbox; die Agenten der Sitzung sind seine Worker, erreicht über ein Relay, das nur Cairns eigene "
-              "Befehlszeilen annimmt. Sein Image wird einmal gebaut: sandbox-ai build cairn."),
+              "der Sandbox; die Agenten der Sitzung jedes Harness sind seine Worker, jeder mit seiner Ampel, "
+              "erreicht über ein Relay, das nur Cairns eigene Befehlszeilen annimmt. Sein Image wird einmal gebaut: "
+              "sandbox-ai build cairn."),
+    "artex": ("ARTEX, an AI penetration-testing platform, in its own container beside the agent, on the agent's "
+              "network: its targets only what the allow-list opens; its console on this computer's 127.0.0.1 "
+              "(sandbox-ai artex console: address and password). Its image is built once from the reviewed source: "
+              "sandbox-ai build artex.",
+              "ARTEX, eine KI-Plattform für Penetrationstests, in einem eigenen Container neben dem Agenten, im Netz "
+              "des Agenten: seine Ziele nur, was die Erlaubnisliste öffnet; seine Konsole auf 127.0.0.1 dieses "
+              "Rechners (sandbox-ai artex console: Adresse und Passwort). Sein Image wird einmal aus dem geprüften "
+              "Quelltext gebaut: sandbox-ai build artex."),
     "session": ("tmux inside the sandbox or not; a session itself is started with Start and as session.",
                 "tmux in der Sandbox oder nicht; eine Sitzung selbst starten Sie mit Start und als Sitzung."),
     "logs": ("Where the connection and file logs go (outside the sandbox) and how much they keep.",
@@ -184,6 +195,17 @@ KIND_DOES = {
              "geschrieben."),
     "engine": ("Podman or Bubblewrap, the image or variant, and the agent's executable.",
                "Podman oder Bubblewrap, das Image oder die Variante und die ausführbare Datei des Agenten."),
+    "other": ("Holds the options of the start that no other part shows, exactly as the command line has them: the "
+              "security mode, canaries, a name, checkpoints, a preset of sandbox-ai, an option of another version. "
+              "The board puts the part there when a command line, a preset or a project file brings such an option; "
+              "its field takes them as a shell does, and an option another part owns moves to that part. The Expert "
+              "view of the Start page has a field for each of them. Removed, its options are gone from the start.",
+              "Enthält die Optionen des Starts, die kein anderer Teil zeigt, genau wie die Befehlszeile sie hat: den "
+              "Sicherheitsmodus, Canaries, einen Namen, Checkpoints, ein Preset von sandbox-ai, eine Option einer "
+              "anderen Version. Das Board legt den Teil an, wenn eine Befehlszeile, ein Preset oder eine "
+              "Projektdatei eine solche Option mitbringt; sein Feld nimmt sie, wie eine Shell es tut, und eine "
+              "Option, die einem anderen Teil gehört, wandert zu diesem Teil. Die Ansicht Experte der Seite Start "
+              "hat für jede ein eigenes Feld. Wird er entfernt, sind seine Optionen aus dem Start verschwunden."),
 }
 
 
@@ -253,12 +275,16 @@ AREA_TIPS = (
           "markiert."),
          "sandbox-ai AGENT --help", "page-launch"),
     _tip("launch.preview", ("The command line", "Die Befehlszeile"),
-         ("Exactly what the app runs for a start, as you would type it in a terminal.",
-          "Genau das, was die App für einen Start ausführt, so wie Sie es in einem Terminal tippen würden."),
-         ("Copy it to start the same sandbox from a shell, a script or another machine.",
-          "Kopieren Sie sie, um dieselbe Sandbox aus einer Shell, einem Skript oder auf einem anderen Rechner zu "
-          "starten."),
-         "", "page-launch"),
+         ("Exactly what the app runs for a start, as you would type it in a terminal - and a field: edit an option "
+          "or paste a whole line, and once it can be read the fields above and the Board show it.",
+          "Genau das, was die App für einen Start ausführt, so wie Sie es in einem Terminal tippen würden - und ein "
+          "Feld: Bearbeiten Sie eine Option oder fügen Sie eine ganze Zeile ein; sobald sie lesbar ist, zeigen die "
+          "Felder darüber und das Board sie."),
+         ("A line that cannot be read changes nothing and says why below it. Copy command copies it to start the "
+          "same sandbox from a shell, a script or another machine.",
+          "Eine Zeile, die sich nicht lesen lässt, ändert nichts und sagt darunter, warum. Befehl kopieren kopiert "
+          "sie, um dieselbe Sandbox aus einer Shell, einem Skript oder auf einem anderen Rechner zu starten."),
+         "sandbox-ai AGENT [options] [-- ARGS]", "page-launch"),
     _tip("launch.dry", ("Dry run", "Probelauf"),
          ("The launcher checks options, policy, images and network and shows its plan.",
           "Der Launcher prüft Optionen, Richtlinie, Images und Netzwerk und zeigt seinen Plan."),
@@ -1311,6 +1337,8 @@ TERMS = _terms(
 # The settings of the Settings dialog, by their key (backend.SETTINGS).
 SETTING_TIPS = _terms(
     ("theme", "The app's colours and shapes.", "Farben und Formen der App."),
+    ("reading_font", "A font made for reading, for all text and the Help; terminals and code keep theirs.",
+     "Eine zum Lesen gemachte Schrift für alle Texte und die Hilfe; Terminals und Code behalten ihre."),
     ("ui_font", "The font of the app's texts; empty: the theme's. Only fonts installed here are used, nothing is "
      "downloaded.", "Die Schrift der Texte der App; leer: die des Farbschemas. Nur hier installierte Schriften werden "
      "verwendet, nichts wird heruntergeladen."),
@@ -1419,6 +1447,10 @@ SETTING_TIPS = _terms(
     ("ask_timeout", "How long a request waits for your answer (--ask-timeout wins). Then it fails; its question "
      "stays open (Timed out).", "Wie lange eine Anfrage auf Ihre Antwort wartet (--ask-timeout geht vor). Dann "
      "scheitert sie; ihre Rückfrage bleibt offen (Zeit abgelaufen)."),
+    ("fix_questions", "When a start lacks something sandbox-ai can provide: one question for everything it would "
+     "do, or one per fix. Unsigned fixes are always named.", "Wenn einem Start etwas fehlt, das sandbox-ai "
+     "bereitstellen kann: eine Frage für alles, was es täte, oder eine je Korrektur. Unsigniertes wird immer "
+     "genannt."),
     ("sandboxes_interval", "How often the list of running sandboxes is read again.",
      "Wie oft die Liste der laufenden Sandboxen neu gelesen wird."),
     ("connections_interval", "How often the connection log is read again.",

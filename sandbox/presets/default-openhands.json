@@ -25,6 +25,6 @@
     "OpenHands' interactive surface is the Agent Canvas, its web UI on the sandbox's loopback (http://127.0.0.1:8000/): add --browser to see it in the sandbox's own browser, which starts on it (the app's Browser button; Podman). One task without the UI: sandbox-ai openhands -- task \"TASK\".",
     "Nothing else is open: package registries, GitHub and every other host are refused or asked (--ask). For more: the preset coding-openhands or sandbox-ai net allow during the run.",
     "Its telemetry is always off and cannot be turned on.",
-    "OpenHands is not live-tested yet (a start says so); its image first: sandbox-ai build openhands (a start builds it when it is missing)."
+    "Its image first: sandbox-ai build openhands (a start builds it when it is missing)."
   ]
 }

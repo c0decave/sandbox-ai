@@ -70,6 +70,17 @@ def placeholder(kind):
     return f"sandbox-ai-publish-placeholder-{'pypi' if kind in ('pypi', 'testpypi') else kind}"
 
 
+# A GraphQL request that is not a plain query: every one except a JSON object whose "query" is a text without the
+# word mutation (GraphQL has no escapes in names, so a mutation's keyword is always there as written; a batch, a
+# body that is no JSON or a key given twice is unknown, so asked).
+GRAPHQL_MUTATION = {"not": {"type": "object", "properties": {"query": {"type": "string", "not": {"glob": "*mutation*"}}}}}
+# A body that may make a repository public: anything but an object whose visibility fields (if any) keep it private.
+MADE_PUBLIC_GITHUB = {"not": {"type": "object", "properties": {
+    "private": {"optional": True, "const": True}, "visibility": {"optional": True, "enum": ["private"]}}}}
+MADE_PUBLIC_GITLAB = {"not": {"type": "object", "properties": {
+    "visibility": {"optional": True, "enum": ["private"]}}}}
+
+
 # What each kind is: its hosts (the first is the one --url replaces), how the token goes on the wire
 # ("header": in place of the placeholder in a credential header; "basic": inside a Basic login), the agent's
 # variables (VALUE "{placeholder}" or a fixed text) and the requests that are asked.
@@ -94,21 +105,45 @@ KINDS = {
                         "the owners of a crate on {host}"}]},
     "gitlab": {"title": "GitLab API (glab, packages, releases)", "hosts": ["gitlab.com"], "wire": "header",
                "env": {"GITLAB_TOKEN": "{placeholder}"},
-               "ask": [{"methods": WRITES, "path": ["/api/v4/projects/*/packages/**", "/api/v4/projects/*/releases/**",
-                                                    "/api/v4/projects/*/repository/files/**",
-                                                    "/api/v4/projects/*/repository/commits/**",
-                                                    "/api/v4/projects/*/uploads/**", "/api/v4/snippets/**",
-                                                    "/api/v4/projects/*/snippets/**"],
+               # A project is named by its number or its path (group%2Fsub%2Fproject, glab's way: decoded, several
+               # segments - hence ** for it).
+               "ask": [{"methods": WRITES, "path": ["/api/v4/projects/**/packages/**",
+                                                    "/api/v4/projects/**/releases/**",
+                                                    "/api/v4/projects/**/repository/files/**",
+                                                    "/api/v4/projects/**/repository/commits/**",
+                                                    "/api/v4/projects/**/uploads/**", "/api/v4/snippets/**",
+                                                    "/api/v4/projects/**/snippets/**"],
                         "reason": "publishes on {host} (a package, a release, a file or commit the push's privacy "
-                                  "check does not see, a snippet)"}]},
+                                  "check does not see, a snippet)"},
+                       {"methods": WRITES, "path": "/api/graphql", "body": GRAPHQL_MUTATION,
+                        "reason": "changes something on {host} through its GraphQL API (commitCreate writes files "
+                                  "the push's privacy check does not see)"},
+                       {"methods": ["PUT", "POST"], "path": "/api/v4/projects/**", "body": MADE_PUBLIC_GITLAB,
+                        "reason": "changes a project's visibility on {host} (a public one publishes all of it)"},
+                       {"methods": ["PUT", "POST"], "path": "/api/v4/projects/**",
+                        "query": {"visibility": {"not": {"enum": ["private"]}}},
+                        "reason": "changes a project's visibility on {host} (a public one publishes all of it)"}]},
     "github": {"title": "GitHub API (gh, releases, packages)", "hosts": ["api.github.com", "uploads.github.com"],
                "wire": "header", "env": {"GH_TOKEN": "{placeholder}"},
+               # (/repositories/ID/...: a repository by its number, as GitHub's own links name it)
                "ask": [{"methods": WRITES, "path": ["/repos/*/*/releases/**", "/repos/*/*/contents/**",
-                                                    "/repos/*/*/git/**", "/gists/**", "/user/packages/**",
-                                                    "/orgs/*/packages/**"],
+                                                    "/repos/*/*/git/**", "/repositories/*/releases/**",
+                                                    "/repositories/*/contents/**", "/repositories/*/git/**",
+                                                    "/gists/**", "/user/packages/**", "/orgs/*/packages/**"],
                         "reason": "publishes on {host} (a release, a file or commit the push's privacy check does not "
                                   "see, a gist, a package)"},
-                       {"host": 1, "methods": WRITES, "path": "/**", "reason": "uploads a release asset to {host}"}]},
+                       {"methods": WRITES, "path": ["/graphql", "/api/graphql"], "body": GRAPHQL_MUTATION,
+                        "reason": "changes something on {host} through its GraphQL API (createCommitOnBranch writes "
+                                  "files the push's privacy check does not see)"},
+                       {"methods": ["PATCH", "POST", "PUT"], "path": ["/repos/*/*", "/repositories/*"],
+                        "body": MADE_PUBLIC_GITHUB,
+                        "reason": "changes a repository's visibility on {host} (a public one publishes all of it)"},
+                       {"host": 1, "methods": WRITES, "path": "/**", "reason": "uploads a release asset to {host}"},
+                       {"own": True, "methods": WRITES, "path": "/api/uploads/**",
+                        "reason": "uploads a release asset to {host}"}],
+               # GitHub Enterprise (a server of your own) answers its REST API below /api/v3, its uploads below
+               # /api/uploads: each path above holds there too.
+               "own_prefix": "/api/v3"},
 }
 _launcher = None
 
@@ -265,7 +300,13 @@ def rules(kinds, logins=None):
     http = []
     for login, spec in selected(kinds, logins):
         hosts = hosts_of(login["kind"], login["host"])
+        own = login["host"] != spec["hosts"][0]
         for index, rule in enumerate(spec["ask"], 1):
+            if rule.get("own") and not own:
+                continue
+            paths = [rule["path"]] if isinstance(rule["path"], str) else list(rule["path"])
+            if own and spec.get("own_prefix"):
+                paths += [spec["own_prefix"] + path for path in paths if not path.startswith("/api/")]
             if isinstance(rule.get("host"), int):
                 if rule["host"] >= len(hosts):
                     continue  # GitHub Enterprise: no uploads host of its own
@@ -273,7 +314,9 @@ def rules(kinds, logins=None):
             else:
                 host = hosts[0]
             http.append({"id": f"publish-{login['kind']}-{index}", "host": host, "methods": rule["methods"],
-                         "path": rule["path"], "decision": "ask", "reason": rule["reason"].format(host=host)})
+                         "path": paths if len(paths) > 1 else paths[0],
+                         **{key: rule[key] for key in ("query", "body") if key in rule},
+                         "decision": "ask", "reason": rule["reason"].format(host=host)})
     return {"version": 1, "description": "--publish: every request that publishes is asked", "http": http} if http \
         else None
 

@@ -24,6 +24,13 @@ def texts_of(language):
     for section in help_content.SECTIONS:
         yield f"help {section.id}", getattr(section.title, language)
         yield f"help {section.id}", getattr(section.body, language)
+        if section.summary is not None:  # the first view (help_pages.py): its sentence and steps; commands are code
+            yield f"help {section.id}", getattr(section.summary, language)
+        for task in section.tasks:
+            yield f"help {section.id}", getattr(task.title, language)
+            for step in task.steps:
+                if not getattr(step, language).startswith("$ "):
+                    yield f"help {section.id}", getattr(step, language)
     for tip in help_texts.TIPS.values():
         for text in (tip.title, tip.what, tip.does):
             if text is not None:
@@ -181,6 +188,7 @@ def test_the_help_says_live_mcp_servers_are_kept_and_the_start_page_follows_its_
     sandboxes = help_content.BY_ID["page-sandboxes"].body.en
     assert "as a tree" in sandboxes and "Resume with…" in sandboxes
     assert "Two panes" in help_content.BY_ID["page-files"].body.en
-    assert [s.target for s in tours.AREA_TOURS["launch"]][:5] == [None, "agent", "host_choice", "model_choice",
-                                                                  "profile"]
+    # (the page's switch between its two views first: Board | Expert)
+    assert [s.target for s in tours.AREA_TOURS["launch"]][:6] == [None, "view_switch", "agent", "host_choice",
+                                                                  "model_choice", "profile"]
     assert "dry_button" in [s.target for s in tours.AREA_TOURS["launch"]]

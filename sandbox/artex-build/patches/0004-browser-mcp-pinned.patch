@@ -1,0 +1,23 @@
+sandbox-ai's patch 4 of 4 to ARTEX v0.3.15: db/db.go - the seeded browser MCP is the image's pinned
+playwright-mcp on the image's Chromium, not npx @playwright/mcp
+
+diff --git a/db/db.go b/db/db.go
+index 90f9fcb..288ea18 100644
+--- a/db/db.go
++++ b/db/db.go
+@@ -257,11 +257,13 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
+ 	// the recording proxy + CA at runtime (server.Manager.syncBrowserMCPProxy).
+ 	// Insert only if absent so we never clobber user edits (args/env/enabled/
+ 	// visibility) on restart.
++	// sandbox-ai: the Playwright MCP installed in the image at its pinned version, on the image's
++	// Chromium (upstream: npx @playwright/mcp, which fetches whatever the registry has).
+ 	if _, err := d.Exec(`
+ INSERT INTO mcp_servers(name, transport, command, args, env, enabled)
+-VALUES ('browser', 'stdio', 'npx', $1, '{}', false)
++VALUES ('browser', 'stdio', 'playwright-mcp', $1, '{}', false)
+ ON CONFLICT (name) DO NOTHING`,
+-		`["@playwright/mcp","--headless"]`); err != nil {
++		`["--headless","--no-sandbox","--executable-path","/usr/lib/chromium/chromium"]`); err != nil {
+ 		return fmt.Errorf("seed browser mcp: %w", err)
+ 	}
+ 	// NOTE: the placeholder ScopeSentry data-source MCP (empty URL + empty X-API-Key,

@@ -85,6 +85,7 @@ def test_the_check_catches_a_missing_name(tmp_path):
 # approvals meanwhile, or questions are refused after a minute). Declared here; test_every_slow_backend_method_is_declared
 # finds every method of backend.py that runs a process, sleeps or calls one of these, and wants it here too.
 BLOCKING_SAI = {"host_toolchains", "toolchains_of_run", "toolchain_add", "toolchain_attach", "toolchain_detach",
+                "host_fix_plan",  # `AGENT ... --fix-plan` on the start's host (the prerequisites' background read)
                 "call", "_call", "bridges", "bridge_json", "bridge_plan", "bridge_add", "bridge_show", "bridge_revoke",
                 "host_bridges", "bridge_resume", "answer", "dry_run", "doctor", "mcp_catalog", "statistics", "set_secret",
                 "mcp_tool_budget",  # mcp_budget.start_report: the profiles, the definitions, the pins read
@@ -117,13 +118,13 @@ BLOCKING_SAI = {"host_toolchains", "toolchains_of_run", "toolchain_add", "toolch
                 "collect", "host_set", "host_add", "host_remove", "collect_as_shown", "state_usage", "home_details",
                 "host_devices_added",
                 "host_workspaces", "host_secrets", "secret_exists", "host_approvals_history", "session_ids",
-                "recent_folders", "host_install",
+                "recent_folders", "host_install", "host_uninstall", "host_uninstall_plan",
                 # starts, MCP servers, net keep, the privacy check, version and demo device on a host (or here)
                 "host_launch_options", "host_dry_run", "host_mcp_servers", "host_mcp_list", "host_mcp_catalog", "host_mcp_targets",
                 "host_mcp_attach", "net_keep", "privacy_check", "version_details", "host_doctor", "demo_device",
                 # MCP servers of another host copied to one (sandbox-ai mcp copy here, over SSH to both), and the
                 # servers of every other host it offers (mcp list --json on each)
-                "host_mcp_copy", "host_mcp_copy_check", "host_mcp_elsewhere",
+                "host_mcp_copy", "host_mcp_copy_check", "host_mcp_elsewhere", "host_mcp_update",
                 # a board or session as one file, and such a file taken in (sandbox-ai board export|import; with
                 # images: minutes)
                 "board_export", "board_import",
@@ -184,6 +185,12 @@ BLOCKING_SAI = {"host_toolchains", "toolchains_of_run", "toolchain_add", "toolch
 # stop_commands only when quitting, bounded by one grace period; end_groups is its part.
 ON_PURPOSE = {"stop_commands", "end_groups"}
 ON_PURPOSE_MARK = "on the GUI thread on purpose"
+# The only functions whose lines may carry the mark (module, function): the app's start before it has a window (the
+# single instance's bounded probes) and its end. Nothing a page does while the window is shown - round 1 left the
+# Start's `podman image exists` marked so (prerequisites.agent_images_built, up to 5 s); round 2 moved it into the
+# background (look_at_agent_image) and took it off this list.
+ON_PURPOSE_SITES = {("single_instance.py", "ask"), ("single_instance.py", "tell"), ("single_instance.py", "meet"),
+                    ("single_instance.py", "claim"), ("instance_probe.py", "command_line"), ("ui.py", "stop_work")}
 BLOCKING_MODULES = {"subprocess"}
 BLOCKING_TIME = {"sleep"}  # time.sleep: never in a handler (a QTimer waits instead)
 # QProcess's waits (and QThread.wait) block the event loop until the process (thread) is done: AsyncCommand's signals
@@ -216,11 +223,20 @@ BLOCKING_HELPERS = {"WL": {"list_endpoints", "add_and_check", "list_models", "de
                     "remote": {"RemoteRoot", "scan_host", "fingerprints", "Sftp",
                                # a host's folders looked at and made over SFTP (an MCP server's, Add… on a host)
                                "folder_states", "make_folders"}}
-# widgets.background, ThreadCall, Task.thread and call_watched; the Kits page's start_change (its Task.call_watched)
-WRAPPERS = {"background", "ThreadCall", "thread", "call_watched", "start_change", "run_each",
-            # the Files page's: at once for a local root, in a thread (Task with Cancel / background) for a remote one;
-            # run_job: its Task.thread, the remote roots named for Cancel
-            "root_job", "on_root", "run_job"}
+# widgets.background, ThreadCall, Task.thread and call_watched; the Kits page's start_change (its Task.call_watched);
+# the Files page's root_job, on_root (at once for a local root, in a thread - Task with Cancel / background - for a
+# remote one) and run_job (its Task.thread, the remote roots named for Cancel). Each with the position of its work
+# (what runs in the thread): the other arguments - done, the text - are the GUI thread's (round 2: a done= lambda and
+# a Task's done counted as work, and what they called slowly was never looked at).
+WRAPPERS = {"background": 0, "ThreadCall": 0, "thread": 0, "call_watched": 1, "start_change": 0, "run_each": 0,
+            "root_job": 1, "on_root": 1, "run_job": 1,
+            "job": 1}  # (file_properties: the Files page's root_job handed in as job=)
+WORK_KEYWORDS = {"function", "work"}  # (background's work=True is a flag: only a callable there is work)
+PARTIALS = {"partial"}
+# Functions of the pages that return a slow callable (functools.partial(sai.host_run, host)) for a dialog of another
+# module, which runs it in its own background(): llm_page.LlmDialog's Test connection, llm_loaded_view.LoadedDialog.
+HANDED_ON = {("llm_page.py", "runner"), ("llm_page.py", "requirement")}
+PROCESS_CALLS = {"run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"}  # functools.partial(F, ...): F runs where the partial is called
 # The modules not checked call by call: backend.py (what is slow is declared above), widgets.py (background, ThreadCall
 # and Task themselves; the waits of the app's end), and the helpers whose slow functions the pages may only hand to a
 # wrapper (files.py, wizard_llm.py, presets.py, name_fields.py, chromium.py: BLOCKING_FILES, BLOCKING_HELPERS) or that
@@ -276,39 +292,63 @@ def blocking(node):
     return None
 
 
-def handed_methods(tree):
-    """The names of methods handed to a wrapper as self.NAME (background(self.scan, ...)) and never called directly
-    (self.NAME(...)) in the module: their body runs in the wrapper's thread."""
-    handed, called = set(), set()
+def work_of(call):
+    """The node CALL (a wrapper's call) runs in its thread: its argument at the wrapper's work position, or a WORK_KEYWORDS
+    keyword's value that is not a constant; None if CALL is no wrapper's."""
+    if not isinstance(call, ast.Call) or call_name(call) not in WRAPPERS:
+        return []
+    found = [call.args[WRAPPERS[call_name(call)]]] if len(call.args) > WRAPPERS[call_name(call)] else []
+    return found + [k.value for k in call.keywords if k.arg in WORK_KEYWORDS and not isinstance(k.value, ast.Constant)]
+
+
+def at_work(node, parents):
+    """True if NODE is a wrapper's work, or the function a functools.partial at a wrapper's work wraps."""
+    parent = parents.get(node)
+    if isinstance(parent, ast.keyword):
+        parent = parents.get(parent)
+    if any(node is work for work in work_of(parent)):
+        return True
+    return isinstance(parent, ast.Call) and call_name(parent) in PARTIALS and parent.args and parent.args[0] is node \
+        and at_work(parent, parents)
+
+
+def self_attributes(tree):
+    """{NAME: [the self.NAME nodes of the module]} - every reference, a call's or a callback's."""
+    found = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and call_name(node) in WRAPPERS:
-            for value in [*node.args, *(k.value for k in node.keywords)]:
-                if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "self":
-                    handed.add(value.attr)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
-                isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
-            called.add(node.func.attr)
-    return handed - called
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self":
+            found.setdefault(node.attr, []).append(node)
+    return found
 
 
-def deferred(node, parents, handed=frozenset()):
-    """True if NODE lies in a lambda handed to a wrapper, in a nested function whose name is, or in a method that is
-    (HANDED: handed_methods)."""
+def handed_methods(tree, parents=None):
+    """The names of methods handed to a wrapper as its work (background(self.scan, ...)) and never referenced
+    otherwise in the module - neither called (self.NAME(...)) nor passed elsewhere (connect(self.NAME), done=self.NAME):
+    their body runs in the wrapper's thread."""
+    parents = parents or {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    return {name for name, nodes in self_attributes(tree).items() if all(at_work(node, parents) for node in nodes)}
+
+
+def deferred(node, parents, handed=frozenset(), strict=False):
+    """True if NODE lies in what a wrapper runs in its thread: a lambda (or a functools.partial) that is its work, a
+    nested function handed to one as its work by its name and not referenced otherwise in the function it is defined
+    in, or a method that is so (HANDED: handed_methods, called_only_deferred). A wrapper's answer (done=, a Task's
+    done) is the GUI thread's. (STRICT: kept for the callers; the same now.)"""
     child, parent = node, parents.get(node)
     while parent is not None:
-        if isinstance(child, ast.Lambda) and isinstance(parent, ast.Call) and call_name(parent) in WRAPPERS \
-                and child is not parent.func:
+        if isinstance(child, (ast.Lambda, ast.Call)) and at_work(child, parents) and \
+                (isinstance(child, ast.Lambda) or call_name(child) in PARTIALS):
             return True
-        if isinstance(child, ast.keyword) and isinstance(parent, ast.Call) and call_name(parent) in WRAPPERS \
-                and isinstance(child.value, ast.Lambda):
-            return True
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(parent, (ast.FunctionDef,
-                                                                                            ast.AsyncFunctionDef)):
-            handed_here = any(isinstance(n, ast.Call) and call_name(n) in WRAPPERS and any(
-                isinstance(a, ast.Name) and a.id == child.name for a in [*n.args, *(k.value for k in n.keywords)])
-                for n in ast.walk(parent))
-            if handed_here:
-                return True
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # A nested function handed to a wrapper by its name in the function it is defined in (also inside an
+            # if, a with or a loop of that function) - and nowhere else (connect(read): that run is the GUI thread's)
+            outer = parent
+            while outer is not None and not isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                outer = parents.get(outer)
+            if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                uses = [n for n in ast.walk(outer) if isinstance(n, ast.Name) and n.id == child.name]
+                if uses and all(at_work(n, parents) for n in uses):
+                    return True
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(parent, ast.ClassDef) and \
                 child.name in handed:
             return True
@@ -316,13 +356,134 @@ def deferred(node, parents, handed=frozenset()):
     return False
 
 
-def blocking_calls(source):
+def called_only_deferred(tree, parents, handed):
+    """HANDED and the methods of the module referenced (self.NAME) only where that is deferred itself - called in a
+    nested function handed to a wrapper, a lambda handed to one, or a method that is so (repeated until nothing is
+    added): their bodies run in the wrapper's thread too. A method called once on the GUI thread, or passed as a
+    callback anywhere (connect(self.NAME), done=self.NAME), is not."""
+    references = self_attributes(tree)
+    methods = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+               for node in node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    work = set(handed)
+    while True:
+        more = {name for name in methods - work if references.get(name) and all(
+            at_work(node, parents) or (isinstance(parents.get(node), ast.Call) and parents[node].func is node
+                                       and deferred(node, parents, frozenset(work))) for node in references[name])}
+        if not more:
+            return frozenset(work)
+        work |= more
+
+
+def passed(node):
+    """A description if NODE (an Attribute or Name, not called here) is something slow handed on as a callable -
+    connect(self.sai.doctor), QTimer.singleShot(0, partial(subprocess.run, ...)) - else None."""
+    if isinstance(node, ast.Attribute):
+        if holds_sai(node.value) and node.attr in BLOCKING_SAI:
+            return f"sai.{node.attr} (passed)"
+        if isinstance(node.value, ast.Name) and node.value.id in BLOCKING_MODULES and node.attr in PROCESS_CALLS:
+            return f"{node.value.id}.{node.attr} (passed)"
+        if isinstance(node.value, ast.Name) and node.value.id == "time" and node.attr in BLOCKING_TIME:
+            return f"time.{node.attr} (passed)"
+        if isinstance(node.value, ast.Name) and node.attr in BLOCKING_HELPERS.get(node.value.id, ()):
+            return f"{node.value.id}.{node.attr} (passed)"
+    return None
+
+
+def enclosing_function(node, parents):
+    parent = parents.get(node)
+    while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        parent = parents.get(parent)
+    return parent
+
+
+def kept_in_thread(node, parents, handed, tree, module="", seen=None):
+    """True if the callable NODE evaluates to (a slow function passed, not called here) only ever runs in a wrapper's
+    thread: it is a wrapper's work, lies in what one runs, or is the value - as it is, in a conditional, a tuple or a
+    functools.partial - of a local name every use of which does the same (called in a lambda that is a wrapper's work,
+    background(*call), handed on as work), or what a function returns whose every call does (background(
+    give_targets(sai, host)))."""
+    seen = set() if seen is None else seen
+    if node in seen:
+        return True
+    seen.add(node)
+    if at_work(node, parents) or deferred(node, parents, handed) or looked_at(node, parents):
+        return True
+    child, parent = node, parents.get(node)
+    while isinstance(parent, (ast.IfExp, ast.Tuple, ast.List, ast.Dict, ast.Subscript)) or (
+            isinstance(parent, ast.Call) and call_name(parent) in PARTIALS and parent.args and parent.args[0] is child):
+        if (isinstance(parent, ast.IfExp) and child is parent.test) or \
+                (isinstance(parent, ast.Dict) and child not in parent.values) or \
+                (isinstance(parent, ast.Subscript) and child is not parent.value):
+            return False
+        child, parent = parent, parents.get(parent)
+    if isinstance(parent, ast.Call) and at_work(parent, parents) and child is not parent.func:
+        return True  # (an argument of the factory of a wrapper's work: background(self.on_host(host, sai.X, ...)))
+    if isinstance(parent, ast.Assign) and all(isinstance(target, ast.Name) for target in parent.targets):
+        scope = enclosing_function(parent, parents)
+        names = {target.id for target in parent.targets}
+        uses = [n for n in ast.walk(scope if scope is not None else tree) if isinstance(n, ast.Name)
+                and n.id in names and isinstance(n.ctx, ast.Load)]
+        return bool(uses) and all(used_in_thread(use, parents, handed, tree, module, seen) for use in uses)
+    if isinstance(parent, ast.Return):
+        function = enclosing_function(parent, parents)
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        if (module, function.name) in HANDED_ON:
+            return True
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and call_name(n) == function.name]
+        return bool(calls) and all(kept_in_thread(call, parents, handed, tree, module, seen) or (
+            isinstance(parents.get(call), ast.Call) and parents[call].func is call
+            and deferred(parents[call], parents, handed)) for call in calls)
+    return False
+
+
+def looked_at(node, parents):
+    """NODE (a callable) is only looked at there, not run: `if reader is None`, `not read`, callable(read)."""
+    parent = parents.get(node)
+    return isinstance(parent, (ast.Compare, ast.UnaryOp)) or (
+        isinstance(parent, (ast.If, ast.While, ast.IfExp)) and parent.test is node) or (
+        isinstance(parent, ast.Call) and call_name(parent) in ("callable", "hasattr", "isinstance"))
+
+
+def used_in_thread(use, parents, handed, tree, module, seen):
+    """A use of a local name that holds a slow callable: called where that is deferred, or the callable handed on."""
+    parent = parents.get(use)
+    if isinstance(parent, ast.Call) and parent.func is use:
+        return deferred(parent, parents, handed)
+    if looked_at(use, parents):
+        return True
+    if isinstance(parent, ast.Starred):  # background(*call, ...): the function and its arguments
+        call = parents.get(parent)
+        return isinstance(call, ast.Call) and call_name(call) in WRAPPERS and call.args and call.args[0] is parent
+    return kept_in_thread(use, parents, handed, tree, module, seen)
+
+
+def blocking_calls(source, module=""):
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    handed, lines = handed_methods(tree), source.splitlines()
-    return [(node.lineno, what) for node in ast.walk(tree) if isinstance(node, ast.Call)
-            for what in [blocking(node)] if what and not deferred(node, parents, handed)
-            and ON_PURPOSE_MARK not in lines[node.lineno - 1]]
+    handed, lines = called_only_deferred(tree, parents, handed_methods(tree, parents)), source.splitlines()
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and call_name(node) == "getattr" and len(node.args) > 1 and \
+                holds_sai(node.args[0]) and isinstance(node.args[1], ast.Constant) and node.args[1].value in BLOCKING_SAI:
+            # getattr(self.sai, "host_fix_plan", None): the slow method itself, for a backend that may lack it
+            what = f"sai.{node.args[1].value} (passed)"
+            if kept_in_thread(node, parents, handed, tree, module):
+                continue
+        elif isinstance(node, ast.Call):
+            what = blocking(node)
+            if what and deferred(node, parents, handed):
+                continue
+        elif isinstance(node, ast.Attribute) and not (isinstance(parents.get(node), ast.Call) and
+                                                      parents[node].func is node):
+            what = None if isinstance(parents.get(node), ast.Attribute) else passed(node)
+            if what and kept_in_thread(node, parents, handed, tree, module):
+                continue
+        else:
+            continue
+        if what and ON_PURPOSE_MARK not in lines[node.lineno - 1]:
+            found.append((node.lineno, what))
+    return found
 
 
 def test_pages_run_commands_and_slow_reads_only_in_the_background():
@@ -330,8 +491,74 @@ def test_pages_run_commands_and_slow_reads_only_in_the_background():
     names = sorted(path.name for path in PACKAGE.glob("*.py") if path.name not in HELPER_MODULES)
     assert {"ui.py", "kits_page.py", "hosts_page.py", "tours.py", "intro.py", "main.py"} <= set(names)
     found = [f"{name}:{line} {what}" for name in names
-             for line, what in blocking_calls((PACKAGE / name).read_text())]
+             for line, what in blocking_calls((PACKAGE / name).read_text(), name)]
     assert not found, "on the GUI thread (use widgets.background, ThreadCall or Task):\n" + "\n".join(found)
+
+
+def marked_sites():
+    """{(module, innermost function)} of every line of the package that carries ON_PURPOSE_MARK."""
+    found = set()
+    for path in sorted(PACKAGE.glob("*.py")):
+        source = path.read_text()
+        lines = source.splitlines()
+        marked = {number for number, line in enumerate(lines, 1) if ON_PURPOSE_MARK in line}
+        if not marked:
+            continue
+        functions = [node for node in ast.walk(ast.parse(source))
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for number in marked:
+            around = [node for node in functions if node.lineno <= number <= node.end_lineno]
+            inner = max(around, key=lambda node: node.lineno) if around else None
+            found.add((path.name, inner.name if inner is not None else "<module>"))
+    return found
+
+
+def test_only_the_apps_start_and_end_wait_on_the_gui_thread_on_purpose():
+    """The mark is no way out for a page (round 2, 2026-11-22): a line of any other function that says "on the GUI
+    thread on purpose" fails here, and the Start's image check is not among them any more."""
+    found = marked_sites()
+    assert found <= ON_PURPOSE_SITES, f"marked on purpose, not listed: {sorted(found - ON_PURPOSE_SITES)}"
+    assert not [site for site in found if site[0] == "prerequisites.py"]
+    assert not [line for line in (PACKAGE / "prerequisites.py").read_text().splitlines() if ON_PURPOSE_MARK in line]
+
+
+def test_a_method_called_only_in_the_background_is_not_flagged_and_one_called_on_the_gui_thread_is():
+    """Round 1 (2026-11-22): a helper method that only a nested function handed to background() calls (also one
+    defined inside an if) runs in that thread - its sandbox-ai reads are not the GUI thread's; one that is also called
+    from a done= callback, or straight from a handler, is (and so is the subprocess it runs)."""
+    source = """
+class Page:
+    def start(self):
+        if self.ready:
+            def read():
+                return self.helper(), self.deeper()
+            background(read, owner=self, done=lambda result, error: self.answered(result))
+
+    def helper(self):
+        return self.sai.host_json("lab", "x")
+
+    def deeper(self):
+        return self.inner()
+
+    def inner(self):
+        return self.sai.host_run("lab", "y")
+
+    def answered(self, result):
+        return self.on_gui()
+
+    def on_gui(self):
+        return self.sai.host_json("lab", "z")
+
+    def clicked(self):
+        return self.mixed()
+
+    def mixed(self):
+        import subprocess
+        return subprocess.run(["podman"])
+"""
+    found = blocking_calls(source)
+    assert [what for _, what in found] == ["sai.host_json()", "subprocess.run()"], found
+    assert [line for line, _ in found] == [22, 29]
 
 
 def test_a_roots_steps_and_what_connects_to_a_remote_system_are_caught_on_the_gui_thread():
@@ -360,6 +587,68 @@ class Page:
     found = [what for _, what in blocking_calls(source)]
     assert found == ["root.rename_entry()", "root.make_folder()", "root.chmod_entry()", "root.stat_entry()",
                      "exists_in()", "entry_infos()", "remote.RemoteRoot()", "remote.scan_host()"]
+
+
+def test_the_blocking_check_sees_callbacks_partials_and_answers_on_the_gui_thread():
+    """Round 2 (2026-11-22): what the guard missed - a slow method passed as a callback (connect, QTimer.singleShot) or
+    wrapped in functools.partial outside a wrapper's work; an answer (done=lambda, a Task's done) that calls something
+    slow (it runs on the GUI thread); a method or nested function handed to background() and also connected to a
+    signal (that run is the GUI thread's)."""
+    source = """
+class Page:
+    def bad(self):
+        self.button.clicked.connect(self.sai.doctor)
+        QTimer.singleShot(0, functools.partial(self.sai.call, "net", "show"))
+        QTimer.singleShot(0, partial(subprocess.run, ["podman"]))
+        background(self.work, done=lambda result, error: self.sai.host_run("lab", "x"))
+        self.task.thread(lambda cancelled: 1, self.answered, "text")
+        background(self.scan, done=self.done)
+        self.timer.timeout.connect(self.scan)
+        def read():
+            return self.sai.runs()
+        background(read, done=self.done)
+        self.again.clicked.connect(read)
+
+    def answered(self, result, error):
+        return self.sai.instances()
+
+    def scan(self):
+        return self.sai.statistics("x")
+
+    def good(self):
+        background(functools.partial(self.sai.call, "net", "show"), done=self.done)
+        ThreadCall(partial(self.sai.answer, "1-1-1"), "allow").start()
+        self.task.call_watched(self.sai, lambda: self.sai.host_install("h"), self.done, "text")
+        on_root(self.root, lambda: self.sai.host_file_roots("h"), self.done)
+        background(self.only_here, done=self.done)
+
+    def only_here(self):
+        return self.sai.workspaces("x")
+
+    def kept(self, what, host):
+        call = {"apply": self.sai.update_apply, "rollback": self.sai.update_rollback}[what]
+        background(lambda: call(True), done=self.done)
+        background(self.on_host(host, self.sai.remove_device, "run"), done=self.done)
+        run = self.sai.call if host == "local" else functools.partial(self.sai.host_run, host)
+        held = (run, "net", "show")
+        background(*held, done=self.done)
+
+    def held_and_called(self, what):
+        call = {"apply": self.sai.update_apply}[what]
+        return call(True)
+
+    def looked_up(self, host):
+        reader = getattr(self.sai, "host_file_roots", None)
+        if reader is None or not callable(reader):
+            return
+        background(lambda: reader(host), done=self.done)
+        plan = getattr(self.sai, "host_fix_plan", None)
+        return plan(host, "claude", [])
+"""
+    found = blocking_calls(source)
+    assert sorted(what for _, what in found) == sorted([
+        "sai.doctor (passed)", "sai.call (passed)", "subprocess.run (passed)", "sai.host_run()", "sai.instances()",
+        "sai.statistics()", "sai.runs()", "sai.update_apply (passed)", "sai.host_fix_plan (passed)"]), found
 
 
 # What makes a method of backend.py slow by itself: a process (subprocess, the runner of call()), a pipe served until
@@ -518,6 +807,7 @@ MUTATIONS = {
     "host-remove": ["host_remove"],
     "host-edit": ["host_set"],
     "host-install": ["host_install"],
+    "host-uninstall": ["host_uninstall"],
     "vpn-remove": ["vpn_remove"],
     "llm-remove": [("llm", "remove")],
     "llm-unload": [("llm", "unload")],
@@ -530,6 +820,7 @@ MUTATIONS = {
     "image-remove": [("images", "remove")],
     "mcp-attach": ["mcp_attach", "host_mcp_attach_live"],
     "mcp-copy": ["host_mcp_copy"],
+    "mcp-update": ["host_mcp_update"],
     "kits-attach": ["host_kits_attach"],
     "kits-detach": ["host_kits_detach"],
     "agent-restart": ["host_agent_restart"],

@@ -19,7 +19,7 @@ QtWidgets = pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not inst
 from sandbox_ai_app import backend, credentials_page as C, widgets  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "tests"))
+sys.path.append(str(ROOT / "tests"))  # (after the app's own tests: conftest.app_tests_first)
 from live_fakes import Host  # noqa: E402
 
 TOKEN = "gitea_appgiven_0123456789abcdef"

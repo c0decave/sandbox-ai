@@ -31,7 +31,9 @@ from PySide6.QtWidgets import (
 from . import backend
 from .files import printable
 from .i18n import tr
-from .widgets import FlowLayout, exec_dropped, plain_label, safe_tooltip
+from .widgets import (
+    FlowLayout, exec_dropped, plain_label, row_enabled, safe_tooltip, set_row_enabled, set_row_heading,
+)
 
 PLACEHOLDER_HOST = "HOST"  # a suggestion's part to be typed over (HOST=SECRET of --api-key): selected when chosen
 
@@ -217,6 +219,7 @@ class ListFields(QWidget):
         self.value_box.activated.connect(self.suggestion_chosen)
         self.value_box.opening.connect(lambda: self.ask_provider(self.current_kind()))
         self.value_box.installEventFilter(self)
+        self.value_box.lineEdit().installEventFilter(self)  # (a click into the empty field opens its list)
         self.value_box.lineEdit().textEdited.connect(lambda _t: self.say(""))
         self.kind_box = QComboBox()
         self.kind_box.setAccessibleName(tr("Kind of value"))
@@ -228,9 +231,9 @@ class ListFields(QWidget):
                 index = self.kind_box.count() - 1
                 self.kind_box.setItemData(index, safe_tooltip(kind.tip or kind.label), Qt.ItemDataRole.ToolTipRole)
                 if not kind.enabled:
-                    self.kind_box.model().item(index).setEnabled(False)
+                    set_row_enabled(self.kind_box, index, False)
                     self.kind_box.setItemData(index, safe_tooltip(kind.why or kind.tip), Qt.ItemDataRole.ToolTipRole)
-        first = next((i for i in range(self.kind_box.count()) if self.kind_box.model().item(i).isEnabled()), 0)
+        first = next((i for i in range(self.kind_box.count()) if row_enabled(self.kind_box, i)), 0)
         self.kind_box.setCurrentIndex(first if self.kind_box.count() else -1)
         self.kind_box.currentIndexChanged.connect(self.kind_changed)
         self.add_button = QPushButton(tr("Add"))
@@ -274,7 +277,7 @@ class ListFields(QWidget):
     def choose_kind(self, key):
         """KEY's kind in the drop-down (a finding about it, a page made anew): True when it is offered."""
         index = self.kind_box.findData(key)
-        if index < 0 or not self.kind_box.model().item(index).isEnabled():
+        if index < 0 or not row_enabled(self.kind_box, index):
             return False
         self.kind_box.setCurrentIndex(index)
         return True
@@ -287,12 +290,11 @@ class ListFields(QWidget):
         kind.enabled, kind.why = bool(enabled), why
         index = self.kind_box.findData(key)
         if index >= 0:
-            self.kind_box.model().item(index).setEnabled(bool(enabled))
+            set_row_enabled(self.kind_box, index, bool(enabled))
             self.kind_box.setItemData(index, safe_tooltip(why if not enabled and why else kind.tip or kind.label),
                                       Qt.ItemDataRole.ToolTipRole)
             if not enabled and self.kind_box.currentIndex() == index:
-                other = next((i for i in range(self.kind_box.count()) if self.kind_box.model().item(i).isEnabled()),
-                             None)
+                other = next((i for i in range(self.kind_box.count()) if row_enabled(self.kind_box, i)), None)
                 if other is not None:
                     self.kind_box.setCurrentIndex(other)
         self.show_kind()
@@ -311,7 +313,7 @@ class ListFields(QWidget):
         self.add_button.setEnabled(usable)
         if kind is None:
             return
-        self.value_box.lineEdit().setPlaceholderText(kind.placeholder)
+        self.show_placeholder()
         tip = kind.tip or kind.label
         if kind.split:
             tip += "\n" + tr("One or more, separated by commas or spaces")
@@ -329,7 +331,22 @@ class ListFields(QWidget):
         """PROVIDER(fill) offers values of KEY's kind (see the module's text); asked now when that kind is chosen."""
         self.providers[key] = provider
         if key == self.current_kind():
+            self.show_placeholder()
             self.ask_provider(key)
+
+    def show_placeholder(self):
+        """The value field's grey text: what a value looks like; where the kind offers values, that they are a list
+        to choose from (the user 2026-11-23: "warum gibt es beim Board und den Toolchains kein Dropdown" - an editable
+        list looked like a line to type into)."""
+        kind = self.kinds.get(self.current_kind())
+        if kind is None:
+            return
+        if kind.key in self.providers:
+            text = tr("Choose from the list, or type: {example}", example=kind.placeholder) if kind.placeholder \
+                else tr("Choose from the list, or type…")
+        else:
+            text = kind.placeholder
+        self.value_box.lineEdit().setPlaceholderText(text)
 
     def ask_provider(self, key):
         provider = self.providers.get(key)
@@ -366,11 +383,7 @@ class ListFields(QWidget):
             if in_group and in_group != group:  # (the group's name: a line that cannot be chosen)
                 group = in_group
                 self.value_box.addItem(group)
-                header = self.value_box.model().item(self.value_box.count() - 1)
-                header.setFlags(Qt.ItemFlag.NoItemFlags)
-                font = header.font()
-                font.setBold(True)
-                header.setFont(font)
+                set_row_heading(self.value_box, self.value_box.count() - 1)
             self.value_box.addItem(label, value)
             self.value_box.setItemData(self.value_box.count() - 1, safe_tooltip(value if value != label else label),
                                        Qt.ItemDataRole.ToolTipRole)
@@ -515,6 +528,10 @@ class ListFields(QWidget):
     # -- the keyboard --
 
     def eventFilter(self, watched, event):  # noqa: N802
+        if event.type() == QEvent.Type.MouseButtonRelease and watched is self.value_box.lineEdit() and \
+                not self.typed() and self.current_kind() in self.providers and not self.value_box.view().isVisible():
+            self.value_box.showPopup()  # (the empty field of a kind with a list: a click shows the list, as the arrow does)
+            return False
         if watched is self.value_box and event.type() == QEvent.Type.KeyPress and \
                 event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.typed():
             if not self.value_box.view().isVisible():

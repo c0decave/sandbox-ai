@@ -332,7 +332,9 @@ def test_an_approved_opencode2_plugin_loads_after_the_rule_plugin(om2, tmp_path)
     run = om2.run("--kit", "sp", "--rules", str(rules_file))
     content = json.loads(run.env["OPENCODE_CONFIG_CONTENT"])
     assert content["plugins"] == ["/etc/opencode2/sandbox-ai-hooks", OC2_ROOT]
-    assert (str(root), OC2_ROOT, "ro") in run.kit_mounts
+    # The plugin's folder as copied and checked at the start (kits.checked_copy), never the live store.
+    (source,) = [src for src, dest, _ in run.kit_mounts if dest == OC2_ROOT]
+    assert source.endswith("/kits/plugins/1") and str(root) not in source
     # Without rules the plugin loads alone.
     run = om2.run("--kit", "sp")
     assert json.loads(run.env["OPENCODE_CONFIG_CONTENT"])["plugins"] == [OC2_ROOT]
@@ -439,7 +441,12 @@ def test_e2e_an_approved_opencode2_plugin(fake_host):
     assert layer["plugins"] == [OC2_ROOT]
     runs = [call for call in fake_host.calls() if call[:1] == ["run"] and "--pod" in " ".join(call)]
     mounts = " ".join(" ".join(call) for call in runs)
-    assert f"src={root},dst={OC2_ROOT},ro" in mounts or f"{root}:{OC2_ROOT}:ro" in mounts, mounts[-3000:]
+    # The copy made and checked at the start (the session's kits/plugins/1), not the plugin store.
+    assert f"/kits/plugins/1,dst={OC2_ROOT},ro" in mounts or f"/kits/plugins/1:{OC2_ROOT}:ro" in mounts, \
+        mounts[-3000:]
+    assert f"src={root},dst={OC2_ROOT}" not in mounts and f"{root}:{OC2_ROOT}" not in mounts
+    copied = session / "kits/plugins/1"
+    assert sorted(p.name for p in copied.iterdir()) == sorted(p.name for p in root.iterdir())
 
 
 # --- the built-in kit superpowers-plugin: the first real case ----------------------------------------------------

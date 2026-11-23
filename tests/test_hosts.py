@@ -22,7 +22,8 @@ spec.loader.exec_module(h)
 @pytest.fixture
 def remote(tmp_path, monkeypatch):
     """A stand-in ssh on PATH and a remote HOME with sandbox-ai in ~/.local/bin only. The stand-in ssh refuses a key
-    file others can read, as ssh does; the remote sandbox-ai answers version --verbose, update --check and update
+    file others can read, as ssh does; the login shell is sh, or the one ~/login-shell names (fish, csh: as
+    tests/login_shells.py reads the line); the remote sandbox-ai answers version --verbose, update --check and update
     as an installation of the kind in ~/kind (user, system, checkout, pip, old), its version in ~/version; a sudo
     on the remote PATH does what ~/sudo says (nopasswd, password, refused)."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -52,6 +53,18 @@ if "-i" in args:
         sys.exit(255)
 command = args[args.index("--") + 2]
 env = {{"HOME": {str(home)!r}, "PATH": {str(home / "rbin")!r} + ":/usr/bin:/bin"}}
+shell = os.path.join({str(home)!r}, "login-shell")
+shell = open(shell).read().strip() if os.path.exists(shell) else "sh"
+if shell != "sh":  # a login shell that is not POSIX (fish, csh): as it reads the line (tests/login_shells.py)
+    sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+    import login_shells
+    try:
+        words = login_shells.words(shell, command)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(127)
+    words = words[1:] if words[:1] == ["exec"] else words
+    sys.exit(subprocess.run(words, env=env).returncode)
 sys.exit(subprocess.run(["sh", "-c", command], env=env).returncode)
 """)
     (bin_dir / "ssh").chmod(0o755)
@@ -326,7 +339,7 @@ def test_test_makes_an_unprotected_key_private_and_tries_again(remote):
     assert result["fixed"] == [{"path": str(identity), "was": "0644", "now": "0600"}]
     assert identity.stat().st_mode & 0o777 == 0o600
     # Made private before the first try: ssh never had to refuse it.
-    assert len([c for c in calls(remote) if c[-1].endswith("--version; fi")]) == 1
+    assert len([c for c in calls(remote) if (h.neutral_script(c[-1]) or "").endswith("--version; fi")]) == 1
     lines = []
     identity.chmod(0o640)
     assert h.cli(["test", "ct1"], lines.append) == 0
@@ -370,7 +383,7 @@ def test_what_is_never_changed(remote, tmp_path):
     foreign = key(tmp_path / "foreign")
     try:  # a file of another user (only root can make one, and not in every user namespace)
         os.chown(foreign, 12345, 12345)
-    except PermissionError:
+    except OSError:  # (EPERM: not root; EINVAL: a user namespace that does not map 12345)
         pass
     else:
         done, warning = h.protect_key(foreign)
@@ -466,8 +479,9 @@ def test_sudo_that_wants_a_password_is_named_and_asked_in_a_terminal(remote, mon
     result = h.update("ct1")
     assert result["needs_password"] and "wants a password" in result["error"] and not result["changed"]
     terminal = h.update_terminal("ct1")
-    assert terminal[1] == "-tt" and 'exec sudo -- "$(command -v sandbox-ai)" update --system --prefix /opt/sai' \
-        in terminal[-1]
+    # (the user's own command first, as a terminal there finds it; else the one on PATH - with sudo either way)
+    assert terminal[1] == "-tt" and 'exec sudo -- "$HOME/.local/bin/sandbox-ai" update --system --prefix /opt/sai' \
+        in h.neutral_script(terminal[-1])
     # From a terminal, hosts update asks there (the stand-in runs it; a real sudo would prompt).
     monkeypatch.setattr(h.sys.stdin, "isatty", lambda: True)
     lines = []
@@ -542,7 +556,9 @@ def test_list_shows_versions_and_keeps_them_a_while(remote):
     h.update("ct1")
     lines = []
     assert h.cli(["list", "--cached"], lines.append) == 0
-    assert any(line.startswith("ct1") and line.split()[3] == "?" for line in lines), "an update forgets what was kept"
+    # (it forgot what was kept, and the app's Hosts page showed an empty column: user report 2026-11-23) - the update
+    # reads the version again and keeps it, at once
+    assert any(line.startswith("ct1") and "0.1.66, up to date" in line for line in lines), lines
     assert h.cli(["list"], lines.append) == 0
     assert any(line.startswith("ct1") and "0.1.66, up to date" in line for line in lines), lines
 
@@ -973,7 +989,7 @@ def test_install_dry_run_says_what_would_be_done(remote):
         result["notes"][0]
     sent = [json.loads(line) for line in remote["log"].read_text().splitlines()]
     assert not any("tar -xzf" in args[-1] for args in sent), "nothing copied"
-    assert all(args[-1].startswith("sh -c ") for args in sent), "run by sh, whatever the login shell"
+    assert all(h.neutral_script(args[-1]) is not None for args in sent), "run by sh, whatever the login shell"
     lines = []
     assert h.cli(["install", "ct1", "--dry-run"], lines.append) == 0 and "nothing done" in lines[0]
 
@@ -1024,9 +1040,8 @@ def test_install_removes_the_copy_also_when_sudo_fails(remote):
     before = set(Path("/tmp").glob("sandbox-ai-install.*"))
     result = h.install("ct1", mode="system")
     assert result["error"] and "sudo" in result["error"]
-    sent = [json.loads(line)[-1] for line in remote["log"].read_text().splitlines()]
-    assert any(command.startswith("sh -c ") and "rm -rf --" in command and "case $d in" in command
-               for command in sent), "cleaned up after"
+    sent = [h.neutral_script(json.loads(line)[-1]) or "" for line in remote["log"].read_text().splitlines()]
+    assert any("rm -rf --" in command and "case $d in" in command for command in sent), "cleaned up after"
     assert set(Path("/tmp").glob("sandbox-ai-install.*")) <= before
 
 
@@ -1228,7 +1243,7 @@ def test_a_hosts_own_update_mode_is_set_over_ssh_and_listed(remote):
     assert json.loads(lines[0])[0]["mode"] == "off"
     with pytest.raises(ValueError, match="window of --mode auto"):
         h.cli(["update", "ct1", "--at", "02:00"], print)
-    with pytest.raises(ValueError, match="--version, --from-here and --sudo are for an update now"):
+    with pytest.raises(ValueError, match="--version, --from-here, --sudo and --installation are for an update now"):
         h.cli(["update", "ct1", "--mode", "notify", "--version", "0.1.70"], print)
     # A copy that cannot update itself: refused there, with the reason; an old sandbox-ai: update it first.
     setup(remote, kind="checkout")
@@ -1237,3 +1252,29 @@ def test_a_hosts_own_update_mode_is_set_over_ssh_and_listed(remote):
     setup(remote, kind="old")
     result = h.update_mode("ct1", "notify")
     assert "no update mode yet" in result["error"] and "sandbox-ai hosts update ct1" in result["error"]
+
+
+@pytest.mark.parametrize("check, update, ahead, column", [
+    ("installed: 0.1.180 (x)\navailable: 0.1.188 (s)\nsignature: good, by the trusted key SHA256:k\n", True, False,
+     "0.1.180, update: 0.1.188"),
+    ("installed: 0.1.180 (x)\navailable: 0.1.188 (s)\nsignature: BAD: not signed by a trusted release key\n", False,
+     False, "0.1.180, up to date"),
+    ("installed: 0.1.180 (x)\navailable: 0.1.188 (s)\nsignature: none (the release has no SHA256SUMS.sig)\n", False,
+     False, "0.1.180, up to date"),
+    ("installed: 0.1.193 (x)\navailable: 0.1.188 (s)\nsignature: good, by the trusted key SHA256:k\n", False, True,
+     "0.1.193, newer than the newest release 0.1.188"),
+    ("installed: 0.1.30 (x)\navailable: 0.1.66 (s)\n", True, False, "0.1.30, update: 0.1.66"),  # (too old to say)
+])
+def test_a_hosts_update_is_one_its_own_update_would_take(check, update, ahead, column, monkeypatch):
+    """hosts list (and the web's Hosts page): an update only where the host's own update would take it - a release
+    signed by a key it trusts -, and a host newer than the newest release says so (the user's 0.1.193 against
+    0.1.188, 2026-11-22)."""
+    installed = check.split()[1]
+    monkeypatch.setattr(h, "run_fixing", lambda name, args, path=None, runner=None: (
+        0, f"sandbox-ai {installed}\ninstallation: system (/usr/local/lib/sandbox-ai)\n", "", [], None))
+    monkeypatch.setattr(h, "installation", lambda out: {"version": installed, "kind": "system", "path": None,
+                                                        "prefix": "/usr/local", "update_mode": None})
+    monkeypatch.setattr(h, "run", lambda name, args, timeout=None, path=None, runner=None: (0, check, ""))
+    found = h.host_status("ct1")
+    assert found["update"] is update and bool(found.get("ahead")) is ahead
+    assert h.status_text(found) == column

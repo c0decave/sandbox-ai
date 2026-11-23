@@ -433,7 +433,7 @@ def test_the_models_table_and_use_as_default(qapp, sai, monkeypatch):
     headers = [widget.horizontalHeaderItem(c).text() for c in range(widget.columnCount())]
     assert headers == ["Name", "Loaded", "Type", "Quant", "Context", "Size", "Support"], \
         "only the columns with values (and the traffic light: none of these is in the research's table)"
-    assert {widget.item(r, 6).text() for r in range(widget.rowCount())} == {"? not tested"}
+    assert {widget.item(r, 6).text() for r in range(widget.rowCount())} == {"? no data yet"}
     names = [widget.row_keys[widgets.row_index(widget, r)] for r in range(widget.rowCount())]
     assert names == ["qwen2.5-coder:7b", "llama3.1:8b", LONG], "loaded first, then by name"
     long_row = names.index(LONG)
@@ -649,7 +649,7 @@ def test_a_no_tests_nothing_and_other_errors_ask_nothing(qapp, sai, monkeypatch)
     sai.asked.clear()
     dialog.test()
     assert [a for _, a in sai.asked] == [keyed], "answered No: not tested again"
-    assert dialog.test_result.text().startswith("Not tested: the key is not sent over plain http")
+    assert dialog.test_result.text().startswith("Not checked: the key is not sent over plain http")
     assert not dialog.insecure.isChecked() and dialog.insecure_confirmed is None
     widgets.SHOWN.clear()
     sai.answers[("local", keyed)] = (1, "", "sandbox-wizard: Cannot reach vllm at 203.0.113.5:8000: timed out\n")

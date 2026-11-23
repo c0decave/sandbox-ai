@@ -4,7 +4,9 @@ installation - and "Restart the app" once it has worked."""
 import functools
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -31,14 +33,34 @@ def installation(root, version="0.9.0"):
 
 # -- which copy updates how (sandbox/main.py's update and installation_mode) --
 
-def test_the_route_of_each_kind_of_copy(tmp_path):
+@pytest.fixture
+def outside_homes(tmp_path):
+    """A folder for a system installation (PREFIX/lib/sandbox-ai) outside every home: tmp_path, unless TMPDIR put it
+    below one (TMPDIR=/root/..., /home/...), where an installation is never a system one (SYSTEM_HOMES) - then a
+    folder of the system's own temporary folder, removed afterwards."""
+    if not str(tmp_path).startswith(backend.SYSTEM_HOMES):
+        yield tmp_path
+        return
+    base = next((folder for folder in ("/tmp", "/var/tmp", "/dev/shm") if os.access(folder, os.W_OK)), None)
+    if base is None:
+        pytest.skip("no folder outside the homes to place a system installation in")
+    folder = Path(tempfile.mkdtemp(prefix="sai-system-", dir=base))
+    yield folder
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_the_route_of_each_kind_of_copy(tmp_path, outside_homes, monkeypatch):
     user = installation(tmp_path / "home" / ".local" / "share" / "sandbox-ai")
     assert backend.update_route(user, euid=1000, writable=lambda p: True)[0] == "user"
-    system = installation(tmp_path / "usr" / "lib" / "sandbox-ai")
+    system = installation(outside_homes / "usr" / "lib" / "sandbox-ai")
     assert backend.update_route(system, euid=1000, writable=lambda p: False) == \
-        ("root", str(tmp_path / "usr" / "lib" / "sandbox-ai"))
+        ("root", str(outside_homes / "usr" / "lib" / "sandbox-ai"))
     assert backend.update_route(system, euid=1000, writable=lambda p: True)[0] == "user"  # this user may write it
     assert backend.update_route(system, euid=0, writable=lambda p: False)[0] == "user"  # the app runs as root
+    # The same tree below a home (as sandbox/main.py's HOMES) is never a system installation: the user's own
+    monkeypatch.setattr(backend, "SYSTEM_HOMES", (f"{outside_homes}/",))
+    assert backend.update_route(system, euid=1000, writable=lambda p: False)[0] == "user"
+    monkeypatch.undo()
     package = tmp_path / "appimage" / "sandbox"
     package.mkdir(parents=True)
     (package.parent / "install.sh").write_text("")
@@ -54,11 +76,11 @@ def test_the_route_of_each_kind_of_copy(tmp_path):
     assert backend.update_route(pip)[0] == "other"
 
 
-def test_the_route_of_an_installation_the_app_finds_through_its_current_link(tmp_path, monkeypatch):
+def test_the_route_of_an_installation_the_app_finds_through_its_current_link(tmp_path, outside_homes, monkeypatch):
     """The app finds install.sh's installation through DATA/current (the link is kept, so that an update is picked up):
     its sandbox/ folder is DATA/current/sandbox, not DATA/versions/X/sandbox - a system installation this user cannot
     write is still root's to update (sudo), and "Restart the app" still starts the installation's stable launcher."""
-    data = tmp_path / "usr" / "lib" / "sandbox-ai"
+    data = outside_homes / "usr" / "lib" / "sandbox-ai"
     installation(data)
     os.symlink("versions/0.9.0", data / "current")
     (data / "versions" / "0.9.0" / "sandbox-ai-app").write_text("#!/bin/sh\n")
@@ -475,3 +497,19 @@ def test_the_daily_check_stays_quiet_in_the_status_bar(window):
     window.update_checked(0, UP_TO_DATE, "")
     window.update_checked(1, "", "offline")
     assert window.statusBar().currentMessage() == "before"
+
+
+def test_a_clicked_check_of_a_copy_newer_than_the_newest_release_says_so_plainly(window, monkeypatch):
+    """The user's case (2026-11-22): a system installation of 0.1.193 against the newest release 0.1.188 -
+    Help > Check for updates seemed to do nothing. What `update --check` printed there, and what the app says now."""
+    route(monkeypatch, "root", "/usr/local/lib/sandbox-ai")
+    said = ("installed: 0.1.193 (/usr/local/lib/sandbox-ai)\n"
+            "available: 0.1.188 (https://github.com/c0decave/sandbox-ai)\n"
+            "           older than the installed 0.1.193: an update refuses it without --allow-downgrade\n"
+            f"signature: good, by the trusted key {KEY}\n"
+            f"trusted keys: {KEY} (the installed tree)\n")
+    window.update_asked = True
+    window.update_checked(0, said, "")
+    text = "sandbox-ai 0.1.193 is newer than the newest release 0.1.188: nothing to update"
+    assert window.update_said == text and window.statusBar().currentMessage() == text
+    assert window.update_notice.isHidden() and window.notified == [], "nothing offered, nothing notified"

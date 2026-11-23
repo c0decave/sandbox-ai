@@ -516,6 +516,26 @@ def test_refused_without_a_terminal_unless_yes(fake_copy, capsys):
     assert (home / "data/sandbox-ai/secrets/TOKEN").is_file()
 
 
+def test_the_mcp_servers_folders_stay_unless_mcp_data(fake_copy, capsys):
+    """`mcp add` makes a folder of its own for each folder a server keeps (data/sandbox-ai/mcp-folders: a memory
+    server's graph, its uploads): the user's data. --purge keeps them and says so; --purge --mcp-data removes them;
+    --mcp-data alone is refused."""
+    home, ran = fake_copy
+    graph = home / "data/sandbox-ai/mcp-folders/memory/data/graph.jsonl"
+    graph.parent.mkdir(parents=True)
+    graph.write_text("{}")
+    lines = []
+    assert u.main(["--purge", "--yes"], out=lines.append, isatty=lambda: False) == 0
+    assert graph.is_file() and not (home / "state/sandbox-ai").exists()
+    said = "\n".join(lines)
+    assert "the MCP servers' own folders" in said and "--mcp-data with --purge removes them" in said
+    assert u.main(["--purge", "--mcp-data", "--yes"], out=lines.append, isatty=lambda: False) == 0
+    assert not graph.exists() and not (home / "data/sandbox-ai/mcp-folders").exists()
+    with pytest.raises(SystemExit) as exc:
+        u.main(["--mcp-data", "--yes"], out=lambda line: None)
+    assert exc.value.code == 2 and "--mcp-data goes with --purge" in capsys.readouterr().err
+
+
 def test_the_schedules_timer_is_turned_off_first_and_only_ours(fake_copy, monkeypatch):
     """sandbox-ai schedule enable's systemd user timer would start this copy's main.py every minute after it is gone:
     the plan names it, and it is turned off (systemctl --user disable --now) and its files removed before anything
@@ -873,3 +893,19 @@ def test_the_update_timer_is_turned_off_first_and_only_ours(fake_copy, monkeypat
     assert calls[0] == (["systemctl", "--user", "disable", "--now", "sandbox-ai-update.timer"], []), \
         "turned off before the installer ran"
     assert not any(units.iterdir())
+
+
+def test_the_list_of_a_system_installation_is_shown_to_its_users_but_only_root_removes_it(fake_copy, monkeypatch,
+                                                                                         capsys):
+    """sandbox-ai hosts uninstall shows the host's own table before it asks (and before sudo asks for a password):
+    --dry-run of a system installation only lists, for anyone; the removal is still refused but to root."""
+    home, ran = fake_copy
+    monkeypatch.setattr(u, "copy_kind", lambda *a, **k: {
+        "kind": "system", "data": "/usr/local/lib/sandbox-ai", "prefix": "/usr/local", "how": None,
+        "refused": "this is a system installation (/usr/local/lib/sandbox-ai): uninstall it as root: sudo "
+                   "sandbox-ai uninstall"})
+    lines = []
+    assert u.main(["--dry-run"], out=lines.append, isatty=lambda: False) == 0
+    assert any("Command links" in line for line in lines) and ran == []
+    assert u.main(["--yes"], out=lines.append, isatty=lambda: False) == 1
+    assert "uninstall it as root" in capsys.readouterr().err and ran == []

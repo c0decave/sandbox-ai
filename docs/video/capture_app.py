@@ -92,16 +92,20 @@ def stage(root, home=None):
     state = home / ".local" / "state"
     digest = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:12]
     logs = state / "sandbox-ai" / "logs" / f"{project.name}-{digest}"  # sandbox/logs.py default_log_dir
-    run_dir = root / "runtime" / "sandbox-ai" / "runs" / RUN
+    # The runtime folder inside the demo HOME: a page that names a path of it (the Approvals page's "not readable: its
+    # control socket ... is not there" of the staged run) shows the demo's path, never the machine's temporary folder.
+    runtime = home / ".run"
+    run_dir = runtime / "sandbox-ai" / "runs" / RUN
     (run_dir / "approvals").mkdir(parents=True)
-    os.chmod(root / "runtime", 0o700)
+    os.chmod(runtime, 0o700)
     (run_dir / "run.json").write_text(json.dumps({
         "run": RUN, "name": NAME, "agent": "claude", "backend": "podman", "workspace": str(project),
-        "pid": os.getpid(), "session": None, "session_dir": str(root / "session"), "log_dir": str(logs),
+        "pid": os.getpid(), "session": None, "log_dir": str(logs),
+        "session_dir": str(home / ".local" / "state" / "sandbox-ai" / "sessions" / RUN),
         "started": stamp(600), "proxy": True,
         # its browser of its own (--browser): the Sandboxes page's Browser button opens its live view
         "browser": {"kind": "chromium", "control": "human", "profile": "fresh", "container": f"{RUN}-browser",
-                    "vnc": str(root / "runtime" / "sandbox-ai" / "runs" / f"{RUN}.browser-vnc" / "vnc.sock")}}))
+                    "vnc": str(runtime / "sandbox-ai" / "runs" / f"{RUN}.browser-vnc" / "vnc.sock")}}))
 
     def ask(ident, seconds_ago, **question):
         (run_dir / "approvals" / f"{ident}.json").write_text(json.dumps({"id": ident, "time": stamp(seconds_ago),
@@ -256,20 +260,21 @@ def stage_traffic(logs):
 
 
 def demo_commands(env, cwd):
-    """What the pages list besides the run: made with this checkout's own commands (offline ones only)."""
+    """What the pages list besides the run: made with this checkout's own commands (offline ones only). The demo's
+    secrets are kept --plain: a throwaway HOME has no primary password, and their values are no real ones."""
     sai = str(REPO / "sandbox-ai")
     steps = [
         ([sai, "hosts", "add", "ct1", "me@ct1.lan", "--description", "Proxmox 101"], None),
         ([sai, "kits", "new", "review"], None),
         ([sai, "kits", "new-skill", "review", "lint-fix", "--description", "Fixes lint errors; use after edits"], None),
-        ([sai, "secrets", "set", "GITHUB_TOKEN"], "ghp_demo-not-a-real-token\n"),
-        ([sai, "secrets", "set", "OLLAMA_KEY"], "demo-key\n"),
+        ([sai, "secrets", "set", "GITHUB_TOKEN", "--plain"], "ghp_demo-not-a-real-token\n"),
+        ([sai, "secrets", "set", "OLLAMA_KEY", "--plain"], "demo-key\n"),
         ([sai, "identities", "add", "work", "--name", "Me", "--email", "me@example.org",
           "--description", "commits at work"], None),
         ([sai, "llm", "add", "gpu-box", "-k", "ollama", "-u", "http://192.168.178.20:11434", "-m", "qwen3-coder:30b"],
          None),
         # an MCP server of the signed catalog with a value that is no secret and a secret of another name (0.1.95)
-        ([sai, "secrets", "set", "TELEGRAM_SHOP_BOT"], "123456:demo-not-a-real-token\n"),
+        ([sai, "secrets", "set", "TELEGRAM_SHOP_BOT", "--plain"], "123456:demo-not-a-real-token\n"),
         ([sai, "mcp", "add", "telegram", "--network", "full", "--env", "TELEGRAM_BOT_TOKEN@TELEGRAM_SHOP_BOT",
           "--env", "TELEGRAM_ALLOWED_CHATS=123456789", "--no-pull", "--backend", "podman"], None),
     ]
@@ -296,7 +301,8 @@ class Capture:
             self.qt_words = app_main.qt_translations(self.qapp) if hasattr(app_main, "qt_translations") else None
         except Exception:  # noqa: BLE001 - an older app: Qt's English words
             self.qt_words = None
-        terminal.available = lambda web=None: (False, "not in the video")
+        why = {"de": "nicht im Video"}.get(lang, "not in the video")  # (the page shows it in the app's language)
+        terminal.available = lambda web=None: (False, why)
         theme.apply(look)
         self.theme = theme
         from sandbox_ai_app import widgets
@@ -314,6 +320,7 @@ class Capture:
         self.project = Path(os.environ["HOME"]) / "src" / "shop"
         self.window.set_project(str(self.project))
         self.extra = []  # windows to close after a state
+        self.opening = False  # a state waits for the dialog it opens (dialog_of)
         self.cleanup = []  # folders to remove at the end
 
     def settle(self, seconds=1.0):
@@ -324,7 +331,10 @@ class Capture:
 
     def page(self, key):
         window = self.window
-        window.nav.setCurrentRow(window.nav_rows[key])
+        if hasattr(window, "show_page"):  # one row for the Start page's two views: the view by its key (0.1.212)
+            window.show_page(key, raise_window=False)
+        else:
+            window.nav.setCurrentRow(window.nav_rows[key])
         self.settle(0.8)
         return getattr(window, key)
 
@@ -385,6 +395,12 @@ class Capture:
         (getattr(window.sandboxes, "refresh_soon", None) or window.sandboxes.refresh)()
         self.settle(3.0)
         made = 0
+        # A modal question nobody answers offscreen would hold the capture for good: one the app asks by itself (not a
+        # dialog a state opened) is said and closed, and that state's picture is taken without it.
+        from PySide6.QtCore import QTimer
+        guard = QTimer()
+        guard.timeout.connect(self.close_stray_modal)
+        guard.start(3000)
         for key in PAGES:
             if only and key not in only and not any(STATES.get(name) == key for name in only):
                 continue
@@ -413,6 +429,13 @@ class Capture:
         for folder in self.cleanup:
             shutil.rmtree(folder, ignore_errors=True)
         print(f"capture_app: {self.lang}: {made} pictures in {self.out}")
+
+    def close_stray_modal(self):
+        widget = self.qapp.activeModalWidget()
+        if widget is None or widget in self.extra or self.opening:
+            return
+        print(f"capture_app: warning: closed a question the app asked: {widget.windowTitle()!r}", file=sys.stderr)
+        (getattr(widget, "reject", None) or widget.close)()
 
     # -- the pages as they first show --
 
@@ -458,8 +481,15 @@ class Capture:
         self.tab(page.form, 0)
         return image
 
+    def from_preset(self, page, preset):
+        """The board of PRESET, the board shown before dropped without asking: a preset's board counts as not applied
+        (0.1.2xx), so the next preset would ask "Changes not applied" in a modal question nobody answers offscreen."""
+        if hasattr(page, "may_discard"):
+            page.may_discard = lambda: True
+        return page.new_from_preset(preset)
+
     def state_board_preset(self, page):
-        page.new_from_preset("development")
+        self.from_preset(page, "development")
         self.settle(1.5)
         agent = next((node for node in page.scene.items() if type(node).__name__ == "NodeItem"
                       and "agent" in str(getattr(node, "kind", "") or getattr(getattr(node, "part", None), "kind", ""))),
@@ -508,9 +538,9 @@ class Capture:
         self.settle(1.0)
 
     def state_board_agent(self, page):
-        """A preset of an agent not live-tested yet (Hermes): the agent's part with its choice, the line below it, the
-        model server list; the launcher's check names the image to build (Build now)."""
-        page.new_from_preset("coding-hermes")
+        """A preset of one of the newer agents (Hermes): the agent's part with its choice, the model server list; the
+        launcher's check names the image to build (Build now)."""
+        self.from_preset(page, "coding-hermes")
         self.settle(2.0)
         self.select_agent(page)
         self.wide_inspector()
@@ -521,7 +551,7 @@ class Capture:
         return self.window.grab().toImage()
 
     def state_board_agents(self, page):
-        """The gallery at its category Agents: every agent's presets, those not live-tested yet marked."""
+        """The gallery at its category Agents: every agent's presets."""
         from sandbox_ai_app.preset_gallery import PresetGallery
         dialog = PresetGallery(page.sai, directory=str(self.project), parent=self.window)
         self.extra.append(dialog)
@@ -747,6 +777,7 @@ class Capture:
         before = {id(w) for w in QApplication.topLevelWidgets()}
         original = QDialog.exec
         QDialog.exec = lambda dialog: (dialog.show(), 0)[1]
+        self.opening = True  # (the dialog asked for: not a stray question)
         try:
             action()
             end = time.time() + seconds + 90  # what it reads first runs in the background (sandbox-ai, slow when busy)
@@ -757,6 +788,7 @@ class Capture:
                               isinstance(w, QDialog) and w.isVisible()), None)
         finally:
             QDialog.exec = original
+            self.opening = False
         if found is None:
             raise LookupError("no dialog opened" + (f" ({self.window.statusBar().currentMessage()})"
                                                     if self.window.statusBar().currentMessage() else ""))
@@ -1070,7 +1102,7 @@ def main(argv=None):
             home, project = stage(root, args.home)
             env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
                    "XDG_STATE_HOME": str(home / ".local" / "state"), "XDG_DATA_HOME": str(home / ".local" / "share"),
-                   "XDG_CACHE_HOME": str(home / ".cache"), "XDG_RUNTIME_DIR": str(root / "runtime"),
+                   "XDG_CACHE_HOME": str(home / ".cache"), "XDG_RUNTIME_DIR": str(home / ".run"),
                    "SANDBOX_AI_SECRETS": "file", "SANDBOX_AI_HOME": str(REPO), "SANDBOX_AI_NO_DEPRECATION": "1",
                    "PATH": f"{REPO}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
                    "QT_SCALE_FACTOR": args.scale}

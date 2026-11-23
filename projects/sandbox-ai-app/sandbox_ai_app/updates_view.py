@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QComboBox, QFormLayout, QHBoxLayout, QLineEdit, QP
 from . import backend
 from .files import printable, printable_text
 from .i18n import N_, tr
-from .widgets import ask_first, background, plain_label, safe_tooltip, warn
+from .widgets import ask_first, background, plain_label, safe_tooltip, set_row_enabled, set_row_tip, warn
 
 MODES = (("off", N_("off - nothing is checked unless asked")),
          ("notify", N_("notify - a newer signed release is announced (the default)")),
@@ -52,6 +52,9 @@ def result_text(result):
             return tr("{available} is there, but it is not signed (no SHA256SUMS.sig): not offered",
                       available=available)
         return tr("{available} is there, but not signed by a trusted key: not offered", available=available)
+    if backend.newer(result.get("installed"), result.get("available")):
+        return tr("{installed} is newer than the newest release {available}: nothing to update",
+                  installed=printable(result.get("installed")), available=available)
     if result.get("available"):
         return tr("up to date ({installed}; the newest release is {available})",
                   installed=printable(result.get("installed")), available=available)
@@ -131,12 +134,9 @@ class UpdatesPanel(QWidget):
         self.data = data if isinstance(data, dict) else None
         data = self.data or {}
         refused = data.get("refused") or {}
-        model = self.mode.model()
         for index, (value, _) in enumerate(MODES):
-            item = model.item(index)
-            if item is not None:
-                item.setEnabled(value not in refused)
-                item.setToolTip(safe_tooltip(refused.get(value) or ""))
+            set_row_enabled(self.mode, index, value not in refused)
+            set_row_tip(self.mode, index, refused.get(value) or "")
         if data.get("mode"):
             self.mode.setCurrentIndex(max(0, self.mode.findData(data["mode"])))
             self.window_field.setText(str(data.get("window") or ""))
@@ -163,10 +163,14 @@ class UpdatesPanel(QWidget):
         newer = bool((data.get("result") or {}).get("newer"))
         self.install_button.setEnabled(bool(data.get("downloaded")) or (newer and (self.installs_here(data)
                                                                                    or self.window_offers())))
-        self.rollback_button.setEnabled(bool(data.get("rollback")))
-        self.rollback_button.setToolTip(safe_tooltip(tr("Back to {version}, the version kept before",
-                                                        version=printable(data["rollback"]))
-                                                     if data.get("rollback") else tr("No other version is kept")))
+        # (a system installation this user cannot write: only root goes back - said, not offered)
+        own = data.get("rollback_now", True) is not False
+        self.rollback_button.setEnabled(bool(data.get("rollback")) and own)
+        self.rollback_button.setToolTip(safe_tooltip(
+            tr("No other version is kept") if not data.get("rollback") else
+            tr("Back to {version}, the version kept before", version=printable(data["rollback"])) if own else
+            tr("Back to {version} only as root: sudo sandbox-ai update --rollback",
+               version=printable(data["rollback"]))))
 
     def installs_here(self, data):
         """Whether Install now… can install a release into this copy in the background (`update --install`): a copy

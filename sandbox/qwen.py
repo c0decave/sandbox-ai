@@ -27,7 +27,6 @@ MANAGED_DIR = "/etc/qwen-code"
 SETTINGS = MANAGED_DIR + "/settings.json"
 SESSION_DIR = "qwen"  # in the session directory, mounted read-only at MANAGED_DIR
 SETTINGS_VERSION = 4  # Qwen Code 0.26's settings format: a file at it is never migrated (written)
-EXPERIMENTAL = "qwen"  # not live-tested yet: the start says so (a note, never a refusal)
 NAME = "Qwen Code"
 KEY_VARIABLE = "OPENAI_API_KEY"  # where Qwen Code's OpenAI-compatible auth reads its key (--llm: the placeholder)
 
@@ -305,10 +304,6 @@ def telemetry_rules():
              "reason": "Qwen Code's telemetry is always off"} for number, host in enumerate(rule_hosts(), 1)]
 
 
-def experimental_note():
-    return ("Qwen Code: not live-tested yet (its image and a real start have not passed their live test)")
-
-
 def mcp_args(names, bridge_args, timeouts=None):
     """Qwen Code's --mcp-config for the --mcp servers NAMES: each the launcher's stdio bridge (BRIDGE_ARGS(name)),
     with its wait for one call from TIMEOUTS ({name: seconds}, the launcher's mcp_tool_timeouts; Qwen Code counts
@@ -358,10 +353,9 @@ def environment(a):
 
 
 def plan(a):
-    """The dry run's "qwen": the reviewed release, the settings' place, what is on and what stays off, and whether
-    it is experimental here."""
+    """The dry run's "qwen": the reviewed release, the settings' place, what is on and what stays off."""
     names = features(a)
-    return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}", "experimental": True,
+    return {"version": VERSION, "commit": COMMIT, "package": f"{PACKAGE}@{VERSION}",
             "system_settings": SETTINGS, "own_sandbox": False,
             # Never switchable: pinned off, opt-out variables set, these hosts never opened and refused by the proxy.
             "telemetry": {"switchable": False, "blocked_hosts": list(TELEMETRY_HOSTS),

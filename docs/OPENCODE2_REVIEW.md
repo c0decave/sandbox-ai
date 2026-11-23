@@ -69,7 +69,7 @@ that bypassed the proxy (none did): `opencode run` and the TUI (in tmux, a messa
 defaults and with sandbox-ai's settings, an MCP server (stdio, sandbox-ai's demo server), `debug config` (which
 configuration layer wins), `plugin add`, `upgrade`, `pair --remote`, `session import URL`, `stats`, `models`,
 `auth list`. Not verified here: the image build (no Podman in this sandbox: it builds in CI or on the host) and a
-start in a real sandbox; hence OpenCode 2 ships as not live-tested yet (the start says so in one line; no opt-in).
+start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (opencode2)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -80,7 +80,7 @@ start in a real sandbox; hence OpenCode 2 ships as not live-tested yet (the star
 | no provider configured | the free models of OpenCode Zen on `opencode.ai` (`opencode/big-pickle`, `flint-40b-free` and the like): the prompt goes to the maker's service | the same (opencode.ai is OpenCode's own provider, open as for OpenCode 1); with `--llm` or `--no-provider-defaults` it is closed |
 | a project's `opencode.json` naming a model that does not exist | falls back to the free models on `opencode.ai` (measured) | `--llm`'s model is set in the highest layer (`OPENCODE_CONFIG_CONTENT`), which no project file overrides |
 | `opencode upgrade` | `opencode.ai/update/api`, then npm, brew or the curl installer | refused (the install is read-only; a new OpenCode 2 is a new review and `sandbox-ai build opencode2`) |
-| `opencode plugin add|update|check`, plugins in a configuration | `registry.npmjs.org` (and Git hosts for `github:` specs; the background install of configured plugins at every start) | refused unless `--opencode2-enable plugins`; npm closed |
+| `opencode plugin add\|update\|check`, plugins in a configuration | `registry.npmjs.org` (and Git hosts for `github:` specs; the background install of configured plugins at every start) | refused unless `--opencode2-enable plugins`; npm closed |
 | `opencode pair --remote` | `opentunnel.xyz` (`POST /api/tunnel`): the server is exposed to the internet | refused always; `opentunnel.xyz` never opened and refused by the proxy |
 | `opencode session import URL`, `references` with a `repository`, `skills`/`instructions` URLs | that URL, GitHub | the sandbox's allow-list decides, as for every tool |
 
@@ -126,7 +126,7 @@ own hosts and shows in the dry run's `"opencode2"`.
 | Telemetry, analytics, crash reports | none found: no analytics client in the binary (no PostHog, Sentry, Segment, Mixpanel, Amplitude; `posthog` only names PostHog's MCP server for OAuth), OpenTelemetry only with an `OTEL_EXPORTER_OTLP_*` endpoint of yours; Bun's crash reporter (`bun.report`, `BUN_ENABLE_CRASH_REPORTING`) | **always off, not switchable** (see Telemetry) | none |
 | Update check (`update`, `opencode upgrade`) | **notify**: at every interactive start (`opencode.ai/update/api`) | off (`OPENCODE_DISABLE_AUTOUPDATE=1`, `update: disable`), `opencode.ai/update/**` refused by the proxy, `opencode upgrade`/`update`/`uninstall` refused | `updates`: the check and its notice (`update: notify`); installing is refused either way |
 | Model catalog (models.dev data from `models.opencode.ai`) | at every start | off (`OPENCODE_DISABLE_MODELS_FETCH=1`): the bundled catalog | `models-catalog` (models.opencode.ai) |
-| Plugins from npm and Git (`plugins`, `opencode plugin add|update|check`; configured plugins installed in the background at start) | on demand | closed (registry.npmjs.org), `opencode plugin add|update|check` refused; local plugins in `.opencode/plugins/` load (they are files of the project) | `plugins` (registry.npmjs.org) |
+| Plugins from npm and Git (`plugins`, `opencode plugin add\|update\|check`; configured plugins installed in the background at start) | on demand | closed (registry.npmjs.org), `opencode plugin add\|update\|check` refused; local plugins in `.opencode/plugins/` load (they are files of the project) | `plugins` (registry.npmjs.org) |
 | Web search (Exa, Firecrawl, Parallel, Tavily, TinyFish; asks the first time) | on demand, with a provider's key | closed | `web-search` (mcp.exa.ai, mcp.firecrawl.dev, search.parallel.ai, api.tavily.com, agent.tinyfish.ai) with `--api-key` for a provider that needs one |
 | OpenCode Zen / Console / Go (the maker's models, the `opencode` provider, `/connect`) | open | open (`opencode.ai`, the provider host as for OpenCode 1); closed with `--llm` or `--no-provider-defaults` | - |
 | Background service shared per user | on | off (`service.json` `disabled`); `opencode serve` on the sandbox's loopback only | - |
@@ -229,7 +229,7 @@ from the read-only mount, its skills and bootstrap, a refused call still refused
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - With its update check and catalog download off and the shared service disabled, OpenCode 2 contacts nothing but its
   model (measured, headless and interactive, every socket watched).
@@ -239,5 +239,5 @@ from the read-only mount, its skills and bootstrap, a refused call still refused
   self-update in the sandbox (read-only install, update check off, `upgrade` refused).
 - Against: a very young major line with a fast release cadence (2.0.0 to 2.3.0 in nine weeks; the 14-day rule pins
   three releases behind); the one-shot MCP gap of 2.2.5; plugins and Code Mode run code inside the sandbox (as the
-  agent); not live-tested in a sandbox yet. Hence not live-tested yet, and the review is repeated for every release
+  agent); not live-tested in a sandbox when reviewed; it has been since (see above). The review is repeated for every release
   taken in.

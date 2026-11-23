@@ -25,8 +25,7 @@ CPython 3.12 (`nanobot --version`: v0.4.0), and runs of it against a local fake 
 other connection sent to a logging proxy that refuses it, while every non-loopback socket of nanobot's processes was
 sampled every 0.2 s: with upstream's defaults and with sandbox-ai's settings. Not verified here: the image build (no
 Podman in this sandbox; it builds in CI or on the host; `openaipublic.blob.core.windows.net`, where the tokenizer file
-comes from, is not reachable from this sandbox) and a start in a real sandbox; hence the release ships nanobot as not
-live-tested yet (the start says so in one line; no opt-in).
+comes from, is not reachable from this sandbox) and a start in a real sandbox; hence it was not live-tested when this review was made (since then CI's job `agents-live (nanobot)` and the live check's `harnesses-live` run it in a real sandbox).
 
 ## Hosts contacted by default (measured)
 
@@ -88,7 +87,7 @@ only its own hosts and shows in the dry run's `"nanobot"`.
 | Docker | the project's own `Dockerfile`/`docker_bootstrap.py` bind `0.0.0.0` | not used: nanobot is installed from the wheel; nothing binds outside the loopback | none |
 | Scheduler: heartbeat (every 30 min a turn on `HEARTBEAT.md`), Dream (every 2 h a memory consolidation turn) | on (in the gateway) | off (pinned) | `scheduler`: both on, in the gateway while the sandbox runs; no host of its own (they use the model) |
 | Cron jobs (`cron` tool, `/trigger`) | the agent sets them up when asked; they run in the gateway | they run in the gateway while the sandbox runs (the gateway ends with the session); nanobot 0.4.0 has no switch that removes the tool | - |
-| Persistent gateway (`nanobot gateway --background`, `/detach`, `nanobot gateway restart|stop`) | on demand | `nanobot gateway` in the agent's arguments is refused without `scheduler`; the gateway the terminal client starts ends with the session | `scheduler` |
+| Persistent gateway (`nanobot gateway --background`, `/detach`, `nanobot gateway restart\|stop`) | on demand | `nanobot gateway` in the agent's arguments is refused without `scheduler`; the gateway the terminal client starts ends with the session | `scheduler` |
 | Chat channels (Telegram, Discord, Slack, WeChat, Feishu, DingTalk, Email, Matrix, Teams, WhatsApp, QQ, ...) | off until configured; their packages are installed at run time with pip | off; their packages are not in the image (the read-only venv takes no installs), their hosts closed | `gateway:telegram` (api.telegram.org): the Telegram channel (its packages are in the image), the bot token of the secret `nanobot_telegram` as `TELEGRAM_BOT_TOKEN` (`channels.telegram.token: "${TELEGRAM_BOT_TOKEN}"`, which nanobot resolves at start); who may talk to it: nanobot's pairing (the first message gets a code; `/pairing approve CODE` in nanobot or the WebUI's Settings) or `allowFrom` in `~/.nanobot/config.json` |
 | Updates (`nanobot update`, the WebUI's update-and-restart: PyPI, the release catalogue on raw.githubusercontent.com, Sigstore checks) | manual (`nanobot update`), or from the WebUI's About page | closed; `nanobot update` in the agent's arguments is refused; the install is read-only, so an update can never be applied | `updates` (pypi.org, raw.githubusercontent.com): the check only. A new nanobot is a new review, then `sandbox-ai build nanobot` |
 | Optional features (`nanobot plugins enable ...`, Langfuse, Bedrock, Azure, channel packages) | `pip install` into nanobot's own Python at run time (unpinned) | fails: the venv is read-only and PyPI closed | none (a new image) |
@@ -99,7 +98,7 @@ only its own hosts and shows in the dry run's `"nanobot"`.
 | WebUI | `nanobot webui`, 127.0.0.1:8765 with a login link (a secret in its fragment) | on the sandbox's loopback only; the app and `--browser` show it | - |
 | Terminal client (`nanobot`) | the Bun-compiled client from the wheel; a source checkout downloads Bun; a missing client downloads one from the GitHub release | the client from the wheel (`NANOBOT_TUI_NO_DOWNLOAD=1`) | - |
 | Remote WebUI pairing (`nanobot remote`, Nanobot Desktop) | on demand | nothing to pair with: no host opened, no Desktop | none |
-| OAuth providers (`nanobot provider login openai-codex|github-copilot|xai`) | on demand | closed (their hosts are not open) | the provider's hosts (`--allow-host`); sandbox-ai has no login for nanobot |
+| OAuth providers (`nanobot provider login openai-codex\|github-copilot\|xai`) | on demand | closed (their hosts are not open) | the provider's hosts (`--allow-host`); sandbox-ai has no login for nanobot |
 | MCP (`tools.mcpServers`, stdio and HTTP; WebUI MCP presets that run `npx`/`uvx`) | the user's | `--mcp` servers through the launcher's bridge; a preset that downloads needs its registry's host | `--mcp`, `--allow-host` |
 | Subagents, goals (`/goal`), memory (`memory/MEMORY.md`, git history with dulwich) | on | on, local | - |
 
@@ -164,7 +163,7 @@ holds: the network, MCP and device rules, its web fetches at the connection prox
 
 ## Go / No-Go
 
-**Go, not live-tested yet** (choosing it starts it; the start says so in one line).
+**Go** (choosing it starts it like any other agent).
 
 - With sandbox-ai's settings nanobot contacts nothing but its model at start and during a turn (measured); its
   update check, marketplace, registries, keyless search and Jina Reader are on demand, closed and each switchable with

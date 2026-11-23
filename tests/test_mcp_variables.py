@@ -300,7 +300,9 @@ def test_remember_catalog_env(scenario, tmp_path):
         assert known[source]["mcp:gowitness"] == {"signature": "unsigned", "env": {
             "ALLOW_PRIVATE_TARGETS": {"required": False, "secret": False}},
             # (its network and hosts too: mcp list and doctor tell a full server of an allowlist entry to switch)
-            "network": "full", "hosts": []}
+            "network": "full", "hosts": [],
+            # (what it pins: mcp list, show, doctor and a start say a newer image - tests/test_mcp_update.py)
+            "image": f"{GOWITNESS['image']}@{GOWITNESS['digest']}"}
         assert known[source]["mcp:telegram"]["env"]["TELEGRAM_BOT_TOKEN"] == {"required": True, "secret": True}
         assert oct(m.catalog_env_file().stat().st_mode & 0o777) == "0o600"
     elif scenario == "sad":  # a catalog whose signature does not verify: what it said before is forgotten
@@ -578,9 +580,9 @@ def test_mcp_catalog_json_names_the_folders_each_entry_takes(tmp_path, capsys):
     path.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [folders, GOWITNESS]}))
     assert m.cli(["catalog", "--json", "-c", str(path)]) == 0
     entries = {entry["name"]: entry for entry in json.loads(capsys.readouterr().out)["entries"]}
-    assert entries["exiftool"]["mounts"] == [
-        {"target": "/work", "required": True, "description": "the files to read"},
-        {"target": "/out", "required": False, "description": ""}]
+    assert entries["exiftool"]["mounts"] == [  # (0.1.212: each with its default and the mode its entry declares)
+        {"target": "/work", "required": True, "description": "the files to read", "default": "workspace", "mode": "ro"},
+        {"target": "/out", "required": False, "description": "", "default": "own", "mode": "ro"}]
     assert entries["gowitness"]["mounts"] == []
 
 

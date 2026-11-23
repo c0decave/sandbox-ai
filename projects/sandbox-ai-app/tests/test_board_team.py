@@ -290,7 +290,7 @@ def test_e2e_the_boards_team_is_checked_and_started_by_the_real_sandbox_ai(teame
     with its roles and member options, and the part then shows its board."""
     page, node = teamed
     root = Path(os.environ["SANDBOX_AI_HOME"])
-    sys.path.insert(0, str(root / "tests"))
+    sys.path.append(str(root / "tests"))  # (after the app's own tests: conftest.app_tests_first)
     from live_fakes import Host
     host = Host(tmp_path / "host")
     host.env["SANDBOX_AI_SECRETS"] = "file"

@@ -39,7 +39,8 @@ def test_the_tour_walks_every_page_in_the_windows_order():
 
 OWN = {"workspace": {"path", "readonly"}, "mount": {"source", "dest", "mode"}, "mcp": {"name"}, "service": {"name", "image"},
        "agent": {"agent", "model", "effort", "thinking"}, "proxy": {"enabled"}, "home": {"login"},
-       "session": {"tmux"}, "bridge": {"peer", "direction", "message", "watch"}, "team": {"name", "lead"}}
+       "session": {"tmux"}, "bridge": {"peer", "direction", "message", "watch"}, "team": {"name", "lead"},
+       "other": {"tokens"}}
 
 
 def test_every_question_is_about_what_its_node_owns(sai):
@@ -67,10 +68,12 @@ SAMPLES = {"path": "/home/u/src/app", "source": "/home/u/data", "dest": "/mnt/da
            "--no-inspect": ["pinned.example.org"], "--git-token-env": ["https://github.com=GH_TOKEN"],
            "name": "demo", "--llm": "local", "--allow-host": ["api.example.org"],
            "--allow-domain": ["example.org"], "--vpn": "work",
-           "--device": ["/dev/kvm"], "--memory": "4g", "--cpus": "2", "--pids": "1024", "--gui-vnc": "/home/u/vnc",
+           "--device": ["/dev/kvm"], "--toolchain": ["go", "rust"], "--memory": "4g", "--cpus": "2", "--pids": "1024", "--gui-vnc": "/home/u/vnc",
            "--log-dir": "/home/u/logs", "--image-variant": "gpu", "image": "redis", "--browser-profile": "session",
            "peer": "docs", "--cairn-workers": "claude=sonnet", "--cairn-origin": "The machine 10.0.0.5",
-           "--cairn-goal": "Its flaws, proven", "--cairn-hint": "Start at port 80"}
+           "--cairn-goal": "Its flaws, proven", "--cairn-hint": "Start at port 80",
+           "--artex-port": "9000",
+           "tokens": ["--mode high", "--name 'night shift'", "--probe"]}
 
 
 def sample(question):
@@ -168,3 +171,17 @@ def test_model_and_effort_reach_the_launcher_as_its_options():
     back = B.from_argv(sai, "codex", argv).first("agent").props
     assert back["model"] == "gpt-5-codex" and back["effort"] == "high"
     assert B.values(board)[2] == ["--model", "gpt-5-codex"]  # without the launcher: as before
+
+
+def test_the_other_options_part_is_asked_a_line_per_option():
+    """The part Other options: its tokens as lines (an option with its value on each, quoted as a shell needs it), and
+    the lines back as the tokens they are."""
+    question = guide.questions("other")[0]
+    board = B.Board()
+    board.extra = ["--mode", "high", "--name", "night shift", "--probe", "--llm-traffic=all", "stray"]
+    node = board.first("other")
+    lines = guide.answer_of(node, question)
+    assert lines == ["--mode high", "--name 'night shift'", "--probe", "--llm-traffic=all", "stray"]
+    assert guide.props_of("other", {"tokens": lines}) == {"tokens": board.extra}
+    assert guide.props_of("other", {"tokens": "--mode high\n\n  --keep \n"}) == {"tokens": ["--mode", "high", "--keep"]}
+    assert guide.props_of("other", {"tokens": ""}) == {"tokens": None}

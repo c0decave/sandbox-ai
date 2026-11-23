@@ -43,7 +43,9 @@ def setup(qapp, tmp_path, monkeypatch, wait):
     assert wait(lambda: page.roots.count() > 0 and not page.roots_reading), "the roots are read in the background"
     page.right.go_path(str(host))
     settle(page.left, page.right)
-    return page, ws.resolve(), host.resolve(), outside
+    yield page, ws.resolve(), host.resolve(), outside
+    for root in list(page.remotes.values()):  # (the connections a test made end with it: ssh, its server)
+        root.close()
 
 
 def settle(*panes):

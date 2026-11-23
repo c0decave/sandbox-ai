@@ -95,4 +95,4 @@ def test_the_presets_show_the_part_in_the_gallery(sai, ident):
         assert preset.group == "llm"
     else:
         assert preset.group == "security" and board.first("cairn").props["--cairn-goal"] == "<text:goal>"
-    assert preset.experimental and preset.experimental["names"] == ["cairn"]
+    assert not hasattr(preset, "experimental"), "no badge (the user, 2026-11-22)"

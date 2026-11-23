@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QComboBox, QCompleter, QMenu, QToolButton
 
 from .files import printable, printable_text
 from .i18n import tr
-from .widgets import background, safe_tooltip
+from .widgets import background, row_enabled, safe_tooltip, set_row_enabled
 
 LOCAL = "local"
 KINDS = ("secret", "vpn", "image", "variant", "agent_image", "llm")
@@ -304,7 +304,7 @@ class NameField(_Source, QComboBox):
                     self.setItemData(self.count() - 1, safe_tooltip(name), Qt.ItemDataRole.ToolTipRole)
                 if not names:  # none there: where one is added (greyed, never chosen)
                     self.addItem(none_yet(self.kind))
-                    self.model().item(self.count() - 1).setEnabled(False)
+                    set_row_enabled(self, self.count() - 1, False)
                 self.completions.setStringList(list(names))
                 self.setEditText(current)
             finally:
@@ -317,8 +317,7 @@ class NameField(_Source, QComboBox):
 
     def offered(self):
         """The names in the list (what the host has, as read; not the greyed "None yet")."""
-        return [self.itemText(index) for index in range(1, self.count()) if self.model().item(index) is None
-                or self.model().item(index).isEnabled()]
+        return [self.itemText(index) for index in range(1, self.count()) if row_enabled(self, index)]
 
 
 def add_line(text, name, option=None):

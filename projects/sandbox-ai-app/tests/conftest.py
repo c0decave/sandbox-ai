@@ -29,6 +29,9 @@ os.environ["SANDBOX_AI_APP_LANGUAGE"] = "en"
 os.environ.setdefault("SANDBOX_AI_MCP_NO_IMAGE_CHECK", "1")
 # Secrets the tests keep in private files need no primary password (test_primary_password.py turns that off).
 os.environ.setdefault("SANDBOX_AI_SECRETS_PLAIN", "1")
+# Podman's --init has its init binary (catatonit) on the tests' hosts, whatever this machine has (sandbox/hostinit.py:
+# a start with an MCP image server is refused before it starts on a host without one).
+os.environ.setdefault("SANDBOX_AI_INIT_BINARY", "/usr/libexec/podman/catatonit")
 # A start compacts no logs in the background (the core's tests check that).
 os.environ.setdefault("SANDBOX_AI_AUTO_COMPACT", "0")
 
@@ -45,6 +48,30 @@ try:
     QDesktopServices.openUrl = staticmethod(lambda url: OPENED_URLS.append(url) or True)
 except (ImportError, TypeError, AttributeError):
     pass
+
+
+# The app's tests first on sys.path, before every module is collected and every test runs: some tests put sandbox-ai's
+# own tests/ in front (sys.path.insert(0, ...) for live_fakes, release_kit), and 33 module names are in both folders
+# (test_presets_all, test_stability_round2, conftest's helpers ...) - a later `from test_presets_all import ...` got the
+# core suite's module, and test_presets.py and test_files_review_p13.py failed in a CI part's order (round 2).
+TESTS_DIR = str(Path(__file__).resolve().parent)
+
+
+def app_tests_first():
+    """TESTS_DIR at sys.path[0] (once): what the app's tests import by name is the app's own; sandbox-ai's tests/
+    stays on the path after it (live_fakes, release_kit: names the app's tests do not have)."""
+    if sys.path[:1] != [TESTS_DIR]:
+        while TESTS_DIR in sys.path:
+            sys.path.remove(TESTS_DIR)
+        sys.path.insert(0, TESTS_DIR)
+
+
+def pytest_collectstart(collector):
+    app_tests_first()
+
+
+def pytest_runtest_setup(item):
+    app_tests_first()
 
 
 # CI sets SANDBOX_AI_APP_REQUIRE_QT=1: a test skipped because Qt, QtWebEngine or the sandbox-ai checkout is
@@ -215,14 +242,20 @@ def sweep_widgets(before=()):
 @pytest.fixture(autouse=True)
 def no_widgets_left():
     """What a test made of windows, pages and dialogs goes with it (sweep_widgets): kept, the whole suite grew to
-    several GB in one process and the CI runner killed it (exit 137)."""
+    several GB in one process and the CI runner killed it (exit 137). Then nothing it started runs on
+    (nothing_left_running)."""
     before = ()
     if "PySide6.QtWidgets" in sys.modules:
         from PySide6 import QtWidgets
         app = QtWidgets.QApplication.instance()
         before = set(app.topLevelWidgets()) if app is not None else ()
+    calls, threads = running_calls(), app_threads()
     yield
     sweep_widgets(before)
+    problems = nothing_left_running(calls, threads)
+    if problems:
+        pytest.fail("the test left something running (wait for or stop what it started):\n" + "\n".join(problems),
+                    pytrace=False)
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +266,12 @@ def the_theme_it_found():
     never here - an order of tests no local run had). The themes' own tests choose theirs."""
     found = _look()
     yield
+    if found is not None and "PySide6.QtWidgets" in sys.modules:
+        # (a theme the test chose last is applied once its event is over - theme.apply_soon, a timer: run it now,
+        # or it was applied in the event loop of a later test, after this one had put the look back - round 2)
+        from PySide6 import QtWidgets
+        if QtWidgets.QApplication.instance() is not None:
+            QtWidgets.QApplication.processEvents()
     now = _look()
     # (no app after the test - one that ran main() and ended it, GitHub CI part 1: nothing to put back)
     if found is not None and now is not None and now != found:
@@ -414,6 +453,110 @@ def no_fake_host_process_outlives_the_test():
     if problems:
         pytest.fail("the test left processes of its fake host running (ended now; stop what the test started, e.g. "
                     "`sandbox-ai mcp stop NAME`):\n" + "\n".join(problems), pytrace=False)
+
+
+# -- what a test leaves running: modal dialogs and background threads (round 2, 2026-11-22) --
+# test_responsive::test_stop_runs_in_the_background and test_video_clicks::test_from_a_modal_dialog... failed in long
+# runs only: an earlier test left a window-modal dialog open (the offer then floated over that one) or a call running
+# in the background whose answer came in the middle of the next test. A test that leaves either fails here, naming it;
+# what it left is closed (rejected) or waited for first, so the next test starts clean.
+LEFT_RUNNING_GRACE = 15.0  # seconds a test's background calls may take to end after it (its last read coming back)
+
+
+def open_modal_dialogs():
+    """The app's own modal dialogs (window- or application-modal) that are visible now."""
+    if "PySide6.QtWidgets" not in sys.modules:
+        return []
+    from PySide6 import QtWidgets
+    from PySide6.QtCore import Qt
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return []
+    found = []
+    for widget in app.allWidgets():
+        try:
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible() and widget.isWindow() and \
+                    (widget.isModal() or widget.windowModality() != Qt.WindowModality.NonModal):
+                found.append(widget)
+        except RuntimeError:  # deleted meanwhile
+            pass
+    return found
+
+
+def app_threads():
+    """The Python threads that run the app's code (a target of sandbox_ai_app, not the reused workers of
+    widgets._Workers, which wait idle between calls: their calls are ThreadCalls, below)."""
+    import threading
+    found = set()
+    for thread in threading.enumerate():
+        target = getattr(thread, "_target", None)
+        module = getattr(target, "__module__", "") or ""
+        if thread.is_alive() and module.startswith("sandbox_ai_app") and not thread.name.startswith("worker-"):
+            found.add(thread)
+    return found
+
+
+def running_calls():
+    widgets = sys.modules.get("sandbox_ai_app.widgets")
+    return set(widgets.ThreadCall.running()) if widgets is not None else set()
+
+
+def call_words(call):
+    state = getattr(call, "state", None)
+    what = getattr(state, "what", None) or getattr(getattr(call, "function", None), "__qualname__", None)
+    return str(what or repr(call))[:200]
+
+
+@pytest.fixture(autouse=True)
+def no_modal_dialog_left():
+    """A test leaves no modal dialog of its own open (see above): checked before its windows are swept away."""
+    before = set(open_modal_dialogs())
+    yield
+    problems = []
+    for dialog in open_modal_dialogs():
+        if dialog in before:
+            continue
+        problems.append(f"a modal dialog left open: {dialog_words(dialog)}")
+        try:
+            dialog.reject()
+            dialog.hide()
+        except RuntimeError:
+            pass
+    if problems:
+        pytest.fail("the test left a modal dialog open (answer or close it in the test):\n" + "\n".join(problems),
+                    pytrace=False)
+
+
+def nothing_left_running(before_calls, before_threads):
+    """After a test and the sweep of its windows (no_widgets_left): what it started in the background has ended
+    within LEFT_RUNNING_GRACE seconds - its answers delivered now, within this test - else the test fails, naming it,
+    and what still runs is given up (its late answer reaches no later test)."""
+    import time
+    app = None
+    if "PySide6.QtWidgets" in sys.modules:
+        from PySide6 import QtWidgets
+        app = QtWidgets.QApplication.instance()
+    deadline = time.monotonic() + LEFT_RUNNING_GRACE
+    calls, threads, waited = set(), set(), False
+    while time.monotonic() < deadline:
+        calls, threads = running_calls() - before_calls, app_threads() - before_threads
+        if not calls and not threads:
+            break
+        waited = True
+        if app is not None:
+            app.processEvents()
+        time.sleep(0.01)
+    problems = [f"still running in the background {LEFT_RUNNING_GRACE:g} s after the test: {call_words(call)}"
+                for call in calls]
+    problems += [f"a thread still running {LEFT_RUNNING_GRACE:g} s after the test: {thread.name}" for thread in threads]
+    widgets = sys.modules.get("sandbox_ai_app.widgets")
+    if calls and widgets is not None:
+        with widgets.ThreadCall._lock:
+            for call in calls:
+                call.abandoned = True
+    if app is not None and waited:
+        app.processEvents()  # (the answers of what ended: delivered within this test, not the next one)
+    return problems
 
 
 def pytest_sessionfinish(session, exitstatus):
