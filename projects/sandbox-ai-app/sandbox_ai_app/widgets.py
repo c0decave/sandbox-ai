@@ -1648,7 +1648,9 @@ def fit_size(dialog):
     # The size its code gave it is kept (it may be larger than its hint: a list's room); the one Qt gave it before
     # the texts above were wrapped is not (a long line made an input dialog as wide as the screen).
     given = QWidget.size(dialog) if dialog.testAttribute(Qt.WidgetAttribute.WA_Resized) else QSize(0, 0)
-    width = max(given.width(), hint.width(), min(least_width(dialog), dialog.maximumWidth()))
+    # (its title too: an input dialog's layout sets its minimum size from its contents when it is activated, so the
+    # minimum make_readable gave it for its title was gone - "Hardware-Limits von NAME" was cut in its title bar)
+    width = max(given.width(), hint.width(), min(max(least_width(dialog), title_width(dialog)), dialog.maximumWidth()))
     if limit is not None:
         width = min(width, limit[0])
     height = max(given.height(), needed_height(dialog, width))

@@ -669,10 +669,11 @@ def test_another_host_is_checked_for_the_options_first(qapp, sai, monkeypatch):
     keyed, allowed = refused_then_listed(sai, "ct1")
     plain = ("wizard", "models", "--kind", "vllm", "--url", PUBLIC, "--sort", "loaded", "--json")
     sai.answers[("ct1", plain)] = (0, json.dumps(WL.model_order(MODELS)), "")
-    known = {"ct1": set()}
+    known, fresh_asks = {"ct1": set()}, []
 
-    def command_options(host, *command):
+    def command_options(host, *command, fresh=False):
         assert command == ("wizard", "models")
+        fresh_asks.append(fresh)
         return set(known[host])
     monkeypatch.setattr(sai, "host_command_options", command_options)
     page = llm_page.LlmPage(sai)
@@ -685,6 +686,7 @@ def test_another_host_is_checked_for_the_options_first(qapp, sai, monkeypatch):
     sai.asked.clear()
     dialog.test()
     assert sai.asked == [] and "too old" in dialog.test_result.text() and "--url" in dialog.test_result.text()
+    assert fresh_asks == [False, True], "what was kept, then the host asked once more before it is called too old"
     known["ct1"] = {"--url", "--kind", "--sort", "--json"}
     dialog.test()
     assert sai.asked == [("ct1", plain)] and dialog.test_result.text().startswith("Reachable"), \

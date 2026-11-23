@@ -268,7 +268,11 @@ def test_the_opened_image_list_stays_open_when_it_is_read_again(board, home, wai
     board.inspect(board.board.first("service"))
     qapp.processEvents()
     board.show()
-    combo = next(c for c in board.inspector_holder.findChildren(QtWidgets.QComboBox) if c.findData("\x00other") >= 0)
+    for _ in range(20):  # (showing the Board arranges it and makes its inspector anew: the list is the new one's)
+        qapp.processEvents()
+        board.inspect_timer.isActive() and board.inspect_timer.timeout.emit()
+    combo = next(c for c in board.inspector_holder.findChildren(QtWidgets.QComboBox) if c.findData("\x00other") >= 0
+                 and c.isVisible())
     if added:
         record_images(home / "config", ["redis", "valkey"])
     board.user_images_read_at = 0.0

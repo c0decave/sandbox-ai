@@ -9,7 +9,8 @@ import pytest
 
 from sandbox_ai_app import help_content, help_texts, i18n, tours
 
-LINT_WORDS = re.compile(r"\b(du|Du|dein\w*|Dein\w*|dir|Dir|dich|Dich)\b")
+# (dein, deine, deinem, deinen, deiner, deines - never "Deinstallation" or "deinstallieren")
+LINT_WORDS = re.compile(r"\b(du|Du|[Dd]ein(?:e|em|en|er|es)?|dir|Dir|dich|Dich)\b")
 ANGLICISMS = re.compile(r"\w*(session|sandboxes|sandboxs)\w*", re.IGNORECASE)
 
 
@@ -56,10 +57,11 @@ def prose(text):
 
 
 def test_the_lint_finds_du_and_leaves_options_code_and_paths_alone():
-    for bad in ("Was du gegeben hast", "in deinem Browser", "Deine MCP-Server", "nicht von dir", "z. B. du@example.org"):
+    for bad in ("Was du gegeben hast", "in deinem Browser", "Deine MCP-Server", "nicht von dir", "z. B. du@example.org",
+                "dein Host", "deines Hosts", "deiner Sitzung", "deinen Ordner", "Dein Board"):
         assert LINT_WORDS.search(prose(bad)), bad
     for good in ("--log-dir DIR", "`sandbox-ai logs --log-dir`", "~/du/dein", "Ihre MCP-Server", "Durchsuchen",
-                 "direkt", "Dienst", "{dir}"):
+                 "direkt", "Dienst", "{dir}", "Deinstallieren", "die Deinstallation", "wird deinstalliert"):
         assert not LINT_WORDS.search(prose(good)), good
 
 

@@ -39,6 +39,7 @@ import stat
 import secrets
 import select
 import shutil
+import signal
 import socket
 import ssl
 import struct
@@ -1130,17 +1131,37 @@ def wait_bootstrap(log_path, process, timeout=BOOTSTRAP_TIMEOUT, out=None, secre
         sleep(0.5)
 
 
-def stop_tor(process, runner):
-    """End the tor of an attempt that stalled (TERM, KILL after 10 s); the runner no longer reports it as down."""
-    with contextlib.suppress(OSError):
-        process.terminate()
+def signal_tor(process, kill=False, uid=TOR_UID, run=subprocess.run):
+    """SIGTERM (KILL: SIGKILL) to tor's PROCESS. tor has become debian-tor (UID) by then, and root in the Tor container
+    has no CAP_KILL (--cap-drop=ALL): root's own signal is refused (EPERM), so it is sent by a process of tor's own
+    user, started with CAP_SETUID (which the container has for tor). No capability is added for it."""
     try:
-        process.wait(timeout=10)
+        (process.kill if kill else process.terminate)()
+        return
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        run([sys.executable, "-I", "-S", "-c", "import os, sys; os.kill(int(sys.argv[1]), int(sys.argv[2]))",
+             str(process.pid), str(int(signal.SIGKILL if kill else signal.SIGTERM))], user=uid,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False)
+
+
+def stop_tor(process, runner, uid=TOR_UID, run=subprocess.run, wait=10):
+    """End the tor of an attempt that stalled (TERM, KILL after WAIT seconds; signal_tor: as tor's own user); the
+    runner no longer reports it as down. RuntimeError when it still runs after that: the next attempt's tor could not
+    bind its ports (it said "Address already in use", and why was lost)."""
+    signal_tor(process, False, uid, run)
+    try:
+        process.wait(timeout=wait)
     except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=10)
+        signal_tor(process, True, uid, run)
+        try:
+            process.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"the tor of the stalled attempt (PID {process.pid}) did not end: tor is not started "
+                               "again") from None
     with contextlib.suppress(ValueError):
         runner.children.remove(process)
 
@@ -1191,7 +1212,7 @@ def bootstrap(start, log_path, runner, settings, out=None, secrets=(), bridges=(
             lines = read_from(log_path, offset).splitlines()
             last = next((redact(line, secrets).strip() for line in reversed(lines) if BOOTSTRAPPED.search(line)), last)
             tail = "\n".join(redact(line, secrets) for line in lines[-10:])
-            stop_tor(process, runner)
+            stop_tor(process, runner, uid)
             if number == attempts:
                 break
             listing = runner.run(["nft", "list", "table", "inet", TABLE], check=False)

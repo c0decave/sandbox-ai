@@ -183,6 +183,27 @@ def host(tmp_path_factory):
               for i, (name, user) in enumerate((("postgres", "999:999"), ("redis", "999:1000"),
                                                 ("showcase-web", "101:101")))}
     (root / "config" / "sandbox-ai" / "user-images.json").write_text(json.dumps({"version": 1, "images": images}))
+    # Podman of the check's host: the images the check has before it starts anything are there (each MCP server's,
+    # added by the check; every agent's, built - a command server runs in codex's; your services'), whatever this
+    # machine's Podman holds (none on a CI runner: every image server was refused as "not there"; no Podman at all:
+    # nothing was asked). Only `image exists` is a dry run's question; any other call fails loudly.
+    agents = {LG.preset_plan(preset, llm=LLM, folders=root, gpu=True)["agent"] for preset in PRESETS.values()}
+    there = sorted({definition["image"] for definition in definitions.values() if "image" in definition}
+                   | {f"localhost/{agent}-sandbox:latest" for agent in agents | {"codex"}}
+                   | {entry["image"] for entry in images.values()})
+    (root / "podman-images.json").write_text(json.dumps(there))
+    fake = root / "fake-bin"
+    fake.mkdir()
+    (fake / "podman").write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args[:2] == ['image', 'exists'] and len(args) == 3:\n"
+        f"    sys.exit(0 if args[2] in json.load(open({str(root / 'podman-images.json')!r})) else 1)\n"
+        "print('stand-in podman of presets-live: not a dry run\\'s call: ' + ' '.join(args), file=sys.stderr)\n"
+        "sys.exit(125)\n")
+    (fake / "podman").chmod(0o755)
+    env["PATH"] = f"{fake}{os.pathsep}{env.get('PATH', '/usr/bin:/bin')}"
     # The toolchains the language presets bring, as preset_setup adds them (here: stand-ins, from a catalog nobody
     # signed - the check adds the signed catalog's).
     catalog = TF.catalog(root / "toolchain-catalog")

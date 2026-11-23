@@ -101,6 +101,9 @@ class Podman:
             return subprocess.CompletedProcess(argv, 0, "\n".join(ids) + "\n", "")
         if words[:2] == ["image", "rm"]:
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if words[:2] == ["image", "exists"] and len(words) == 3:
+            known = set(self.store) | {str(d.get("Id", "")).removeprefix("sha256:") for d in self.store.values()}
+            return subprocess.CompletedProcess(argv, 0 if words[2].removeprefix("sha256:") in known else 1, "", "")
         raise AssertionError(argv)
 
 
@@ -1130,7 +1133,11 @@ def test_sandbox_ai_build_of_a_variant_on_your_image(config, tmp_path):
 def test_a_start_with_a_service(config, tmp_path, monkeypatch):
     """A real start (the pod replaced): the images checked before anything runs, the supervisor told what to wait
     for, run.json naming the service, the agent its address."""
-    add_redis()
+    podman = add_redis()[3]
+    # The store the start asks whether the service's image is still there (services.ready_fixes) is the one it was
+    # pulled into, never this machine's Podman (a CI runner's has no such image: the start was refused).
+    ready_fixes = sv.ready_fixes
+    monkeypatch.setattr(sv, "ready_fixes", lambda a, l=None, run=None: ready_fixes(a, l, run=podman))
     monkeypatch.setattr(s.os, "geteuid", lambda: 1000)
     monkeypatch.setattr(s.shutil, "which", lambda name: "/usr/bin/" + name)
     monkeypatch.setattr(s, "prepare_home", lambda *args: [])
@@ -1148,6 +1155,7 @@ def test_a_start_with_a_service(config, tmp_path, monkeypatch):
     assert s.main(["claude", "--workspace", str(work), "--no-auth", "--no-tmux", "--no-keep",
                    "--service", "cache:image=redis,port=6379,ready-timeout=30"]) == 0
     assert prepared == [["cache"]]
+    assert ["image", "exists", ID] in [call[-3:] for call in podman.calls], "its image asked for before the start"
     assert seen["config"]["services"] == [{"name": "cache", "ready": 6379, "timeout": 30}]
     assert seen["config"]["env"]["SANDBOX_AI_SERVICES"] == "cache=localhost:6379"
     assert seen["record"]["services"][0]["name"] == "cache" and seen["record"]["services"][0]["unchecked"]

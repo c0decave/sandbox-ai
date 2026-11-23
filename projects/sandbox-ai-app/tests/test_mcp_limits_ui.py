@@ -338,7 +338,7 @@ def test_the_german_texts_are_there(qapp, sai):
     fields = MF.LimitsFields(MF.limit_checks(sai.module("mcp")), {"memory": "512m"})
     fields.fields["memory"].setText("1024")
     assert fields.reasons["memory"].text().startswith("Nicht gültig: eine ganze Zahl mit m oder g")
-    assert fields.reset_button.text() == "Die eingebauten Grenzen nehmen"
+    assert fields.reset_button.text() == "Die eingebauten Limits nehmen"  # (Grenzen: Limits in German texts, 0.1.240)
     assert fields.fields["memory"].placeholderText() == "Standard: 512m"
 
 

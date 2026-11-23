@@ -42,8 +42,8 @@ def test_the_real_bash_here():
 
 
 def test_build_all_builds_every_image_and_goes_on_after_a_failure(tmp_path, monkeypatch):
-    """`sandbox-ai build all` builds ALL of sandbox-ai's images - the seven agents, team, Cairn, browser, VPN, Tor and
-    every variant of yours - each on its own, so one failure stops none of the others."""
+    """`sandbox-ai build all` builds ALL of sandbox-ai's images - the twelve agents, team, Cairn, ARTEX, browser, VPN,
+    Tor and every variant of yours - each on its own, so one failure stops none of the others."""
     import json
     import subprocess
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -63,12 +63,13 @@ def test_build_all_builds_every_image_and_goes_on_after_a_failure(tmp_path, monk
     assert m.build_all(["-pu", "unix:///x", "--uv", "0.9", "all", "--no-cache"], run=run, out=said.append) == 1
     names = [call[call.index("--variant") + 1] if "--variant" in call else call[-2] for call in calls]
     assert names == ["codex", "claude", "opencode", "opencode2", "hermes", "dsh", "qwen", "goose", "openhands",
-                     "nanobot", "letta", "pi", "team", "cairn", "browser", "vpn", "tor", "tor"]
+                     "nanobot", "letta", "pi", "team", "cairn", "artex", "browser", "vpn", "tor", "tor"]
     assert all(call[-1] == "--no-cache" for call in calls)
     assert calls[0][:4] == ["--podman-url", "unix:///x", "--uv", "0.9"]
-    assert calls[14] == ["browser", "--no-cache"]  # the browser's build takes none of those options
-    assert calls[17][-3:] == ["--variant", "tor", "--no-cache"]
-    assert "17 of 18 built; failed: qwen" in said[-1]
+    assert calls[14][:3] == ["--podman-url", "unix:///x", "artex"]  # (a plain image: the Podman service only)
+    assert calls[15] == ["browser", "--no-cache"]  # the browser's build takes none of those options
+    assert calls[18][-3:] == ["--variant", "tor", "--no-cache"]
+    assert "18 of 19 built; failed: qwen" in said[-1]
     assert m.build_all(["--pin", "1.2.3", "all"], run=run, out=said.append) == 2
 
 

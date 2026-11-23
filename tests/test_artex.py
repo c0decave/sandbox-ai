@@ -425,7 +425,13 @@ def test_9_6_no_host_folder_but_read_only_files_no_capabilities_no_engine_socket
     assert "--volume" not in argv and "/var/lib/artex:rw,exec,nosuid,nodev,size=2g,mode=0700,U" in argv
     assert "--cap-drop=ALL" in argv and "--security-opt=no-new-privileges" in argv and "--read-only" in argv
     assert argv[argv.index("--user") + 1] == "1000:1000" and "--privileged" not in argv
-    assert not any(re.search(r"docker\.sock|podman\.sock|/run/user|/work", word) for word in argv)
+    assert not any(re.search(r"docker\.sock|podman\.sock|/run/user", word) for word in argv)
+    # No folder of the project: neither the workspace's host path nor /work, in no word (the checkout's own path may
+    # have a "/work" in it - a CI runner's /home/runner/work/... - which is no folder of the project's).
+    workspace = str(Path(a.workspace).resolve())
+    assert not any(workspace in word or re.search(r"(^|[=:,])/work(/|,|:|$)", word) for word in argv), argv
+    assert sorted(m.split("src=")[1].split(",")[0] for m in mounts if "/sandbox-artex/artex_runtime.py" in m) == \
+        [str(ROOT / "sandbox" / "artex_runtime.py")], "sandbox-ai's own file, read-only"
     assert argv[-4:] == [IMAGE_ID, "-I", "/sandbox-artex/artex_runtime.py", "serve"]
 
 

@@ -12248,7 +12248,8 @@ class MainWindow(QMainWindow):
             text = getattr(button, "label", "") or button.accessibleName()  # (its full text: "Allow…")
             action = QAction(text, into)
             action.setEnabled(button.isEnabled())
-            action.setToolTip(button.toolTip())  # (the button's own, made with safe_tooltip: taken as it is)
+            tip = button.toolTip()  # (the button's own, made with safe_tooltip: taken as it is)
+            action.setToolTip(tip)
             action.triggered.connect(lambda _=False, b=button, key=instance.key:
                                      self.select_quietly(key) and b.click())
             into.addAction(action)

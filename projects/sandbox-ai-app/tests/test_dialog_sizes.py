@@ -239,6 +239,21 @@ def test_every_message_box_and_question_can_be_read(window, screens, monkeypatch
     assert screens.found == [], "\n".join(screens.found)
 
 
+@pytest.mark.parametrize("ask", ["getText", "getInt", "getItem"])
+def test_an_input_dialog_is_as_wide_as_its_title(window, screens, monkeypatch, ask):  # noqa: F811
+    """CI 2026-11-23: "Hardware-Limits von auburn-kakapo-bamboo" (the German of Limits of NAME since 0.1.240) was cut in
+    its input dialog's title bar - Qt's input dialog sets its minimum size from its contents when its layout is
+    activated, and the title's width make_readable had given it was gone (fit_size did not count the title)."""
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", None)
+    title = "A title much longer than the least width of a dialog: " + "auburn-kakapo-bamboo " * 2
+    args = {"getText": ("x",), "getInt": ("x", 512), "getItem": ("x", ["a", "b"], 0, False)}[ask]
+    getattr(QtWidgets.QInputDialog, ask)(window, title, *args)
+    dialog = screens.shown[-1]
+    assert dialog.windowTitle() == title
+    assert dialog.width() >= widgets.title_width(dialog) > widgets.least_width(dialog)
+    assert screens.found == [], "\n".join(screens.found)
+
+
 def dialogs(window):
     """[(what, make)]: every dialog of the app's own, made with what its callers give it."""
     from sandbox_ai_app import (credentials_page, files_page, help_view, hosts_page, identities_page, images_page,
@@ -280,6 +295,12 @@ def dialogs(window):
         ("add host", lambda: hosts_page.AddHostDialog(window)),
         ("edit host", lambda: hosts_page.EditHostDialog(host, window)),
         ("install on host", lambda: hosts_page.InstallDialog(host, "0.1.95", window)),
+        ("uninstall on host", lambda: hosts_page.UninstallDialog(
+            host["name"], [{"kind": "user", "version": "0.1.240", "path": "/home/me/.local/bin/sandbox-ai",
+                            "terminal": True, "executable": True},
+                           {"kind": "system", "version": "0.1.231", "path": "/usr/local/bin/sandbox-ai",
+                            "executable": True}],
+            lambda values, done: done("REMOVED  /home/me/.local/share/sandbox-ai\n" * 6, True), window)),
         ("team start", lambda: team_page.StartDialog(window, tr("this machine"), False)),
         ("team post", lambda: team_page.PostDialog(window, "alpha", ["claude", "codex"])),
         ("vpn", lambda: vpn_page.VpnDialog(window)),

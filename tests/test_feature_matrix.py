@@ -24,6 +24,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import home_guard  # noqa: E402
+import toolchain_fakes as TF  # noqa: E402
 
 home_guard.ensure()  # tests write logins: never into the real HOME, also when conftest.py was not run
 
@@ -2640,6 +2641,17 @@ def register_preset_servers(m):
 def every_builtin_preset_starts(m, dev):
     """Each built-in preset, with the values a user would give, passes every check of a start (a dry run)."""
     register_preset_servers(m)
+    # The toolchains the language presets bring (--toolchain), in the store as `sandbox-ai toolchain add` puts them:
+    # stand-ins of the published catalog's, added from a catalog nobody signed (a store without them: the start
+    # offers to add them - the fix plan, its own tests).
+    TF.install(m.tmp / "toolchain-catalog")
+    try:
+        every_builtin_preset_starts_checked(m, dev)
+    finally:
+        TF.writable(m.tmp)
+
+
+def every_builtin_preset_starts_checked(m, dev):
     checked = []
     for preset in PRESETS.catalog().values():
         if m.agent not in preset.get("agents", PRESETS.AGENTS):

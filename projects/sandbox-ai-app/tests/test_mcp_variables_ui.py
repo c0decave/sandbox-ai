@@ -253,11 +253,15 @@ def test_the_mcp_part_shows_variables_and_two_buttons_of_their_own_size(board_pa
     board_page.resize(1400, 900)
     board_page.show()
     board_page.inspector_holder.show()
-    qapp.processEvents()
-    # (an answer that came in meanwhile - the host's secrets, the catalog: slow on a loaded machine - may have
-    # rebuilt the inspector, its buttons with it: the ones shown now are measured)
-    buttons = {b.text(): b for b in board_page.inspector_holder.findChildren(QtWidgets.QPushButton)
-               if b.isVisible()}
+    # (showing the Board arranges and centres it and so makes its inspector anew; an answer that came in meanwhile -
+    # the host's secrets, the catalog: slow on a loaded machine - may have rebuilt it too: the ones shown now are
+    # measured, once the new inspector's rows are shown - a few turns of the event loop)
+    from conftest import wait_until
+
+    def shown():
+        return {b.text(): b for b in board_page.inspector_holder.findChildren(QtWidgets.QPushButton) if b.isVisible()}
+    assert wait_until(qapp, lambda: {"Use the server's limits", "Save as the server's defaults…"} <= set(shown()))
+    buttons = shown()
     reset, save = buttons["Use the server's limits"], buttons["Save as the server's defaults…"]
     for button in (reset, save):  # their own size: not as wide as the fields (they looked like the main action)
         assert button.width() <= button.sizeHint().width() + 4, (button.text(), button.width())

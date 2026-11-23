@@ -182,7 +182,8 @@ jobs:
   # outside the allow-list stays unreached and lands in the proxy's log; no capabilities, read-only root), and a
   # variant of claude on python:3.12-slim-bookworm; the preset showcase-full-stack's services (PostgreSQL 17.6, nginx from
   # sandbox-ai's own Containerfile, images build-image --builtin showcase-web) and its image recipe django built and
-  # used against them. Builds the claude image first; the job fails if a test was skipped.
+  # used against them. Builds the claude image first; the job fails if a test was skipped (the recipe android-dev's
+  # opt-in build of about 4.1 GB is deselected).
   services:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -213,7 +214,11 @@ jobs:
           SANDBOX_AI_CI_REPORTS: ${{ runner.temp }}/ci-reports
         run: |
           status=0
-          python -m pytest -vv -rfEs -o faulthandler_timeout=600 --agent-live tests/test_services_live.py > services.txt 2>&1 || status=$?
+          # The recipe android-dev's real build (about 4.1 GB) is opt-in (SANDBOX_AI_ANDROID_DEV_BUILD=1) and not run
+          # here: deselected by name, so that any other skip still fails the job.
+          python -m pytest -vv -rfEs -o faulthandler_timeout=600 --agent-live tests/test_services_live.py \
+            --deselect tests/test_services_live.py::test_the_android_dev_recipe_builds_and_has_its_tools \
+            > services.txt 2>&1 || status=$?
           tail -n 200 services.txt
           if [ "$status" -ne 0 ] || grep -q SKIPPED services.txt; then
             # What failed, readable through the API (the logs are not): each failed test, its assertion, and the

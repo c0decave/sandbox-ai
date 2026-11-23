@@ -608,3 +608,90 @@ def test_the_launchers_requests_through_tor_wait_within_their_budget(monkeypatch
     plain = {**TOR_TUNNEL, "tor": None, "dns": ["10.64.0.1"]}
     answer = rt.handle_request(json.dumps({"op": "resolve", "id": 3, "names": ["a.example"]}), plain, False)
     assert answer["error"] == "10.64.0.1: no answer from 10.64.0.1"
+
+
+# --- CI, 2026-11-23 (killswitch job): the second attempt's tor could not bind its ports ------------------------------
+# tor: bootstrapped 50% (Loading relay descriptors) ... stalled ... trying again (2 of 3), then the new tor: "Could not
+# bind to 127.0.0.1:9040: Address already in use. Is Tor already running?" The first tor still ran: it had become
+# debian-tor, and root in the Tor container has no CAP_KILL (--cap-drop=ALL), so stop_tor's SIGTERM and SIGKILL were
+# refused (EPERM) - and that refusal was swallowed.
+
+class Refused:
+    """tor's process as root without CAP_KILL sees it once tor is debian-tor: its own signals refused (EPERM); WAIT is
+    the real process's when there is one."""
+
+    args, returncode = ["tor"], None
+
+    def __init__(self, process=None, pid=4711, ends=True):
+        self.process, self.pid, self.ends, self.waits = process, process.pid if process else pid, ends, 0
+
+    def poll(self):
+        return self.process.poll() if self.process is not None else None
+
+    def terminate(self):
+        raise PermissionError(1, "Operation not permitted")
+
+    kill = terminate
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self.process is not None:
+            return self.process.wait(timeout=timeout)
+        if not self.ends:
+            raise rt.subprocess.TimeoutExpired("tor", timeout)
+        return 0
+
+
+def test_a_stalled_tor_that_became_debian_tor_is_signalled_as_debian_tor():
+    sent = []
+    process = Refused()
+    runner = types.SimpleNamespace(children=[process])
+    rt.stop_tor(process, runner, uid=rt.TOR_UID, run=lambda argv, **kw: sent.append((argv, kw)), wait=0.01)
+    assert len(sent) == 1, "SIGTERM, as tor's own user (it ended: no SIGKILL)"
+    argv, kw = sent[0]
+    assert kw["user"] == rt.TOR_UID and argv[-2:] == ["4711", str(int(rt.signal.SIGTERM))]
+    assert runner.children == []
+
+
+def test_a_tor_that_does_not_end_is_never_followed_by_a_second_one():
+    sent = []
+    process = Refused(ends=False)
+    with pytest.raises(RuntimeError, match=r"the tor of the stalled attempt \(PID 4711\) did not end: tor is not "
+                                           r"started again"):
+        rt.stop_tor(process, types.SimpleNamespace(children=[process]), run=lambda argv, **kw: sent.append(argv),
+                    wait=0.01)
+    assert [argv[-1] for argv in sent] == [str(int(rt.signal.SIGTERM)), str(int(rt.signal.SIGKILL))]
+
+
+def test_the_signal_as_tors_user_ends_a_real_process():
+    """The helper stop_tor starts (a python of the user given, here this test's own: no capability needed) ends a real
+    process whose own signals were refused."""
+    import os
+    import subprocess
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        rt.stop_tor(Refused(child), types.SimpleNamespace(children=[]), uid=os.getuid(), wait=20)
+        assert child.returncode == -int(rt.signal.SIGTERM)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_bootstrap_says_why_when_the_stalled_tor_does_not_end(monkeypatch):
+    """The whole retry: the first tor stalls and does not end - the bootstrap stops with that, and no second tor is
+    started (it could not bind its ports: "Address already in use")."""
+    signalled = []
+    monkeypatch.setattr(rt, "signal_tor", lambda process, kill=False, uid=None, run=None: signalled.append(kill))
+    sim = TorSim([USERS_TOR, SECOND_TRY])
+    sim.start = lambda: (sim.started.append(sim.now), Refused(ends=False))[1]
+    said = []
+    stream = types.SimpleNamespace(write=lambda text: said.append(json.loads(text)["message"]), flush=lambda: None)
+    try:
+        with pytest.raises(RuntimeError, match=r"did not end: tor is not started again"):
+            rt.bootstrap(sim.start, sim.log, Listing(), {"timeout": 300, "attempts": 3, "stall": 90}, stream,
+                         clock=sim.clock, sleep=sim.sleep)
+    finally:
+        sim.close()
+    assert len(sim.started) == 1 and signalled == [False, True]
+    assert not any("trying again" in line for line in said)
