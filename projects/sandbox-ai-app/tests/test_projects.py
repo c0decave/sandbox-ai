@@ -119,7 +119,7 @@ def test_navigation_has_sections_shortcuts_and_a_glyph_per_page(window, qapp):
     from sandbox_ai_app.ui import PAGES, SECTIONS
     headers = [window.nav.item(r) for r in range(window.nav.count()) if window.nav.item(r).data(QtCore.Qt.ItemDataRole.UserRole)
                is None]
-    assert [h.text() for h in headers] == ["PROJECT", "RUNNING", "MANAGE", "MONITORING", "SYSTEM"]
+    assert [h.text() for h in headers] == ["PROJECT", "MANAGE", "MONITORING", "SYSTEM"]
     assert all(not (h.flags() & QtCore.Qt.ItemFlag.ItemIsSelectable) for h in headers), "headers cannot be chosen"
     assert [key for _, pages in SECTIONS for key, _ in pages] == [key for key, _ in PAGES] == window.keys
     for key in window.keys:

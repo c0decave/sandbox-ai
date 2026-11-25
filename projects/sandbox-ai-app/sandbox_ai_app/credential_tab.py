@@ -22,14 +22,14 @@ from .widgets import explanation, plain_label
 NOT_WHILE_RUNNING = {
     "publish": N_("A publish login cannot be given to a sandbox that runs: its tools' variables are set when it "
                   "starts, and the questions before every upload are rules of that start. Restart it with --publish "
-                  "KIND (Sandboxes › Resume with options…); the token alone, without those questions: the Secrets "
+                  "KIND (Sessions › Resume with options…); the token alone, without those questions: the Secrets "
                   "tab's Give to a running sandbox… (as an API key)."),
     "identities": N_("An identity is chosen when a sandbox starts (--identity NAME): its commit name, its Git logins "
-                     "and its publish logins are set up then. Restart the sandbox with it (Sandboxes › Resume with "
+                     "and its publish logins are set up then. Restart the sandbox with it (Sessions › Resume with "
                      "options…); one of its Git logins for a running sandbox: the Git logins tab's (or the Secrets "
                      "tab's) Give to a running sandbox…."),
     "vpn": N_("A VPN is set up before the agent starts (its tunnel and kill switch are the sandbox's network): a "
-              "running sandbox cannot be given one. Restart it with --vpn PROFILE (Sandboxes › Resume with "
+              "running sandbox cannot be given one. Restart it with --vpn PROFILE (Sessions › Resume with "
               "options…)."),
 }
 

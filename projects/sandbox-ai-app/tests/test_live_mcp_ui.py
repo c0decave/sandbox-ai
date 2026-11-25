@@ -1,4 +1,4 @@
-"""The Sandboxes page's "While it runs" box offscreen: Add MCP server… and Remove MCP server… on a running kept start
+"""The Sessions page's "While it runs" box offscreen: Add MCP server… and Remove MCP server… on a running kept start
 of this machine or a host (asked first: mcp-attach, mcp-detach; the agent's restart offered where it needs one), Add
 workspace… with a file or a name; the Connections page on a host; the Model choice of the Start page and the Board
 from the host it starts on. Against stand-ins that record what they were asked: nothing reaches a host, nothing

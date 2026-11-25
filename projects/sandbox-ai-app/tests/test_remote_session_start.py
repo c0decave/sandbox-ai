@@ -683,7 +683,7 @@ def test_window_board_start_of_another_agent_asks_first(fleet, window, wait, mon
 
 
 def test_window_uses_the_sandboxes_pages_fresh_look(fleet, window, monkeypatch):
-    """The Sandboxes page's instances of that host, when read a moment ago, answer at once; older, the host is asked."""
+    """The Sessions page's instances of that host, when read a moment ago, answer at once; older, the host is asked."""
     fleet.running("ct1", "qwen", "q1")
     sandboxes = window.sandboxes
     sandboxes.remote["ct1"] = window.sai.host_instances("ct1")

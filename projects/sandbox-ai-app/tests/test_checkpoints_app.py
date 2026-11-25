@@ -1,4 +1,4 @@
-"""Checkpoints… offscreen (`sandbox-ai checkpoint`): the Sandboxes page's button and right-click menu (a start of this
+"""Checkpoints… offscreen (`sandbox-ai checkpoint`): the Sessions page's button and right-click menu (a start of this
 machine or a host, one that ended too; never an MCP server), the dialog against a stand-in that records what it was
 asked (listed, Changes, Restore… with its preview first and then asked, Delete asked, Take one now with its label),
 and once end to end through the real sandbox-ai of this checkout: a workspace whose files an agent deleted put back.

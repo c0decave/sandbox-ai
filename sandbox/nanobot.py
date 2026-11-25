@@ -441,14 +441,17 @@ def thinking(a):
     return None if value is None or getattr(a, "helper_of", None) else value == "on"
 
 
-NOTE_SKILL = "sandbox-ai-network"  # the run's network note (agent_sandbox.nanobot_note_skill), in every turn
+NOTE_SKILL = "sandbox-ai-network"  # the start's note (agent_sandbox.start_note: the run's network note, the line
+#                                    that names its intro), in every turn
 
 
 def note_skill(text):
-    """SKILL.md of the run's network note (how this run reaches the network through its Tor or VPN) for nanobot:
-    always (agent/skills.py get_always_skills), so its text is in nanobot's system prompt every turn."""
-    return ("---\nname: " + NOTE_SKILL + "\ndescription: " + json.dumps("How this run reaches the network (sandbox-ai: "
-            "its Tor or VPN); in every turn.") + "\nalways: true\n---\n\n" + text.strip() + "\n")
+    """SKILL.md of the start's note (how this run reaches the network through its Tor or VPN, and the line that
+    names /sandbox/session/INTRO.md: what the sandbox has) for nanobot: always (agent/skills.py get_always_skills),
+    so its text is in nanobot's system prompt every turn."""
+    return ("---\nname: " + NOTE_SKILL + "\ndescription: " + json.dumps("What sandbox-ai tells you about this run: "
+            "its network (Tor or a VPN) and what the sandbox has; in every turn.") + "\nalways: true\n---\n\n"
+            + text.strip() + "\n")
 
 
 def files(a, config):

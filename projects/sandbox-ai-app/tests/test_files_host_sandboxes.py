@@ -4,7 +4,7 @@ the file manager of the current version, nor the remote processes/dirs?"): the l
 thread: backend.host_file_roots, `sandbox-ai list --folders --json` there), opened over the host's SFTP connection
 in that folder and counted as an agent's; a host that does not answer is marked and holds nothing up; an older
 sandbox-ai there leaves its host's own entry alone. The chooser has a heading per section once there is more than this
-machine; the page follows the hosts file (follow_hosts) and the Sandboxes page's host (HostFollow) with its host filter.
+machine; the page follows the hosts file (follow_hosts) and the Sessions page's host (HostFollow) with its host filter.
 Against the fake SFTP server (fake_sftp_server.py); everything changed is below tmp_path."""
 import json
 import os
@@ -223,7 +223,7 @@ def test_the_host_filter_offers_one_hosts_sandboxes_and_shows_its_first(remote, 
 
 
 def test_the_files_page_follows_the_sandboxes_pages_host(remote, wait):
-    """As the other pages (HostFollow): the Sandboxes page's host is the page's host filter - its first sandbox's folder
+    """As the other pages (HostFollow): the Sessions page's host is the page's host filter - its first sandbox's folder
     shown -, until the human chooses another one here."""
     page, home, ws, reader = remote
     follow = host_choice.HostFollow()
@@ -232,14 +232,14 @@ def test_the_files_page_follows_the_sandboxes_pages_host(remote, wait):
     reader.answers["lab"] = "hang"  # (its folders still on their way when it is followed)
     page.refresh_roots()
     follow.choose("lab")
-    assert page.host_filter() == "lab" and page.follow_note.text() == "lab, as on the Sandboxes page"
+    assert page.host_filter() == "lab" and page.follow_note.text() == "lab, as on the Sessions page"
     assert page.left.roots.currentData() == str(ws), "nothing of lab's known yet: what is shown stays"
     reader.answers["lab"] = [("run", "claude-abc", str(home / "lab" / "proj"))]
     page.refresh_roots()  # (lab answers this time; the read that hangs is dropped)
     assert wait(lambda: page.left.roots.currentData() == lab and page.left.remote(), 15), page.message.text()
     # Chosen here: it holds, and the note says so.
     page.host_box.setCurrentIndex(page.host_box.findData("local"))
-    assert page.follow_note.text() == "local (this machine), chosen here; the Sandboxes page shows lab"
+    assert page.follow_note.text() == "local (this machine), chosen here; the Sessions page shows lab"
     assert wait(lambda: page.left.roots.currentData() == str(ws), 10)
     follow.choose(None)  # all hosts there: the page can show all - it does, and what it shows stays
     assert page.host_filter() is None and page.left.roots.currentData() == str(ws)

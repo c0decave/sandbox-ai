@@ -1,4 +1,4 @@
-"""Session bridges on the Sandboxes page: the bridges between running sessions (also marked on both sessions' rows),
+"""Session bridges on the Sessions page: the bridges between running sessions (also marked on both sessions' rows),
 New bridge… (a dialog: the two sessions, the capabilities with path pickers, both directions, until, the ask mode,
 the observer's actions each on its own, the limits under Advanced), Show, Revoke and Resume - each through
 `sandbox-ai bridge` in the background, never on the GUI thread. Before a bridge is made the launcher's dry run says
@@ -30,7 +30,7 @@ LOCAL = "local"
 MAX_ROWS = 6  # rows the list of bridges shows before it scrolls
 
 
-REMOTE_WAIT = 60  # seconds one host may take to list its starts (as the Sandboxes page waits)
+REMOTE_WAIT = 60  # seconds one host may take to list its starts (as the Sessions page waits)
 
 
 def alive(widget):
@@ -611,7 +611,7 @@ def show_lines(document):
 
 class BridgesBox(QGroupBox):
     """The bridges between running sessions of this machine (sandbox-ai bridge list), with New bridge…, Show,
-    Revoke… and Resume…. Read in the background after each look of the Sandboxes page; CHANGED is said when what is
+    Revoke… and Resume…. Read in the background after each look of the Sessions page; CHANGED is said when what is
     listed changed (the page marks both sessions' rows)."""
     changed = Signal()
 

@@ -96,7 +96,8 @@ def test_a_build_that_still_runs_is_still_asked_about(page, monkeypatch):
 def test_the_tab_menu_offers_the_sessions_actions_with_their_reasons(page, sai):
     view = open_tab(page, sai.command("attach", "web"), "web")
     assert entries(page, 0) == [("Rename…", True), ("Restart", True), ("Stop session", True),
-                                ("Focus in Sandboxes & sessions", True),
+                                ("Focus in Sessions", True),
+                                ("Show on the Board", False),  # (no window whose Board could show it, in this page alone)
                                 ("File manager", False),  # (no window to open the Files page in this page alone)
                                 ("Open shell", False),  # (no window to open a shell tab from, in this page alone)
                                 ("Add folder…", False),  # (no window to add a folder from, in this page alone)
@@ -104,15 +105,15 @@ def test_the_tab_menu_offers_the_sessions_actions_with_their_reasons(page, sai):
                                 ("Stop session and close tab", True), ("Close other tabs", False)]
     menu = widgets.context_menu(page, page.tab_actions(0))
     assert [a.text() for a in menu.actions() if not a.isSeparator()][:4] == [
-        "Rename…", "Restart", "Stop session", "Focus in Sandboxes & sessions"]
-    dict((text, f) for text, _, _, f in filter(None, page.tab_actions(0)))["Focus in Sandboxes & sessions"]()
+        "Rename…", "Restart", "Stop session", "Focus in Sessions"]
+    dict((text, f) for text, _, _, f in filter(None, page.tab_actions(0)))["Focus in Sessions"]()
     assert page.focused == ["session:web"]
     # A build: no session to stop, restart or focus - each disabled with the reason.
     open_tab(page, ["sh", "-c", "sleep 60"], "build")
     actions = {text: (enabled, why) for text, enabled, why, _ in filter(None, page.tab_actions(1))}
-    assert actions["Stop session"] == (False, "Not a session the app knows (yet): see Sandboxes & sessions")
+    assert actions["Stop session"] == (False, "Not a session the app knows (yet): see Sessions")
     assert actions["Restart"] == (False, "Its command still runs: stop it first")
-    assert actions["Focus in Sandboxes & sessions"][0] is False and actions["Close other tabs"][0] is True
+    assert actions["Focus in Sessions"][0] is False and actions["Close other tabs"][0] is True
     # A start in a tab is found by its tag (run.json "app_tab").
     start = open_tab(page, sai.command("claude", "--workspace", "/srv"), "claude")
     page.sessions.instances["session:brisk"] = session("brisk", tag=start.tab_tag)

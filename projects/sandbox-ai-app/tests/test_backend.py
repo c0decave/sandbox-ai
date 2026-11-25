@@ -29,8 +29,9 @@ def test_every_launcher_option_is_in_the_form(sai):
     options = sai.options()
     names = {o.long for o in options}
     parser = sai.launcher.build_parser()
-    visible = {next(s for s in a.option_strings if s.startswith("--")) for a in parser._actions
-               if a.option_strings and a.help != "==SUPPRESS=="}
+    # (keyed by its last long name, as the app keys it: backend.long_name - --allow-net, --allow: --allow)
+    visible = {backend.long_name(a) for a in parser._actions
+               if a.option_strings and a.help != "==SUPPRESS==" and backend.long_name(a)}
     assert visible - names == backend.HIDDEN & visible
     by = {o.long: o for o in options}
     assert by["--dangerously-skip-permissions"].kind == "flag" and by["--dangerously-skip-permissions"].short == "-D"

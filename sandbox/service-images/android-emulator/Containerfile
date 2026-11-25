@@ -1,0 +1,61 @@
+# the Android emulator without a window (API 37, x86_64) for --service android-emulator: adb at android-emulator:5555
+#
+# Build it once: sandbox-ai images build-image android-emulator --builtin android-emulator. It asks you to accept the
+# Android Software Development Kit License Agreement (https://developer.android.com/studio/terms;
+# --accept-android-sdk-license answers for a script): the emulator, its system image, platform-tools and the
+# command-line tools are Google's and may not be passed on (section 3.4), so they are no part of sandbox-ai and of no
+# image it publishes. This build fetches them from dl.google.com on your machine - the four rows of
+# sandbox/recipes/android-dev/sdk.lock (the image variant android-dev's own lock: one list of pins), each held to its
+# size and checksums by install.sh before it is unpacked - and the result stays in your Podman store. About 2.7 GB to
+# fetch, several GB more as an image (the system image is most of it); x86_64 only (Google publishes no Linux arm64 emulator in its SDK repository). The
+# Debian packages are those of the release (the emulator's libraries, a headless JRE for avdmanager, tini); the FROM
+# below names an exact release (Debian 12.12, 2025-09-06), pulled once and pinned by the digest it got.
+#
+# As a service (service.json: port=5555,port=5554,port=5550,ready=5550,ready-timeout=600,device=/dev/kvm,data=/avd,
+# memory=6g,cpus=2,pids=1024) it runs beside the agent in the sandbox's pod: /dev/kvm for this container alone (the
+# agent's sandbox gets no device), no capabilities, a read-only root, its AVD in /avd (a tmpfs; keep=yes in a kept
+# start: a volume), its network the sandbox's own (firewall, connection proxy, allow-list). It runs as the
+# container's root, which is your own user outside (rootless Podman) and has no capability here: another user could
+# not open /dev/kvm where the host gives it to yours alone. The agent's start waits until Android has booted
+# (sys.boot_completed: port 5550 opens then), at most ready-timeout seconds.
+FROM docker.io/library/debian:12.12-slim
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl unzip tini \
+       netcat-openbsd openjdk-17-jre-headless libpulse0 libnss3 libnspr4 libxcomposite1 libxcursor1 libxdamage1 \
+       libxi6 libxtst6 libxrandr2 libasound2 libgl1 libegl1 libxkbfile1 libdbus-1-3 libx11-xcb1 libxkbcommon-x11-0 \
+       libfontconfig1 libtinfo5 libbsd0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+       libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY shared/install.sh shared/sdk.lock shared/android-sdk-license /opt/android-dev/
+COPY shared/cmdline-tools_23.0.xml shared/platform-tools.xml shared/emulator.xml \
+     shared/system-images_android-37.0_google_apis_x86_64.xml /opt/android-dev/package-xml/
+ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk \
+    PATH=/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/23.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The four packages of the emulator out of the lock (cmdline-tools, platform-tools, emulator, the system image), each
+# fetched, checked and unpacked by install.sh; then the acceptance sdkmanager would have written, and the checks: the
+# emulator finds its libraries, avdmanager makes an AVD of the system image.
+RUN awk '$1 ~ /^(cmdline-tools;|platform-tools$|emulator$|system-images;)/' /opt/android-dev/sdk.lock \
+       > /opt/android-dev/emulator.lock \
+    && [ "$(wc -l < /opt/android-dev/emulator.lock)" = 4 ] \
+    && sh /opt/android-dev/install.sh /opt/android-dev/emulator.lock /opt/android-dev/package-xml \
+    && mkdir -p /opt/android-sdk/licenses \
+    && cp /opt/android-dev/android-sdk-license /opt/android-sdk/licenses/android-sdk-license \
+    && chmod -R a+rX,go-w /opt/android-sdk \
+    && for qemu in /opt/android-sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless; do \
+         if [ -e "$qemu" ] && LD_LIBRARY_PATH=/opt/android-sdk/emulator/lib64:/opt/android-sdk/emulator/lib64/qt/lib \
+              ldd "$qemu" | grep 'not found'; then \
+           echo "sandbox-ai android-emulator: ERROR: the emulator lacks the libraries above" >&2; exit 1; fi; \
+       done \
+    && printf 'no\n' | avdmanager --silent create avd --name build-check --device pixel_7 \
+       --package 'system-images;android-37.0;google_apis;x86_64' --path /var/tmp/avd-check \
+    && rm -rf /var/tmp/avd-check /root/.android \
+    && adb version \
+    && emulator -version \
+    && echo "sandbox-ai android-emulator: by building this image you accepted the Android Software Development Kit" \
+            "License Agreement (https://developer.android.com/studio/terms)"
+COPY android-emulator-service /usr/local/bin/android-emulator-service
+# The container's root on purpose (service.json "root" says why); it has no capability and no new privileges.
+USER 0:0
+EXPOSE 5555
+# tini -s: also where Podman's own init is its PID 1 (--init, where the host has catatonit): a subreaper then.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/bin/sh", "/usr/local/bin/android-emulator-service"]

@@ -1204,6 +1204,13 @@ def test_detached_copy_hands_over_the_helpers_descriptor(run, tmp_path):
                         subprocess.CompletedProcess(c, 1, "", "clone: this kernel lacks the new mount API"))
     with pytest.raises(ValueError, match="has it ended"):
         w.detached_copy(record, folder, (1, 2), finder=lambda r: None, proc=proc, runner=runner)
+    # An anchor that ended between finding it and using it: the sandbox's processes are found anew.
+    answers = iter([{"user": 999}, {"user": 100}])
+    fd = w.detached_copy(record, folder, (1, 2), finder=lambda r: next(answers), proc=proc, runner=runner)
+    os.close(fd)
+    assert seen[-1]["user"] == 100
+    with pytest.raises(ValueError, match="process 999 of the sandbox is gone"):
+        w.detached_copy(record, folder, (1, 2), finder=lambda r: {"user": 999}, proc=proc, runner=runner)
 
 
 def test_the_clone_helper_enters_the_sandbox_and_sends_a_read_only_clone(tmp_path):

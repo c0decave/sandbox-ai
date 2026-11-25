@@ -498,3 +498,63 @@ def test_the_server_is_added_from_the_signed_catalog_by_its_prefix(tmp_path, mon
     said, problem = gaps.mcp_added({}, "binwalk", {"folders": {}, "add": []}, "podman")
     assert problem is None and said.startswith("yes")
     assert calls == [("mcp", "add", "mcp:binwalk")]
+
+
+# --- --mcp-vpn: the servers behind a Tor profile, as gowitness-tor runs (the user, 2026-11-25) ---------------------
+
+GOWITNESS = {"entry": "mcp:gowitness", "prefix": "mcp", "name": "gowitness", "published": True, "bubblewrap": True,
+             "network": "full", "env": [], "mounts": [], "tor": {"support": "yes", "note": ""}}
+GOWITNESS_SPEC = {"name": "gowitness", "calls": [
+    {"tool": "screenshot", "arguments": {"url": "https://example.com/"}, "expect": "image/png"},
+    {"tool": "screenshot", "arguments": {"url": "http://duckduckgogg42.onion/"}, "expect": ".onion needs a Tor profile",
+     "expect_error": True}]}
+
+
+def test_behind_a_tor_profile_a_server_with_network_is_added_with_vpn_and_its_onion_refusal_left_out():
+    plan = LG.mcp_plan(GOWITNESS, GOWITNESS_SPEC, "podman", vpn="tor1")
+    assert plan["skip"] is None and plan["vpn"] == "tor1"
+    assert plan["add"] == ["--backend", "both", "--vpn", "tor1"]
+    assert [call["arguments"]["url"] for call in plan["calls"]] == ["https://example.com/"]
+    assert plan["skipped_calls"] == [("screenshot", "behind Tor an .onion address is reached: this call checks its "
+                                                    "refusal without Tor")]
+    assert plan["by_hand"] == "sandbox-ai mcp add gowitness --vpn tor1; sandbox-ai claude --backend podman --mcp gowitness"
+    assert LG.mcp_plan(GOWITNESS, GOWITNESS_SPEC, "podman")["vpn"] is None, "without --mcp-vpn as before"
+
+
+def test_behind_a_tor_profile_what_cannot_go_through_it_is_skipped_with_why():
+    assert LG.mcp_plan(GOWITNESS, GOWITNESS_SPEC, "bwrap", vpn="tor1")["skip"] == \
+        "no VPN under Bubblewrap: behind a VPN it runs with Podman only"
+    assert LG.mcp_plan({**RADARE2, "network": "none"}, R2_SPEC, "podman", vpn="tor1")["skip"].startswith(
+        "it reaches no network: nothing of it goes through tor1")
+    no = {**GOWITNESS, "tor": {"support": "no", "note": "it needs UDP"}}
+    assert LG.mcp_plan(no, GOWITNESS_SPEC, "podman", vpn="tor1")["skip"] == \
+        "its catalog says it does not work behind Tor: it needs UDP"
+
+
+def test_mcp_vpn_is_asked_about_and_handed_to_the_tests(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "servers").mkdir(parents=True)
+
+    def runner(command, timeout=60, env=None, cwd=None, input=None):
+        if command[1:3] == ["mcp", "catalog"]:
+            return 0, json.dumps({"entries": [GOWITNESS]}), ""
+        return 0, "", ""
+    asked = []
+    env = {}
+    args = LG.parser().parse_args(["--only", "mcp-live", "--mcp-repo", str(repo), "--mcp-vpn", "tor1"])
+    assert args.mcp_vpn == "tor1"
+    question = io.StringIO("y\n")
+    import unittest.mock
+    with unittest.mock.patch.object(LG, "ask", lambda text, stream_in=None, stream_out=None: asked.append(text) or True):
+        assert LG.prepare_mcp(args, tmp_path, env, question, runner) is None
+    assert "behind the Tor profile tor1, made in the check's own configuration" in asked[0]
+    assert env["SAI_LIVE_MCP_VPN"] == "tor1"
+    bad = LG.parser().parse_args(["--only", "mcp-live", "--mcp-repo", str(repo), "--mcp-vpn", "../x", "--yes"])
+    assert LG.prepare_mcp(bad, tmp_path, {}, None, runner).startswith("--mcp-vpn ../x: a profile's name")
+
+
+def test_the_report_says_which_rows_ran_behind_the_vpn(tmp_path):
+    (tmp_path / "gowitness.podman.json").write_text(json.dumps({"server": "gowitness", "backend": "podman",
+                                                                "outcome": "passed", "vpn": "tor1"}))
+    rows = LG.mcp_rows(tmp_path)
+    assert rows[0]["vpn"] == "tor1"

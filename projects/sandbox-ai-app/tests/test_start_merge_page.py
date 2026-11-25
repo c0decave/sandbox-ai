@@ -100,10 +100,10 @@ def flush(window, qapp):
 # -- one page, one entry, a switch --
 
 def test_the_navigation_has_one_entry_and_the_page_opens_as_the_board(window, qapp):
-    """A new installation: Start is one entry (no Board entry beside it), shown as the Board, with the switch above
-    the page saying so."""
+    """A new installation: Board is one entry for both views (the user 2026-11-24: no more Start), shown as the
+    Board, with the switch above the page saying so."""
     titles = [window.nav.item(row).text() for row in range(window.nav.count())]
-    assert titles[:3] == ["PROJECT", "Start", "RUNNING"] and "Board" not in titles
+    assert titles[:3] == ["PROJECT", "Board", "Sessions"] and titles.count("Board") == 1 and "Start" not in titles
     assert window.current_page() == "board" and window.start_view == "board"
     window.show()
     qapp.processEvents()
@@ -614,7 +614,7 @@ def test_resume_with_shows_the_sessions_whole_start_on_the_page(window, qapp):
     on the Start page - nothing is resumed -, when the options it was created with are known."""
     from sandbox_ai_app.ui import ResumeDialog
     dialog = ResumeDialog(window.sandboxes, "work", start=("codex", ["--offline", "--memory", "4g"], ["exec"]))
-    assert dialog.start_button.isEnabled() and dialog.start_button.text() == "On the Start page…"
+    assert dialog.start_button.isEnabled() and dialog.start_button.text() == "On the Board page…"
     dialog.workspaces.set_value(["/tmp/extra"])
     dialog.servers.setText("files")
     dialog.options.setText("--cpus 2")

@@ -2,6 +2,7 @@
 """sandbox-ai presets: ready setups to start an agent with.
 
   sandbox-ai presets list [--json]                      the built-in presets and your own, by category
+  sandbox-ai presets list --host HOST | --all-hosts     another host's, or one list over all hosts (each with its hosts)
   sandbox-ai presets categories [--json]                the categories (titles and descriptions in English and German)
   sandbox-ai presets show NAME [--json]                 what NAME sets, needs and asks for
   sandbox-ai presets check NAME [--value KEY=VALUE]... [--agent AGENT]
@@ -1102,8 +1103,10 @@ def missing(preset, given=None, agent=None, mcp_names=None, notes=None):
         found += variant_missing(variant, agent)
     # The toolchains it brings (--toolchain): one not in the store yet is added when the start offers it.
     for name in missing_toolchains([value for value, _ in option_values(preset, values, "--toolchain")]):
-        found.append(f"toolchain {name} is not in the store yet (the start offers to add it): sandbox-ai toolchain add "
-                     f"{name}")
+        terms = licensed_toolchain(name)  # (built on this machine from its publisher's downloads, under a license)
+        found.append(f"toolchain {name} is not in the store yet (the start offers to add it"
+                     + (f" once you accept the {terms['title']}, {terms['url']}" if terms else "")
+                     + f"): sandbox-ai toolchain add {name}")
     # What the options name by a value of yours: an MCP server (--mcp), a publishing login (--publish).
     def leave_out(names):
         optional = names and all(preset["values"][n].get("optional") for n in names)
@@ -1275,6 +1278,16 @@ def missing_toolchains(values):
         return module.missing(values)
     except Exception:  # noqa: BLE001 - only for what check says
         return []
+
+
+def licensed_toolchain(value):
+    """{"title", "url", "option", ...} of the license the toolchain VALUE (NAME[@VERSION]) is known to be under
+    (toolchain_recipes.LICENSED: android-sdk, built on this machine from Google's downloads), or None."""
+    try:
+        recipes = _module("toolchain_recipes")
+        return recipes.TERMS.get(recipes.LICENSED.get(str(value).partition("@")[0]))
+    except Exception:  # noqa: BLE001 - only for what check says
+        return None
 
 
 def refused_in(options, origin=None):
@@ -1595,6 +1608,106 @@ def live_text(found):
     return f"{found['symbol']} live check failed on {found['date']}, sandbox-ai {found['version']} ({found['why']})"
 
 
+def ruleset_of(preset):
+    """The ruleset PRESET names (its "rules" file beside it), parsed; None without one. Read as the start reads it (no
+    symlink in an extra directory, at most LIMIT); ValueError: unreadable or not JSON."""
+    if not preset.get("rules") or not preset.get("_path"):
+        return None
+    path = Path(preset["_path"]).parent / preset["rules"]
+    try:
+        data = read_bytes(path, follow=preset.get("_origin") != "extra")
+    except OSError as exc:
+        raise ValueError(f"{path}: {exc.strerror or exc}") from None
+    if len(data) > LIMIT:
+        raise ValueError(f"{path}: larger than {LIMIT >> 10} KiB")
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise ValueError(f"{path}: not valid JSON") from None
+    if not isinstance(document, dict):
+        raise ValueError(f"{path}: not a ruleset")
+    return document
+
+
+# -- the presets of other hosts (sandbox-ai hosts): presets list --host HOST, --all-hosts --
+
+LOCAL = "local"  # hosts.LOCAL: this machine
+HOST_WAIT = 90  # seconds a host may take to list its presets
+
+
+def host_presets(host, run=None):
+    """[document] of `sandbox-ai presets list --json` on HOST (this machine: its catalog, as that prints it), each
+    with "host". ValueError: not answered, or not a list."""
+    if host == LOCAL:
+        return [{**public(preset), "host": LOCAL} for preset in catalog().values()]
+    run = run or _module("hosts").run
+    status, text, err = run(host, ["presets", "list", "--json"], timeout=HOST_WAIT)
+    if status != 0:
+        raise ValueError(f"{host}: {(err or text).strip()[-300:] or f'exit status {status}'}")
+    try:
+        found = json.loads(text)
+    except (ValueError, RecursionError):
+        raise ValueError(f"{host}: sandbox-ai presets list printed no JSON") from None
+    if not isinstance(found, list):
+        raise ValueError(f"{host}: not a list of presets")
+    return [{**entry, "host": host} for entry in found if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            and ID.fullmatch(entry["id"])]
+
+
+def place_text(entry):
+    """Where ENTRY (a document of host_presets) is on its host: "built-in", "yours", "from DIR"."""
+    origin = entry.get("origin") or "built-in"
+    return f"from {entry.get('directory')}" if origin == "extra" else str(origin)
+
+
+def all_hosts(names=None, run=None):
+    """([preset], [problem]): the presets of this machine and of every host of sandbox-ai hosts (NAMES: these), one
+    each by id - the first host's document (this machine first), with "hosts": [{host, origin[, directory]}] of every
+    host that has one of that id. A host that does not answer is a problem, never the end of the list."""
+    if names is None:
+        names = [entry["name"] for entry in _module("hosts").entries()]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(names)))) as pool:
+        futures = [(name, pool.submit(host_presets, name, run)) for name in names]
+    merged, problems_ = {}, []
+    for name, future in futures:
+        try:
+            documents = future.result()
+        except Exception as exc:  # noqa: BLE001 - one host that does not answer: said, the others listed
+            problems_.append(f"{name} not read: {exc}")
+            continue
+        for document in documents:
+            place = {"host": name, "origin": document.get("origin") or "built-in",
+                     **({"directory": document["directory"]} if document.get("directory") else {})}
+            kept = merged.setdefault(document["id"], {**document, "hosts": []})
+            kept["hosts"].append(place)
+    return list(merged.values()), problems_
+
+
+def list_hosts(args, out):
+    """presets list --host HOST / --all-hosts: that host's list, or one over all hosts (each preset with its hosts)."""
+    if args.all_hosts:
+        presets, problems_ = all_hosts()
+    else:
+        presets, problems_ = host_presets(args.host), []
+    if args.json:
+        out(json.dumps(presets, indent=2))
+    else:
+        width = max([22, *(len(preset["id"]) for preset in presets)])
+        for category in CATEGORIES:
+            group = [preset for preset in presets if category_of(preset) == category]
+            if group:
+                out(f"{category_text(category)} ({category}):")
+                for preset in sorted(group, key=lambda x: x["id"]):
+                    where = ", ".join(f"{place['host']}" + ("" if place["origin"] == "built-in" else
+                                                            f" ({place_text(place)})")
+                                      for place in preset.get("hosts") or [{**preset, "host": args.host}])
+                    out(printable(f"  {preset['id']:<{width}} {str(preset.get('title', ''))[:80]}  [{where}]"))
+    for problem in problems_:
+        print(f"sandbox-ai presets: {printable(problem)}", file=sys.stderr)
+    return 0
+
+
 # -- the extra preset directories (defaults.json's preset_dirs) --
 
 def dirs_report():
@@ -1705,6 +1818,12 @@ def main(argv, out=print):
     commands = p.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="the built-in presets and your own, by category")
     listing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    where = listing.add_mutually_exclusive_group()
+    where.add_argument("--host", metavar="HOST", help="the presets of this host of sandbox-ai hosts (over SSH; "
+                                                       "default: this machine)")
+    where.add_argument("--all-hosts", action="store_true",
+                       help="one list over this machine and every host of sandbox-ai hosts: each preset once, with "
+                            "the hosts that have it")
     kinds = commands.add_parser("categories", help="the categories presets are listed under (English and German)")
     kinds.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     shown = commands.add_parser("show", help="what a preset sets, needs and asks for")
@@ -1735,6 +1854,8 @@ def main(argv, out=print):
                     out(f"{entry['id']:<12} {entry['title']['en']}: {entry['description']['en']}")
             return 0
         if args.command == "list":
+            if args.host not in (None, LOCAL) or args.all_hosts:
+                return list_hosts(args, out)
             damaged = []
             presets = catalog(damaged)
             if args.json:
@@ -1759,7 +1880,13 @@ def main(argv, out=print):
         preset = load(args.name)
         if args.command == "show":
             if args.json:
-                out(json.dumps(public(preset), indent=2))
+                # (its ruleset too: what a start of it on another host - the app's Board - takes along; one that
+                # cannot be read is said, as its start would say it)
+                try:
+                    shown = {"ruleset": ruleset_of(preset)}
+                except ValueError as exc:
+                    shown = {"ruleset": None, "ruleset_problem": str(exc)}
+                out(json.dumps({**public(preset), **shown}, indent=2))
             else:
                 describe(preset, out)
             return 0

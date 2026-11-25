@@ -1,4 +1,4 @@
-"""Schedules on the Sandboxes page: the scheduled runs of this machine or of a host (`sandbox-ai schedule` there).
+"""Schedules on the Sessions page: the scheduled runs of this machine or of a host (`sandbox-ai schedule` there).
 
 A schedule starts an agent on a timetable (--every, --at, --cron) or when a repository is pushed to (--on-push), each
 run a normal start under its rules with the agent's one-shot mode; nobody answers questions at night, so its ask mode

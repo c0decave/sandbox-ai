@@ -19,6 +19,30 @@ def test_show_start_on_this_machine_lists_the_workspace(setup, wait):
     assert wait(lambda: page.left.root is not None and os.path.realpath(str(page.left.root.path)) == str(ws), 10)
 
 
+def test_show_start_opens_the_tabs_folder_also_when_the_sandboxes_list_does_not_name_it(setup, wait, tmp_path):
+    """The user (2026-11-24): a tab's File manager did not open the tab's folder. A folder the sandboxes' list does
+    not name (a session whose record names no workspace) showed the list's first entry - another sandbox's workspace."""
+    page, _ws, host, _ = setup
+    other = tmp_path / "other-ws"
+    other.mkdir()
+    (other / "x.txt").write_text("x")
+    page.left.go_path(str(host))
+    settle(page.left)
+    page.show_start("local", str(other))
+    assert wait(lambda: page.left.root is not None and os.path.realpath(str(page.left.root.path)) ==
+                str(other.resolve()), 10)
+
+
+def test_show_start_through_a_link_to_the_workspace(setup, wait, tmp_path):
+    page, ws, host, _ = setup
+    link = tmp_path / "linked"
+    link.symlink_to(ws)
+    page.left.go_path(str(host))
+    settle(page.left)
+    page.show_start("local", str(link))
+    assert wait(lambda: page.left.root is not None and os.path.realpath(str(page.left.root.path)) == str(ws), 10)
+
+
 def test_show_start_on_a_host_selects_that_sandbox_folder_once_the_host_listed_it(setup, monkeypatch):
     page, _ws, _host, _ = setup
     shown = []

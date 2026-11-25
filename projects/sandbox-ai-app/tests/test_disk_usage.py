@@ -1,4 +1,4 @@
-"""The Sandboxes page's Disk usage…: what sandbox-ai keeps on this machine or a host (sandbox-ai gc --usage), then
+"""The Sessions page's Disk usage…: what sandbox-ai keeps on this machine or a host (sandbox-ai gc --usage), then
 Clean up… with or without the download caches of the kept HOMEs; the clean-up's list names the logs it compresses.
 The real `sandbox-ai gc --usage` of the checkout in SANDBOX_AI_HOME, on a state folder written here."""
 import gzip
@@ -147,7 +147,9 @@ def test_gc_lines_say_what_goes_later_apart():
 def test_disk_usage_is_a_button_and_on_right_click(window):
     page = window.sandboxes
     assert "usage" in page.manage_buttons
-    assert page.manage_buttons["usage"] in page.table.menu_entries()
+    offered = [inner for entry in page.table.menu_entries()  # (under Manage ▸ since 2026-11-24)
+               for inner in (entry.entries if isinstance(entry, widgets.MenuGroup) else [entry])]
+    assert page.manage_buttons["usage"] in offered
 
 
 @needs_sai

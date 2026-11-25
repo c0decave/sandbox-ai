@@ -4824,15 +4824,79 @@ def test_mcp_serve(scenario, tmp_path):
         return received
     # cat sends the request back (no answer to it): once it ends, the relay answers the request still open - with
     # why it ended (tests/test_mcp_live_start.py).
+    # (0.2.1: the reason ends with where the human sees more)
     unanswered = b'{"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "sandbox-ai: the MCP server ended ' \
-                 b'before it answered (exit status 0, nothing on its error output)"}}\n'
-    assert exchange() == (ping + unanswered if scenario == "happy" else b"")
+                 b'before it answered (exit status 0, nothing on its error output); the human sees more: sandbox-ai ' \
+                 b'mcp list"}}\n'
+    # A server that cannot be started answers the request with why, instead of closing without a word (0.2.1).
+    not_started = b'{"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "sandbox-ai: the MCP server could ' \
+                  b'not be started (No such file or directory); the human sees more: sandbox-ai mcp list"}}\n'
+    assert exchange() == (ping + unanswered if scenario == "happy" else not_started)
     # One failing or finished instance never takes the listener down.
-    assert exchange() == (ping + unanswered if scenario == "happy" else b"")
+    assert exchange() == (ping + unanswered if scenario == "happy" else not_started)
     if scenario == "happy":
         # What is not one JSON message never reaches the server: the relay answers it.
         answer = json.loads(exchange(b"echo\n"))
         assert answer["error"]["code"] == -32700 and answer["id"] is None
+
+
+def test_mcp_show_hint(scenario):
+    """Where the human sees more about a server that failed: its name (an instance's NAME.HASH: NAME), else the list."""
+    if scenario == "happy":
+        assert s.RUNTIME.mcp_show_hint("gowitness.ab12cd") == "the human sees more: sandbox-ai mcp show gowitness"
+    elif scenario == "sad":
+        assert s.RUNTIME.mcp_show_hint("x; rm -rf /") == "the human sees more: sandbox-ai mcp list"  # never echoed
+    else:
+        assert s.RUNTIME.mcp_show_hint(None) == s.RUNTIME.mcp_show_hint("a" * 33) == \
+            "the human sees more: sandbox-ai mcp list"
+
+
+def test_mcp_failure_record(scenario, tmp_path):
+    """A server's failure lands in its safeguards records (mcp list/show, doctor read it), redacted and bounded."""
+    path = tmp_path / "safeguards.jsonl"
+    env = {"SANDBOX_AI_MCP_RECORDS": str(path), "SANDBOX_AI_MCP_INSTANCE": "gowitness.ab12"}
+    if scenario == "happy":
+        entry = s.RUNTIME.mcp_failure_record("ended before it answered", "exit status 126", "sandbox-ai mcp check x",
+                                             environ=env)
+        written = json.loads(path.read_text().splitlines()[-1])
+        assert written == entry and entry["target"] == "gowitness" and entry["kind"] == "mcp-server"
+        assert entry["why"] == "exit status 126" and entry["fix"] == "sandbox-ai mcp check x"
+    elif scenario == "sad":
+        assert s.RUNTIME.mcp_failure_record("x", "y", "z", environ={}) is None  # no records file: nothing written
+        assert not path.exists()
+        (tmp_path / "elsewhere").write_text("")
+        path.symlink_to(tmp_path / "elsewhere")  # never followed
+        s.RUNTIME.mcp_failure_record("x", "y", "z", environ=env)
+        assert (tmp_path / "elsewhere").read_text() == ""
+    else:
+        entry = s.RUNTIME.mcp_failure_record("w" * 1000, "\x1b[31mred\n" * 100, "f", environ=env)
+        # (cut to 300 characters, then escaped: never a control character, never unbounded)
+        assert len(entry["what"]) <= 300 and len(entry["why"]) <= 3 * 300 and "\x1b" not in entry["why"]
+
+
+def test_mcp_answer_refused(scenario):
+    """A connection that gets no server is answered with the reason on its first request (an agent then tells its
+    human why), and closed; bounded in what it reads."""
+    ours, theirs = socket.socketpair()
+    with theirs:
+        if scenario == "happy":
+            theirs.sendall(b'{"jsonrpc": "2.0", "method": "initialize", "id": 7}\n')
+            s.RUNTIME.mcp_answer_refused(ours, "its image is not there", wait=5)
+            answer = json.loads(theirs.makefile("rb").readline())
+            assert answer == {"jsonrpc": "2.0", "id": 7, "error": {"code": -32000,
+                                                                   "message": "sandbox-ai: its image is not there"}}
+        elif scenario == "sad":
+            # A notification (no id), then something that is not JSON: never answered, the connection just closes.
+            theirs.sendall(b'{"jsonrpc": "2.0", "method": "notifications/initialized"}\nnot json\n')
+            theirs.shutdown(socket.SHUT_WR)
+            s.RUNTIME.mcp_answer_refused(ours, "why", wait=5)
+            assert theirs.makefile("rb").read() == b""
+        else:
+            # Nothing comes within the wait: it gives up without an answer (and never blocks longer).
+            started = time.monotonic()
+            s.RUNTIME.mcp_answer_refused(ours, "why", wait=0.2)
+            assert time.monotonic() - started < 3
+            assert theirs.makefile("rb").read() == b""
 
 
 def test_mcp_bridge(scenario, tmp_path, monkeypatch):
@@ -21904,3 +21968,211 @@ def test_late_fixes(scenario, monkeypatch):
         assert found == []
     else:  # one secret named twice: one fix
         assert [item["id"] for item in found] == ["secret:FOO"]
+
+
+# -- what a start may reach, and why (reach: run.json "reach", net show; todos 2026-11-24) --
+
+def test_opened_now(scenario):
+    argv = {"happy": ["-A", "a.example"], "sad": [], "edge": ["--allow-github", "-P", "3000", "-t", "192.0.2.1:22"]}
+    a = s.parse_args(["claude", *argv[scenario]])
+    hosts, tcp, ports, presets = s.opened_now(a)
+    assert hosts == set(a.allow_host) and tcp == set(a.allow_tcp) and ports == set(a.allow_host_port)
+    assert presets == ({"github"} if scenario == "edge" else set())
+    hosts.add("changed.example")
+    assert "changed.example" not in a.allow_host, "a copy: what is noted later is compared with it"
+
+
+def test_note_opened(scenario):
+    a = s.parse_args(["claude"])
+    a.implied_allows = {}
+    before = s.opened_now(a)
+    if scenario == "happy":
+        a.allow_host.append("git.example.net")
+        a.presets.append("github")
+        s.note_opened(a, "git-login", before)
+        assert a.implied_allows == {"host:git.example.net": "git-login", "preset:github": "git-login"}
+    elif scenario == "sad":
+        assert s.note_opened(a, "llm", before) == before and a.implied_allows == {}
+    else:  # the first source that opened it keeps it
+        a.allow_tcp.append("192.0.2.4:443")
+        after = s.note_opened(a, "llm", before)
+        s.note_opened(a, "feature", before)
+        assert a.implied_allows == {"tcp:192.0.2.4:443": "llm"} and "192.0.2.4:443" in after[1]
+
+
+def test_option_values(scenario):
+    names = {"--allow-host": "lower", "--dns": None, "--allow-tcp": ""}
+    if scenario == "happy":
+        assert s.option_values(["--allow-host", "A.example, b.example", "--dns", "--allow-tcp=192.0.2.1:22"],
+                               names) == {"--allow-host": ["a.example", "b.example"], "--dns": [True],
+                                          "--allow-tcp": ["192.0.2.1:22"]}
+    elif scenario == "sad":
+        assert s.option_values(["--allow-host"], names) == {} and s.option_values(None, names) == {}
+    else:  # what follows "--" is the agent's, never an option of the start
+        assert s.option_values(["--other", "x", "--", "--allow-host", "x.example"], names) == {}
+
+
+def test_given_by(scenario):
+    tokens = {"happy": ["--allow-domain", "example.org", "--allow-pypi", "--profile", "dns"],
+              "sad": ["--allow-domain", "co.uk"], "edge": ["--allow-shared-wildcard", "*.blob.core.windows.net",
+                                                             "--frontier", "--egress-all-allow", "--offline"]}[scenario]
+    found = s.given_by(tokens)
+    if scenario == "happy":
+        assert found["hosts"] == {"example.org", "*.example.org"} and found["presets"] == {"pypi"}
+        assert found["profiles"] == {"dns"} and not found["dns"]
+    elif scenario == "sad":
+        assert found["hosts"] == set(), "a domain refused at the start is no allowance"
+    else:
+        assert found["hosts"] == {"*.blob.core.windows.net"} and found["frontier"] and found["egress"] \
+            and found["offline"]
+
+
+def test_reach(scenario, tmp_path):
+    argv = {"happy": ["claude", "-A", "a.example"], "sad": ["claude", "--offline"],
+            "edge": ["codex", "--no-provider-defaults", "--allow-host", "*.example.org", "--nameserver", "192.0.2.53"]}
+    a = s.parse_args([*argv[scenario], "--workspace", str(tmp_path)])
+    a.start_tokens = list(argv[scenario])
+    found = s.reach(a)
+    if scenario == "happy":
+        assert found[0]["source"] == "provider" and {"kind": "https", "what": "a.example", "source": "option"} in found
+    elif scenario == "sad":
+        assert found == [{"kind": "nothing", "what": "--offline", "source": "option"}]
+    else:
+        assert [e["kind"] for e in found] == ["wildcard", "dns"] and found[1]["what"] == "192.0.2.53"
+
+
+def test_reach_source_text(scenario):
+    entry = {"happy": {"source": "provider", "detail": "claude"}, "sad": {"source": "unknown-kind"},
+             "edge": {"source": "project", "detail": "/p/.sandbox-ai.json"}}[scenario]
+    assert s.reach_source_text(entry) == {"happy": "the agent's provider (claude)", "sad": "unknown-kind",
+                                          "edge": "the project file (/p/.sandbox-ai.json)"}[scenario]
+
+
+def test_recorded_reach(scenario, monkeypatch, tmp_path):
+    a = s.parse_args(["claude", "--workspace", str(tmp_path)])
+    if scenario == "sad":
+        monkeypatch.setattr(s, "reach", lambda _a: 1 / 0)
+        assert s.recorded_reach(a) == [], "an explanation never stops a start"
+    elif scenario == "happy":
+        assert s.recorded_reach(a) == s.reach(a) != []
+    else:
+        a.offline = True
+        assert s.recorded_reach(a) == [{"kind": "nothing", "what": "--offline", "source": "option"}]
+
+
+# --- the agent's intro (intro.py): /sandbox/session/INTRO.md and the line that names it -----------------------------
+# (The suite's starts go without it - conftest.py's SANDBOX_AI_INTRO=0 -: each contract here says which start it means.)
+
+
+def a_users(monkeypatch, *argv):
+    """The start ARGV as a user's: no SANDBOX_AI_INTRO in the environment (the intro is on unless an option says no)."""
+    monkeypatch.delenv(s.INTRO_VARIABLE, raising=False)
+    return s.parse_args(list(argv))
+
+
+def test_load_intro_module(scenario):
+    intro = s.load_intro_module()
+    if scenario == "happy":
+        assert intro.PATH == "/sandbox/session/INTRO.md" and intro.PATH in intro.LINE and "\n" not in intro.LINE
+    elif scenario == "sad":  # a run without an intro: nothing written, never an exception
+        assert intro.refresh({}) is False and intro.refresh({"directory": "/nonexistent"}) is False
+    else:
+        assert s.load_intro_module() is intro  # loaded once
+
+
+def test_intro_on(scenario, monkeypatch):
+    if scenario == "happy":  # a user's start tells its agent; --intro also where the environment says no
+        assert s.intro_on(a_users(monkeypatch, "claude"))
+        monkeypatch.setenv(s.INTRO_VARIABLE, "0")
+        assert s.intro_on(s.parse_args(["codex", "--intro"]))
+    elif scenario == "sad":  # --no-intro, the environment's 0, a probe, a program of your own
+        assert not s.intro_on(a_users(monkeypatch, "claude", "--no-intro"))
+        assert not s.intro_on(a_users(monkeypatch, "claude", "--probe"))
+        assert not s.intro_on(a_users(monkeypatch, "claude", "--binary", "/bin/sh"))
+        monkeypatch.setenv(s.INTRO_VARIABLE, "0")
+        assert not s.intro_on(s.parse_args(["claude"]))
+    else:  # your default (agent_intro false) under --intro and under the environment's 1
+        a = a_users(monkeypatch, "claude")
+        a.intro_default = False
+        assert not s.intro_on(a)
+        again = s.parse_args(["claude", "--intro"])
+        again.intro_default = False
+        assert s.intro_on(again)
+        monkeypatch.setenv(s.INTRO_VARIABLE, "1")
+        assert s.intro_on(a)
+
+
+def fake_vpn_note():
+    return types.SimpleNamespace(agent_note=lambda a: "through Tor\n", NOTE_FILE="network.md",
+                                 NOTE_PATH="/sandbox/session/network.md")
+
+
+def test_start_note(scenario, monkeypatch):
+    monkeypatch.setattr(s, "load_vpn_module", fake_vpn_note)
+    line = s.load_intro_module().LINE
+    if scenario == "happy":
+        assert s.start_note(a_users(monkeypatch, "claude")) == line
+    elif scenario == "sad":
+        assert s.start_note(a_users(monkeypatch, "claude", "--no-intro")) is None
+    else:  # behind a VPN or Tor: the network note first, the line after it
+        a = a_users(monkeypatch, "claude", "--vpn", "anon")
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert s.start_note(a) == "through Tor\n\n" + line
+
+
+def test_note_path(scenario, monkeypatch):
+    monkeypatch.setattr(s, "load_vpn_module", fake_vpn_note)
+    if scenario == "happy":  # a harness that takes a file reads the notes joined
+        assert s.note_path(a_users(monkeypatch, "letta")) == s.load_intro_module().NOTE_PATH
+    elif scenario == "sad":
+        assert s.note_path(a_users(monkeypatch, "letta", "--no-intro")) is None
+    else:  # without the intro, behind Tor: the network note's own file
+        a = a_users(monkeypatch, "opencode", "--vpn", "anon", "--no-intro")
+        a.vpn_profile = {"name": "anon", "type": "tor"}
+        assert s.note_path(a) == "/sandbox/session/network.md"
+
+
+def test_note_place(scenario, monkeypatch):
+    if scenario == "happy":
+        assert s.note_place(a_users(monkeypatch, "claude")) == s.NOTE_PLACES["claude"]
+    elif scenario == "sad":  # no note at all: the place as the table has it
+        assert s.note_place(a_users(monkeypatch, "opencode", "--no-intro")) == s.NOTE_PLACES["opencode"]
+    else:  # OpenCode with the intro: the file it is given, not network.md
+        place = s.note_place(a_users(monkeypatch, "opencode"))
+        assert s.load_intro_module().NOTE_PATH in place and "network.md" not in place
+
+
+def test_intro_plan(scenario, monkeypatch, tmp_path):
+    if scenario == "happy":
+        plan = s.intro_plan(a_users(monkeypatch, "claude", "--workspace", str(tmp_path)))
+        assert plan["file"] == "/sandbox/session/INTRO.md" and plan["agent_reads_it"] == s.NOTE_PLACES["claude"]
+        assert "- `/work` - the project (you start here), read-write" in plan["text"]
+        assert str(tmp_path) not in plan["text"], "sandbox paths only"
+    elif scenario == "sad":
+        assert s.intro_plan(a_users(monkeypatch, "claude", "--no-intro")) is None
+    else:  # a mount with its mode
+        data = tmp_path / "data"
+        data.mkdir()
+        plan = s.intro_plan(a_users(monkeypatch, "codex", "--workspace", str(tmp_path / "w"), "--mount",
+                                    f"{data}:/mnt/data:ro"))
+        assert "- `/mnt/data` - an extra folder or file, read-only" in plan["text"]
+
+
+def test_codex_own_instructions(scenario, tmp_path):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    parser = s.load_privacy_module()._toml_module()
+    if scenario == "happy":
+        (home / ".codex/config.toml").write_text('developer_instructions = "Answer in German."\n')
+        assert s.codex_own_instructions(home) == ("Answer in German." if parser is not None else None)
+    elif scenario == "sad":  # none there, a file that is no TOML, no file: the note alone
+        (home / ".codex/config.toml").write_text('model = "x"\n')
+        assert s.codex_own_instructions(home) is None
+        (home / ".codex/config.toml").write_text("not = [valid")
+        assert s.codex_own_instructions(home) is None
+        assert s.codex_own_instructions(tmp_path / "nowhere") is None
+    else:  # not a text, or an empty one
+        (home / ".codex/config.toml").write_text('developer_instructions = ["a"]\n')
+        assert s.codex_own_instructions(home) is None
+        (home / ".codex/config.toml").write_text('developer_instructions = "  "\n')
+        assert s.codex_own_instructions(home) is None

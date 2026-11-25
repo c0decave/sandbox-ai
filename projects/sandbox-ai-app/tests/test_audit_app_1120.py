@@ -247,14 +247,10 @@ def test_allow_dialog_ok_with_nothing_or_half_a_git_login(window, monkeypatch): 
     assert dialog.isVisible() and dialog.result() != QtWidgets.QDialog.DialogCode.Accepted
     assert dialog.problem.isVisibleTo(dialog) and dialog.problem.text() == "Type or tick what to allow first."
     dialog.hosts.setText("pypi.org")
-    dialog.git_url.setText("https://git.example.org")
-    ok.click()
-    assert dialog.isVisible(), "half a Git login is not sent"
-    assert "needs both" in dialog.problem.text(), dialog.problem.text()
-    dialog.git_ref.setText("GITEA_TOKEN")
     ok.click()
     assert dialog.result() == QtWidgets.QDialog.DialogCode.Accepted
-    assert dialog.arguments() == ["--allow-host", "pypi.org", "--git-token-env", "https://git.example.org=GITEA_TOKEN"]
+    assert dialog.arguments() == ["--allow-host", "pypi.org"]
+    # (half a Git login: OtherLoginDialog of Credentials says it since 2026-11-24, test_net_proposals_app.py)
     revoke = ui.NetworkDialog(window, {}, "Revoke for web", supported, op="revoke")
     revoke.show()
     revoke.findChild(QtWidgets.QDialogButtonBox).button(QtWidgets.QDialogButtonBox.StandardButton.Ok).click()

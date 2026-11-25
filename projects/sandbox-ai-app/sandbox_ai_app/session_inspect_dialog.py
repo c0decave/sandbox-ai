@@ -1,4 +1,4 @@
-"""Memory… and Session files… of the Sandboxes page (buttons and a start's right-click menu): a start's agent memory and
+"""Memory… and Session files… of the Sessions page (buttons and a start's right-click menu): a start's agent memory and
 the agents' own session files, read only (`sandbox-ai session memory|files` on the start's host).
 
 The files are listed on the left (name, size, when changed), the chosen one's text on the right; Find looks for a

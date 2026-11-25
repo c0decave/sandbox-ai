@@ -2634,6 +2634,11 @@ def register_preset_servers(m):
     images = {name: {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + digit * 64,
                      "id": "sha256:" + digit * 64, "user": user}
               for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"), ("showcase-web", "4", "101:101"))}
+    # sandbox-ai's own Containerfiles for services a preset starts (android-development: the emulator beside the
+    # sandbox, an adb server for a USB device), built as `images build-image NAME --builtin NAME` records them.
+    for digit, name in (("5", "android-emulator"), ("6", "adb")):
+        images[name] = {"kind": "built", "image": f"localhost/sandbox-ai-image-{name}:latest", "builtin": name,
+                        "id": "sha256:" + digit * 64, "user": "0:0", "ports": [], "os": {}}
     (path.parent / "user-images.json").write_text(json.dumps({"version": 1, "images": images}))
 
 
@@ -2669,7 +2674,9 @@ def every_builtin_preset_starts_checked(m, dev):
         if any(spec.get("kind") in ("vpn", "llm") and not spec.get("optional")
                for spec in preset.get("values", {}).values()):
             continue  # a registered VPN profile or LLM server: test_presets_all.py registers them and starts these
-        if m.backend == "bwrap" and "--image-variant" in preset.get("options", []):
+        if m.backend == "bwrap" and PRESETS.option_values(
+                preset, {n: str(v["default"]) for n, v in preset.get("values", {}).items() if "default" in v},
+                "--image-variant"):  # (one it starts as it comes: android-development names one only when asked)
             # an image variant is an image: bwrap runs the host's own programs
             m.refused("--preset", preset["id"], *preset_values(m, preset, dev),
                       match="--image-variant applies only to the Podman backend")
@@ -2689,6 +2696,45 @@ def every_builtin_preset_starts_checked(m, dev):
             preset_mcp(preset), preset["id"]
         checked.append(preset["id"])
     assert len(checked) >= 20
+
+
+@presets_scenario
+def android_as_a_toolchain_and_as_services_beside_the_sandbox(m, dev):
+    """Android without the big image (2026-11-24): the SDK as the toolchain android-sdk (the jdk with it), the
+    emulator as the service android-emulator with /dev/kvm for itself, an adb server for a USB device as the service
+    adb - by hand and as the preset android-development brings them. The agent's own sandbox gets no device."""
+    register_preset_servers(m)
+    TF.install(m.tmp / "toolchain-catalog")
+    try:
+        if m.backend != "podman":
+            m.refused("--service", "android-emulator", match="--service needs the Podman backend")
+            plan = m.plan("--toolchain", "android-sdk", "--toolchain-offline")  # the toolchain: every backend
+            assert [entry["name"] for entry in plan["toolchains"]] == ["jdk", "android-sdk"]
+            return
+        plan = m.plan("--toolchain", "android-sdk", "--service", f"android-emulator:device={dev / 'kvm'}",
+                      "--service", f"adb:device={dev / 'ttyACM0'}")
+        assert [entry["name"] for entry in plan["toolchains"]] == ["jdk", "android-sdk"]
+        assert {"dl.google.com", "maven.google.com"} <= set(plan["toolchain_hosts"]["opened"])
+        emulator, adb = plan["services"]
+        # What sandbox-ai's own Containerfiles bring for their services: nothing of it had to be typed.
+        assert emulator["reachable_at"] == ["localhost:5555", "localhost:5554", "localhost:5550"]
+        assert (emulator["ready"], emulator["ready_timeout"], emulator["limits"]["memory"]) == (5550, 600, "6g")
+        assert emulator["devices"] == [str(dev / "kvm")] and emulator["read_only"] is True
+        assert adb["reachable_at"] == ["localhost:5037"] and adb["devices"] == [str(dev / "ttyACM0")]
+        assert plan["devices"] == [], "the devices are the services' alone"
+        m.refused("--service", f"adb:device={dev / 'ttyACM0'}", "--allow-host-port", "5037",
+                  match="port 5037 is a port of the host")
+        m.refused("--mode", "high", "--service", f"android-emulator:device={dev / 'kvm'}",
+                  match="not taken in the security mode high")
+        if m.agent in PRESETS.catalog()["android-development"]["agents"]:
+            plan = m.plan("--preset", "android-development", "--preset-value", f"kvm={dev / 'kvm'}",
+                          "--preset-value", f"device={dev / 'ttyACM0'}")
+            assert [entry["name"] for entry in plan["toolchains"]] == ["jdk", "android-sdk"]
+            assert [(entry["name"], entry["devices"]) for entry in plan["services"]] == [
+                ("android-emulator", [str(dev / "kvm")]), ("adb", [str(dev / "ttyACM0")])]
+            assert plan["services"][1]["reachable_at"] == ["localhost:5038"] and plan["devices"] == []
+    finally:
+        TF.writable(m.tmp)
 
 
 @presets_scenario

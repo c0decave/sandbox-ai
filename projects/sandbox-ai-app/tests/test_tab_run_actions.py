@@ -1,5 +1,5 @@
 """A terminal tab's right click -> "While it runs" (user 2026-11-19: "Go to Netzwerk / allow hosts / domain ..., MCP
-add, ..."): the Sandboxes page's actions for a running start, for that tab's session - as enabled as the page's own
+add, ..."): the Sessions page's actions for a running start, for that tab's session - as enabled as the page's own
 buttons (with their reasons), acting on that start without showing the page."""
 import pytest
 
@@ -23,7 +23,7 @@ def test_the_tab_menu_has_the_run_actions_of_its_session(window, monkeypatch):  
     menu = window.run_menu_for(window, instance)
     assert menu is not None and menu.title() == "While it runs"
     texts = [action.text() for action in menu.actions()]
-    for wanted in ("Allow…", "Revoke…", "Allowed during the run", "Add…", "Remove…", "Limits…"):
+    for wanted in ("Allow…", "Revoke…", "What it may reach…", "Add…", "Remove…", "Limits…"):
         assert wanted in texts, texts
     # (the user 2026-11-23: what adds or takes out is under Add… and Remove…, each opening the kinds)
     sub = {action.text(): action.menu() for action in menu.actions() if action.menu() is not None}
@@ -31,7 +31,7 @@ def test_the_tab_menu_has_the_run_actions_of_its_session(window, monkeypatch):  
                                                           "Add workspace…", "Add device…"]
     assert [a.text() for a in sub["Remove…"].actions()][0] == "Remove MCP server…"
     assert not any(text.startswith(("Add ", "Remove ")) for text in texts), "none of them flat any more"
-    assert window.current_page() == shown, "the Sandboxes page is not shown for it"
+    assert window.current_page() == shown, "the Sessions page is not shown for it"
     called = []
     monkeypatch.setattr(window.sandboxes, "network", lambda op: called.append((op, window.sandboxes.target())))
     allow = next(a for a in menu.actions() if a.text() == "Allow…")

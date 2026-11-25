@@ -1,4 +1,4 @@
-"""Copy to host… and Move to host… of the Sandboxes page offscreen: a session of this machine to a host of sandbox-ai
+"""Copy to host… and Move to host… of the Sessions page offscreen: a session of this machine to a host of sandbox-ai
 hosts (`sandbox-ai session copy|move NAME HOST [--as NAME] [--map=LOCAL=REMOTE]... [--check]`). The dialog offers the
 hosts without this machine, the name there and every folder of the session (only a changed one becomes --map), Check
 only, Copy and Move (asked first: session-move); its output is shown. Against stand-ins that record what they were
@@ -134,7 +134,7 @@ def test_the_folders_of_a_session_read_from_its_plan(sai, monkeypatch):
         sai.session_transfer_plan("-x")
 
 
-# -- the Sandboxes page's buttons --
+# -- the Sessions page's buttons --
 
 
 def test_copy_and_move_only_for_a_session_of_this_machine(ui, sai, monkeypatch):

@@ -38,6 +38,15 @@ A service (--service NAME[:KEY=VALUE,...], repeatable; also in a project file's 
     user=UID[:GID]     the user it runs as (default: the image's own, read from it when it was added)
     read-only=yes|no   a read-only root file system (default yes)
     memory=SIZE cpus=N pids=N   its limits (default 512m, 1, 256)
+    device=DEVICE      a device of this host for the service alone, never for the agent (repeatable): a path under
+                       /dev or usb:VENDOR:PRODUCT[:SERIAL], checked as --device is; not in the modes high and paranoid
+
+  sandbox-ai's own Containerfiles (sandbox-ai images templates; service-images/NAME) may bring the keys their
+  service needs (service.json "spec": its ports, its device, its limits): --service NAME of such an image starts with
+  them, and what you give yourself replaces them key by key. android-emulator (the Android emulator, headless, with
+  /dev/kvm for itself: adb connect android-emulator:5555) and adb (an adb server for the USB device you give it) are
+  such services; an image that is built from Google's SDK downloads is built once you accepted their license
+  (images build-image NAME --builtin NAME [--accept-android-sdk-license]).
 
 Standard library only.
 """
@@ -621,6 +630,84 @@ def builtin_images():
     return found
 
 
+TEMPLATE_KEYS = frozenset({"spec", "build_network", "terms", "arches", "context", "about", "root"})
+TEMPLATE_LIMIT = 64 << 10
+
+
+def template_info(template):
+    """What sandbox-ai's own Containerfile TEMPLATE says of itself beside it (service-images/TEMPLATE/service.json; {}
+    without one): "spec" - the keys of --service its service starts with (KEY=VALUE,...: its ports, its device, its
+    limits) -, "build_network" (its RUN steps fetch: built with the network), "terms" (the license its downloads are
+    under: toolchain_recipes.TERMS, accepted before it is built), "arches" (the machines it can be built on),
+    "context" (files of sandbox/ its build takes besides its own folder's, found there as shared/NAME), "about",
+    "root" (why its service runs as the container's root, when it does).
+    ValueError for a file that is not that: it comes with sandbox-ai, but its spec becomes podman's arguments."""
+    path = BUILTIN_IMAGES / str(template) / "service.json"
+    if not re.fullmatch(NAME, str(template)) or not path.is_file():
+        return {}
+    try:
+        info = json.loads(images_module().read_limited(path, TEMPLATE_LIMIT))
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"{path}: {exc}") from None
+    if not isinstance(info, dict) or set(info) - TEMPLATE_KEYS:
+        raise ValueError(f"{path}: expected {{{', '.join(sorted(TEMPLATE_KEYS))}}}")
+    spec = info.get("spec", "")
+    if not isinstance(spec, str):
+        raise ValueError(f"{path}: spec is KEY=VALUE,...")
+    parse_spec(f"{template}:{spec}" if spec else str(template))
+    if info.get("terms") is not None and info["terms"] not in recipes_module().TERMS:
+        raise ValueError(f"{path}: the license {info['terms']!r} is none sandbox-ai knows")
+    arches = info.get("arches", [])
+    context = info.get("context", [])
+    if not isinstance(arches, list) or not all(isinstance(arch, str) for arch in arches) or \
+            not isinstance(context, list) or not all(
+                isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+){0,5}", item)
+                and ".." not in item.split("/") for item in context):
+        raise ValueError(f"{path}: arches and context are lists of names")
+    return {"spec": spec, "build_network": info.get("build_network") is True, "terms": info.get("terms"),
+            "arches": list(arches), "context": list(context), "about": str(info.get("about") or ""),
+            "root": str(info.get("root") or "")}
+
+
+_recipes = None
+
+
+def recipes_module():
+    """toolchain_recipes.py (the licenses a download may be under, and how one is accepted), loaded once."""
+    global _recipes
+    if _recipes is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_recipes_for_services", HERE / "toolchain_recipes.py")
+        with LOADING:
+            if _recipes is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _recipes = loaded
+    return _recipes
+
+
+def template_terms(template):
+    """{"id", "title", "by", "url", "option", "says"} of the license sandbox-ai's own Containerfile TEMPLATE's
+    downloads are under, or None."""
+    ident = template_info(template).get("terms") if template else None
+    return {"id": ident, **recipes_module().TERMS[ident]} if ident else None
+
+
+def with_template(value, template):
+    """The --service VALUE with the keys sandbox-ai's own Containerfile TEMPLATE brings for its service (template_info
+    "spec"), each only where VALUE names no such key itself (a port of yours replaces its ports, a memory= its
+    memory)."""
+    spec = template_info(template).get("spec") if template else ""
+    if not spec:
+        return value
+    name, _, rest = value.partition(":")
+    mine = [item for item in rest.split(",") if item]
+    given = {item.partition("=")[0].strip() for item in mine}
+    if "port" in given:  # (ports of your own: the template's ready= names one of its ports)
+        given |= {"ready", "ready-timeout"}
+    return name + ":" + ",".join([*mine, *(item for item in spec.split(",")
+                                            if item.partition("=")[0].strip() not in given)])
+
+
 def builtin_containerfile(template):
     """The path of sandbox-ai's own Containerfile TEMPLATE; ValueError naming those there are."""
     found = builtin_images()
@@ -631,7 +718,8 @@ def builtin_containerfile(template):
 
 
 def templates(found=None):
-    """[{template, description, image, built}] of sandbox-ai's own Containerfiles (builtin_images): IMAGE is the name
+    """[{template, description, image, built, spec, build_network, terms, arches, about}] of sandbox-ai's own
+    Containerfiles (builtin_images, template_info): IMAGE is the name
     an image of it gets when a start needs it (the template's own), BUILT the names of your images built from it
     (FOUND: read_registry_parts; a record that cannot be read: none)."""
     if found is None:
@@ -639,37 +727,90 @@ def templates(found=None):
             found = read_registry_parts()[0]
         except ValueError:
             found = {}
-    return [{"template": template, "description": description, "image": template,
-             "built": sorted(name for name, entry in found.items() if entry.get("builtin") == template)}
-            for template, description in builtin_images().items()]
+    rows = []
+    for template, description in builtin_images().items():
+        info = template_info(template)
+        terms = template_terms(template)
+        rows.append({"template": template, "description": description, "image": template,
+                     "built": sorted(name for name, entry in found.items() if entry.get("builtin") == template),
+                     # what its service starts with (--service NAME: these keys, unless you give them), whether its
+                     # build fetches (the network), the license its downloads are under, where it can be built
+                     "spec": info.get("spec", ""), "build_network": bool(info.get("build_network")),
+                     "terms": {key: terms[key] for key in ("id", "title", "by", "url", "option")} if terms else None,
+                     "arches": info.get("arches", []), "about": info.get("about", "")})
+    return rows
 
 
 BUILD_NETWORK_NOTE = ("its RUN steps reach the network from this host directly - outside the sandbox's firewall, VPN "
                       "and Tor, with your own address")
 
 
+def machine_arch(value=None):
+    """This machine's architecture as sandbox-ai names it (x86_64, aarch64)."""
+    import platform
+    value = (value or platform.machine()).lower()
+    return {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64"}.get(value, value)
+
+
+def composed_context(folder, shared, scratch):
+    """The build context of one of sandbox-ai's own Containerfiles that takes files of sandbox/ besides its folder's
+    (template_info "context"): a copy of FOLDER in SCRATCH with each of SHARED as shared/NAME beside it."""
+    import shutil
+    target = Path(scratch) / "context"
+    shutil.copytree(folder, target, symlinks=False)
+    for item in shared:
+        source = HERE / item
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(f"{source}: a file of sandbox-ai the build takes is not there")
+        (target / "shared").mkdir(exist_ok=True)
+        shutil.copyfile(source, target / "shared" / source.name)
+    return target
+
+
 def build(name, file, context=None, replace=False, podman=None, run=None, out=print, trust_agent_written=False,
-          network=False, builtin=None, derived=None):
+          network=False, builtin=None, derived=None, accepted=False, mode=None, terminal=None, read=None,
+          machine=None):
     """Build your Containerfile FILE (in CONTEXT, default its folder) as your image NAME: each image it takes from
     outside pulled once and pinned by digest in the Containerfile that is built (podman build --pull=never), the
     result recorded by its image ID. A Containerfile or context where a sandbox can write (an agent could have
     changed it) is refused unless TRUST_AGENT_WRITTEN (--trust-agent-written: you reviewed it). Its RUN steps get no
     network (--network=none) unless NETWORK (--build-network: this host's own, outside the sandbox's firewall, VPN
-    and Tor). BUILTIN: the name of one of sandbox-ai's own Containerfiles (service-images) instead of FILE. Returns
-    (name, record)."""
+    and Tor). BUILTIN: the name of one of sandbox-ai's own Containerfiles (service-images) instead of FILE; what it
+    says of itself (template_info) holds: one that fetches is built with the network (said), one whose downloads are
+    under a license only once you accepted it - ACCEPTED (--accept-android-sdk-license) or a yes on this terminal
+    (TERMINAL, READ: tests), never asked in the modes high and paranoid (MODE) -, one for other machines (MACHINE:
+    this one's architecture) is refused. Returns (name, record)."""
     images = images_module()
     found = read_registry()
     name_taken(name, found, replace)
+    info, agreed = {}, None
     if builtin:
         if context:
             raise ValueError("--builtin builds in its own folder: no --context with it")
         file = builtin_containerfile(builtin)
+        info = template_info(builtin)
+        arch = machine_arch(machine)
+        if info.get("arches") and arch not in info["arches"]:
+            raise ValueError(f"--builtin {builtin}: it is built for {', '.join(info['arches'])} only, this machine is "
+                             f"{arch}" + (f" ({info['about']})" if info.get("about") else ""))
+        terms = template_terms(builtin)
+        if terms:
+            how = recipes_module().accept(
+                terms, f"what the service image {builtin} is built from", f"sandbox-ai images build-image {name} "
+                f"--builtin {builtin}", accepted, mode, terminal, read, lambda text: out(f"sandbox-ai images: {text}"))
+            agreed = {"id": terms["id"], "how": how, "accepted": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        if info.get("build_network") and not network:
+            network = True
+            out(f"sandbox-ai images: {builtin} fetches what it is built from (sandbox-ai's own Containerfile names "
+                "each download)")
     path = Path(os.path.abspath(os.path.expanduser(str(file))))
     folder = Path(os.path.abspath(os.path.expanduser(str(context)))) if context else path.parent
     if not folder.is_dir():
         raise ValueError(f"--context {folder}: not a folder")
     agent_written = False
-    for where, what in ((path, "the Containerfile"), (folder, "the build context")):
+    # (and each file of sandbox-ai one of its own Containerfiles takes besides its folder: composed_context)
+    for where, what in ((path, "the Containerfile"), (folder, "the build context"),
+                        *((HERE / item, "a file the build takes") for item in info.get("context", []))):
         try:
             images.check_location(where, what)
         except ValueError as exc:
@@ -712,9 +853,10 @@ def build(name, file, context=None, replace=False, podman=None, run=None, out=pr
     with tempfile.TemporaryDirectory(prefix="sandbox-ai-user-image-") as scratch:
         generated = Path(scratch) / "Containerfile"
         generated.write_text(pinned_text)
+        built_in = composed_context(folder, info["context"], scratch) if info.get("context") else folder
         argv = [*podman, "build", "--pull=never", *([] if network else ["--network=none"]), "--file", str(generated),
                 "--tag", tag,
-                "--label", f"{USER_IMAGE_LABEL}={name}", str(folder)]
+                "--label", f"{USER_IMAGE_LABEL}={name}", str(built_in)]
         built = run_podman(argv, run, capture=False, timeout=7200)
     if built.returncode != 0:
         images.remember("build-image-failed", name, containerfile=str(path))
@@ -731,6 +873,7 @@ def build(name, file, context=None, replace=False, podman=None, run=None, out=pr
              "containerfile_sha256": hashlib.sha256(text.encode()).hexdigest(), "from": sources, "reviewed": False,
              "build_network": bool(network), "agent_written": agent_written,
              **({"builtin": builtin} if builtin else {}), **({"derived": derived} if derived else {}),
+             **({"terms": agreed} if agreed else {}),  # (the license accepted for what it was built from)
              "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
              **describe_image(data, podman, str(data.get("Id") or tag), run)}
     record_entry(name, entry, replace)
@@ -845,7 +988,11 @@ SERVICE_NAME = r"[a-z0-9][a-z0-9-]{0,23}"
 SERVICE_LIMIT = 8
 DEFAULTS = {"memory": "512m", "cpus": "1", "pids": 256, "ready_timeout": 60}
 SPEC_KEYS = ("image", "port", "ready", "ready-timeout", "env", "secret", "data", "keep", "user", "read-only",
-             "memory", "cpus", "pids")
+             "memory", "cpus", "pids", "device")
+# device=: a path (under /dev: the launcher's own check, as for --device, says so at the start - services.check), or
+# a USB device by its IDs (devices.py finds its nodes); no comma, as in every value of a --service.
+DEVICE_VALUE = re.compile(r"/[A-Za-z0-9._+@/-]{1,200}|usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[A-Za-z0-9._+-]{1,64})?")
+DEVICE_LIMIT = 8
 ENV_NAME = r"[A-Za-z_][A-Za-z0-9_]{0,63}"
 ENV_VALUE = r"[^\x00-\x1f\x7f,]{0,1000}"
 SECRET_NAME = r"[A-Za-z_][A-Za-z0-9_]{0,63}"
@@ -858,7 +1005,7 @@ VOLUME_LABEL = "sandbox-ai.service-volume"
 def default_service(name):
     return {"name": name, "image": name, "ports": [], "ready": None, "ready_timeout": DEFAULTS["ready_timeout"],
             "env": [], "secrets": [], "data": [], "keep": False, "user": None, "read_only": True,
-            "memory": DEFAULTS["memory"], "cpus": DEFAULTS["cpus"], "pids": DEFAULTS["pids"]}
+            "memory": DEFAULTS["memory"], "cpus": DEFAULTS["cpus"], "pids": DEFAULTS["pids"], "devices": []}
 
 
 def yes_no(key, value):
@@ -953,6 +1100,15 @@ def parse_spec(value):
             if not re.fullmatch(r"[0-9]{2,6}", item_value) or int(item_value) < 16:
                 raise ValueError(f"--service {name}: pids= is a number of at least 16")
             service["pids"] = int(item_value)
+        elif key == "device":
+            if not DEVICE_VALUE.fullmatch(item_value) or ".." in item_value.split("/"):
+                raise ValueError(f"--service {name}: device= is a path under /dev or usb:VENDOR:PRODUCT[:SERIAL] "
+                                 f"(sandbox-ai devices scan shows them): {item_value!r}")
+            if item_value in service["devices"]:
+                raise ValueError(f"--service {name}: device={item_value} is named twice")
+            service["devices"].append(item_value)
+    if len(service["devices"]) > DEVICE_LIMIT:
+        raise ValueError(f"--service {name}: at most {DEVICE_LIMIT} devices")
     if len(service["data"]) > 8 or len(service["ports"]) > 16 or len(service["env"]) + len(service["secrets"]) > 64:
         raise ValueError(f"--service {name}: at most 8 data folders, 16 ports and 64 variables")
     if isinstance(service["ready"], int) and service["ready"] not in service["ports"]:
@@ -987,6 +1143,7 @@ def spec_text(service):
     for key in ("memory", "cpus", "pids"):
         if str(service.get(key, DEFAULTS[key])) != str(DEFAULTS[key]):
             items.append(f"{key}={service[key]}")
+    items += [f"device={device}" for device in service.get("devices", [])]
     return service["name"] + (":" + ",".join(items) if items else "")
 
 
@@ -1031,6 +1188,13 @@ def service_record(value, service, found, damaged=None):
     if image in builtin_images():
         # One of sandbox-ai's own Containerfiles: offered to be built (fixes.py) - its FROM is a third party's image,
         # pulled once and pinned by digest, UNCHECKED like your images (said in the question).
+        terms = template_terms(image)
+        if terms:  # built from downloads under a license: yours to accept (never done by --fix: asked on its own)
+            raise f.Missing(
+                f"--service {name}: no image {image} of yours; it is one of sandbox-ai's own Containerfiles, built "
+                f"once with: sandbox-ai images build-image {image} --builtin {image} (it asks you to accept the "
+                f"{terms['title']}; {terms['option']} answers for a script), or give image=NAME of one of yours; "
+                f"your images: {mine}; see sandbox-ai images list", [template_fix(image, name, terms)])
         raise f.Missing(
             f"--service {name}: no image {image} of yours; it is one of sandbox-ai's own Containerfiles, built once "
             f"with: sandbox-ai images build-image {image} --builtin {image} (the app's start builds it when needed, "
@@ -1052,6 +1216,57 @@ def service_record(value, service, found, damaged=None):
                            [["sandbox-ai", "images", "pull", "REFERENCE", "--as", image]],
                            manual="which image it is (its registry's reference, or your Containerfile: sandbox-ai "
                                   f"images build-image {image} --file Containerfile) is yours to say")])
+
+
+def template_fix(image, service, terms, again=False):
+    """The fix (fixes.py) that builds sandbox-ai's own Containerfile IMAGE whose downloads are under the license
+    TERMS: a way only you choose (asked on its own, No first; never taken by --fix; refused in the modes high and
+    paranoid) - its yes is your acceptance, so its command carries the option."""
+    f = fixes_module()
+    return f.fix("service", image, f"the service image {image} (sandbox-ai's own Containerfile) is not "
+                 + ("in Podman's store" if again else "built on this host"),
+                 f"accept the {terms['title']} and build it here from {terms['by']}'s downloads",
+                 [["sandbox-ai", "images", "build-image", image, "--builtin", image, terms["option"],
+                   *(["--replace"] if again else [])]],
+                 duration="a download of some GB, then minutes",
+                 security=f"by this you accept the {terms['title']} ({terms['url']}): {terms['says']}; its FROM is a "
+                          "third party's image (pulled once, pinned by digest), UNCHECKED like your images",
+                 choice=f"license:service:{image}", terms=terms["id"])
+
+
+def service_devices(a, l, service):
+    """[{"value", "path", "kind"}] of the devices of SERVICE (its device= values), each checked as --device is
+    (devices.plan: a path under /dev that may be passed, a USB device's nodes): for the service alone - the agent's
+    sandbox gets none of them. ValueError in the security modes high and paranoid (as --device), for what the
+    administrator's policy forbids, and for a device a rule of the run's rulesets denies or asks about (a service
+    starts before anyone could answer)."""
+    if not service.get("devices"):
+        return []
+    name, mode = service["name"], getattr(a, "mode", None)
+    if mode in ("high", "paranoid"):
+        raise ValueError(f"--service {name}: device={service['devices'][0]} is not taken in the security mode {mode} "
+                         "(the device's driver runs in your host's kernel); the mode medium takes it (--mode medium)")
+    forbidden = [str(entry) for entry in (getattr(a, "policy", None) or {}).get("forbid", [])]
+    module = l.load_devices_module()
+    rules = l.RUNTIME.Ruleset(l.load_rulesets(a))
+    entries = []
+    for value in service["devices"]:
+        option = f"--service {name}: device={value}"
+        if "--device" in forbidden or f"--device={value}" in forbidden:
+            raise ValueError(f"{option}: --device is not allowed by the administrator's policy ({l.POLICY_FILE})")
+        try:
+            nodes, _, _ = module.plan(value, launcher=l.launcher_view(), option="its device")
+        except ValueError as exc:  # ("its device /dev/kvm: No such file or directory", as --device says it)
+            raise ValueError(f"--service {name}: {exc}") from None
+        for node in nodes:
+            verdict = rules.device(node["facts"]) if rules.devices_active else {"decision": "allow"}
+            if verdict["decision"] != "allow":
+                raise ValueError(f"{option}: " + (l.printable(str(verdict.get("reason") or "a device rule denies it"))
+                                                  if verdict["decision"] == "deny" else
+                                                  f"rule {verdict.get('rule')} ({verdict.get('ruleset')}) asks about "
+                                                  "it, and a service starts before anyone could answer"))
+            entries.append({"value": value, "path": node["path"], "kind": node["kind"]})
+    return entries
 
 
 def check(a, l=None, found=None):
@@ -1086,6 +1301,8 @@ def check(a, l=None, found=None):
         if service["name"] in {s["name"] for s in services}:
             raise ValueError(f"--service {service['name']} is given twice")
         entry = service_record(value, service, found, damaged)
+        if entry.get("builtin"):  # the keys sandbox-ai's own Containerfile brings for its service (service.json)
+            service = parse_spec(with_template(value, entry["builtin"]))
         user = service["user"] or entry.get("user")
         if user is None:
             raise ValueError(f"--service {service['name']}: the user its image runs as ({entry.get('config_user')!r}) "
@@ -1100,7 +1317,8 @@ def check(a, l=None, found=None):
             if port in seen:
                 raise ValueError(f"--service {service['name']}: port {port} is the service {seen[port]}'s too")
             seen[port] = service["name"]
-        services.append({**service, "user": user, "record": entry})
+        services.append({**service, "user": user, "record": entry,
+                         "device_entries": service_devices(a, l, service)})
     a.services = services
     return services
 
@@ -1118,6 +1336,20 @@ def notes(a):
                          "images can be set to a higher one")
         if service["read_only"] is False:
             found.append(f"service {service['name']}: its root file system is writable (read-only=no)")
+        paths = [item["path"] for item in service.get("device_entries") or []]
+        if paths:
+            found.append(f"service {service['name']}: it alone gets {', '.join(paths)} (the driver runs in your "
+                         "host's kernel); the agent's sandbox does not")
+            access = getattr(launcher(), "device_access", None)
+            for path in paths:
+                try:
+                    usable = access is None or os.path.isdir(path) or access(path)
+                except OSError:
+                    usable = True
+                if not usable:
+                    found.append(f"warning: service {service['name']}: your user cannot open {path} directly "
+                                 "(only through a supplementary group, which no container keeps), so the service "
+                                 "cannot either; see the README (Hardware) for a udev rule")
     return found
 
 
@@ -1194,6 +1426,10 @@ def create_command(a, pod, service, session, l=None, limits=None):
             # redis's /data (755, its user's in the image) was not writable for the service (CI 2026-11-14). Podman
             # refuses the kernel's uid=/gid= ("unknown mount option", CI 2026-11-15); U chowns it to --user.
             argv += ["--tmpfs", f"{path}:rw,noexec,nosuid,nodev,size={service['memory']},U"]
+    for item in service.get("device_entries") or []:  # device=: for this container alone (checked: service_devices)
+        # A directory as a bind mount, not --device: Podman would copy only the devices present now.
+        argv += ["--mount", f"type=bind,src={item['path']},dst={item['path']},rw,dev,nosuid"] \
+            if item["kind"] == "dir" else ["--device", item["path"]]
     env = {}
     for item in service.get("env", []):
         if item.get("from_host"):
@@ -1224,6 +1460,7 @@ def plan(a, l=None):
                       "data": [{"path": path, "kind": kind, **({"volume": volume} if volume else {})}
                                for path, kind, volume in data_mounts(a, service)],
                       "env": [item["name"] for item in service["env"]],
+                      "devices": [item["path"] for item in service.get("device_entries") or []],
                       "secrets": [item["secret"] for item in service["secrets"]],
                       "capabilities": "none (--cap-drop=ALL, no-new-privileges)",
                       "network": "the sandbox's own: its firewall, connection proxy, allow-list, approvals, kill "
@@ -1237,7 +1474,9 @@ def add_again(name, entry):
     if entry["kind"] == "pulled":
         return f"sandbox-ai images pull {entry.get('ref') or entry['image']} --as {name} --replace"
     if entry.get("builtin"):
-        return f"sandbox-ai images build-image {name} --builtin {entry['builtin']} --replace"
+        terms = template_terms(entry["builtin"]) if entry["builtin"] in builtin_images() else None
+        return (f"sandbox-ai images build-image {name} --builtin {entry['builtin']} --replace"
+                + (f" {terms['option']}" if terms else ""))
     return f"sandbox-ai images build-image {name} --file {entry.get('containerfile')} --replace"
 
 
@@ -1250,6 +1489,8 @@ def again_fix(service, entry):
         command = ["sandbox-ai", "images", "pull", entry.get("image") or entry.get("ref"), "--as", name, "--replace"]
         title, security = ("pull it again by the digest it was added with (the same image)",
                            "your image, UNCHECKED as before (not reviewed by sandbox-ai)")
+    elif entry.get("builtin") in builtin_images() and template_terms(entry["builtin"]) and name == entry["builtin"]:
+        return template_fix(name, service["name"], template_terms(entry["builtin"]), again=True)
     elif entry.get("builtin"):
         command = ["sandbox-ai", "images", "build-image", name, "--builtin", entry["builtin"], "--replace"]
         title, security = ("build it again from sandbox-ai's own Containerfile",
@@ -1642,6 +1883,15 @@ def forget_volumes(key, podman=None, run=None):
 
 # -- the command (sandbox-ai images pull|build-image|list; remove: images.py) --
 
+def build_mode():
+    """The security mode `images build-image` runs under (your defaults' mode, the administrator's floor): in high
+    and paranoid no question about a license is asked (toolchains.default_mode)."""
+    try:
+        return launcher().load_toolchains_module().default_mode(launcher())
+    except Exception:  # noqa: BLE001 - not told: asked as in medium (the option is needed without a terminal anyway)
+        return None
+
+
 def main(argv, out=print, run=None):
     parser = argparse.ArgumentParser(prog="sandbox-ai images", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1662,6 +1912,11 @@ def main(argv, out=print, run=None):
     building.add_argument("--build-network", action="store_true",
                           help="give its RUN steps the network: this host's own, outside the sandbox's firewall, VPN "
                                "and Tor (default: none)")
+    building.add_argument("--accept-android-sdk-license", action="store_true",
+                          help="for one of sandbox-ai's own Containerfiles that is built from Google's SDK downloads "
+                               "(--builtin android-emulator): you accept the Android Software Development Kit "
+                               "License Agreement (https://developer.android.com/studio/terms) - without it the "
+                               "question is asked on a terminal, never in the modes high and paranoid")
     building.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     listed = sub.add_parser("list")
     listed.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
@@ -1675,7 +1930,11 @@ def main(argv, out=print, run=None):
         for row in [] if args.json else rows:
             built = f"; built as: {', '.join(row['built'])}" if row["built"] else ""
             out(f"{row['template']:18} {row['description']}{built}")
-            out(f"  build: sandbox-ai images build-image {row['image']} --builtin {row['template']}")
+            out(f"  build: sandbox-ai images build-image {row['image']} --builtin {row['template']}"
+                + (f"  (asks you to accept the {row['terms']['title']}, {row['terms']['url']}; "
+                   f"{row['terms']['option']} for a script)" if row["terms"] else ""))
+            if row["spec"]:
+                out(f"  as a service: --service {row['image']}  (it brings: {row['spec']})")
         return 0
     if args.command == "pull":
         name, entry = pull(args.reference, args.name, args.replace, run=run,
@@ -1687,7 +1946,8 @@ def main(argv, out=print, run=None):
         name, entry = build(args.name, args.file, args.context, args.replace, run=run,
                             out=(lambda text: print(text, file=sys.stderr)) if args.json else out,
                             trust_agent_written=args.trust_agent_written, network=args.build_network,
-                            builtin=args.builtin)
+                            builtin=args.builtin, accepted=args.accept_android_sdk_license,
+                            mode=build_mode() if args.builtin else None)
         if args.json:
             out(json.dumps({"name": name, **entry}, indent=2))
         return 0

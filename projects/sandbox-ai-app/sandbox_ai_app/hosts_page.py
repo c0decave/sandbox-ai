@@ -197,7 +197,7 @@ def storage_words(found, now=None):
 
 
 def reach_text(info, now=None):
-    """Whether a host answered (the Sandboxes page's last look, {"seen", "problem"}), in a few words."""
+    """Whether a host answered (the Sessions page's last look, {"seen", "problem"}), in a few words."""
     import time
     now = time.time() if now is None else now
     if not info:
@@ -788,7 +788,7 @@ class WebPanel(QWidget):
 
 class HostsPage(QWidget):
     """The hosts of `sandbox-ai hosts` with what the other pages last saw of them (set_fleet, set_questions): the
-    Sandboxes page reads every host's starts, the Approvals page their questions; this page adds no SSH of its own for
+    Sessions page reads every host's starts, the Approvals page their questions; this page adds no SSH of its own for
     that. Show starts and Show questions switch to those pages, filtered by the host."""
     host_removed = Signal(str)  # a host left the list: the other pages drop its rows at once
     show_starts = Signal(str)  # Sandboxes, filtered by that host
@@ -817,7 +817,7 @@ class HostsPage(QWidget):
             widget.setAccessibleName(name or text.rstrip("…"))
             widget.clicked.connect(lambda _=False: slot())
             return widget
-        self.starts_button = button(tr("Show starts"), tr("The Sandboxes page with this host's starts only"),
+        self.starts_button = button(tr("Show starts"), tr("The Sessions page with this host's starts only"),
                                     lambda: self.host() and self.show_starts.emit(self.host()))
         self.questions_button = button(tr("Show questions"), tr("The Approvals page with this host's questions only"),
                                        lambda: self.host() and self.show_questions.emit(self.host()))
@@ -884,7 +884,7 @@ class HostsPage(QWidget):
             "The app runs the storage check on this host (sandbox-ai gc --check there, over SSH) in the background, "
             "as for this machine: at its start and then as the host's own Storage setting says (weekly by default); "
             "it applies the host's storage rules and says above the threshold what could be freed there. On by "
-            "default for the hosts the app uses (the Sandboxes page found starts there).")))
+            "default for the hosts the app uses (the Sessions page found starts there).")))
         self.storage_box.toggled.connect(self.storage_toggled)
         self.storage_note = plain_label(role="secondary", selectable=True)
         self.storage_note.setAccessibleName(tr("The host's last storage check"))
@@ -1165,7 +1165,7 @@ class HostsPage(QWidget):
         self.show_storage()
 
     def set_fleet(self, fleet):
-        """{host: {"running", "seen", "problem"}} from the Sandboxes page's last look at every host."""
+        """{host: {"running", "seen", "problem"}} from the Sessions page's last look at every host."""
         self.fleet = dict(fleet or {})
         self.show_hosts()
 

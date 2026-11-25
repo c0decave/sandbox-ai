@@ -1,4 +1,4 @@
-"""Duplicate…, Export with state… and Import… of the Sandboxes page (and Import a session… of the Board): a session's
+"""Duplicate…, Export with state… and Import… of the Sessions page (and Import a session… of the Board): a session's
 state - its configuration, HOME with the agent's conversation, memory, checkpoints and network approvals - as a second
 session here (`sandbox-ai session duplicate NAME NEW`), as one archive (`sandbox-ai session export NAME OUT`), or an
 archive taken as a session of this machine (`sandbox-ai session import FILE`).

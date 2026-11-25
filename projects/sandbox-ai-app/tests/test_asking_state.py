@@ -1,4 +1,4 @@
-"""The Sandboxes page's State column says "asking" only while a start has a question that still waits (user
+"""The Sessions page's State column says "asking" only while a start has a question that still waits (user
 2026-11-19: "läuft, fragt" was shown when nothing was asked). The Approvals page keeps every question it lists - timed
 out, allowed, refused - so the mark and the Hosts page's counts take only the open ones."""
 import types

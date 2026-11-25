@@ -95,7 +95,7 @@ def add_crtsh(page):
 
 def test_the_catalog_says_unsigned_and_which_catalog_lists_it(page):
     rows = catalog_rows(page)
-    assert rows == [["hub:crtsh", "none", "crt.sh lookups", "yes", "unsigned", "axross-mcp-hub (github.com/c0decave)"]]
+    assert rows == [["hub:crtsh", "offline", "crt.sh lookups", "yes", "unsigned", "axross-mcp-hub (github.com/c0decave)"]]
 
 
 def test_refused_for_its_unsigned_catalog_it_is_offered_and_added_with_unsigned(page):

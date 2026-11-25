@@ -43,8 +43,7 @@ def run_row(page):
 def test_the_page_has_two_tabs_that_switch(qapp, window):  # noqa: F811
     page = shown(window, qapp)
     tabs = page.tabs
-    assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == ["Sessions & sandboxes",
-                                                                                 "Schedules"]
+    assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == ["Sessions", "Schedules"]
     assert "&" not in tabs.tabText(0).replace("&&", ""), "the & is shown, not a mnemonic"
     assert tabs.currentWidget() is page.sessions_tab, "the sessions first"
     assert page.table.isVisible() and not page.schedules_box.isVisible()
@@ -235,7 +234,8 @@ def test_the_menu_keeps_the_texts(qapp, window):  # noqa: F811
     assert widgets.button_text(page.transfer_buttons["export"]) == "Export…"
     assert widgets.button_text(page.stop_all_button) == "Stop all…"
     assert widgets.button_text(page.run_named["allow"]) == "Allow…"
-    entries = [action.text() for action in widgets.menu_of(page.table).actions() if action.text()]
+    entries = [text for text, _ in widgets.menu_entries(widgets.menu_of(page.table))]
+    entries = [text.strip() for text in entries]  # (a submenu's entries indented: grouped since 2026-11-24)
     for text in ("Attach", "Resume with…", "Export…", "Allow…", "Connection log", "Secrets and logins…", "Stop all…"):
         assert text in entries, (text, entries)
 
@@ -282,13 +282,13 @@ def test_german(qapp, env, monkeypatch):  # noqa: F811
     try:
         page = made.sandboxes
         assert [page.tabs.tabText(i).replace("&&", "&") for i in range(page.tabs.count())] == \
-            ["Sitzungen & Sandboxen", "Zeitpläne"]
+            ["Sitzungen", "Zeitpläne"]
         assert page.session_label.text() == "Sitzung" and page.run_label.text() == "Während sie läuft"
         assert widgets.button_text(page.run_named["allow"]) == "Erlauben…"
         dialog = settings.SettingsDialog(made.sai, made)
         assert dialog.fields["button_texts"].text() == "Beschriftungen der Schaltflächen neben den Symbolen zeigen"
         dialog.deleteLater()
-        for key in ("Sessions & sandboxes", "Show button texts beside the icons"):
+        for key in ("Sessions", "Show button texts beside the icons"):
             assert key in i18n.TEXTS and i18n.TEXTS[key]["de"], key
     finally:
         i18n.set_language("en")

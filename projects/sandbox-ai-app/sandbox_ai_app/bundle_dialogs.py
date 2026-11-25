@@ -1,4 +1,4 @@
-"""Export… and Import… of the Board page and the Sandboxes page: a board or a session as one self-sufficient file (a
+"""Export… and Import… of the Board page and the Sessions page: a board or a session as one self-sufficient file (a
 bundle), and such a file taken in (`sandbox-ai board export|import`).
 
 ExportDialog writes the bundle of a session (of this machine or a host) or of the board shown: where to (a file of this

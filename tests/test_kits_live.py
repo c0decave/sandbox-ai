@@ -212,6 +212,66 @@ def test_a_whole_kit_with_its_hooks_memory_and_plugins_not_given(live):
     assert not (made.staging / "skills/check").exists() and not (made.staging / "agents/critic.md").exists()
 
 
+
+# --- a kit that brings only hooks (the user 2026-11-24: "Nicht ausgeführt: kit hallmark-hook brings no skills, agents,
+# commands for Claude Code <-- was ist da passiert?") -----------------------------------------------------------------
+
+def test_a_kit_with_only_hooks_says_what_it_brings_and_why_they_wait_for_a_start(live):
+    """The built-in kit hallmark-hook holds only a hook: the attach said it brought nothing (it brings a hook) and
+    dropped the note why hooks wait. Now the refusal names the hooks, why a running sandbox gets none (the agent's
+    managed configuration, set at a start, approved first) and the way: --keep, then a restart of the sandbox."""
+    live.make()
+    with pytest.raises(ValueError) as refused:
+        L.attach("web", kit="hallmark-hook", out=live.out)
+    said = str(refused.value)
+    assert "brings no skills" not in said
+    assert "kit hallmark-hook brings only hooks for Claude Code" in said, said
+    assert "not given while the sandbox runs" in said and "managed configuration" in said
+    assert "--keep" in said and "sandbox-ai resume web --restart" in said
+    assert "sandbox-ai kits trust-hooks hallmark-hook" in said, "not approved yet: the command that approves them"
+    assert "hallmark-hook" not in live.sessions.load("web")["options"], "nothing kept without --keep"
+
+
+def test_a_kit_with_only_hooks_is_kept_for_the_next_start_with_keep(live):
+    made = live.make()
+    result = L.attach("web", kit="hallmark-hook", keep=True, out=live.out)
+    assert result["attached"] == [] and result["kept"] == "kit hallmark-hook"
+    assert live.sessions.load("web")["options"][-2:] == ["--kit", "hallmark-hook"]
+    assert [item["kind"] for item in result["reload"]] == ["hooks"] and result["reload"][0]["reload"] == "sandbox"
+    message = result["message"]
+    assert "hooks" in message and "Kept for its later starts" in message, message
+    assert "sandbox-ai resume web --restart" in message and "trust-hooks hallmark-hook" in message
+    assert not list(made.staging.rglob("hooks.json")), "nothing of the hooks reaches the running sandbox"
+    # Its next start takes the kit (and its hooks, once approved) from its options.
+    a = live.s.parse_args(["claude", *live.sessions.load("web")["options"], "--no-auth"])
+    assert "hallmark-hook" in a.kit
+    # Taken out again: out of its later starts.
+    gone = L.detach("web", "hallmark-hook", out=live.out)
+    assert gone["kept_removed"] and "hallmark-hook" not in live.sessions.load("web")["options"]
+    assert "no longer get the hooks of kit hallmark-hook" in gone["message"], gone["message"]
+
+
+def test_hooks_an_agent_cannot_run_are_said_with_the_reason(live):
+    live.make("dsh", agent="dsh")
+    kit = Path(os.environ["XDG_DATA_HOME"]) / "sandbox-ai/kits/guard/dsh"
+    (kit / "hooks").mkdir(parents=True)
+    (kit / "hooks/hooks.json").write_text(json.dumps({"hooks": {}}))
+    with pytest.raises(ValueError) as refused:
+        L.attach("dsh", kit="guard", keep=True, out=live.out)
+    said = str(refused.value)
+    assert "kit guard brings only hooks for" in said and "hooks are not supported for" in said, said
+    assert "Cordis" in said, "the reason the agent runs none"
+
+
+def test_a_kit_with_nothing_for_the_agent_says_what_it_would_take(live):
+    live.make()
+    kit = Path(os.environ["XDG_DATA_HOME"]) / "sandbox-ai/kits/empty/claude"
+    kit.mkdir(parents=True)
+    (kit / "notes.txt").write_text("x\n")
+    with pytest.raises(ValueError, match=r"kit empty brings nothing for Claude Code \(no skills, agents, commands"):
+        L.attach("web", kit="empty", out=live.out)
+
+
 # --- the checks of a start ----------------------------------------------------------------------------------------
 
 def test_symlinks_are_refused_or_skipped_never_followed(live, tmp_path):
@@ -549,6 +609,20 @@ def test_e2e_kits_and_plugins_attach_through_sandbox_ai_to_a_running_start(live)
     done = run_cli("plugins", "detach", "e2e", "new@m")
     assert done.returncode == 0, done.stderr
     assert "is off" in done.stdout
+
+
+def test_e2e_a_kit_with_only_hooks_through_sandbox_ai(live):
+    """The user's case through ./sandbox-ai: kits attach START hallmark-hook says what the kit brings and the way;
+    with --keep it is kept for the start's later starts (exit status 0)."""
+    live.make("e2e", real_process=True)
+    done = run_cli("kits", "attach", "e2e", "hallmark-hook")
+    assert done.returncode == 1 and "brings only hooks for Claude Code" in done.stderr, done.stderr
+    assert "--keep" in done.stderr and "sandbox-ai resume e2e --restart" in done.stderr
+    done = run_cli("kits", "attach", "e2e", "hallmark-hook", "--keep", "--json")
+    assert done.returncode == 0, done.stderr
+    result = json.loads(done.stdout)
+    assert result["kept"] == "kit hallmark-hook" and result["attached"] == []
+    assert live.sessions.load("e2e")["options"][-2:] == ["--kit", "hallmark-hook"]
 
 
 @pytest.mark.parametrize("agent", AGENTS)

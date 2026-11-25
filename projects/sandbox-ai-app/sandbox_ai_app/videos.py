@@ -50,7 +50,7 @@ ARCHIVE_LIMIT = 2 << 30  # bytes of the videos' archive, at most
 MEMBER_LIMIT = 1 << 30  # bytes of one video in it, at most
 LANGUAGE_NAMES = {"en": N_("English"), "de": N_("German")}
 # The page each video is about: the navigation's titles (ui.SECTIONS; a test keeps the two the same).
-PAGE_TITLES = {"launch": N_("Start"), "board": N_("Board"), "sandboxes": N_("Sandboxes & sessions"),
+PAGE_TITLES = {"launch": N_("Board: Expert view"), "board": N_("Board: Board view"), "sandboxes": N_("Sessions"),
                "terminals": N_("Terminals"), "approvals": N_("Approvals"), "files": N_("File manager"),
                "kits": N_("Kits & plugins"), "mcp": N_("MCP servers"), "llm": N_("LLM servers"),
                "images": N_("Images"), "credentials": N_("Credentials"), "team": N_("Teams"),

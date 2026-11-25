@@ -1,4 +1,4 @@
-"""Skills, subagents, commands and plugins for a RUNNING sandbox in the app, offscreen: the Sandboxes page's Add
+"""Skills, subagents, commands and plugins for a RUNNING sandbox in the app, offscreen: the Sessions page's Add
 skills/plugins… and Remove skills/plugins… (buttons and the right click), the Kits page's Give to a running sandbox…
 (a kit, or a skill or plugin chosen in What it brings, to a running start of this machine or a host), each asked first
 (kits-attach, kits-detach), and the agent's restart inside the sandbox offered where it reads the addition only when it

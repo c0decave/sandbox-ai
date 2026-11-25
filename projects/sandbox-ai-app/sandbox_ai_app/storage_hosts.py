@@ -5,7 +5,7 @@ SSH, one host after the other; the notice names the host, the Hosts page shows e
 
 Per host one setting (Hosts page, "Check its storage in the background"; the app's settings.json "storage_hosts":
 {host: true|false}, a host's own choice only once one is made): on by default only for the hosts the app uses - a
-host on which the Sandboxes page found starts (running or kept), remembered (state.json "storage_hosts_used") so that
+host on which the Sessions page found starts (running or kept), remembered (state.json "storage_hosts_used") so that
 it holds after a restart. The schedule is the host's own storage_check (its defaults, as its last check said them:
 off, weekly, daily), else this machine's; a host that did not answer is asked again after RETRY_SECONDS. What the
 app keeps of a check (state.json "storage_hosts_checked"): its time, how much could be freed, the threshold, whether

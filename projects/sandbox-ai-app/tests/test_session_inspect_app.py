@@ -1,4 +1,4 @@
-"""Memory… and Session files… offscreen (`sandbox-ai session memory|files|export`): the Sandboxes page's buttons and
+"""Memory… and Session files… offscreen (`sandbox-ai session memory|files|export`): the Sessions page's buttons and
 right-click menu (a start of this machine or a host, running or kept; never an MCP server or one that kept no HOME),
 the dialog against a stand-in that records what it was asked (the list, a file's text, a conversation, Find, In full,
 Which copy, Export… of a kept start of this machine), what the agent wrote shown as plain text, and once end to end

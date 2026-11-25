@@ -1,4 +1,4 @@
-"""Help, tours and German texts (review round 4): every button of the Start page and of the Sandboxes page's "While it
+"""Help, tours and German texts (review round 4): every button of the Start page and of the Sessions page's "While it
 runs" and Session boxes is explained in the help (English and German); the German texts address the user as Sie, never
 du; they say Sitzung and Sandboxen, Neu laden for Refresh and Aktualisieren for Update."""
 import dataclasses
@@ -89,7 +89,7 @@ def test_refresh_is_neu_laden_and_update_is_aktualisieren():
             assert "aktualisier" in de, (key, entry["de"])
 
 
-# -- every button of the Start page and the Sandboxes page's boxes is in the help --
+# -- every button of the Start page and the Sessions page's boxes is in the help --
 
 def normal(text):
     return re.sub(r"\s+", " ", text.replace("&", "").replace("…", " ")).strip().lower()
@@ -171,7 +171,7 @@ def test_every_button_of_the_sandboxes_boxes_is_in_the_help(qapp, sai):
         assert {"Add workspace…", "Add MCP server…", "Remove MCP server…"} <= set(live)
         labels = live + own_buttons(page, inside=page.session_row)
         assert "Resume with…" in labels
-        assert not missing(labels), "Sandboxes page buttons the help does not mention:\n" + "\n".join(missing(labels))
+        assert not missing(labels), "Sessions page buttons the help does not mention:\n" + "\n".join(missing(labels))
     finally:
         page.timer.stop()
         page.remote_timer.stop()
@@ -186,7 +186,7 @@ def test_the_help_says_live_mcp_servers_are_kept_and_the_start_page_follows_its_
                   "asking first"):
         assert words in launch, words
     gallery = help_content.BY_ID["app-presets-gallery"].body.en
-    assert "one catalogue per host" in gallery and "only sandbox-ai's is shown" in gallery
+    assert "in one list" in gallery and "only sandbox-ai's is shown" in gallery  # (every host's: todos 2026-11-24)
     sandboxes = help_content.BY_ID["page-sandboxes"].body.en
     assert "as a tree" in sandboxes and "Resume with…" in sandboxes
     assert "Two panes" in help_content.BY_ID["page-files"].body.en

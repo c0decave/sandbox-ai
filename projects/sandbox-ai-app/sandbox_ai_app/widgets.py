@@ -1407,6 +1407,24 @@ LARGE_INSET = 24  # px: a large dialog's place inside its window's top left corn
 MOVED = 24  # px: a dialog this far from where it was placed (or sized this much otherwise) was moved by the human
 PLACES = {}  # the dialog's key (place_key) -> QRect: where the human moved or sized it, for this app session
 UNLIMITED = (1 << 24) - 1  # QWIDGETSIZE_MAX
+WINDOW_SHARE = 0.92  # a dialog one works in beside the window (the preset gallery): this share of that window's size
+
+
+def as_large_as_window(dialog, share=WINDOW_SHARE):
+    """DIALOG opens almost as large as the window it is opened from (SHARE of its size; at least what it needs, at most
+    SCREEN_SHARE of its screen) and centred over it, also when it is large (todos 2026-11-24: the presets window "fast
+    so groß wie das hauptfenster und zentriert")."""
+    dialog.setProperty("windowShare", float(share))
+
+
+def window_share_size(dialog):
+    """The size as_large_as_window gives DIALOG (None: not asked for, or no window it is opened from)."""
+    share = dialog.property("windowShare")
+    anchor = anchor_of(dialog) if share else None
+    if anchor is None:
+        return None
+    size = QWidget.size(anchor)
+    return QSize(int(size.width() * float(share)), int(size.height() * float(share)))
 
 
 def own_rule(dialog):
@@ -1648,6 +1666,7 @@ def fit_size(dialog):
     # The size its code gave it is kept (it may be larger than its hint: a list's room); the one Qt gave it before
     # the texts above were wrapped is not (a long line made an input dialog as wide as the screen).
     given = QWidget.size(dialog) if dialog.testAttribute(Qt.WidgetAttribute.WA_Resized) else QSize(0, 0)
+    given = window_share_size(dialog) or given  # (as large as the window it is opened from: as_large_as_window)
     # (its title too: an input dialog's layout sets its minimum size from its contents when it is activated, so the
     # minimum make_readable gave it for its title was gone - "Hardware-Limits von NAME" was cut in its title bar)
     width = max(given.width(), hint.width(), min(max(least_width(dialog), title_width(dialog)), dialog.maximumWidth()))
@@ -1706,7 +1725,7 @@ def placement(window, size=None):
     if anchor is not None and not over.intersects(area):
         over = area
     large = size.width() > area.width() * LARGE_SHARE or size.height() > area.height() * LARGE_SHARE
-    if large:
+    if large and not window.property("windowShare"):  # (as_large_as_window: centred over its window all the same)
         x, y = over.left() + LARGE_INSET, over.top() + LARGE_INSET
     else:
         x, y = over.center().x() - size.width() // 2, over.center().y() - size.height() // 2
@@ -2036,6 +2055,20 @@ def ask_password(parent, title_text, text, accept):
 # tests: the key choose() answers while AUTO_ANSWER is set (None, or a key the question does not have: its first
 # choice, or none)
 AUTO_CHOICE = None
+
+
+def accept_license(parent, what, terms=None, text=None):
+    """True when the human accepts a license for WHAT (the toolchain android-sdk, the service image android-emulator):
+    TERMS ({"title", "by", "url"}: what sandbox-ai's catalog or template says of it) or TEXT (what a fix of the
+    launcher's plan says is security-relevant about it). A question of its own, No its default: a license is never
+    accepted by Enter or by "Fix all"."""
+    said = text or tr("{by} publishes it under the {title} ({url}), which forbids passing it on.", by=terms["by"],
+                      title=terms["title"], url=terms["url"])
+    return choose(parent, tr("License"), tr(
+        "{what} is built on this machine from its publisher's downloads. {said}\n\nsandbox-ai ships nothing of it: "
+        "each file is fetched from its publisher, checked against sandbox-ai's signed pins and kept on this "
+        "machine.\n\nDo you accept that license?", what=what, said=said),
+        [("accept", tr("Accept"))], cancel=tr("Do not accept")) == "accept"
 
 
 def choose(parent, title_text, text, choices, cancel=None, destructive=()):
@@ -4062,10 +4095,11 @@ class FlowLayout(QLayout):
     (one of its own, StartControls) and is wider than the row gets the row's width and the height it needs there.
     LINE: its size hint is all in one row (the room it takes where there is enough) - for a flow that is an item of
     another, which places it at its hint; without, its hint is its least size (a page's rows ask no more than that).
-    Likewise any item that can be narrower than its hint (a row of a field that shrinks) when the row is narrower."""
+    Likewise any item that can be narrower than its hint (a row of a field that shrinks) when the row is narrower.
+    FILL: each item as high as its row, at its top (cards: a row of them one block, whatever each one's height)."""
 
-    def __init__(self, parent=None, spacing=6, line=False):
-        self.items, self.heights, self.minimum, self.line = [], {}, None, line
+    def __init__(self, parent=None, spacing=6, line=False, fill=False):
+        self.items, self.heights, self.minimum, self.line, self.fill = [], {}, None, line, fill
         super().__init__(parent)
         self.gap = spacing
         self.setContentsMargins(0, 0, 0, 0)
@@ -4156,11 +4190,13 @@ class FlowLayout(QLayout):
         self._place(row, y, line, apply)
         return y + line - rect.y()
 
-    @staticmethod
-    def _place(row, y, line, apply):
+    def _place(self, row, y, line, apply):
         if apply:
             for item, x, hint in row:
-                item.setGeometry(QRect(x, y + (line - hint.height()) // 2, hint.width(), hint.height()))
+                if self.fill:
+                    item.setGeometry(QRect(x, y, hint.width(), line))
+                else:
+                    item.setGeometry(QRect(x, y + (line - hint.height()) // 2, hint.width(), hint.height()))
 
 
 class TwoLineToolButton(QToolButton):
@@ -4307,9 +4343,9 @@ START_WHERE = (("app", i18n.N_("in the app")), ("window", i18n.N_("in a terminal
 
 
 class StartControls(QWidget):
-    """One Start for the Board and the Start page: where (a terminal tab of the app or a terminal window) and whether
+    """One Start for the Board and the Board page: where (a terminal tab of the app or a terminal window) and whether
     it starts as a session - kept running in tmux when its terminal or the app closes (or the app crashes), attached
-    again from Sandboxes & sessions or Terminals - named by a codename unless a name of its own is typed. Before,
+    again from Sessions or Terminals - named by a codename unless a name of its own is typed. Before,
     three buttons (Start in the app, Start in a terminal window, Start as session) said the same less clearly.
     START(embedded, session) is called with True (the app) or False (a window) and the session's name or None."""
 
@@ -4329,7 +4365,7 @@ class StartControls(QWidget):
         self.as_session = QCheckBox(tr("as session"))
         self.as_session.setChecked(True)
         self.as_session.setToolTip(safe_tooltip(tr(
-            "Keeps running when its terminal or the app closes; attach it again from Sandboxes & sessions or "
+            "Keeps running when its terminal or the app closes; attach it again from Sessions or "
             "Terminals. Off: it ends with its terminal.")))
         self.name = QLineEdit()
         self.name.setAccessibleName(tr("Session name"))

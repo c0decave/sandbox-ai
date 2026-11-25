@@ -1294,6 +1294,9 @@ def test_every_call_of_the_page_is_in_the_matrix():
     covered |= {("POST", "/api/hosts/X/update"), ("POST", "/api/hosts/X/mcp/X/attach")}
     # test_a_host_install_in_every_login_state (run by this machine's sandbox-ai, about the host)
     covered |= {("POST", "/api/hosts/X/install"), ("GET", "/api/hosts/X/install")}
+    # test_web.py: test_the_images_page_lists_what_can_be_installed_and_starts_it_in_a_terminal (sandbox-ai install
+    # --list on the host; the install itself runs in a terminal, asked first)
+    covered |= {("GET", "/api/hosts/X/install-items")}
     # test_a_host_uninstall_in_every_login_state (run by this machine's sandbox-ai, about the host)
     covered |= {("POST", "/api/hosts/X/uninstall"), ("POST", "/api/hosts/X/uninstall-plan")}
     # tests/test_web_mcp_copy.py: MCP servers of another host copied here (run by this machine's sandbox-ai, which
@@ -1301,6 +1304,8 @@ def test_every_call_of_the_page_is_in_the_matrix():
     covered |= {("POST", "/api/hosts/X/mcp-copy")}
     # tests/test_web_mcp_update.py: Update and Update all (mcp update [NAME...] on the host, asked first)
     covered |= {("POST", "/api/hosts/X/mcp-update")}
+    # tests/test_web_mcp_check.py: Check and Check all (mcp check [NAME...|--all] on the host; changes nothing)
+    covered |= {("POST", "/api/hosts/X/mcp-check")}
     # tests/test_web_fix_plan.py: what a start lacks (`AGENT ... --fix-plan` on the host), end to end with Podman faked
     covered |= {("POST", "/api/hosts/X/fix-plan")}
     # a schedule's ${path}: run, pause, resume above; a run's report (report/RUN) above

@@ -53,7 +53,7 @@ def drive(qt, window, first, second, say=lambda **fields: None, seconds=180):
             page.refresh_soon(again=True)
         return {first, second} <= names
     if not wait(both_listed, seconds):
-        result["problem"] = ("the Sandboxes page did not list both sessions as running: "
+        result["problem"] = ("the Sessions page did not list both sessions as running: "
                              f"{sorted(entry['name'] for entry in page.bridge_sessions())}")
         return result
     say(step="listed", sessions=[entry["name"] for entry in page.bridge_sessions()])

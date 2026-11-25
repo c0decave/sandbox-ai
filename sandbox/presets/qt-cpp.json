@@ -1,0 +1,45 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "qt-cpp",
+  "title": "Qt with C++",
+  "description": "Qt applications in C++ with CMake or qmake: the Qt SDK (headers, libraries, CMake packages, moc, uic, rcc, Designer and the other tools, every module) mounted in, GCC from the image variant gcc; without a display Qt draws offscreen. Everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Qt mit C++",
+      "description": "Qt-Anwendungen in C++ mit CMake oder qmake: das Qt-SDK (Header, Bibliotheken, CMake-Pakete, moc, uic, rcc, Designer und die übrigen Werkzeuge, alle Module) eingehängt, GCC aus der Image-Variante gcc; ohne Bildschirm zeichnet Qt offscreen. Alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--toolchain",
+    "qt",
+    "--toolchain-offline",
+    "--image-variant",
+    "{variant}"
+  ],
+  "values": {
+    "variant": {
+      "label": "The image variant with GCC (empty: none - Bubblewrap, the host's compiler)",
+      "kind": "text",
+      "default": "gcc",
+      "hint": "once: sandbox-ai images recipe gcc --from AGENT && sandbox-ai build gcc; or a variant of yours with a C++ compiler that uses libstdc++",
+      "optional": true
+    }
+  },
+  "needs": [
+    "the image variant gcc, once: sandbox-ai images recipe gcc --from AGENT && sandbox-ai build gcc (GCC, GNU make, CMake, Ninja and the OpenGL headers from Debian)"
+  ],
+  "notes": [
+    "The Qt SDK (qmake, qt-cmake, moc, uic, rcc, lupdate, lrelease, designer, linguist, assistant, qmllint, qmlformat, qmlls; CMAKE_PREFIX_PATH and Qt6_DIR set: find_package(Qt6) finds it) comes with the preset (--toolchain qt; it brings Qt for Python, the toolchains pyside6 and python): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add them (sandbox-ai toolchain add qt: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. The Qt of the long-term line: --toolchain qt@6.11 on the command line.",
+    "The compiler is the image's: sandbox-ai images recipe gcc --from AGENT && sandbox-ai build gcc, which the preset starts with --image-variant gcc (its value variant) - GCC with libstdc++, GNU make, CMake, Ninja. Qt's own builds are GCC's: the toolchain cc (Clang with libc++) cannot link them (QTimer::singleShot and every other Qt function with a std:: type in its signature stay undefined). Podman only as it is: with Bubblewrap there is no image - give the value empty (--preset-value variant=) and the compiler is the host's (g++, make, CMake).",
+    "Without a display Qt draws offscreen (QT_QPA_PLATFORM=offscreen): a program runs, QWidget::grab() and QQuickWindow::grabWindow() give its picture. A real window - Designer, your application to look at: --gui on the command line (Xvfb, Qt then uses xcb; --gui-vnc DIR lets you watch).",
+    "The registries stay closed (--toolchain-offline): GitHub needs --allow-github on the command line, PyPI --allow-pypi, another download host --allow-host NAME. Qt in Python alone: the preset qt-python.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

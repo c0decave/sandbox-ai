@@ -233,7 +233,7 @@ def suggestion(record):
             return f"reserved {host}", None, "a reserved name (RFC 2606/6761): it never exists, nothing to allow"
         preset = preset_for(host)
         if preset:
-            return f"--allow-{preset}", f"--allow-{preset}", f"{host} belongs to that preset"
+            return f"--allow-{preset}", f"--allow-{preset}", f"{host} belongs to that host set"
         if host in launcher().FRONTIER:
             return "--frontier", "--profile frontier", f"{host} is an OpenAI/Anthropic host"
         return f"--allow-host {host}", f"--allow-host {host}", "name lookup was refused (allows TCP/443)"

@@ -84,7 +84,9 @@ HEADER = """# The downloads of the image recipe android-dev, each pinned by its 
 # sha1: Google's own checksum of an SDK archive (its repository XML; the NDK's also on github.com/android/ndk).
 # sha256: Google publishes none - "-" until a build has confirmed it: install.sh then prints the SHA-256 it computed
 # ("unconfirmed SHA-256"); write it here and every later build checks it too. Gradle's and Kotlin's are their
-# publishers' SHA-256.
+# publishers' SHA-256. (2026-11-24: every Google archive below was downloaded once - its size and SHA-1 matched - and
+# its SHA-256 written here; the toolchain android-sdk of sandbox-ai-mcp and the service image android-emulator pin
+# the same files by it.)
 # Every archive: by downloading and building it you accept the Android Software Development Kit License Agreement
 # (https://developer.android.com/studio/terms), the license all of them are published under.
 #

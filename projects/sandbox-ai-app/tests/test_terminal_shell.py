@@ -1,5 +1,5 @@
 """Right-click on a terminal tab -> "Open shell" (user 2026-11-19): a shell in that session's sandbox, under the
-agent's rules (`sandbox-ai shell NAME`, on another host over SSH) - as the Sandboxes page's Shell; only while it runs."""
+agent's rules (`sandbox-ai shell NAME`, on another host over SSH) - as the Sessions page's Shell; only while it runs."""
 import pytest
 
 pytest.importorskip("PySide6.QtWidgets", reason="PySide6 is not installed")

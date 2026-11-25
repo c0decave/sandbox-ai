@@ -1,0 +1,6 @@
+{
+  "spec": "port=5037,data=/adb,memory=256m,pids=128",
+  "build_network": true,
+  "about": "an adb server beside the agent: give it the phone with device=usb:VENDOR:PRODUCT",
+  "root": "the USB device's node is opened with your own user's rights: the container's root is your user outside (rootless Podman), any other user of it is none the host gave the device to"
+}

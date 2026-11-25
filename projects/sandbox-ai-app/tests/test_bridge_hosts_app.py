@@ -79,7 +79,7 @@ def test_the_backend_takes_a_hosts_bridge_by_host_and_id(monkeypatch):
         sai.host_bridges("ct1")
 
 
-# -- the Sandboxes page --
+# -- the Sessions page --
 
 def test_the_bridges_box_lists_the_hosts_bridges_and_acts_on_them_there(window, env, monkeypatch, wait):
     found = sessions(env)

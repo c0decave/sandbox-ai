@@ -758,7 +758,7 @@ def test_catalog_command_lists_both_catalogs(tmp_path, capsys):
     assert m.cli(["catalog", "-c", str(first), "-c", str(second), "-c", str(tmp_path / "missing.json")]) == 0
     captured = capsys.readouterr()
     assert "c0:duckduckgo  [allowlist html.duckduckgo.com:443]  DuckDuckGo search  unsigned" in captured.out
-    assert "c1:binwalk  [none]  binwalk  (not published yet)  unsigned" in captured.out
+    assert "c1:binwalk  [offline]  binwalk  (not published yet)  unsigned" in captured.out
     sign(first)
     assert m.cli(["catalog", "-c", str(first)]) == 0
     assert "DuckDuckGo search  signed" in capsys.readouterr().out
@@ -876,7 +876,7 @@ def test_an_unpublished_catalog_is_named_as_such():
 def test_image_server_vpn_needs_network_full_and_a_profile_name():
     image = f"ghcr.io/a/b@{DIGEST}"
     assert m.validated_image({"image": image, "network": "full", "vpn": "corp"}, "t")["vpn"] == "corp"
-    with pytest.raises(ValueError, match="a VPN needs network full"):
+    with pytest.raises(ValueError, match="a VPN needs network egress-all"):
         m.validated_image({"image": image, "vpn": "corp"}, "t")
     with pytest.raises(ValueError, match="vpn must name a VPN profile"):
         m.validated_image({"image": image, "network": "full", "vpn": "../x"}, "t")
@@ -904,6 +904,9 @@ def test_image_server_with_a_vpn_starts_behind_its_container(tmp_path, monkeypat
     monkeypatch.setattr(m.subprocess, "Popen", lambda cmd, **kw: started.append(cmd) or Process())
     monkeypatch.setattr(m, "wait_for_socket", lambda *a, **kw: None)
     proven = vpn_proven(monkeypatch)
+    # Its profile is there (one that is not is refused before anything starts: test_mcp_robust.py).
+    monkeypatch.setattr(m.launcher().load_vpn_module(), "load_profile", lambda name: {"name": name,
+                                                                                      "type": "wireguard"})
     fake_supervisor(tmp_path, os.getpid(), "ddg", start=4242)
     assert m.ensure_running("ddg", s.parse_args(["codex"])) == "started"
     assert proven == [("container", "sandbox-ai-vpn-mcp-ddg", "corp")]
@@ -1718,7 +1721,8 @@ def test_a_relay_that_never_listens_is_not_reported_opened(monkeypatch):
 
 def test_agent_connections_do_not_pile_up_while_the_server_is_down():
     """Round 4: a connection whose server cannot be reached is dropped from the relay at once, not kept until the
-    detach."""
+    detach. 2026-11-25: its first request is answered with why (the server does not run) and what the human runs,
+    then it is closed - an agent no longer sees only a closed connection."""
     base = Path(tempfile.mkdtemp(prefix="cd-", dir="/tmp"))
     try:
         (base / "server").mkdir()
@@ -1733,7 +1737,17 @@ def test_agent_connections_do_not_pile_up_while_the_server_is_down():
             with socket.socket(socket.AF_UNIX) as client:
                 client.connect(str(base / "relay.sock"))
                 client.settimeout(5)
-                assert client.recv(10) == b""  # the server is down: closed
+                client.sendall(b'{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}\n')
+                received = b""
+                while True:
+                    data = client.recv(65536)
+                    if not data:
+                        break  # the server is down: answered, then closed
+                    received += data
+                answer = json.loads(received)
+                assert answer["id"] == 7, answer
+                assert "the MCP server is not running" in answer["error"]["message"], answer
+                assert "the human sees more: sandbox-ai mcp show web" in answer["error"]["message"], answer
         deadline = time.monotonic() + 5
         while relay.connections and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -1755,7 +1769,7 @@ def test_a_catalog_text_never_makes_another_row_and_full_network_is_said(tmp_pat
     path.write_text(json.dumps({"schema": "axross-mcp-catalog", "version": 1, "entries": [forged]}))
     assert m.cli(["catalog", "-c", str(path)]) == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert len(lines) == 1 and lines[0].startswith("c0:helper  [full evil.example]") and lines[0].endswith("unsigned")
+    assert len(lines) == 1 and lines[0].startswith("c0:helper  [egress-all evil.example]") and lines[0].endswith("unsigned")
     assert m.cli(["catalog", "--json", "-c", str(path)]) == 0
     printed = capsys.readouterr().out
     web = load("webui_for_catalog_test", "webui.py")
@@ -2177,7 +2191,7 @@ def test_mcp_set_changes_a_server_of_yours_as_add_checks_it(tmp_path, capsys):
         m.set_server("binwalk", {"mounts": []}, catalogs=sources, out=lambda line: None)
     with pytest.raises(ValueError, match="does not use KEY"):
         m.set_server("binwalk", {"env": ["KEY"]}, catalogs=sources, out=lambda line: None)
-    with pytest.raises(ValueError, match="a VPN needs network full"):
+    with pytest.raises(ValueError, match="a VPN needs network egress-all"):
         m.set_server("binwalk", {"vpn": "anon"}, out=lambda line: None)
     m.set_server("binwalk", {"network": "full", "vpn": "anon"}, out=lambda line: None)
     assert m.definitions()["binwalk"]["vpn"] == "anon"
@@ -2651,3 +2665,29 @@ def test_container_side_hint():
             m.mount_host("/work=/work_ro", "/work_ro", "ro")
         assert "reads like a folder of the server's container" in str(caught.value)
         assert "TARGET is the folder inside the server's container" in str(caught.value)
+
+
+ENSURE_RUNNING = m.ensure_running  # (the live fixture stands in for it; these tests take the real one back)
+
+
+@pytest.mark.parametrize("path", ["attach --live", "start --for"])
+def test_attach_live_and_start_for_refuse_a_gone_image_before_the_server_starts(live, monkeypatch, tmp_path, path):
+    """The user, 2026-11-25: a path that skipped the start's check let each connection end with "ended before it
+    answered". mcp attach --live and mcp start --for start the server through ensure_running, which now refuses what
+    would end every connection - its image not in Podman's store - with the fix, before anything starts, and the
+    run stays as it was."""
+    run, relays = live.make()
+    config = tmp_path / "cfg/sandbox-ai/mcp.json"
+    image = "ghcr.io/c0decave/sandbox-ai-mcp-gowitness@sha256:" + "d" * 64
+    config.write_text(json.dumps({**json.loads(config.read_text()), "gowitness": {"image": image, "network": "none"}}))
+    monkeypatch.setattr(m, "ensure_running", ENSURE_RUNNING)
+    monkeypatch.setattr(m, "image_present", lambda name, run=None: False)
+    monkeypatch.setattr(m.subprocess, "Popen", lambda *a, **kw: pytest.fail("a server was started"))
+    with pytest.raises(ValueError) as caught:
+        if path == "attach --live":
+            m.attach_live("gowitness", "web", out=live.out)
+        else:
+            m.attach("gowitness", "web", start_server=True, out=live.out)
+    assert f"MCP server gowitness: its image {image} is not there" in str(caught.value)
+    assert caught.value.fixes[0]["commands"] == [["podman", "pull", image]]
+    assert json.loads((run / "run.json").read_text())["mcp_servers"] == [] and relays.names() == []

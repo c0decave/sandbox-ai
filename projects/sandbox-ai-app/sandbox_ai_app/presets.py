@@ -105,6 +105,13 @@ class Preset:
     # sandbox-ai's built-in presets: their last live result (sandbox-ai's presets.live_light: the live check's
     # imported evidence, {light green|red, date, version, why, ...}), {} without one - then nothing is shown.
     live: dict = field(default_factory=dict)
+    # sandbox-ai's presets: where it is on its host (built-in, yours, extra), and every host of a combined catalogue
+    # that has a preset of this id: ((host, origin, directory or ""), ...) - its host's first.
+    origin: str = ""
+    places: tuple = ()
+    # sandbox-ai's preset of another host: the ruleset file it names there, read from that host when the board is made
+    # (with_ruleset); "" when its ruleset is here (rules) or it has none.
+    rules_file: str = ""
 
     def __post_init__(self):
         if not self.name:
@@ -378,6 +385,13 @@ class Catalogue:
     # sandbox-ai's categories ([(id, {title, description: {en, de}})], its presets.CATEGORY_INFO in its order); empty
     # for a sandbox-ai without them: its presets in one section then, as before.
     categories: list = field(default_factory=list)
+    # The hosts it was made of (combined: every host's presets in one list, each preset once with its places); () for
+    # one host's.
+    hosts: tuple = ()
+
+    @property
+    def combined(self):
+        return bool(self.hosts)
 
     def find(self, key):
         """The preset of KEY ((source, id), "SOURCE:ID" or an id: the app's, then sandbox-ai's - as ID or sai-ID,
@@ -404,7 +418,8 @@ class Catalogue:
             if key != SAI_CATEGORY:
                 found.append((key, title, [p for p in self.presets if p.source == "app" and p.category == key]))
             elif not self.categories:
-                title = title if self.host == "local" else tr("sandbox-ai's presets on {host}", host=self.host)
+                title = title if self.host == "local" or self.combined else \
+                    tr("sandbox-ai's presets on {host}", host=self.host)
                 found.append((key, title, self.own()))
             else:
                 known = {ident for ident, _ in self.categories}
@@ -421,7 +436,7 @@ class Catalogue:
         """The heading of sandbox-ai's category IDENT in the app's language: "sandbox-ai: Development" (on another host:
         "sandbox-ai on HOST: Development")."""
         name = category_text(self.info(ident), "title") or ident
-        return tr("sandbox-ai: {category}", category=name) if self.host == "local" else \
+        return tr("sandbox-ai: {category}", category=name) if self.host == "local" or self.combined else \
             tr("sandbox-ai on {host}: {category}", host=self.host, category=name)
 
     def description(self, key):
@@ -488,6 +503,146 @@ def catalogue(sai, host="local", documents=None, problems=(), mine=None):
     replaced = tuple(p.id for p in PRESETS if p.id in names)
     app = [p for p in PRESETS if p.id not in names]
     return Catalogue(host, own + app + list(mine), problems, replaced, complete, sai_categories(sai))
+
+
+def known_hosts(sai, target="local"):
+    """The hosts a combined catalogue reads: this machine, TARGET (the host the board starts on) and every host of
+    `sandbox-ai hosts`, each once, TARGET first."""
+    names = [target, "local"]
+    try:
+        if getattr(sai, "hosts_supported", lambda: False)():
+            names += [entry["name"] for entry in sai.host_entries() if isinstance(entry.get("name"), str)]
+    except Exception as _exc:  # noqa: BLE001 - no list of hosts, or a damaged one: this machine and TARGET
+        applog.swallowed("presets", "known_hosts: no list of hosts", _exc)
+    return list(dict.fromkeys(names))
+
+
+def combined(sai, target="local", read=None, mine=None):
+    """One Catalogue over every host (known_hosts): READ is {host: (documents or None - not read yet -, problems)}
+    (this machine's, when not given, from its sandbox-ai's module). Each of sandbox-ai's presets once by its id, as
+    TARGET has it (what `--preset` there starts), else as the first host that has it (this machine first), with the
+    places of every host that has one (places); the app's own (left out where some host's sandbox-ai has the same id)
+    and MINE (None: yours, loaded) as in catalogue()."""
+    read = dict(read or {})
+    if "local" not in read:
+        read["local"] = local_documents(sai)
+    order = list(dict.fromkeys([target, "local", *read]))
+    merged, places, problems, complete = {}, {}, [], True
+    for host in order:
+        documents, said = read.get(host) or (None, [])
+        problems += [problem if host == "local" else f"{host}: {problem}" for problem in said]
+        if documents is None:
+            complete = False
+            continue
+        for document in documents:
+            name = str(document.get("id", "")) if isinstance(document, dict) else ""
+            if name not in merged:
+                try:
+                    merged[name] = from_sandbox_ai(sai, document, host=host)
+                except ValueError as exc:
+                    problems.append(f"{'' if host == 'local' else host + ': '}{name or '?'}: {exc}")
+                    continue
+            places.setdefault(name, []).append((host, str(document.get("_origin") or document.get("origin")
+                                                          or "built-in")[:20],
+                                                str(document.get("_dir") or document.get("directory") or "")[:900]))
+    own = [replace(preset, places=tuple(places[name])) for name, preset in merged.items()]
+    if mine is None:
+        mine, mine_problems = load_mine(sai)
+        problems = mine_problems + problems
+    names = {preset.name for preset in own}
+    replaced = tuple(p.id for p in PRESETS if p.id in names)
+    app = [p for p in PRESETS if p.id not in names]
+    return Catalogue(target, own + app + list(mine), problems, replaced, complete, sai_categories(sai), tuple(order))
+
+
+def from_hosts(preset):
+    """The hosts PRESET comes from: sandbox-ai's - every host of its places (its own host without places); the app's
+    own and yours - this machine (where the app keeps them; they start on any host)."""
+    if preset.source != "sandbox-ai":
+        return ("local",)
+    return tuple(host for host, _, _ in preset.places) or (preset.host,)
+
+
+def host_label(host):
+    return tr("this computer") if host == "local" else host
+
+
+def place_label(host, origin, directory=""):
+    """"coding-101", "coding-101 (yours)", "this computer (from /srv/team)": a host of a preset and where it is
+    there (built-in is said by nothing)."""
+    label = host_label(host)
+    if origin == "yours":
+        return tr("{host} (yours there)", host=label)
+    if origin == "extra":
+        return tr("{host} (from {folder})", host=label, folder=directory or "?")
+    return label
+
+
+def where_short(preset):
+    """Where PRESET comes from, in a few words (its card)."""
+    if preset.source == "app":
+        return tr("The app's own")
+    if preset.source == "mine":
+        return tr("Yours, kept in this app")
+    places = preset.places or ((preset.host, preset.origin, ""),)
+    return tr("On {hosts}", hosts=", ".join(place_label(*place) for place in places))
+
+
+def where_text(preset, target="local"):
+    """Where PRESET comes from and what a start on TARGET does with it (the gallery's details)."""
+    if preset.source != "sandbox-ai":
+        return where_short(preset) + " " + tr("(starts on any host)")
+    text = tr("sandbox-ai's preset on {hosts}.", hosts=", ".join(
+        place_label(*place) for place in preset.places or ((preset.host, preset.origin, ""),)))
+    if target not in from_hosts(preset):
+        text += " " + tr("Not on {host}: the board takes its definition along; secrets come from {host}'s own "
+                         "store.", host=host_label(target))
+    return text
+
+
+def agent_of(preset, agent=None):
+    """The agent a board of PRESET starts (build's rule): its own, else AGENT, else claude; one it is for."""
+    agent = preset.agent or agent or "claude"
+    return preset.agents[0] if preset.agents and agent not in preset.agents else agent
+
+
+def needs_preparing(preset, target):
+    """Whether PRESET asks a host before its board for TARGET is made: its ruleset is on its host (with_ruleset), or
+    it comes from elsewhere and TARGET is another host (what its launcher takes)."""
+    return bool(preset.rules_file) or (target != "local" and target not in from_hosts(preset))
+
+
+def with_ruleset(sai, preset):
+    """PRESET (sandbox-ai's, of another host) with the ruleset it names there, read from that host (`presets show
+    --json` there carries it, sandbox-ai 0.1.243) and checked as an imported preset's is. ValueError with why not:
+    that sandbox-ai is too old to hand it over, or it cannot read it."""
+    if not preset.rules_file:
+        return preset
+    document = sai.host_preset(preset.host, preset.name)
+    if "ruleset" not in document:
+        raise ValueError(tr("The sandbox-ai on {host} is too old to hand over the ruleset of {name}: update it (Hosts "
+                            "page, Update sandbox-ai), then try again.", host=preset.host, name=preset.name))
+    if not isinstance(document.get("ruleset"), dict):
+        raise ValueError(tr("The ruleset of {name} on {host} cannot be read: {error}", name=preset.name,
+                            host=preset.host, error=printable(str(document.get("ruleset_problem") or "?"))[:300]))
+    fresh = from_sandbox_ai(sai, document, host=preset.host)
+    return replace(preset, rules=fresh.rules, rules_file="",
+                   notes=tuple(note for note in preset.notes if preset.rules_file not in note))
+
+
+def prepare(sai, preset, target, agent=None):
+    """PRESET ready for a board that starts on TARGET (a worker: it asks hosts over SSH): its ruleset read from its
+    host, and - one that comes from elsewhere - checked against what TARGET's launcher takes. ValueError with what
+    TARGET cannot do and why (too old: update it)."""
+    preset = with_ruleset(sai, preset)
+    if target != "local" and target not in from_hosts(preset):
+        known = sai.host_launch_options(target, agent_of(preset, agent))
+        unknown = backend.unknown_options(sai.options(), list(preset.options), known)
+        if unknown:
+            raise ValueError(tr("{host} cannot start {name}: its sandbox-ai does not know {options}. Update it (Hosts "
+                                "page, Update sandbox-ai), then try again.", host=target, name=preset.text(preset.title),
+                                options=" ".join(unknown)[:300]))
+    return preset
 
 
 HOST_DOCUMENTS = {}  # {host: (documents, problems)}: what `presets list --json` there said last
@@ -959,16 +1114,17 @@ def from_sandbox_ai(sai, document, host="local"):
     agents = [a for a in document.get("agents") or [] if isinstance(a, str)]
     agent = agents[0] if len(agents) == 1 else None
     prompt = document.get("prompt") if isinstance(document.get("prompt"), str) else ""
-    rules, rules_note = None, []
-    if isinstance(document.get("rules"), str) and isinstance(document.get("_path"), str):
+    rules, rules_note, rules_file = None, [], ""
+    if isinstance(document.get("rules"), str) and isinstance(document.get("ruleset"), dict):
+        rules = document["ruleset"]  # (`presets show --json` of 0.1.243 on: the ruleset itself, checked below)
+    elif isinstance(document.get("rules"), str) and isinstance(document.get("_path"), str):
         try:
             rules = json.loads((Path(document["_path"]).parent / document["rules"]).read_text())
         except (OSError, ValueError, RecursionError):
             rules = None
     elif isinstance(document.get("rules"), str):
-        rules_note = [tr("Its ruleset {file} is a file on {host}: it is not on this board; a start with --preset "
-                         "{name} there brings it.", file=document["rules"][:200], host=host,
-                         name=str(document.get("id", ""))[:60])]
+        rules_file = document["rules"][:200]
+        rules_note = [tr("Its ruleset {file} is read from {host} when the board is made.", file=rules_file, host=host)]
     origin = document.get("_origin") or document.get("origin")
     folder = document.get("_dir") or document.get("directory")
     passed_on = passed_on_warnings(sai, document, origin, fill) if origin == "extra" else []
@@ -1003,7 +1159,9 @@ def from_sandbox_ai(sai, document, host="local"):
                                mcp_entries=tuple((server.split(":", 1)[1], server) for server in
                                                  map(str, document.get("mcp") or []) if MCP_ENTRY.fullmatch(server)),
                                group=sai_group(document), translations=sai_translations(document),
-                               bridge=sai_bridge(document, fill), live=sai_live(sai, document))
+                               bridge=sai_bridge(document, fill), live=sai_live(sai, document),
+                               origin=str(origin or "built-in")[:20], rules_file=rules_file,
+                               places=((host, str(origin or "built-in")[:20], str(folder or "")[:900]),))
 
 
 def passed_on_warnings(sai, document, origin, fill):

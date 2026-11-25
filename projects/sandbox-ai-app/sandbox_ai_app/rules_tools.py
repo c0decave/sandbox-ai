@@ -1,4 +1,4 @@
-"""Help beside a field of ruleset files (--rules FILE, on the Board and the Start page): what to enter (a
+"""Help beside a field of ruleset files (--rules FILE, on the Board and the Board page): what to enter (a
 placeholder and an example in the tooltip), New from example… (a starter ruleset written to a file outside every
 workspace, then added), Check (`sandbox-ai rules check`: their rules, or why each is refused; one inside a workspace
 is refused here, as the start refuses it) and All rules… (`sandbox-ai rules show`: every ruleset the start would have,

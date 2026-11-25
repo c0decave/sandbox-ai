@@ -1,5 +1,5 @@
 """Export… and Import… of a board or session offscreen (`sandbox-ai board export|import`): the Board page's buttons and
-canvas menu, the Sandboxes page's button and right click, the dialogs - against stand-ins that record what they were
+canvas menu, the Sessions page's button and right click, the dialogs - against stand-ins that record what they were
 asked, and once end to end through the real sandbox-ai of this checkout (a board exported to a file, that file
 checked and imported, the board shown). The GUI thread never runs the commands (BLOCKING_SAI: tests/test_references)."""
 import json
@@ -222,7 +222,7 @@ def test_an_imported_board_keeps_its_places_bridges_and_team(qapp, env):
     page.deleteLater()
 
 
-# -- the Sandboxes page --
+# -- the Sessions page --
 
 def session(name="web", state="stopped", host="local"):
     if host != "local":

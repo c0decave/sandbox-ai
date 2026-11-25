@@ -1,0 +1,19 @@
+{
+  "spec": "port=5555,port=5554,port=5550,ready=5550,ready-timeout=600,data=/avd,memory=6g,cpus=2,pids=1024,device=/dev/kvm",
+  "build_network": true,
+  "terms": "android-sdk-license",
+  "arches": [
+    "x86_64"
+  ],
+  "context": [
+    "recipes/android-dev/install.sh",
+    "recipes/android-dev/sdk.lock",
+    "recipes/android-dev/android-sdk-license",
+    "recipes/android-dev/package-xml/cmdline-tools_23.0.xml",
+    "recipes/android-dev/package-xml/platform-tools.xml",
+    "recipes/android-dev/package-xml/emulator.xml",
+    "recipes/android-dev/package-xml/system-images_android-37.0_google_apis_x86_64.xml"
+  ],
+  "about": "Google publishes no Linux arm64 emulator in its SDK repository; on such a host use a device (the service adb, or the host's adb server with --allow-host-port 5037)",
+  "root": "/dev/kvm is opened with your own user's rights: the container's root is your user outside (rootless Podman), any other user of it is none the host gave the device to"
+}

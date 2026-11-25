@@ -54,7 +54,7 @@ def test_stop_all_asks_with_the_list_then_stops_here_and_on_the_hosts(window, fa
     targets = page.stop_all_targets()
     assert {host: [i.name for i in found] for host, found in targets.items()} == {"local": ["web", "held"],
                                                                                  "box": ["far"]}
-    menu = [text for text, _ in widgets.menu_entries(widgets.menu_of(page.table))]
+    menu = [text.strip() for text, _ in widgets.menu_entries(widgets.menu_of(page.table))]  # (Manage ▸)
     assert "Stop all…" in menu, "in the list's context menu too"
     monkeypatch.setattr(widgets, "AUTO_ANSWER", False)  # Cancel: nothing runs
     assert page.stop_all() is False and fake == []

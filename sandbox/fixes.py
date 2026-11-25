@@ -24,6 +24,9 @@ fixes. One fix is a dict:
   choice    the name of the question this fix is one answer of: fixes with the same choice are alternatives (add
             the agent, or take another worker) - one is chosen by the human (its letter on a terminal, its id with
             --fix-only), never by "all" or --fix
+  terms     the id of a license the fix accepts for you ("" for none; toolchain_recipes.TERMS): such a fix is one
+            answer of a question of its own (choice: asked alone, No first, never done by "all" or --fix), its
+            command carries the option that accepts, and the modes high and paranoid refuse it
   start     for a fix with options: the whole command line of the start as it would be then
   verdict   offered (sandbox-ai does it after a yes, or with --fix), manual (its commands are shown, never run: they
             need root, or a value only you have), refused (the security mode does not take it: not offered, the laxer
@@ -71,7 +74,7 @@ class Missing(ValueError):
 
 
 def fix(kind, name, missing, title, commands=(), duration="", unsigned=False, security="", network=False,
-        terminal=False, needed=True, manual="", refused="", options=None, choice="", ident=None):
+        terminal=False, needed=True, manual="", refused="", options=None, choice="", ident=None, terms=""):
     """One fix (the module's docstring). MANUAL: why its commands are only shown; REFUSED: why it is not offered.
     OPTIONS ({"add": [words], "remove": [option names]}): a fix that changes the start's own options instead of the
     host (start_options); CHOICE: the name of the question it is one answer of (alternatives) - a manual fix with the
@@ -88,6 +91,7 @@ def fix(kind, name, missing, title, commands=(), duration="", unsigned=False, se
             "commands": commands, "duration": str(duration or ""), "unsigned": bool(unsigned),
             "security": str(security or ""), "network": bool(network), "terminal": bool(terminal),
             "needed": bool(needed), "verdict": verdict, "options": change, "choice": str(choice or ""), "start": "",
+            "terms": str(terms or ""),
             "why": str(refused or manual or ("" if commands or change else "nothing sandbox-ai can do for you"))}
 
 
@@ -152,6 +156,11 @@ def judge(fixes, mode):
             item["verdict"] = "refused"
             item["why"] = (f"not offered in the security mode {mode}: it would {what}; the mode {LAXER} takes it "
                            f"(--mode {LAXER})")
+        elif item["verdict"] == "offered" and mode in STRICT and item.get("terms"):
+            # A license is yours to accept: in the strict modes never by an offer's yes, only by your own command.
+            item["verdict"] = "refused"
+            item["why"] = (f"not offered in the security mode {mode}: it accepts a license, which is yours to do - "
+                           + " && ".join(command_text(command) for command in item["commands"]))
         judged.append(item)
     return judged
 

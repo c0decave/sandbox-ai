@@ -1,0 +1,26 @@
+# an adb server for the USB device you give it (--service adb:device=usb:VENDOR:PRODUCT): the agent gets adb, not USB
+#
+# Build it once: sandbox-ai images build-image adb --builtin adb. adb and fastboot are Debian's own packages of the
+# release (android-platform-tools, built by Debian from the Android Open Source Project: Apache-2.0) - nothing of
+# Google's SDK downloads, no license to accept. Its build fetches those packages (the network, said when it builds).
+# The FROM below names an exact release (Debian 12.12, 2025-09-06), pulled once and pinned by the digest it got.
+#
+# As a service (service.json: port=5037,data=/adb,memory=256m,pids=128) it runs beside the agent in the sandbox's
+# pod with the device of its device= for itself: the agent's sandbox gets no USB device, only the adb server at
+# localhost:5037 (the port every adb client asks), so `adb devices` there shows the phone. It runs as the container's
+# root, which is your own user outside (rootless Podman), without any capability: the device's node is opened with
+# your user's rights (the udev rule of Debian's android-sdk-platform-tools-common, or yours). Its key (the one the
+# phone asks you to allow) is kept in /adb: a tmpfs, so the phone asks at every start - keep=yes in a kept start
+# keeps it. A phone that is replugged gets another node: restart the sandbox then. Not together with
+# --allow-host-port 5037 (the host's own adb server would be at the same port).
+FROM docker.io/library/debian:12.12-slim
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends adb fastboot tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && adb version
+COPY adb-service /usr/local/bin/adb-service
+# The container's root on purpose (service.json "root" says why); it has no capability and no new privileges.
+USER 0:0
+EXPOSE 5037
+# tini -s: also where Podman's own init is its PID 1 (--init, where the host has catatonit): a subreaper then.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/bin/sh", "/usr/local/bin/adb-service"]

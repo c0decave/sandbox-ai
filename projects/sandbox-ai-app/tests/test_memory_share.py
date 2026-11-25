@@ -1,4 +1,4 @@
-"""The Sandboxes page's Memory column: what the launcher's memory watch writes for a running sandbox
+"""The Sessions page's Memory column: what the launcher's memory watch writes for a running sandbox
 (memory.json in its session directory), numbers only."""
 import json
 

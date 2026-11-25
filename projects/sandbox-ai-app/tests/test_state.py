@@ -198,7 +198,7 @@ def test_window_page_navigation_and_panels_come_back(window, monkeypatch, qapp):
         assert again.collapsed == {"Monitoring"} and all(again.nav.isRowHidden(r) for r in insight)
         assert not any(again.nav.isRowHidden(r) for r in again.section_rows["Manage"][1])
         # A click on a section's header folds it (and unfolds it).
-        header = again.nav.item(again.section_rows["Running"][0])
+        header = again.nav.item(again.section_rows["Manage"][0])
         position = again.nav.visualItemRect(header).center()
         from PySide6.QtGui import QMouseEvent
         release = QMouseEvent(QtCore.QEvent.Type.MouseButtonRelease, QtCore.QPointF(position),
@@ -206,7 +206,7 @@ def test_window_page_navigation_and_panels_come_back(window, monkeypatch, qapp):
                               QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.NoButton,
                               QtCore.Qt.KeyboardModifier.NoModifier)
         QtWidgets.QApplication.sendEvent(again.nav.viewport(), release)
-        assert "Running" in again.collapsed
+        assert "Manage" in again.collapsed
     finally:
         close(again)
         close(window)
@@ -329,7 +329,7 @@ def test_an_unapplied_board_draft_comes_back_with_undo_and_discard(window, env, 
 
 
 def test_the_folds_of_the_sandboxes_tree_come_back(window, env, monkeypatch):
-    """Which hosts and starts of the Sandboxes page are open is kept per host and start."""
+    """Which hosts and starts of the Sessions page are open is kept per host and start."""
     from sandbox_ai_app.start_tree import row_id
     folder = project(env, "p")
     run = fake_run(env, "claude-one", folder)

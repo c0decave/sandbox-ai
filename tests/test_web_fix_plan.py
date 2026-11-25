@@ -225,6 +225,56 @@ def test_a_choice_between_ways_to_start_is_one_tick_of_several_never_made_for_yo
     assert result["chosen"] == ["image:localhost/claude-sandbox:latest", "option:cairn-workers-codex"]
 
 
+LICENSE_PAGE = FAKE_DOM + r"""
+const PLAN = __PLAN__;
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "ct1", kind: "ssh" }];', context);
+  answer = (method, path) => (path === "/api/hosts/ct1/fix-plan" ? PLAN : method === "GET" ? [] : { output: "" });
+  const asked = vm.runInContext('askFixPlan(__main, "ct1", { agent: "codex", name: "", workspace: "/w", options: "[]" })', context);
+  await settle();
+  result.lines = main.all().filter(n => n.tagName === "li").map(n => n.textContent);
+  result.buttons = main.all().filter(n => n.tagName === "button" && !n.hidden).map(n => n.textContent);
+  const boxes = main.all().filter(n => n.tagName === "input");
+  result.before = boxes.map(b => Boolean(b.checked));
+  if (__TICK__) { boxes[1].checked = true; boxes[1].fire("change"); }
+  button(main, "Do the ticked ones and start").fire("click");
+  result.chosen = await asked;
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_fix_that_accepts_a_license_is_a_tick_of_yours_never_fix_all(tmp_path):
+    """The toolchain android-sdk (2026-11-24): built on the host from Google's downloads, under their license. Its fix
+    comes as one answer of a question of its own (fixes.py "choice", "terms"): the page shows the ticks at once (no
+    "Fix all and start"), says the license in its line, and leaves it unticked - only your tick hands it to the
+    start's terminal (--fix-only)."""
+    license_fix = {"id": "toolchain:android-sdk", "kind": "toolchain",
+                   "missing": "the toolchain android-sdk is not in the store",
+                   "title": "accept the Android Software Development Kit License Agreement and build it here from "
+                            "Google's downloads",
+                   "command": "sandbox-ai toolchain add android-sdk --accept-android-sdk-license", "start": "",
+                   "duration": "a download of about 1 GB", "unsigned": False,
+                   "security": "by this you accept the Android Software Development Kit License Agreement "
+                               "(https://developer.android.com/studio/terms)", "terminal": False, "needed": True,
+                   "verdict": "offered", "why": "", "choice": "license:toolchain:android-sdk"}
+    plan = {"questions": "all", "mode": "medium", "fixes": [PLAN["fixes"][0], license_fix]}
+    page = LICENSE_PAGE.replace("__PLAN__", json.dumps(plan))
+    result = run_driver(tmp_path, page.replace("__TICK__", "false"), "fix-license")
+    assert "https://developer.android.com/studio/terms" in result["lines"][1]
+    assert "--accept-android-sdk-license" in result["lines"][1]
+    assert result["buttons"] == ["Do the ticked ones and start", "Cancel"], "no Fix all: a license is yours"
+    assert result["before"] == [True, False]
+    assert result["chosen"] == ["image:localhost/claude-sandbox:latest"]
+    ticked = run_driver(tmp_path, page.replace("__TICK__", "true"), "fix-license-ticked")
+    assert ticked["chosen"] == ["image:localhost/claude-sandbox:latest", "toolchain:android-sdk"]
+    # The service hands the launcher's "choice" on (what makes it a tick of yours) and takes the id for --fix-only.
+    assert w.FIX_ID.fullmatch("toolchain:android-sdk") and w.FIX_ID.fullmatch("toolchain:android-sdk@36")
+    assert w.FIX_ID.fullmatch("service:android-emulator")
+
+
 UPDATE_PAGE = FAKE_DOM + r"""
 (async () => {
   const result = {};

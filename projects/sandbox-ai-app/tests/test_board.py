@@ -244,7 +244,7 @@ def test_layout_is_untrusted_data_next_to_the_project(sai, tmp_path):
 def test_mcp_nodes_describe_their_server(sai):
     rows = dict(B.mcp_summary({"image": "ghcr.io/x@sha256:1", "network": "full", "hosts": ["api.example"],
                                "mounts": [{"host": "/data", "target": "/work", "mode": "rw"}]}))
-    assert rows["Runs"] == "ghcr.io/x@sha256:1" and rows["Network"] == "full" and "/data → /work (rw)" in rows["Folders"]
+    assert rows["Runs"] == "ghcr.io/x@sha256:1" and rows["Network"] == "egress-all" and "/data → /work (rw)" in rows["Folders"]
     assert "not defined" in dict(B.mcp_summary(None))["Definition"]
     assert isinstance(sai.mcp_definitions(), dict)
 

@@ -1,5 +1,5 @@
 """Review and trust a project file (.sandbox-ai.json) on this machine or on a host of `sandbox-ai hosts`, from the
-Settings (trusted project configurations) and from the Start page with another host chosen.
+Settings (trusted project configurations) and from the Board page with another host chosen.
 
 The question is project_trust's, as for a file of this machine: every key that will be trusted, what weakens the
 sandbox marked (against the defaults of the host the file is on), and the changes against the version the app saw
@@ -113,7 +113,7 @@ def review_and_trust(parent, sai, host, path, done=None, source=None, say_truste
 
 
 def review_here(parent, sai, path, done, source=None, say_trusted=False):
-    """review_and_trust for a file of this machine: its bytes read once and trusted exactly (as the Start page's Open
+    """review_and_trust for a file of this machine: its bytes read once and trusted exactly (as the Board page's Open
     project folder does)."""
     directory = os.path.dirname(path)
 

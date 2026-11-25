@@ -120,7 +120,7 @@ def test_fill_keeps_row_keys_and_the_selection_across_sorting(qapp):
 def test_pages_and_preview(window, env):
     # (Start is one entry: its two views, Board and Expert, are under it - test_start_merge_page.py)
     assert [window.nav.item(i).text() for i in range(window.nav.count())] == [
-        "PROJECT", "Start", "RUNNING", "Sandboxes & sessions", "Terminals", "Approvals", "MANAGE",
+        "PROJECT", "Board", "Sessions", "Terminals", "Approvals", "MANAGE",
         "File manager", "Kits & plugins", "MCP servers", "LLM servers", "Images", "Credentials", "Teams", "MONITORING",
         "Connections", "Activity", "LLM traffic", "Statistics", "System monitor",
         "SYSTEM", "System", "Hosts", "Help"]
@@ -325,7 +325,7 @@ def test_connections_follow_reads_at_its_interval_and_appends_what_came(window, 
 
 
 def test_sandboxes_page_of_a_test_ignores_launchers_others_started(window, tmp_path):
-    """The Sandboxes page reads this account's launcher processes from /proc: on a machine where other sessions run
+    """The Sessions page reads this account's launcher processes from /proc: on a machine where other sessions run
     sandbox-ai (or its tests) at the same time, their launchers were rows of the tests' pages, and the tests that
     count rows failed now and then (conftest.only_this_sessions_launchers). A launcher this test run did not start
     (here: another session's, with a HOME of its own, left to init by a shell that exits at once) is not one of the
@@ -1132,6 +1132,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     monkeypatch.setattr(window.sai, "doctor", lambda backend="podman": release.wait(30) and [("ok", "Podman", "5", "")])
     monkeypatch.setattr(window.sai, "dry_run", lambda agent, argv: release.wait(30) and ({"plan": 1}, ""))
     monkeypatch.setattr(window.sai, "mcp_catalog", lambda: release.wait(30) and ([], []))
+    monkeypatch.setattr(window.sai, "rules_reload", lambda run, host="local": release.wait(30) and {"rules": []})
     monkeypatch.setattr("sandbox_ai_app.state.run_dialog", lambda dialog: [str(env)])
     from sandbox_ai_app import ui
     monkeypatch.setattr(ui.PrivacyDialog, "exec", lambda dialog: (dialog.paths.set_value([str(env)]),
@@ -1145,7 +1146,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     window.mcp.load_catalog()
     read_now(window.sandboxes)
     window.sandboxes.table.selectRow(0)
-    window.sandboxes.show_allowed()
+    window.sandboxes.reload_rules()
     assert time.monotonic() - began < 3, "the commands run in the background"
     live_mcp = [window.sandboxes.run_named[key] for key in ("add-mcp", "remove-mcp", "add-kits", "remove-kits")]  # for kept starts only
     live_mcp.append(window.sandboxes.run_named["browser"])  # for a start with --browser only
@@ -1164,7 +1165,7 @@ def test_slow_commands_do_not_block_the_window(window, env, monkeypatch, wait):
     titles = [title for title, *_ in widgets.SHOWN]
     # (the Start page's folder followed the project opened meanwhile: its plan is said to be out of date - R2-20)
     assert any(t.startswith("Plan (dry run)") for t in titles) and any(t.startswith("Privacy check") for t in titles) \
-        and "claude-abc" in titles
+        and "Reload the rules of claude-abc" in titles
 
 
 def test_background_timeout_answers_at_once_but_keeps_the_button_until_the_thread_ends(qapp, wait):
@@ -1873,8 +1874,8 @@ def test_the_window_in_german(qapp, env, monkeypatch):
     i18n.set_language("de")
     w = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=0)
     try:
-        assert [w.nav.item(i).text() for i in range(w.nav.count())][:6] == [
-            "PROJEKT", "Start", "LAUFEND", "Sandboxen & Sitzungen", "Terminals", "Freigaben"]
+        assert [w.nav.item(i).text() for i in range(w.nav.count())][:5] == [
+            "PROJEKT", "Board", "Sitzungen", "Terminals", "Freigaben"]
         assert [w.view_switch.buttons[key].text() for key in ("board", "launch")] == ["Board", "Experte"]
         assert w.approvals.allow_button.text() == "Einmal erlauben"
         assert w.launch.form.tabText(1) == "Netzwerk"
@@ -2064,16 +2065,15 @@ def test_the_revoke_dialog_shows_what_the_run_has_and_a_typed_allow_is_kept_unti
     assert not revoke.presets["github"].isEnabled() and "not allowed" in revoke.presets["github"].toolTip()
     revoke.deleteLater()
     key = ("net", "allow", "local", "claude-abc")
-    first = NetworkDialog(None, presets, "Allow", {"--git-token-env"}, draft=key)
+    first = NetworkDialog(None, presets, "Allow", {"--dns"}, draft=key)
     assert first.draft.notice.isHidden()
     first.hosts.setText("api.example.org")
-    first.git_url.setText("https://git.example.org")
-    first.git_ref.setText("GITEA_TOKEN")
+    first.nets.setText("192.0.2.0/24")
     first.presets["github"].setChecked(True)
     first.reject()
     assert key in drafts.DRAFTS
-    again = NetworkDialog(None, presets, "Allow", {"--git-token-env"}, draft=key)
-    assert again.hosts.text() == "api.example.org" and again.git_ref.text() == "GITEA_TOKEN"
+    again = NetworkDialog(None, presets, "Allow", {"--dns"}, draft=key)
+    assert again.hosts.text() == "api.example.org" and again.nets.text() == "192.0.2.0/24"
     assert again.presets["github"].isChecked() and not again.draft.notice.isHidden()
     other = NetworkDialog(None, presets, "Allow", set(), draft=("net", "allow", "local", "claude-xyz"))
     assert other.hosts.text() == "", "another run's dialog starts empty"
@@ -2116,19 +2116,13 @@ def test_the_network_dialog_offers_what_the_installed_sandbox_ai_can(qapp):
     new.hosts.setText("example.org")
     new.host_ports.setText("3000 11434")
     new.dns.setChecked(True)
-    new.git_url.setText("http://localhost:3080")
-    new.git_kind.setCurrentIndex(new.git_kind.findData("secret"))
-    new.git_ref.setText("GITEA")
     assert new.arguments() == ["--allow-host", "example.org", "--allow-host-port", "3000", "--allow-host-port",
-                               "11434", "--dns", "--git-token-secret", "http://localhost:3080=GITEA"]
-    new.git_ref.setText("")  # a login needs both: the server and where its token is
-    assert "--git-token-secret" not in new.arguments()
+                               "11434", "--dns"]
+    # (a Git login is given from Credentials since 2026-11-24: test_net_proposals_app.py)
     # An older sandbox-ai: the fields are not offered, nothing of them is passed.
     old = NetworkDialog(None, {}, "Allow", set())
     old.host_ports.setText("3000")
     old.dns.setChecked(True)
-    old.git_url.setText("http://localhost:3080")
-    old.git_ref.setText("X")
     assert old.arguments() == []
     labels = [old.layout().itemAt(i, old.layout().ItemRole.LabelRole) for i in range(old.layout().rowCount())]
     texts = [item.widget().text() for item in labels if item is not None and item.widget() is not None]
@@ -2170,7 +2164,7 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
     window.fold_all(True)
     assert nav.isRowHidden(rows["connections"]) and nav.isRowHidden(rows["hosts"])
     assert not nav.isRowHidden(rows["launch"])  # the current page's section stays open
-    assert set(window.state.get("nav_collapsed")) == {"Running", "Monitoring", "Manage", "System"}
+    assert set(window.state.get("nav_collapsed")) == {"Monitoring", "Manage", "System"}
     window.show_page("hosts", raise_window=False)  # e.g. Ctrl+number, a tour, a link
     assert not nav.isRowHidden(rows["hosts"]) and window.current_page() == "hosts"
     window.fold_all(False)
@@ -2187,7 +2181,7 @@ def test_the_navigation_folds_and_shrinks_to_save_room(window):
     window.set_compact_nav(False)
     assert ui.NAV_WIDTH <= nav.width() <= ui.NAV_MAX_WIDTH and nav.item(rows["files"]).text() == "File manager"
     assert nav.isRowHidden(rows["files"])  # its section is still folded
-    assert nav.item(rows["launch"]).toolTip().split("\n")[0] == "Start (Ctrl+1)"  # then what the page is for
+    assert nav.item(rows["launch"]).toolTip().split("\n")[0] == "Board (Ctrl+1)"  # then what the page is for
 
 
 def test_a_start_in_the_apps_terminal_opens_one_tab_not_two(window, env, monkeypatch, tmp_path):
@@ -2526,9 +2520,14 @@ def test_a_running_start_on_another_host_is_changed_there(window, monkeypatch, w
     assert seen[-1][1] == "Allow for web on ct1" and "--allow-host-port" not in seen[-1][2]
     page.network("revoke")
     done("net", "revoke", "web", "--allow-host", "pypi.org")
+    # What it may reach…: Approvals › Inspection › Allowed now of that start, read there (its Untaint…, Keep… and
+    # Copy as text there: test_approvals_page_tabs.py).
     page.show_allowed()
-    done("net", "show", "web")
-    assert any(title == "web on ct1" for title, *_ in widgets.SHOWN)
+    approvals = window.approvals
+    assert window.current_page() == "approvals" and approvals.page_tabs.currentWidget() is approvals.inspection
+    assert approvals.sections.currentWidget() is approvals.allowed and approvals.header.remote_target() == ("ct1", "web")
+    assert wait(lambda: ("ct1", ("net", "show", "web", "--json")) in ran, 15)
+    window.show_page("sandboxes")
     widgets.SHOWN.clear()
     page.add_workspace()
     done("workspace", "add", "web", "/srv/data")
@@ -2956,9 +2955,9 @@ def test_the_policy_is_read_at_every_scan_and_caps_allows_only(window, env, monk
 
 def test_the_approvals_keys_answer_the_selected_question(window, env, wait, qapp):
     """Ctrl+Shift+D denies for the run, Ctrl+Return allows (asked first), Ctrl+Shift+K blocks always (asked first):
-    taken while the focus is in the open questions - which live in a panel of their own (a dock), not inside the page
-    itself (regression: the keys were taken only for the page's own children, so they never worked) - and in the
-    Questions window too. None of them is a menu mnemonic (Alt+A and Alt+D open &Ansicht and &Datei in German) or
+    taken while the focus is in the open questions - the page's first tab, Questions, since 2026-11-24 (a panel of
+    their own before: the keys were taken only for the page's own children then, so they never worked) - and in the
+    Questions window too; never while the tab Inspection is shown. None of them is a menu mnemonic (Alt+A and Alt+D open &Ansicht and &Datei in German) or
     the key of "Only icons" (Ctrl+Shift+B)."""
     from PySide6.QtTest import QTest
     from sandbox_ai_app import pages
@@ -2968,9 +2967,16 @@ def test_the_approvals_keys_answer_the_selected_question(window, env, wait, qapp
     window.show_page("approvals")
     page = window.approvals
     page.poll()
-    assert page.current() is not None and not page.isAncestorOf(page.open), "the questions are in their panel"
+    assert page.current() is not None and page.page_tabs.currentWidget() is page.open_box, "the questions: tab 1"
+    page.show_inspection("allowed")
+    qapp.processEvents()
+    page.update_key_filter()
+    assert not page.keys_on, "Inspection shown: no answer key"
+    page.show_questions()
+    qapp.processEvents()
     page.open.setFocus()
     qapp.processEvents()
+    page.update_key_filter()
     assert page.keys_on, "the keys are on while the open questions are shown"
     control_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
     QTest.keyClick(page.open, Qt.Key.Key_D, control_shift)
@@ -3373,11 +3379,6 @@ def test_rename_history_clean_up_and_untaint(window, monkeypatch, wait):
     page.clean_up()
     assert wait(lambda: any("has changed" in text for _, text, _ in widgets.SHOWN), 15)
     assert ("local", False, 30) not in collected
-    page.allowed_shown("claude-abc", (0, "claude-abc: tainted\n  take it back: sandbox-ai net untaint claude-abc", ""),
-                       None)
-    page.allowed_dialog.untaint_button.click()
-    assert wait(lambda: ("local", ("net", "untaint", "claude-abc")) in ran, 15)
-    assert any(title == "Untaint claude-abc" for title, *_ in widgets.SHOWN), "asked first"
 
 
 def test_ended_starts_and_the_asking_marker(window, env, monkeypatch, wait):
@@ -3411,7 +3412,7 @@ def test_the_settings_are_in_the_menu_bar(window, monkeypatch):
     assert "Ctrl+," in [s.toString() for s in window.actions["settings"].shortcuts()]
 
 
-# -- the Sandboxes page's tree: hosts, their starts, what belongs to each start --
+# -- the Sessions page's tree: hosts, their starts, what belongs to each start --
 
 
 def sandboxes_tree(window, monkeypatch):

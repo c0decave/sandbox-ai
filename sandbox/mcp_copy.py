@@ -249,8 +249,11 @@ def network_of(definition):
 
 
 # A network as people read it (the definition's word stays in the documents: export --json, the plan's "network").
-NETWORK_WORDS = {"full": "internet (no LAN)", "allowlist": "only its catalog entry's hosts", "lan": "internet + LAN",
-                 "none": "none", "the start's rules": "its command's own options (the sandbox's rules)"}
+# In the agents' words (offline, egress-all, allowlist, lan: mcp.NETWORK_WORDS; 2026-11-24), the older ones read too.
+NETWORK_WORDS = {"full": "egress-all (the internet, not your LAN)", "egress-all": "egress-all (the internet, not your LAN)",
+                 "allowlist": "allowlist (only its catalog entry's hosts)", "lan": "lan (the internet and your LAN)",
+                 "none": "offline", "offline": "offline",
+                 "the start's rules": "its command's own options (the sandbox's rules)"}
 
 
 def network_text(network):

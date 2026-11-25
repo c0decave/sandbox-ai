@@ -554,12 +554,15 @@ def detached_copy(record, source, identity, finder=None, proc=PROC, runner=None)
     IDENTITY: device, inode), made by a helper in the user namespace of the running sandbox RECORD: '..' from it
     leads nowhere, so whoever holds it (the run's supervisor, `sandbox-ai mcp attach --live`) reaches that folder and
     nothing else of the host. ValueError when it cannot be made (Linux 5.12 or later; the sandbox ended)."""
-    found = (finder or finder_default)(record)
-    if not found or not found.get("user"):
-        raise ValueError("the sandbox's processes were not found (has it ended?)")
-    user = found["user"]
-    starts = {str(user): start_time(user, proc)}
-    if starts[str(user)] is None:
+    for _attempt in range(3):  # a process that ended between finding it and using it: the sandbox's are found anew
+        found = (finder or finder_default)(record)
+        if not found or not found.get("user"):
+            raise ValueError("the sandbox's processes were not found (has it ended?)")
+        user = found["user"]
+        starts = {str(user): start_time(user, proc)}
+        if starts[str(user)] is not None:
+            break
+    else:
         raise ValueError(f"process {user} of the sandbox is gone (has it ended?)")
     ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -1337,6 +1340,7 @@ def add(record, value, read_only=False, out=print, runner=run_helper, finder=fin
         else:
             why = "another workspace holds that name now"
         out(f"  after a restart it is at {WORKSPACES_DIR}/{elsewhere} ({why})")
+    module("intro").refreshed(record, out)  # /sandbox/session/INTRO.md names it (a run with an intro)
     return entry["sandbox"]
 
 
@@ -1532,6 +1536,7 @@ def remove(record, value, force=False, out=print, runner=run_helper, finder=find
     out(f"removed {entry['sandbox']} ({shown(entry.get('remote') or entry['host'])}) from {shown(record.get('run'))}"
         f"{' and from the session options' if kept else ''}; what the agent may still hold in a namespace of its own "
         "(a copy no table shows) only a restart takes away for sure")
+    module("intro").refreshed(record, out)
 
 
 def listing(record):

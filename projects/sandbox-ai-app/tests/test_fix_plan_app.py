@@ -110,6 +110,45 @@ def test_one_question_for_everything_then_fixed_there_and_the_start_goes_on(on_l
     assert not [text for title, text, _ in widgets.SHOWN if title == "Not started"], widgets.SHOWN
 
 
+ANDROID = fix("toolchain", "android-sdk", "the toolchain android-sdk is not in the store",
+              "accept the Android Software Development Kit License Agreement and build it here from Google's downloads",
+              [["sandbox-ai", "toolchain", "add", "android-sdk", "--accept-android-sdk-license"]],
+              security="by this you accept the Android Software Development Kit License Agreement "
+                       "(https://developer.android.com/studio/terms)", choice="license:toolchain:android-sdk",
+              terms="android-sdk-license")
+
+
+def test_a_fix_that_accepts_a_license_is_asked_on_its_own_and_never_done_by_fix_all(on_lab, planned, monkeypatch):
+    """The toolchain android-sdk (2026-11-24) is built on the host from Google's downloads, under their license: the
+    launcher's fix carries the option that accepts it. "Fix all" does the rest; the license is its own question."""
+    shown = ready(on_lab, planned)
+    planned.plan = [dict(GO), dict(ANDROID)]
+    answer(planned, monkeypatch)
+    licenses = []
+    monkeypatch.setattr(prerequisites, "accept_license",
+                        lambda parent, what, terms=None, text=None: licenses.append((what, text)) or False)
+    shown.start()
+    (text, keys), = asked(planned)
+    assert "toolchain go" in text and "android-sdk" not in text, "no row of the question Fix all answers"
+    assert licenses == [("the toolchain android-sdk is not in the store", ANDROID["security"])]
+    assert ran(planned) == [("lab", "toolchain", "add", "go")] and shown.started == []
+    said = "\n".join(text for title, text, _ in widgets.SHOWN if title == "Not started")
+    assert "the toolchain android-sdk is not in the store: not done" in said
+    # Accepted: its command, with the option, runs there and the start goes on.
+    monkeypatch.setattr(prerequisites, "accept_license", lambda parent, what, terms=None, text=None: True)
+    planned.plan = [dict(ANDROID)]
+    shown.start()
+    assert ran(planned)[-1] == ("lab", "toolchain", "add", "android-sdk", "--accept-android-sdk-license")
+    assert len(shown.started) == 1
+
+
+def test_a_hosts_plan_cannot_hide_a_license_in_an_ordinary_fix():
+    hidden = {key: value for key, value in ANDROID.items() if key not in ("terms", "choice")}
+    plan = backend.checked_fix_plan(json.dumps({"fixes": [hidden, dict(GO), dict(ANDROID)], "questions": "all",
+                                                "mode": "medium"}))
+    assert [item["terms"] for item in plan["fixes"]] == ["license", "", "android-sdk-license"]
+
+
 def test_cancel_runs_nothing_and_says_what_is_missing_with_its_command(on_lab, planned, monkeypatch):
     shown = ready(on_lab, planned)
     planned.plan = [dict(IMAGE), dict(GO)]

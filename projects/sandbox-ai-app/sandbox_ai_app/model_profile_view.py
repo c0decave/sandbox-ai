@@ -1,5 +1,5 @@
 """The "What we know" box (Qt): what sandbox-ai's research knows of a model in an agent, beside the model profile on
-the Board (the LLM part's and the agent's properties) and on the Start page.
+the Board (the LLM part's and the agent's properties) and on the Board page.
 
 User: "please also add a box to the app with agent + harness what we know and what we dont with short bullet points
 and what is working and what not." model_profile.knowledge() gives the words; this box shows them compactly: a title

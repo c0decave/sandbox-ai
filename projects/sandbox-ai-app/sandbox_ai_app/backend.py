@@ -108,7 +108,8 @@ GROUPS = {
     "Git": ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins",
             "--token-proxy", "--git-credentials"],
     "Agent": ["--model", "--effort", "--show-thinking", "--preset", "--preset-value", "--dangerously-skip-permissions", "--mcp", "--mcp-limits", "--mcp-mount", "--mcp-env", "--service", "--helper", "--with", "--kit", "--kit-dir", "--no-default-kit",
-              "--no-memory", "--no-plugins", "--local-config", "--env", "--secret-env", "--api-key", "--publish",
+              "--no-memory", "--no-plugins", "--intro", "--no-intro", "--local-config", "--env", "--secret-env",
+              "--api-key", "--publish",
               "--hermes-enable", "--qwen-enable", "--goose-enable", "--openhands-enable", "--nanobot-enable", "--letta-enable",
               "--opencode2-enable",
               "--pi-enable"],
@@ -600,7 +601,7 @@ class SandboxAI:
         for action in self.parser_actions():
             if not action.option_strings or action.help == argparse.SUPPRESS:
                 continue
-            long = next((o for o in action.option_strings if o.startswith("--")), None)
+            long = long_name(action)
             if long is None or long in HIDDEN:
                 continue
             short = next((o for o in action.option_strings if not o.startswith("--")), "")
@@ -613,7 +614,7 @@ class SandboxAI:
         what a preset may name without being "unknown" (presets.from_document). Only --help and --version left out."""
         result = []
         for action in self.parser_actions():
-            long = next((o for o in action.option_strings if o.startswith("--")), None)
+            long = long_name(action)
             if long is None or long in ("--help", "--version"):
                 continue
             short = next((o for o in action.option_strings if not o.startswith("--")), "")
@@ -726,7 +727,7 @@ class SandboxAI:
 
     def board_bundle_supported(self):
         """Whether this sandbox-ai has `sandbox-ai board export|import` (a board or session as one file); looked up
-        once (the Sandboxes page asks at every change of the selection)."""
+        once (the Sessions page asks at every change of the selection)."""
         known = self.__dict__.get("_bundle_supported")
         if known is None:
             known = self.__dict__["_bundle_supported"] = (self.directory / "board_bundle.py").is_file()
@@ -782,7 +783,7 @@ class SandboxAI:
 
     def session_start(self, ident):
         """(agent, launcher options, agent arguments) session IDENT was created with, as session_ids last read them
-        (the Start page shows them for its project), or None."""
+        (the Board page shows them for its project), or None."""
         return self.__dict__.get("_session_starts", {}).get(ident)
 
     def session_exit(self, ident):
@@ -800,9 +801,10 @@ class SandboxAI:
         return list(self.__dict__.get("_session_servers", {}).get(ident, []))
 
     def mcp_servers(self):
-        """[(name, status, what)] of the defined MCP servers."""
+        """[(name, status, what)] of the defined MCP servers (Burp: its mode and edition, burp_text)."""
         mcp = self.module("mcp")
-        return [(name, mcp.status(name), d["image"] if "image" in d else " ".join(d.get("command", [])))
+        return [(name, mcp.status(name), burp_text(d) if is_burp(d) else
+                 d["image"] if "image" in d else " ".join(d.get("command", [])))
                 for name, d in sorted(mcp.definitions().items())]
 
     def mcp_serving(self):
@@ -848,8 +850,10 @@ class SandboxAI:
         return budget.start_report(model, list(servers or []), project, definitions, table)
 
     def mcp_catalog(self):
-        """([(prefix, entry)], problems) of the MCP catalogs."""
-        return self.module("mcp").catalog_entries()
+        """([(prefix, entry)], problems) of the MCP catalogs (an entry's network as MCP_NETWORKS has it)."""
+        entries, problems = self.module("mcp").catalog_entries()
+        return [(prefix, {**entry, "network": mcp_network(entry["network"])} if isinstance(entry, dict) and isinstance(
+            entry.get("network"), str) else entry) for prefix, entry in entries], problems
 
     def user_images(self, host="local"):
         """[{name, kind, image, ref, digest, user, ports, os, unchecked, used_by, base_problem ...}] of your images
@@ -1159,7 +1163,7 @@ class SandboxAI:
     def bridges(self, include_all=False):
         """[{id, state, a, b, a_run, b_run, a_to_b, b_to_a, observer_actions, ask, until, calls, warnings, reason}] of
         `sandbox-ai bridge list --json` (ALL: ended ones too), read from its files with sandbox-ai's own module (no
-        process, no Podman: the Sandboxes page reads them with every look); [] with a sandbox-ai that has none."""
+        process, no Podman: the Sessions page reads them with every look); [] with a sandbox-ai that has none."""
         if not self.bridge_supported():
             return []
         rows = self.module("bridge").listing(include_all)
@@ -1487,11 +1491,15 @@ class SandboxAI:
             raise ValueError("not a list of toolchains")
         return [row for row in data if isinstance(row, dict) and valid_toolchain(row.get("name"))]
 
-    def toolchain_add(self, name, host="local"):
-        """`sandbox-ai toolchain add NAME` on HOST: from the signed catalog into its store (a download)."""
+    def toolchain_add(self, name, host="local", accept=None):
+        """`sandbox-ai toolchain add NAME` on HOST: from the signed catalog into its store (a download). ACCEPT: the
+        option that accepts the license of one that is built there from its publisher's downloads (a catalog row's
+        "terms" "option": --accept-android-sdk-license) - given only after the human said yes to that license."""
         if not valid_toolchain(name):
             return 2, "", "invalid toolchain"
-        return self.host_run(host, "toolchain", "add", name, timeout=3600)
+        if accept is not None and accept not in LICENSE_OPTIONS:
+            return 2, "", "invalid license option"
+        return self.host_run(host, "toolchain", "add", name, *([accept] if accept else []), timeout=3600)
 
     def toolchain_attach(self, run, name, host="local", offline=False):
         """`sandbox-ai toolchain attach RUN NAME` on HOST: mounted read-only into the running sandbox."""
@@ -1758,7 +1766,7 @@ class SandboxAI:
             run = f"mcp-{name}" if f"mcp-{name}" in runs else by_pid.get(state.get("pid")) if state.get("pid") else None
             record = dict(runs.get(run, {})) if run else {}
             used.add(run)
-            # Whom it was started for (mcp.json, since 0.1.78): the Sandboxes page shows it below that start
+            # Whom it was started for (mcp.json, since 0.1.78): the Sessions page shows it below that start
             # (start_tree.owners); "owner_recorded": the key is there (None: started on its own).
             record.update({"started_for": state.get("started_for"), "owner_recorded": "started_for" in state})
             found.append(Instance("mcp", f"mcp:{name}", name, run=run, mcp=name, project=record.get("workspace", ""),
@@ -1797,7 +1805,7 @@ class SandboxAI:
 
     def add_team_leads(self, found):
         """The members of a team (sandbox-ai team: a start that reaches the board team-NAME) learn their lead's
-        start ("lead" in their record, as sandbox-ai list --json says it): the Sandboxes page shows them below it,
+        start ("lead" in their record, as sandbox-ai list --json says it): the Sessions page shows them below it,
         and they open no tab of their own. Read from the team's record; nothing for the lead itself, or when there
         is no record (an older sandbox-ai, a damaged one)."""
         leads = {}
@@ -2784,7 +2792,7 @@ class SandboxAI:
 
     def host_instances(self, name, timeout=60):
         """The starts on host NAME (`sandbox-ai list --json` there, over SSH) as [Instance] with HOST set: what the
-        Sandboxes page lists beside this account's own."""
+        Sessions page lists beside this account's own."""
         return [i for i in (listed_instance(name, entry) for entry in self.host_json(name, "list", "--json",
                                                                                   timeout=timeout)) if i is not None]
 
@@ -3651,6 +3659,12 @@ class SandboxAI:
                 why = self.module("storage").check_value(key, value)
                 if why:
                     raise ValueError(why)
+        elif key == "agent_intro":
+            # Settings > New projects: Tell the agent what its sandbox has (intro.py; the default: true)
+            if "agent_intro" not in getattr(self.launcher, "DEFAULTS_KEYS", ()):
+                raise ValueError("this sandbox-ai has no default agent_intro yet; update it")
+            if value is not None and value is not False:
+                raise ValueError("agent_intro is false, or unset (the agent is told: the default)")
         elif key == "fix_questions":
             # What a start lacks: one question for everything, or one per fix (fixes.QUESTIONS).
             if not self.fix_questions_known():
@@ -4394,7 +4408,7 @@ class SandboxAI:
                      "--secret-env", "--api-key", "--git-token-secret")
 
     def host_start_choices(self, host):
-        """({option: [name]}, {option: problem}) of what HOST has for the Start page's choosers: --vpn its VPN profiles
+        """({option: [name]}, {option: problem}) of what HOST has for the Board page's choosers: --vpn its VPN profiles
         (vpn list --json), --kit its kits that are named (kits list --json), --identity its identities (identities
         list --json), --mcp its MCP servers (mcp list --json), --image-variant its image variants and --image the
         agents' images (images --json, read once), --service your images (images list; this machine: their record),
@@ -5082,9 +5096,11 @@ class SandboxAI:
             if not isinstance(entry, dict) or not re.fullmatch(MCP_NAME, str(entry.get("name") or "")):
                 continue
             serves = entry.get("serves") if isinstance(entry.get("serves"), list) else []
+            definition = entry.get("definition") if isinstance(entry.get("definition"), dict) else {}
             rows.append((entry["name"], printable(str(entry.get("status") or ""))[:20],
                          printable(", ".join(str(s) for s in serves))[:300],
-                         printable(str(entry.get("image") or entry.get("command") or ""))[:300],
+                         printable(burp_text(definition) if is_burp(definition) else
+                                   str(entry.get("image") or entry.get("command") or ""))[:300],
                          origin_text(entry) if "catalog" in entry else ""))
         return rows
 
@@ -5117,10 +5133,24 @@ class SandboxAI:
             newer = newer_shown(entry.get("newer"))
             if problem or below or newer:
                 found[entry["name"]] = {"problem": {k: printable_text(str(problem.get(k) or ""))[:600]
-                                                    for k in ("time", "what", "why", "fix")} if problem else None,
+                                                    for k in ("time", "what", "why", "fix", "log")} if problem else None,
                                         "below": {printable(str(k))[:20]: printable(str(v))[:20] for k, v in below.items()},
                                         "newer": newer}
         return found
+
+    def host_burp_extension(self, host, name):
+        """`sandbox-ai mcp burp extension --as NAME --json` on HOST: {"path", "sha256", "image"} of the extension jar
+        written there for your own Burp; ValueError with what it said when it failed."""
+        if not re.fullmatch(MCP_NAME, str(name)):
+            raise ValueError("not an MCP server's name")
+        status, out, err = self.host_run(host, "mcp", "burp", "extension", "--as", str(name), "--json", timeout=600)
+        try:
+            found = json.loads(out)
+        except (ValueError, RecursionError):
+            found = None
+        if status != 0 or not isinstance(found, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(found.get("sha256"))):
+            raise ValueError(printable_text((err or out).strip()[-1500:] or f"exit status {status}"))
+        return {key: printable(str(found.get(key) or ""))[:500] for key in ("path", "sha256", "image")}
 
     def host_mcp_update(self, host, names, unsigned=False):
         """`sandbox-ai mcp update NAMES --yes --json` on HOST (no names: every server of its own from a catalog), asked
@@ -5138,6 +5168,33 @@ class SandboxAI:
         if status != 0 or not isinstance(result, dict):
             raise ValueError(printable_text((err or out).strip()[-1500:] or f"exit status {status}"))
         return result
+
+    def host_mcp_check(self, host, names=()):
+        """`sandbox-ai mcp check NAMES --json` on HOST (no names: --all): each server started as a start starts it,
+        MCP initialize and tools/list, stopped again. [{"server", "result": "ok" | "failed" | "skipped", "tools",
+        "seconds", "reason", "fix", "note", "log"}] (texts printable, bounded); ValueError when it gave no rows."""
+        names = [str(name) for name in names]
+        if not all(re.fullmatch(MCP_NAME, name) for name in names):
+            raise ValueError("not an MCP server's name")
+        status, out, err = self.host_run(host, "mcp", "check", *(names or ["--all"]), "--json",
+                                         timeout=60 + 200 * max(len(names), 1) if names else 3600)
+        try:
+            rows = json.loads(out)
+        except (ValueError, RecursionError):
+            rows = None
+        if not isinstance(rows, list):
+            raise ValueError(printable_text((err or out).strip()[-1500:] or f"exit status {status}"))
+        found = []
+        for row in rows:
+            if not isinstance(row, dict) or not re.fullmatch(MCP_NAME, str(row.get("server") or "")):
+                continue
+            result = row.get("result") if row.get("result") in ("ok", "failed", "skipped") else "failed"
+            found.append({"server": row["server"], "result": result,
+                          "tools": row.get("tools") if isinstance(row.get("tools"), int) else None,
+                          "seconds": row.get("seconds") if isinstance(row.get("seconds"), (int, float)) else None,
+                          **{key: printable_text(str(row.get(key) or ""))[:1500] or None
+                             for key in ("reason", "fix", "note", "log")}})
+        return found
 
     def host_mcp_list(self, name):
         """[{"name", "status", "limits", "instances", "kind", "own", "definition", "builtin_defaults", ...}] of the MCP
@@ -5192,7 +5249,7 @@ class SandboxAI:
                 continue
             network, _, hosts = match["network"].partition(" ")
             found.append((match["prefix"], {
-                "name": match["name"], "network": printable(network), "hosts": printable(hosts).split(),
+                "name": match["name"], "network": mcp_network(printable(network)), "hosts": printable(hosts).split(),
                 "title": printable(match["title"]), "digest": None if match["unpublished"] else "published",
                 "_signature": {"state": {"signed": "good", "SIGNATURE BAD": "bad"}.get(match["signature"], "unsigned")},
                 "_listed": True, "_catalog_name": self.catalog_name(match["prefix"], catalogs)}))
@@ -5226,7 +5283,7 @@ class SandboxAI:
             if isinstance(item.get("limits"), dict) else {}
         signature = {"good": "good", "bad": "bad"}.get(str(item.get("signature")), "unsigned")
         entry = {"name": str(item["name"]), "title": text(item.get("title")),
-                 "description": text(item.get("description"), 1000), "network": text(item.get("network") or "none", 20),
+                 "description": text(item.get("description"), 1000), "network": mcp_network(text(item.get("network") or "none", 20)),
                  "hosts": [text(h, 260) for h in item.get("hosts") or [] if isinstance(h, str)][:32],
                  "digest": "published" if item.get("published") else None, "_signature": {"state": signature},
                  "env": env, "mounts": mounts,
@@ -5814,6 +5871,22 @@ class DeviceScanMissing(ValueError):
 USB_DEVICE = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # devices.SELECTOR
 
 
+# The options that accept a license for the human (sandbox-ai's toolchain_recipes.TERMS): only these are ever handed
+# on from a host's answer (a catalog row, a template's row), and only after the human's yes.
+LICENSE_OPTIONS = frozenset({"--accept-android-sdk-license"})
+
+
+def license_terms(row):
+    """{"id", "title", "by", "url", "option"} of the license a host's row (a toolchain of the catalog, one of
+    sandbox-ai's own Containerfiles) says its downloads are under, or None: none, or not one this app knows how to
+    accept (its option is none of LICENSE_OPTIONS)."""
+    terms = row.get("terms") if isinstance(row, dict) else None
+    if not isinstance(terms, dict) or terms.get("option") not in LICENSE_OPTIONS or \
+            not all(isinstance(terms.get(key), str) and terms[key] for key in ("title", "by", "url")):
+        return None
+    return {key: str(terms.get(key) or "")[:200] for key in ("id", "title", "by", "url", "option")}
+
+
 def valid_toolchain(value):
     """A toolchain's name as sandbox-ai takes it: NAME or NAME@VERSION (toolchains.spec)."""
     return isinstance(value, str) and bool(re.fullmatch(r"[a-z][a-z0-9-]{0,31}(?:@[0-9A-Za-z][0-9A-Za-z.+_-]{0,63})?",
@@ -6029,7 +6102,7 @@ NEEDS_CONFIRM = {
     "notify-add": "a phone channel sends that host's questions and alarms - the kind, the run's name, a short what and, "
                   "with the detail full, destinations and paths - to the service it names",
     "notify-remove": "removing a phone channel: its questions and alarms no longer reach you there",
-    # sandbox-ai schedule (the Sandboxes page's Schedules; the web interface's Starts page)
+    # sandbox-ai schedule (the Sessions page's Schedules; the web interface's Starts page)
     "schedule-add": "a schedule starts that agent on that host by itself, on its timetable or trigger, under the "
                     "rules of a normal start; its questions are answered as its ask mode says (off: refused)",
     "schedule-remove": "removing a schedule: it starts nothing any more, and without keep_history its runs' "
@@ -6985,7 +7058,7 @@ FIX_VERDICTS = ("offered", "manual", "refused")
 
 def checked_fix_plan(text):
     """`AGENT ... --fix-plan`'s JSON checked: {"fixes": [{id, kind, name, missing, title, commands, command, duration,
-    unsigned, security, terminal, needed, verdict, why}], "questions": all|each, "mode"}. Every text one printable
+    unsigned, security, terminal, needed, terms, verdict, why}], "questions": all|each, "mode"}. Every text one printable
     line of bounded length; a fix whose commands are not all `sandbox-ai COMMAND ...` with a command of FIX_COMMANDS
     is never "offered" here (it is shown as manual, with its commands as text). ValueError when it is no plan."""
     from .files import printable
@@ -7029,6 +7102,11 @@ def checked_fix_plan(text):
                       "unsigned": item.get("unsigned") is True, "security": line(item.get("security")),
                       "terminal": item.get("terminal") is True, "needed": item.get("needed") is not False,
                       "options": change, "choice": line(item.get("choice"), 200), "start": line(item.get("start"), 2000),
+                      # A fix that accepts a license for the human (fixes.py "terms": the toolchain android-sdk, built
+                      # there from Google's downloads): asked on its own, never done by "Fix all" - also where a
+                      # host's plan does not say so but its command carries the option that accepts.
+                      "terms": line(item.get("terms"), 60) or ("license" if any(
+                          word in LICENSE_OPTIONS for command in commands for word in command) else ""),
                       "verdict": verdict, "why": why})
     return {"fixes": fixes, "questions": plan.get("questions") if plan.get("questions") in ("all", "each") else "all",
             "mode": line(plan.get("mode"), 40)}
@@ -7156,6 +7234,13 @@ def argv_from_values(options, values):
         if option.long in values:
             argv += option.tokens(values[option.long])
     return argv
+
+
+def long_name(action):
+    """The long name of a launcher option the app keys it by: its last one - the name saved option lists, the launcher's
+    canonical_options and older hosts know (--allow-net, --allow: --allow), else None."""
+    names = [o for o in action.option_strings if o.startswith("--")]
+    return names[-1] if names else None
 
 
 def canonical_of(sai):
@@ -8719,7 +8804,21 @@ def catalog_options(catalogs):
 
 # An MCP server's network (sandbox-ai mcp add|set --network) and how the app names it: the internet without your local
 # network, only the hosts its catalog entry declares, the internet and your network (asked first: mcp-lan), nothing.
-MCP_NETWORKS = ("full", "allowlist", "lan", "none")
+MCP_NETWORKS = ("full", "allowlist", "lan", "none")  # as every sandbox-ai's mcp add/set --network takes them
+# Shown in the agents' words (sandbox-ai 2026-11-24: offline, egress-all, allowlist, lan); a host or catalog that
+# says them so is read as the same (mcp_network), and what the app sends stays the older word every host knows.
+MCP_NETWORK_WORDS = {"none": "offline", "full": "egress-all", "allowlist": "allowlist", "lan": "lan"}
+
+
+def mcp_network(value):
+    """VALUE (an MCP server's network, in either words) as MCP_NETWORKS has it: offline: none, egress-all: full."""
+    aliases = {word: stored for stored, word in MCP_NETWORK_WORDS.items()}
+    return aliases.get(value, value) if isinstance(value, str) else value
+
+
+def mcp_network_word(value):
+    """VALUE (an MCP server's network, in either words) in the agents' words."""
+    return MCP_NETWORK_WORDS.get(mcp_network(value), value) if isinstance(value, str) else value
 
 
 MCP_DEFAULT_FOLDER = "default"  # --mount TARGET=default: the folder's default (sandbox-ai's mcp.DEFAULT_HOST)
@@ -8754,8 +8853,9 @@ def mcp_add_args(entry, name_as=None, mounts=(), env=(), network=None, memory=No
     for variable in env:
         args.append(f"--env={env_spec(variable)}")  # NAME, NAME=VALUE or NAME@SECRET
     if network:
+        network = mcp_network(network)
         if network not in MCP_NETWORKS:
-            raise ValueError("the network is none, full, allowlist or lan")
+            raise ValueError("the network is offline, egress-all, allowlist or lan")
         args.append(f"--network={network}")
     if memory:
         if not re.fullmatch(SIZE, str(memory)):
@@ -8834,9 +8934,10 @@ def mcp_set_args(name, stop=False, **changes):
                 raise ValueError(f"{key}: not a value of its kind ({value[:40]})")
             args.append(f"--{key}={value}")
     if "network" in changes:
-        if changes["network"] not in MCP_NETWORKS:
-            raise ValueError("the network is none, full, allowlist or lan")
-        args.append(f"--network={changes['network']}")
+        network = mcp_network(changes["network"])
+        if network not in MCP_NETWORKS:
+            raise ValueError("the network is offline, egress-all, allowlist or lan")
+        args.append(f"--network={network}")
     if "mounts" in changes:
         if not changes["mounts"]:
             args.append("--no-mounts")
@@ -8867,6 +8968,26 @@ def mcp_set_args(name, stop=False, **changes):
 # signature that does not verify is a different refusal, never offered to be taken anyway.
 MCP_UNSIGNED_HINT = "--unsigned adds it anyway"
 MCP_UNSIGNED_SOURCE = re.compile(r"\((?P<catalog>(?:https://|/)\S+?)\.sig cannot be read\)")
+
+
+def is_burp(definition):
+    """Whether DEFINITION is the catalog's Burp (sandbox-ai's burp.py: "burp" with its mode)."""
+    return isinstance(definition, dict) and isinstance(definition.get("burp"), dict) and \
+        definition["burp"].get("mode") in ("host", "container")
+
+
+def burp_text(definition):
+    """What the MCP page and the board show of a Burp server: its edition and mode, where it is reached (host mode)
+    or which jar runs (container mode) - "Burp Suite Professional, host mode (127.0.0.1:9876)"."""
+    from .i18n import tr  # (no Qt)
+    record = definition["burp"]
+    edition = {"community": "Community", "professional": "Professional"}.get(record.get("edition"))
+    title = tr("Burp Suite {edition}", edition=edition) if edition else tr("Burp Suite (edition not known yet)")
+    if record.get("mode") == "container":
+        jar = record.get("jar") if isinstance(record.get("jar"), dict) else {}
+        return tr("{title}, container mode ({jar})", title=title, jar=printable(str(jar.get("name") or "?"))[:120])
+    where = str(definition.get("endpoint") or "http://127.0.0.1:9876/mcp").split("//", 1)[-1].split("/", 1)[0]
+    return tr("{title}, host mode ({where})", title=title, where=printable(where)[:80])
 
 
 def origin_text(origin):

@@ -1,5 +1,5 @@
-"""--ask in words: the Start page's chooser, the Board's approvals part, the beginner guide, the project trust question
-and the Sandboxes page. on asks you (the default), off refuses without asking, allow asks nothing and allows every
+"""--ask in words: the Board page's chooser, the Board's approvals part, the beginner guide, the project trust question
+and the Sessions page. on asks you (the default), off refuses without asking, allow asks nothing and allows every
 question at once (sandbox-ai 0.1.80 and later), marked with a warning. The value stays the launcher's own (on, off,
 allow); only what is shown is worded. The web page shows the same words (sandbox/web/app.js, ASK_LABELS)."""
 from __future__ import annotations

@@ -458,7 +458,7 @@ class TeamPage(QWidget):
 
     def host_changed(self):
         """Another host: the teams of the one before go at once (Talk to the lead, Stop and Delete never name a team
-        of one host on another), and its answers still on their way are dropped. Hidden (the Sandboxes page's host,
+        of one host on another), and its answers still on their way are dropped. Hidden (the Sessions page's host,
         given as it is about to be shown): read by its show, once."""
         self.token += 1
         self.show_token += 1

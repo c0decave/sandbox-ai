@@ -1,6 +1,6 @@
 """What belongs to a start is shown with it (user report: MCP servers started with an agent stood on their own in the
 list, as if they belonged to no agent), and a start opens one tab, not one per part (user report: every MCP server
-of a start opened a tab of its own). start_tree.owners decides; the Sandboxes page, the Terminals page's Sessions
+of a start opened a tab of its own). start_tree.owners decides; the Sessions page, the Terminals page's Sessions
 and the tabs follow it. Offscreen, against fake records."""
 import json
 import os
@@ -96,7 +96,7 @@ def test_a_team_stands_below_its_lead_and_a_helper_below_whom_it_helps():
     assert start_tree.owners([a, b]) == {}, "a circle: each stands on its own"
 
 
-# -- the Sandboxes page --
+# -- the Sessions page --
 
 
 def tree_item(page, host, ident=""):

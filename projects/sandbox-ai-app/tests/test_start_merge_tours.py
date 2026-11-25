@@ -53,7 +53,7 @@ def test_the_guided_tour_has_a_step_for_each_view_and_names_the_switch(window, q
             finally:
                 i18n.set_language("en")
             assert title and text and try_
-            assert "Start" in title or "Start" in text, (page, language)
+            assert "Board" in title and "Start" not in title, (page, language)  # (the page is Board since 2026-11-24)
             assert ("Expert" in text or "Experte" in text) and "Board" in text, (page, language)
         assert i18n.TEXTS[step.text]["de"] != step.text and i18n.TEXTS[step.try_]["de"] != step.try_
     window.start_tour(index=[step.page for step in guide.TOUR].index("launch"))
@@ -71,7 +71,7 @@ def test_the_tours_of_both_views_show_the_switch_and_what_is_new(window):
         targets = [step.target for step in tours.AREA_TOURS[page]]
         assert "view_switch" in targets and "start_controls" in targets and "dry_button" in targets, page
         first = tours.AREA_TOURS[page][0]
-        assert "Start page" in first.text.en and "Seite Start" in first.text.de
+        assert "Board page" in first.text.en and "Seite Board" in first.text.de
         assert "Expert" in first.text.en and "Experte" in first.text.de
     assert {"preview", "line_note", "undo_redo"} <= {step.target for step in tours.AREA_TOURS["launch"]}
     assert any(step.page == "board" and step.target == "view_switch" for step in tours.TASK_TOURS["first-start"].steps)

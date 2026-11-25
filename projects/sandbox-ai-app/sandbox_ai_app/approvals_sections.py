@@ -1,6 +1,6 @@
 """The Approvals page's parts besides the open questions: which sandbox it is about and how that one runs
-(ContextHeader), what it refused and why, with what may be done about it (BlockedSection), and what it may reach now
-beyond its start options (AllowedSection).
+(ContextHeader), what it refused and why, with what may be done about it (BlockedSection), and everything it may reach
+now - what its start opened, each with its source, and what was allowed during the run (AllowedSection).
 
 The page follows the active tab (its run, its session's run, or the newest run of its project); the header's box
 chooses another running sandbox, or all of them. Everything is read in threads, bounded (sandbox-ai's
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBox
 from . import applog
 from . import theme
 from .files import printable, printable_text
-from .i18n import tr
+from .i18n import N_, tr
 from .widgets import (
     ask_first, background, compact_combo, confirm, explanation, fill, flow, list_menu, listing, on_screen, plain_label,
     row_key, selected_rows, set_enabled, table, warn,
@@ -81,10 +81,10 @@ def why_text(entry):
     if kind == "policy":
         return tr("The administrator's policy refuses it. Only your administrator can change that.")
     if kind == "cut":
-        return tr("The kill switch cuts it. What you allow meanwhile stays cut until the cut is lifted (Sandboxes › "
+        return tr("The kill switch cuts it. What you allow meanwhile stays cut until the cut is lifted (Sessions › "
                   "Kill switch).")
     if kind == "blocked":
-        return tr("You blocked it always for this project (Remembered › Forget lifts it).")
+        return tr("You blocked it always for this project (Inspection › Remembered › Forget lifts it).")
     if kind == "taint":
         return tr("Untrusted content entered the run, and the rules for tainted runs hold. `sandbox-ai net untaint` "
                   "takes that back, if you trust what entered.")
@@ -152,7 +152,7 @@ class ContextHeader(QWidget):
         super().__init__()
         self.sai, self.seconds = sai, seconds
         self.runs, self.active = {}, None
-        # The running starts of the hosts of sandbox-ai hosts (as the Sandboxes page last read them): {"HOST:NAME":
+        # The running starts of the hosts of sandbox-ai hosts (as the Sessions page last read them): {"HOST:NAME":
         # {"host", "name", "agent", "workspace"}} - chosen one at a time, read and changed there over SSH.
         self.remote = {}
         layout = QVBoxLayout(self)
@@ -212,6 +212,20 @@ class ContextHeader(QWidget):
             return False
         self.remote = remote
         self.fill()
+        return True
+
+    def choose(self, host, name):
+        """Show NAME of HOST (Sessions › What it may reach…): this machine's run, or a start of another host (listed
+        now when the last read of that host's starts did not have it yet)."""
+        key = name if host == LOCAL else f"{host}:{name}"
+        if host != LOCAL and key not in self.remote:
+            self.remote[key] = {"host": host, "name": name}
+            self.fill()
+        index = self.choice.findData(key)
+        if index < 0:
+            return False
+        self.choice.setCurrentIndex(index)
+        self.show_state()
         return True
 
     def run(self):
@@ -337,7 +351,8 @@ class BlockedSection(QWidget):
         self.allow_run = QPushButton(tr("Allow for this run"))
         self.allow_run.setToolTip(tr("The sandbox may do it until it ends: a destination is opened, a request or tool "
                                      "call no longer asked"))
-        self.allow_always = QPushButton(tr("Allow always…"))
+        # (the label of this scope everywhere: the questions' buttons say it so; "Always allow" there is for the run)
+        self.allow_always = QPushButton(tr("Always, also for later sessions…"))
         self.allow_always.setToolTip(tr("Kept for this project: a destination in its .sandbox-ai.json, a request as an "
                                         "exception in a ruleset of yours (shown before it is written)"))
         self.ask_again = QPushButton(tr("Ask again"))
@@ -628,9 +643,47 @@ class BlockedSection(QWidget):
             return False
 
 
+# What a start opened, by the source sandbox-ai names (net show --json "started": agent_sandbox.reach), and the kind.
+REACH_SOURCES = {"provider": N_("the agent's provider"), "frontier": N_("--frontier"), "profile": N_("the profile"),
+                 "project": N_("the project file"), "option": N_("the start's own options"),
+                 "approved": N_("approved always"), "toolchain": N_("a toolchain's registries"),
+                 "git-login": N_("a Git login"), "api-key": N_("an API key"), "publish": N_("a publish login"),
+                 "llm": N_("--llm"), "feature": N_("an agent feature"), "policy": N_("the administrator's policy")}
+REACH_KINDS = {"preset": N_("HTTPS (port 443)"), "https": N_("HTTPS (port 443)"), "wildcard": N_("host wildcard"),
+               "tcp": N_("TCP port"), "network": N_("every port and protocol"), "host-port": N_("a port of this computer"),
+               "dns": N_("DNS (lookups)"), "everything": N_("every destination (--egress-all-allow)"),
+               "nothing": N_("no network (--offline)")}
+REACH_HOLDS = {"every start of the project": N_("every start of the project")}
+
+
+def started_rows(shown):
+    """The rows of what its start opened (SHOWN["started"], of runs whose sandbox-ai records it): destination, names,
+    kind, why (its source) and how long it holds; never revoked from here (they are its start's: its options or its
+    project file)."""
+    rows = []
+    for entry in shown.get("started") if isinstance(shown.get("started"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        what = str(entry.get("what") or "")
+        hosts = [str(h) for h in entry.get("hosts") or [] if isinstance(h, str)]
+        source = entry.get("source")
+        why = tr(REACH_SOURCES[source]) if source in REACH_SOURCES else str(source or "")
+        if entry.get("detail"):
+            why += f" ({entry['detail']})"
+        holds = entry.get("scope")
+        rows.append({"destination": ", ".join(hosts) if hosts else what,
+                     "names": "" if source == "provider" or not hosts else what,
+                     "kind": tr(REACH_KINDS[entry.get("kind")]) if entry.get("kind") in REACH_KINDS else
+                     str(entry.get("kind") or ""), "why": why,
+                     "holds": tr(REACH_HOLDS[holds]) if holds in REACH_HOLDS else str(holds) if holds else
+                     tr("this start"), "revoke": None, "start": True})
+    return rows
+
+
 class AllowedSection(QWidget):
-    """What the sandbox shown may reach beyond its start options: what was allowed during the run (sandbox-ai net
-    allow, this page, answers for the run or always), from `sandbox-ai net show --json`; Revoke takes it back."""
+    """Everything the sandbox shown may reach now, and why: what its start opened, each with its source and how long it
+    holds (net show's "started"), and what was allowed during the run (sandbox-ai net allow, this page, answers for the
+    run or always), from `sandbox-ai net show --json`; Revoke takes back what was allowed during the run."""
     counted = Signal(int)
 
     def __init__(self, sai, header):
@@ -639,30 +692,48 @@ class AllowedSection(QWidget):
         self.rows, self.reading, self.generation = [], None, 0
         self.rows_run = None  # the run the rows are of (the header may show another one while it is read)
         layout = QVBoxLayout(self)
-        top = QHBoxLayout()
         self.revoke = QPushButton(tr("Revoke…"))
         self.revoke.setAccessibleName(tr("Revoke"))
         self.revoke.setToolTip(tr("The sandbox may no longer reach it (a connection open already stays until it ends)"))
         self.revoke.clicked.connect(self.revoke_selected)
+        # What Sessions › What it may reach… offered in a window of its own until 2026-11-24 (one view now, user's
+        # proposal E): Untaint…, Keep for later starts… (everything: also what approvals opened once or for the run)
+        # and the plain text of `sandbox-ai net show` to copy.
+        self.untaint = QPushButton(tr("Untaint…"))
+        self.untaint.setAccessibleName(tr("Untaint"))
+        self.untaint.clicked.connect(lambda _=False: self.untaint_run())
+        self.keep = QPushButton(tr("Keep for later starts…"))
+        self.keep.setToolTip(tr("sandbox-ai net show --keep: the names and addresses you allowed (or approved "
+                                "always), wildcards, networks, DNS, host ports, devices and workspaces added go "
+                                "into the project's trusted .sandbox-ai.json; no Git logins"))
+        self.keep.clicked.connect(lambda _=False: self.keep_run(False))
+        self.keep_all = QPushButton(tr("Keep everything for later starts…"))
+        self.keep_all.setToolTip(tr("sandbox-ai net show --keep-all: also what approvals opened once or for the run"))
+        self.keep_all.clicked.connect(lambda _=False: self.keep_run(True))
+        self.copy = QPushButton(tr("Copy as text"))
+        self.copy.setAccessibleName(tr("Copy what it may reach as text"))
+        self.copy.setToolTip(tr("The whole list as sandbox-ai net show prints it, to the clipboard"))
+        self.copy.clicked.connect(lambda _=False: self.copy_text())
         refresh = QPushButton(tr("Refresh"))
         refresh.setAccessibleName(tr("Refresh what it may reach"))
         refresh.clicked.connect(lambda: self.refresh())
-        self.summary = plain_label(role="secondary")
-        top.addWidget(self.revoke)
-        top.addWidget(refresh)
-        top.addStretch()
-        layout.addLayout(top)
+        self.summary = plain_label(role="secondary", selectable=True)
+        layout.addWidget(flow(self.revoke, self.untaint, self.keep, self.keep_all, self.copy, refresh))
         layout.addWidget(self.summary)
-        self.table = table([tr("Destination"), tr("Names"), tr("Kind")], multi=True, stretch=1, compact=(0, 2))
+        self.table = table([tr("Destination"), tr("Names"), tr("Kind"), tr("Why"), tr("Holds for")], multi=True,
+                           stretch=1, compact=(0, 2))
         self.table.setAccessibleName(tr("Allowed now"))
         self.table.itemSelectionChanged.connect(self.update_buttons)
-        list_menu(self.table, lambda: [self.revoke, None, refresh])
+        list_menu(self.table, lambda: [self.revoke, None, self.untaint, self.keep, self.keep_all, None, self.copy,
+                                       refresh])
         layout.addWidget(self.table, 1)
-        layout.addWidget(explanation(tr("Listed: what was allowed while it runs (on this page, with sandbox-ai net "
-                                        "allow, or by an answer). What its start options allow is on the Board "
-                                        "(Network); what is kept for the project, under Remembered.")))
+        layout.addWidget(explanation(tr("Everything it may reach now. Why says where each comes from: its start "
+                                        "(provider, options, project file, approvals kept always) or this run "
+                                        "(Allow…, an answer). Revoke takes back what this run added; Keep for later "
+                                        "starts writes it into the project file.")))
         self.message = plain_label(selectable=True, log="approvals")
         layout.addWidget(self.message)
+        self.taint = None  # the run's taint as net show says it ({"tainted", "since", "source"}), None: not said
         self.update_buttons()
 
     def refresh(self):
@@ -686,6 +757,7 @@ class AllowedSection(QWidget):
         self.reading = None
         self.rows_run = run if result is not None and error is None and result[0] == 0 else None
         run_shown = self.header.run()
+        self.taint = None
         if result is None and error is None:
             self.rows = []
             self.summary.setText(tr("Choose one running sandbox above to see what it may reach.") if run_shown == ALL
@@ -699,12 +771,18 @@ class AllowedSection(QWidget):
             except (ValueError, RecursionError):
                 shown = {}
             self.rows = allowed_rows(shown)
-            self.summary.setText(tr("{count} destinations allowed during this run", count=len(self.rows)) + (
+            added = len(self.rows)
+            self.rows += started_rows(shown)
+            self.taint = shown.get("taint") if isinstance(shown.get("taint"), dict) else None
+            self.summary.setText(tr("{count} destinations allowed during this run", count=added) + (
+                ", " + tr("{count} from its start", count=len(self.rows) - added) if len(self.rows) > added else "") + (
                 "  " + tr("(the kill switch cuts them now: {mode})", mode=printable(shown["cut"]))
-                if shown.get("cut") else ""))
+                if shown.get("cut") else "") + taint_line(self.taint))
         # A row's key is its kind and destination: an HTTPS address without names and a network allowed on every
         # port read the same (as may a DNS server), and one key for both selected - and revoked - the two at once.
-        fill(self.table, [[printable(r["destination"]), printable(r["names"]), r["kind"]] for r in self.rows],
+        fill(self.table, [[printable(r["destination"]), printable(r["names"]), r["kind"],
+                           printable(r.get("why") or tr("allowed during this run")),
+                           printable(r.get("holds") or tr("until it ends"))] for r in self.rows],
              keys=[row_identity(r) for r in self.rows])
         self.counted.emit(len(self.rows))
         self.update_buttons()
@@ -715,6 +793,93 @@ class AllowedSection(QWidget):
 
     def update_buttons(self):
         set_enabled(self.revoke, bool(self.selected()), tr("Choose what to revoke first."))
+        one = None if self.rows_run not in (None, ALL) else tr("Choose one running sandbox above first.")
+        for button in (self.keep, self.keep_all, self.copy):
+            set_enabled(button, one is None, one)
+        tainted = isinstance(self.taint, dict) and bool(self.taint.get("tainted"))
+        why = one or (None if tainted else tr("It is not tainted: no untrusted content entered it (or its taint was "
+                                               "taken back)."))
+        set_enabled(self.untaint, why is None, why)
+        if why is None:
+            self.untaint.setToolTip(tr("Take back the run's taint (sandbox-ai net untaint): only once you checked "
+                                       "the untrusted content that entered it"))
+
+    def target(self):
+        """(host, name) of the run the rows were read of, or None."""
+        run = self.rows_run
+        if run in (None, ALL):
+            return None
+        record = self.header.remote.get(run)
+        return (record["host"], record["name"]) if record else (LOCAL, run)
+
+    def run_command(self, *argv, done, timeout=90):
+        """`sandbox-ai ARGV` for the run shown, on its host (this machine: sandbox-ai's own call)."""
+        target = self.target()
+        if target is None:
+            return
+        if target[0] == LOCAL:
+            background(self.sai.call, *argv, timeout=timeout, work=True, done=done)
+        else:
+            background(self.sai.host_run, target[0], *argv, timeout=timeout, work=True, done=done)
+
+    def on_host(self, text):
+        target = self.target()
+        return tr("On {host}: {text}", host=printable(target[0]), text=text) if target and target[0] != LOCAL else text
+
+    def untaint_run(self):
+        """`sandbox-ai net untaint RUN` (on its host): the rules for tainted runs no longer hold - asked first."""
+        target = self.target()
+        if target is None:
+            return
+        run = target[1]
+        if not ask_first(self, "net-untaint", tr("Untaint {run}", run=printable(run)), self.on_host(tr(
+                "Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may "
+                "reach, what is asked) no longer hold until such content enters it again. Only when you checked what "
+                "came in.", run=printable(run))), tr("Untaint")):
+            return
+        self.message.setText(tr("Working…"))
+        self.run_command("net", "untaint", run, done=lambda result, error: self.done(result, error))
+
+    def keep_run(self, every):
+        """`sandbox-ai net show RUN --keep` (EVERY: --keep-all) on its host: what the run was given goes into its
+        project's .sandbox-ai.json, for every later start of that project - asked first."""
+        target = self.target()
+        if target is None:
+            return
+        host, run = target
+        text = tr("Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) "
+                  "in its project's .sandbox-ai.json? Every later start of that project gets it.", run=printable(run))
+        if every:
+            text += " " + tr("Also what approvals opened once or for the run.")
+        if not ask_first(self, "net-keep", tr("Keep for later starts: {run}", run=printable(run)), self.on_host(text),
+                         tr("Keep")):
+            return
+        self.message.setText(tr("Working…"))
+        background(self.sai.net_keep, host, run, every, timeout=120, work=True,
+                   done=lambda result, error: self.done(result, error))
+
+    def copy_text(self):
+        """The plain text of `sandbox-ai net show RUN` (on its host) to the clipboard."""
+        target = self.target()
+        if target is None:
+            return
+
+        def copied(result, error):
+            status, out, err = result if error is None else (1, "", str(error))
+            if status != 0:
+                self.message.setText(tr("Not copied: {error}", error=printable_text((err or out).strip())))
+                return
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(out)
+            self.message.setText(tr("Copied: what {run} may reach, as sandbox-ai net show prints it.",
+                                    run=printable(target[1])))
+        self.run_command("net", "show", target[1], done=copied, timeout=60)
+
+    def done(self, result, error):
+        status, out, err = result if error is None else (1, "", str(error))
+        self.message.setText(printable_text((out or "").strip())[-400:] or tr("Done.") if status == 0 else
+                             tr("Not done: {error}", error=printable_text((err or out).strip())[-400:]))
+        self.refresh()
 
     def revoke_selected(self):
         # The run the rows were read of: another sandbox chosen above while its rows are read still shows these.
@@ -747,9 +912,19 @@ class AllowedSection(QWidget):
         self.refresh()
 
 
+def taint_line(taint):
+    """What net show says of the run's taint, for the summary ("" when not said or not tainted)."""
+    if not isinstance(taint, dict) or not taint.get("tainted"):
+        return ""
+    source = taint.get("source") if isinstance(taint.get("source"), dict) else {}
+    return "  " + tr("Untrusted content: tainted since {since} by {what}", since=printable(taint.get("since") or "?"),
+                     what=printable(source.get("what") or "?"))
+
+
 def row_identity(row):
-    """The key of a row of AllowedSection (allowed_rows): its kind and its destination."""
-    return (row["kind"], row["destination"])
+    """The key of a row of AllowedSection (allowed_rows, started_rows): its kind and its destination (marked for one of
+    its start's)."""
+    return ("start", row["kind"], row["destination"]) if row.get("start") else (row["kind"], row["destination"])
 
 
 def allowed_rows(shown):

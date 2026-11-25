@@ -19,7 +19,7 @@ project file's "mcp_servers", later ones overriding earlier ones:
 A server can also be a container image from an MCP catalog (sandbox-ai-mcp, axross-mcp-hub):
 `sandbox-ai mcp add NAME` checks the entry, pulls the image by digest and writes
 
-  {"NAME": {"image": "ghcr.io/...@sha256:...", "network": "none" | "full" | "allowlist" | "lan",
+  {"NAME": {"image": "ghcr.io/...@sha256:...", "network": "none" | "full" | "allowlist" | "lan",  (offline, egress-all)
             "hosts": ["NAME:PORT"], "allow_private": ["CIDR"], "allow_tcp": ["ADDRESS:PORT"],
             "mounts": [{"target": "/work", "host": "/abs/path", "mode": "ro"}],
             "env": ["VARIABLE"], "memory": "512m", "cpus": 2, "pids": 128, "description": "...",
@@ -38,8 +38,8 @@ secret named; `mcp add/set --env NAME`, `--env NAME=VALUE`, `--env NAME@SECRET`,
 
 Such a server runs per connection as `podman run --rm -i` with no capabilities, a read-only root
 and only the network and folders the definition names; agents reach it the same way. A network is the internet, never
-your local network ("full"), only the hosts of its catalog entry ("allowlist"), or your network too ("lan", your
-choice): nftables rules in its network namespace, loaded before it runs (mcp_egress.py). With "vpn" (a server with
+your local network ("full", shown and given as egress-all), only the hosts of its catalog entry ("allowlist"), your
+network too ("lan", your choice), or none ("none": offline): nftables rules in its network namespace, loaded before it runs (mcp_egress.py). With "vpn" (a server with
 network only) its containers join the network namespace of a VPN container (sandbox-ai vpn), whose kill switch
 lets nothing out but through the tunnel; a server with a command takes --vpn PROFILE in its options. Every
 server's network is decided in server_network and proven after its start (verify_network; each connection of an
@@ -80,11 +80,14 @@ import errno
 import fcntl
 import hashlib
 import importlib.util
+import io
 import ipaddress
 import json
 import os
 from pathlib import Path
+import queue
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -118,7 +121,11 @@ READY_TIMEOUT = 120
 KEYS = {"command", "options", "agent", "workspace", "description", "tool_timeout"}
 IMAGE_KEYS = {"image", "network", "mounts", "env", "memory", "cpus", "pids", "tmp", "description", "source", "vpn",
               "signed_by", "rootfs", "catalog", "env_optional", "env_values", "env_secrets", "tool_timeout", "pid1",
-              "hosts", "allow_private", "allow_tcp", "built", "tmp_exec"}
+              "hosts", "allow_private", "allow_tcp", "built", "tmp_exec", "endpoint", "burp"}
+# "endpoint": an MCP server over Streamable HTTP on this host's loopback (http://127.0.0.1:PORT/PATH) that the relay
+# reaches from the host, mcp_http.py for each connection, instead of a container of the image - Burp's MCP extension
+# in your own Burp (burp.py's host mode); network none, no folders, no variables, no VPN. "burp": what `mcp add burp`
+# chose (burp.py: mode host or container, edition, the jar).
 # "built": an image built on this host from a catalog entry's reviewed source (mcp add --build: mcp_build.py), never
 # signed - {"commit", "repository", "path", "archive_sha256", "at"}; its "signed_by" is null.
 BUILT_KEYS = ("commit", "repository", "path", "archive_sha256", "at")
@@ -129,8 +136,31 @@ BUILT_KEYS = ("commit", "repository", "path", "archive_sha256", "at")
 #   allowlist  only "hosts" (NAME:PORT, its catalog entry's), pinned when each connection begins; no DNS of its own
 #   lan        the internet and your local network (a choice of yours, said with a warning); never the metadata service
 # "allow_private" (networks) and "allow_tcp" (ADDRESS:PORT) open a part of your network to a full or allowlist server.
-NETWORKS = ("none", "full", "allowlist", "lan")
-NETWORK_LABELS = {"none": "none", "full": "internet (no LAN)", "allowlist": "only its hosts", "lan": "internet + LAN"}
+NETWORKS = ("none", "full", "allowlist", "lan")  # as definitions and catalogs store them (older sandbox-ai reads these)
+# In the agents' words (2026-11-24: --offline, --egress-all-allow), shown and offered everywhere; the stored words
+# none and full stay accepted (network_value), from the command line, a catalog and a definition alike.
+NETWORK_WORDS = {"none": "offline", "full": "egress-all", "allowlist": "allowlist", "lan": "lan"}
+NETWORK_ALIASES = {word: stored for stored, word in NETWORK_WORDS.items() if word != stored}
+NETWORK_LABELS = {"none": "offline", "full": "egress-all (the internet, not your LAN)", "allowlist": "allowlist",
+                  "lan": "lan (the internet and your LAN)"}
+NETWORK_CHOICES_TEXT = "offline, egress-all, allowlist or lan"
+
+
+def network_value(word):
+    """The stored network of WORD (offline: none, egress-all: full; the stored words as they are)."""
+    return NETWORK_ALIASES.get(word, word) if isinstance(word, str) else word
+
+
+def network_word(network):
+    """NETWORK (as stored) in the words shown: none: offline, full: egress-all."""
+    return NETWORK_WORDS.get(network, network) if isinstance(network, str) else network
+
+
+class NetworkChoices(tuple):
+    """--network's choices: the new words are offered (--help, completion, an error), the stored ones taken too."""
+
+    def __contains__(self, value):
+        return network_value(value) in NETWORKS
 EGRESS_LIST_LIMIT = 32  # networks or addresses a server's allow_private or allow_tcp names
 HOSTS_LIMIT = 64
 # "pid1": "server" - the server's own process is PID 1 of its container (Podman without --init) or Bubblewrap sandbox
@@ -257,6 +287,8 @@ def validated_image(definition, where):
         rootfs_module().validated(definition["rootfs"], where)
         if definition.get("vpn"):
             raise ValueError(f"{where}: a VPN is for the Podman form of a server (drop rootfs or vpn)")
+    if definition.get("network") in NETWORK_ALIASES:  # written in the new words: stored as before
+        definition = {**definition, "network": network_value(definition["network"])}
     check_egress(definition, where)
     mounts = definition.get("mounts", [])
     if not isinstance(mounts, list) or len(mounts) > 8:
@@ -302,7 +334,18 @@ def validated_image(definition, where):
         if not isinstance(definition["vpn"], str) or not re.fullmatch(launcher().VPN_PROFILE_NAME, definition["vpn"]):
             raise ValueError(f"{where}: vpn must name a VPN profile (sandbox-ai vpn list)")
         if definition.get("network", "none") == "none":
-            raise ValueError(f"{where}: a VPN needs network full (without network nothing would use it)")
+            raise ValueError(f"{where}: a VPN needs network egress-all (without network nothing would use it)")
+    if "endpoint" in definition:
+        try:
+            burp_module().http_module().checked_url(definition["endpoint"])
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from None
+        if definition.get("network", "none") != "none" or definition.get("mounts") or variables_of(definition) or \
+                any(key in definition for key in ("hosts", "allow_private", "allow_tcp", "vpn", "pid1", "tmp_exec")):
+            raise ValueError(f"{where}: a server reached at its endpoint runs no container: network none, no folders, "
+                             "variables, hosts or VPN")
+    if "burp" in definition:
+        burp_module().checked_record(definition["burp"], definition, where)
     return definition
 
 
@@ -403,7 +446,7 @@ def check_egress(definition, where):
     reach, checked; ValueError otherwise."""
     network = definition.get("network", "none")
     if network not in NETWORKS:
-        raise ValueError(f"{where}: network must be none, full, allowlist or lan")
+        raise ValueError(f"{where}: network must be {NETWORK_CHOICES_TEXT}")
     if network == "allowlist":
         checked_hosts(definition.get("hosts"), where)
     elif "hosts" in definition:
@@ -427,12 +470,13 @@ class ListAppend(argparse._AppendAction):
 
 
 def network_label(definition):
-    """An image server's network for people: "internet (no LAN)", "only its hosts (A:443, ...)", "internet + LAN",
-    "none", and the parts of your network opened to it."""
-    network = definition.get("network", "none")
+    """An image server's network for people, in the agents' words: "egress-all (the internet, not your LAN)",
+    "allowlist (only A:443, ...)", "lan (the internet and your LAN)", "offline", and the parts of your network opened
+    to it."""
+    network = network_value(definition.get("network", "none"))
     label = NETWORK_LABELS.get(network, str(network))
     if network == "allowlist":
-        label += f" ({', '.join(definition.get('hosts') or [])})"
+        label += f" (only {', '.join(definition.get('hosts') or [])})"
     opened = [*definition.get("allow_private", []), *definition.get("allow_tcp", [])]
     return label + (f" + {', '.join(opened)}" if opened and network != "none" else "")
 
@@ -445,7 +489,7 @@ def egress_note(name, definition, entry=None):
     opened = [*definition.get("allow_private", []), *definition.get("allow_tcp", [])]
     if network == "lan":
         return (f"MCP server {name} reaches your local network and this host (--network lan); only the clouds' metadata "
-                f"service is refused. Back to the internet alone: sandbox-ai mcp set {name} --network full")
+                f"service is refused. Back to the internet alone: sandbox-ai mcp set {name} --network egress-all")
     if network != "none" and opened:
         return (f"MCP server {name} reaches {', '.join(opened)} of your network (--allow-private/--allow-tcp); the "
                 "rest of it stays closed")
@@ -811,7 +855,8 @@ SECRET_WORDS = frozenset({"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE",
 SECRET_ENDINGS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "APIKEY")
 SECRET_PAIRS = frozenset({("API", "KEY"), ("PRIVATE", "KEY"), ("ACCESS", "KEY"), ("AUTH", "KEY"), ("SIGNING", "KEY")})
 # What the server's run sets itself: never a definition's or a start's.
-RESERVED_ENV = frozenset({"SANDBOX_AI_MCP_MOUNTS"})
+RESERVED_ENV = frozenset({"SANDBOX_AI_MCP_MOUNTS", "SANDBOX_AI_MCP_NAME", "SANDBOX_AI_MCP_INSTANCE",
+                          "SANDBOX_AI_MCP_RECORDS"})  # (the bridge's own: bridge_environment)
 ENV_HELP = ("--env NAME (NAME of your environment, else the secret NAME of sandbox-ai secrets), --env NAME=VALUE (a "
             "value that is no secret, kept in the definition) or --env NAME@SECRET (the secret SECRET)")
 _privacy = None
@@ -1224,6 +1269,38 @@ def rootfs_module():
                 spec.loader.exec_module(loaded)
                 _rootfs = loaded
     return _rootfs
+
+
+_burp = None
+
+
+def burp_module():
+    """burp.py (Burp Suite's two modes: its definition, the extension jar, the endpoint check), loaded once."""
+    global _burp
+    if _burp is None:
+        spec = importlib.util.spec_from_file_location("sandbox_ai_burp_for_mcp", HERE / "burp.py")
+        with LOADING:
+            if _burp is None:
+                loaded = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(loaded)
+                _burp = loaded
+    return _burp
+
+
+def endpoint_listening(url, timeout=1.0):
+    """Whether something accepts a TCP connection at the host and port of the endpoint URL (a quick look, no MCP)."""
+    import socket
+    try:
+        host, port, _path = burp_module().http_module().checked_url(url)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def is_endpoint(definition):
+    """Whether DEFINITION is reached at its endpoint from this host (mcp_http.py), not run as a container."""
+    return isinstance(definition, dict) and "endpoint" in definition
 
 
 def entry_rootfs(entry, read=None):
@@ -1748,8 +1825,8 @@ def remember_catalog_env(found):
         kept.update({key: value for key, value in catalog_pin(entry).items() if value})
         # Its network and hosts too: `mcp list` and doctor tell a full server of an allowlist entry to switch to
         # its hosts without reading the catalog (cached_entry).
-        if entry.get("network") in ("none", "full", "allowlist"):
-            kept["network"] = entry["network"]
+        if network_value(entry.get("network")) in ("none", "full", "allowlist"):
+            kept["network"] = network_value(entry["network"])
             kept["hosts"] = []
             for host in [host for host in entry.get("hosts") or [] if isinstance(host, str)][:HOSTS_LIMIT]:
                 with contextlib.suppress(ValueError):
@@ -2045,7 +2122,7 @@ def cached_entry(definition):
     entry = entries.get(source) if isinstance(entries, dict) else None
     if not isinstance(entry, dict) or entry.get("signature") not in ("good", "unsigned") or "network" not in entry:
         return None
-    return {"network": entry["network"], "hosts": list(entry.get("hosts") or [])}
+    return {"network": network_value(entry["network"]), "hosts": list(entry.get("hosts") or [])}
 
 
 def catalog_optional(definition, variable):
@@ -2551,14 +2628,14 @@ def definition_from_entry(entry, mounts=(), env=(), network=None, memory=None, p
         raise ValueError(f"{entry.get('name')}: the catalog has no digest for it yet (not published): sandbox-ai mcp "
                          f"add {entry.get('name')} --build builds it here from its reviewed source and adds it "
                          "unsigned (asked first)")
-    wanted = entry.get("network", "none")
-    if network is None:
-        network = wanted
+    wanted = network_value(entry.get("network", "none"))  # (a catalog in the new words too)
+    network = wanted if network is None else network_value(network)
     if network not in NETWORKS:
-        raise ValueError("--network must be none, full, allowlist or lan")
-    if network == "allowlist" and (entry.get("network") != "allowlist" or not entry.get("hosts")):
+        raise ValueError(f"--network must be {NETWORK_CHOICES_TEXT}")
+    if network == "allowlist" and (wanted != "allowlist" or not entry.get("hosts")):
         raise ValueError(f"{entry.get('name')}: its catalog entry has no hosts to keep it to (network "
-                         f"{wanted}): give --network full (the internet, not your network) or none")
+                         f"{network_word(wanted)}): give --network egress-all (the internet, not your network) or "
+                         "offline")
     limits = {**recommended_limits(entry),
               **checked_limits({key: value for key, value in (("memory", memory), ("cpus", cpus), ("pids", pids),
                                                               ("tmp", tmp)) if value}, "--memory/--cpus/--pids/--tmp")}
@@ -2682,14 +2759,15 @@ def check_pull_room(local, entry):
 
 def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=None, catalogs=None,
         pull=True, fetch=None, out=print, vpn=None, unsigned=False, backend=None, cpus=None, tmp=None,
-        allow_private=(), allow_tcp=(), built=None):
+        allow_private=(), allow_tcp=(), built=None, burp=None, probe_url=None):
     """sandbox-ai mcp add: write the definition of catalog entry NAME into mcp.json, once its catalog's signature
     verified (or UNSIGNED): for Podman its image pulled by digest, for Bubblewrap its rootfs fetched, checked and
     unpacked (BACKEND podman, bwrap or both; default: Podman when it is there or the entry has no rootfs). The limits
     given, else those the entry recommends; a writable folder that is not there yet is created (once all is checked).
     BUILT ({"image", "digest", "record"}: mcp_build.build_and_add, `mcp add --build`): the entry has no image of its
     own, this one was built here from its source - added unsigned ("signed_by": null, "built": RECORD), whatever its
-    catalog's signature says of the entry; nothing is pulled."""
+    catalog's signature says of the entry; nothing is pulled. BURP ({"mode", "url", "jar", "edition"}: --burp-*): the
+    catalog's Burp in host mode (its default) or container mode (burp.py shaped, then after_add)."""
     LOG.info("mcp", f"add asked: {name}" + (f" as {local}" if local else "") + (f", backend {backend}" if backend else ""))
     entries, problems = catalog_entries(catalogs, fetch)
     for problem in problems:
@@ -2716,6 +2794,12 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
                   **signed,
                   **({"catalog": entry["_catalog"]} if isinstance(entry.get("_catalog"), str) else {}),
                   **({"built": dict(built["record"])} if built is not None else {})}
+    if burp is None and str(entry.get("id") or "") == burp_module().SOURCE:
+        burp = {}  # the catalog's Burp: host mode unless container mode is asked for
+    if burp is not None:
+        definition = validated_image(burp_module().shaped(
+            local, definition, burp, entry, out, secret_exists=lambda secret: secret_value(secret) is not None,
+            is_own=is_own_folder), entry["name"])
     if built is not None:
         definition = validated_image(definition, entry["name"])
     if backend in ("bwrap", "both"):
@@ -2738,6 +2822,9 @@ def add(name, local=None, mounts=(), env=(), network=None, memory=None, pids=Non
         check_pull_room(local, entry)
         pull_image(definition["image"], local, out)
     create_mounts(definition, out, local)
+    if "burp" in definition:  # container mode: your jar into its /burp; host mode: the extension jar, the endpoint
+        definition = validated_image(burp_module().after_add(local, definition, out, probe_url=probe_url),
+                                     entry["name"])
     write_definition(local, definition)
     for line in unsigned_note:
         out(line)
@@ -2764,7 +2851,7 @@ def network_said(local, definition, entry=None, given=None):
         lines.append(f"sandbox-ai mcp: {local} reaches only {', '.join(definition.get('hosts', []))} (its catalog "
                      "entry's hosts, nothing else - not your local network, no DNS of its own)")
     elif network == "full":
-        why = "--network full" if given == "full" else "its catalog entry asks for it"
+        why = "--network egress-all" if network_value(given) == "full" else "its catalog entry asks for it"
         lines.append(f"sandbox-ai mcp: {local} reaches the internet, not your local network ({why})")
     note = egress_note(local, definition, entry)
     if note:
@@ -2894,16 +2981,17 @@ def set_definition(name, changes, entry=None, fetch=None, catalogs=None):
             if key in limits:
                 new[key] = cpus_number(limits[key]) if key == "cpus" else limits[key]
     if "network" in changes:
+        changes = {**changes, "network": network_value(changes["network"])}
         if changes["network"] not in NETWORKS:
-            raise ValueError("--network must be none, full, allowlist or lan")
+            raise ValueError(f"--network must be {NETWORK_CHOICES_TEXT}")
         new["network"] = changes["network"]
         new.pop("hosts", None)
         if changes["network"] == "allowlist":
             # Its catalog entry's hosts, as add takes them.
             source = entry or catalog_entry_of(name, old, fetch, catalogs)
-            if source.get("network") != "allowlist" or not source.get("hosts"):
-                raise ValueError(f"MCP server {name}: its catalog entry has no hosts to keep it to: --network full "
-                                 "(the internet, not your network) or none")
+            if network_value(source.get("network")) != "allowlist" or not source.get("hosts"):
+                raise ValueError(f"MCP server {name}: its catalog entry has no hosts to keep it to: --network "
+                                 "egress-all (the internet, not your network) or offline")
             new["hosts"] = [str(host) for host in source["hosts"]]
         if changes["network"] == "none":
             for key in ("allow_private", "allow_tcp"):
@@ -3892,6 +3980,59 @@ def gone_image_fix(name, image, signed=False, project=False, built=False, mode=N
                             "mcp add NAME --build builds one its catalog has no signed image of)")
 
 
+def server_engine(definition, a):
+    """"bwrap" or "podman": how a start A runs the image server DEFINITION - Bubblewrap when its backend is bwrap and
+    the rootfs is there, or when there is only the rootfs."""
+    return "bwrap" if "rootfs" in definition and (getattr(a, "backend", None) == "bwrap" or "image" not in definition) \
+        else "podman"
+
+
+def runnable_problems(name, definition, a, given=None, present=None):
+    """([problem], [fix]) of what would end every connection of the image server NAME (DEFINITION, as the start A runs
+    it; GIVEN: its definition as defined, for whose word its image is) before it could answer: its image not in
+    Podman's store (its containers run with --pull=never; the fix pulls it again by its digest, gone_image_fix), no
+    init for its containers (Podman's --init without the host's catatonit, an image without an init of its own:
+    image_init), its rootfs gone. The checks of a start (start_problems) and of every other way a server is started
+    or reused (ensure_running: mcp start, mcp start --for, mcp attach --live, mcp check) - one that skipped them let
+    each connection end with "ended before it answered"."""
+    present = present or image_present
+    given = definition if given is None else given
+    problems, fixes = [], []
+    if ("image" not in definition and "rootfs" not in definition) or is_endpoint(definition):
+        # (a server reached at its endpoint - Burp in host mode - runs no container: nothing of this applies)
+        return problems, fixes
+    if server_engine(definition, a) == "podman":
+        there = present(definition["image"])
+        if there is False:
+            problems.append(f"MCP server {name}: its image {definition['image']} is not there (its containers are not "
+                            f"pulled at a start): podman pull {definition['image']}, or add it again (sandbox-ai mcp "
+                            "add)")
+            # Signed only as your mcp.json has it from a verified catalog: a project file's server of the name (it
+            # wins over yours) is someone else's word, whatever "signed_by" it claims.
+            project = getattr(a, "project_document", None)
+            named = name in ((project.get("mcp_servers") or {}) if isinstance(project, dict) else {})
+            fixes.append(gone_image_fix(name, definition["image"], signed=origin(name, given)["signed"] is True,
+                                        project=named, built="built" in given, mode=getattr(a, "mode", None)))
+        else:
+            try:  # (Podman's --init needs the host's catatonit: said here, before anything is started)
+                image_init(name, definition)
+            except ValueError as exc:
+                problems.append(str(exc))
+    elif not Path(str(definition["rootfs"].get("path", ""))).is_dir():
+        problems.append(f"MCP server {name}: its rootfs is gone ({definition['rootfs'].get('path')}); add it again: "
+                        "sandbox-ai mcp add ... --backend bwrap")
+    return problems, fixes
+
+
+def refused_with(problems, fixes, about):
+    """The ValueError a start that is refused for PROBLEMS raises, with FIXES (fixes.py) for what offers them
+    (attach_offered, the app's Preparing tab)."""
+    error = ValueError(problems_text(problems, about))
+    if fixes:
+        error.fixes = list(fixes)
+    return error
+
+
 def start_problems(a, names, servers=None, present=None, fixes=None):
     """([problem], {name: instance}, [note]) of the --mcp servers NAMES of the start A, each checked before anything
     is made or started, every problem with its fix and all of them at once (a start used to fail on the first one,
@@ -3948,28 +4089,15 @@ def start_problems(a, names, servers=None, present=None, fixes=None):
             except ValueError as exc:
                 own_problems.append(str(exc))
             own_problems += run_variables(name, definition, notes=notes)[1]
-            engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) \
-                else "podman"
-            if engine == "podman" and present(definition["image"]) is not False:
-                try:  # (Podman's --init needs the host's catatonit: said here, before anything is started)
-                    image_init(name, definition)
-                except ValueError as exc:
-                    own_problems.append(str(exc))
-            if engine == "podman" and present(definition["image"]) is False:
-                own_problems.append(f"MCP server {name}: its image {definition['image']} is not there (its containers "
-                                    f"are not pulled at a start): podman pull {definition['image']}, or add it again "
-                                    f"(sandbox-ai mcp add)")
-                if fixes is not None:  # (what makes it: fixes.py - offered with everything else the start lacks)
-                    # Signed only as your mcp.json has it from a verified catalog: a project file's server of the name
-                    # (it wins over yours) is someone else's word, whatever "signed_by" it claims.
-                    project = getattr(a, "project_document", None)
-                    named = name in ((project.get("mcp_servers") or {}) if isinstance(project, dict) else {})
-                    fixes.append(gone_image_fix(name, definition["image"], signed=origin(name, servers[name])["signed"]
-                                                is True, project=named, built="built" in servers[name],
-                                                mode=getattr(a, "mode", None)))
-            elif engine == "bwrap" and not Path(str(definition["rootfs"].get("path", ""))).is_dir():
-                own_problems.append(f"MCP server {name}: its rootfs is gone ({definition['rootfs'].get('path')}); "
-                                    "add it again: sandbox-ai mcp add ... --backend bwrap")
+            if is_endpoint(definition) and not endpoint_listening(definition["endpoint"]):
+                # Reached at its endpoint from this host (Burp in host mode): no image runs. Your Burp may come up
+                # later - a note, not a problem: the relay connects when the agent does.
+                notes.append(f"MCP server {name}: nothing answers on {definition['endpoint']} yet - start your Burp "
+                             "with the MCP extension enabled (sandbox-ai mcp burp check)")
+            found_problems, found_fixes = runnable_problems(name, definition, a, servers[name], present)
+            own_problems += found_problems
+            if fixes is not None:  # (what makes it: fixes.py - offered with everything else the start lacks)
+                fixes += found_fixes
         agent = definition.get("agent", "codex")
         if "command" in definition and getattr(a, "backend", None) == "podman" and agent in l.AUTH_TARGETS and \
                 not any(str(option).split("=", 1)[0] in ("--image", "--image-variant", "-i", "-iv")
@@ -4176,6 +4304,21 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         raise ValueError(f"MCP server {name} is a container image of a catalog; on macOS such servers are not "
                          "supported yet (their bridge would run on the Mac, out of reach of podman machine's VM). "
                          "A server defined with a command (\"command\" in mcp.json) works.")
+    # What would end each of its connections before the server answers (its image gone, no init for its containers,
+    # its rootfs gone), refused now with the fix - for every way it is started or reused, as a start's own check
+    # refuses it (runnable_problems): a running one too, whose image was removed meanwhile.
+    problems, fixes = runnable_problems(name, definition, a, servers[name])
+    if ("image" in definition or "rootfs" in definition) and plan.get("vpn") and plan.get("reaches") and \
+            not plan.get("lent") and not plan.get("vpn_type"):
+        # Its VPN profile cannot be read (gone, damaged): said now, as a start's own check says it - not as a VPN
+        # container that never comes up. (A command server's launcher refuses it as any start does.)
+        try:
+            launcher().load_vpn_module().load_profile(plan["vpn"])
+        except (OSError, ValueError) as exc:
+            problems.append(f"MCP server {name}: its VPN: {exc}")
+    if problems:
+        LOG.warning("mcp", f"{label}: refused - " + "; ".join(problems))
+        raise refused_with(problems, fixes, f"the MCP server {name}")
     if status(instance) == "running":
         if load_state(instance).get("definition") != digest:
             # Another project's definition of this name: its workspace must not reach this agent. Other rules
@@ -4240,6 +4383,8 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         # there is only the rootfs.
         # (With a VPN the plan has the Podman form only: a VPN is a container's network namespace.)
         engine = "bwrap" if "rootfs" in definition and (a.backend == "bwrap" or "image" not in definition) else "podman"
+        if is_endpoint(definition):
+            engine = "host"  # reached at its endpoint on this host: no container (mcp_http.py below)
         unenforced = unenforced_text(label) if engine == "podman" else None
         if unenforced:  # (said as the agent's own limits are: the human decides whether that is enough)
             LOG.info("mcp", unenforced)
@@ -4252,7 +4397,12 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
                 raise ValueError(f"MCP server {label}: {problem}")
         bridge = [sys.executable, "-I", str(HERE / "runtime.py"), "--internal-mcp-serve", str(sock / "server.sock"),
                   *gateway_arguments(gateway), "--"]
-        if engine == "bwrap":
+        if engine == "host":
+            # Burp's MCP extension in your own Burp (burp.py's host mode): for each connection mcp_http.py on this
+            # host speaks to its endpoint on loopback, behind the relay - the gateway with this start's MCP rules,
+            # the records, the questions. No agent's sandbox reaches the port; this server has no network of its own.
+            cmd = [*bridge, sys.executable, "-I", str(HERE / "mcp_http.py"), definition["endpoint"]]
+        elif engine == "bwrap":
             if plan["vpn"]:
                 raise ValueError(f"MCP server {name}: no VPN under Bubblewrap")  # (server_network refused it before)
             if not Path(definition["rootfs"]["path"]).is_dir():
@@ -4284,6 +4434,10 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
         environment.update(variables)
         # The bridge compares every folder with what was checked here before each connection's container.
         environment["SANDBOX_AI_MCP_MOUNTS"] = json.dumps(mount_records(definition))
+        # What it cannot serve and a server that ended before it answered: said to the agent with the server's name
+        # (sandbox-ai mcp show NAME) and recorded beside the container watch's records (last_problem).
+        environment.update(SANDBOX_AI_MCP_NAME=name, SANDBOX_AI_MCP_INSTANCE=instance,
+                           SANDBOX_AI_MCP_RECORDS=str(directory / WATCH_FILE))
         if plan["vpn"] and plan.get("egress"):
             # Its VPN container loads its egress rules (and pins its hosts through the tunnel); each connection's guard
             # checks them (vpn.mcp_wrapper, vpn.mcp_guard).
@@ -4306,6 +4460,7 @@ def ensure_running_locked(name, a, vpn=None, instance=None, wait=True):
             waited(instance, lambda: wait_for_socket(sock / "server.sock", log, process, name=label), log)
             verified_or_stopped(instance, plan, a)
             form = (f"Bubblewrap, rootfs {definition['rootfs']['sha256'][:12]}" if engine == "bwrap"
+                    else f"reached at {definition['endpoint']} from this host" if engine == "host"
                     else f"container {definition['image']}")
             print(f"agent-sandbox: MCP server {label} started ({form})", file=sys.stderr)
             return "started"
@@ -5212,6 +5367,17 @@ def attach_offered(attach_once, about):
         return attach_once()
 
 
+def intro_refreshed(record, out=print):
+    """The agent's intro (/sandbox/session/INTRO.md) of the running sandbox RECORD written again from what it has now
+    (intro.py: its MCP servers are run.json's); never raises."""
+    with contextlib.suppress(Exception):
+        spec = importlib.util.spec_from_file_location("sandbox_intro_for_mcp", HERE / "intro.py")
+        intro = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(intro)
+        return intro.refreshed(record, out)
+    return False
+
+
 def attach_live(name, start, helper=None, out=print):
     """`sandbox-ai mcp attach NAME START --live` (HELPER: --helper AGENT instead of NAME): the server into the
     running sandbox of START now, without a restart. {"server", "start", "run", "state", "attached": "live" |
@@ -5296,6 +5462,7 @@ def attach_live(name, start, helper=None, out=print):
     LOG.info("mcp", f"attach {helper and 'the helper ' + helper or name} to {entry['name']} --live: "
                     f"{result['attached']}" + ("" if result["kept"] else "; not kept for its later starts"))
     out(result["message"])
+    intro_refreshed(record, out)  # /sandbox/session/INTRO.md names it (a run with an intro)
     return result
 
 
@@ -5366,6 +5533,8 @@ def detach(name, start, helper=None, live=False, out=print):
     LOG.info("mcp", f"detach {helper and 'the helper ' + helper or name} from {entry['name']}"
                     f"{' --live' if live else ''}: {result['detached']}")
     out(result["message"])
+    if live and record:
+        intro_refreshed(record, out)
     return result
 
 
@@ -5414,7 +5583,8 @@ def server_list(served=None):
         problems = [p for p in (last_problem(i) for i in instances(name, include_stopped=True)) if p]
         problem = max(problems, key=lambda p: str(p.get("time") or "")) if problems else None
         found.append({"name": name, "status": "running" if running else "stopped",
-                      "command": (d["image"] if "image" in d else f"rootfs {d['rootfs']['sha256'][:12]}" if "rootfs" in d
+                      "command": (burp_module().label(d) if "burp" in d else
+                                  d["image"] if "image" in d else f"rootfs {d['rootfs']['sha256'][:12]}" if "rootfs" in d
                                   else " ".join(d["command"])) + (f"  (vpn {d['vpn']})" if d.get("vpn") else ""),
                       "serves": served.get(name, []), "limits": defaults, "instances": running,
                       "kind": "image" if "image" in d else "rootfs" if "rootfs" in d else
@@ -5469,9 +5639,213 @@ def show(name, as_json=False, out=print):
     lines += [f"  instance {i['instance']}: " + ", ".join(f"{m.get('target')}={m.get('host')}:{m.get('mode')}"
                                                          for m in i.get("mounts") or [] if isinstance(m, dict))
               for i in found["instances"] if i["instance"] != name and i.get("mounts")]
+    lines.append(f"  log: {state_dir(name) / 'supervisor.log'}")
+    lines += problem_lines(found.get("last_problem"))
     for line in lines:
         out(printable(line))
     return 0
+
+
+def problem_lines(problem):
+    """What `mcp show` says of a server's last failure PROBLEM (last_problem): when, what, why, the fix, its log."""
+    if not isinstance(problem, dict):
+        return []
+    return [f"  last failure ({problem.get('time')}): {problem.get('what')}",
+            f"    why: {problem.get('why')}", f"    fix: {problem.get('fix')}",
+            *([f"    its log: {problem['log']}"] if problem.get("log") else [])]
+
+
+# --- every server checked as a start would start it (sandbox-ai mcp check) ------------------------------------------
+#
+# For each defined server: what a start checks (start_problems), its start as a start makes it (ensure_running: its
+# definition, limits, folder defaults, VPN), then one connection the way an agent's goes (runtime.py's bridge to its
+# socket): MCP initialize and tools/list; then it is stopped again if the check started it. A row per server: ok
+# (its tools, the seconds), or the reason and the fix. scripts/live_gaps.py's mcp-live is the deep check (smoke calls,
+# a second workspace).
+
+CHECK_SECONDS = 120  # how long one server has for its start and its answers to initialize and tools/list
+CHECK_REQUESTS = ({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                              "clientInfo": {"name": "sandbox-ai-mcp-check", "version": "1"}}},
+                  {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                  {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+
+
+def check_workspace():
+    """The workspace of the check's starts (a server bound to the start's workspace needs one): an empty folder of
+    sandbox-ai's state, made 0700."""
+    folder = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "sandbox-ai" / "mcp-check" / \
+        "workspace"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder.resolve()
+
+
+def handshake(sock, timeout=CHECK_SECONDS, popen=subprocess.Popen):
+    """([tool names], None) of the server whose socket is SOCK - one connection through runtime.py's bridge, as an
+    agent's relay makes it: initialize, notifications/initialized, tools/list - or (None, why): the server's own error
+    (the relay's "ended before it answered (...)" with its reason), no answer within TIMEOUT seconds, or none at all."""
+    process = popen([sys.executable, "-I", str(HERE / "runtime.py"), "--internal-mcp-bridge", str(sock)],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    lines, errors = queue.Queue(), []
+
+    def read():
+        with contextlib.suppress(OSError, ValueError):
+            for line in iter(lambda: process.stdout.readline(64 << 20), b""):
+                lines.put(line)
+        lines.put(None)
+    threading.Thread(target=read, daemon=True).start()
+    threading.Thread(target=lambda: errors.append(process.stderr.read(64 << 10)), daemon=True).start()
+    deadline = time.monotonic() + timeout
+
+    def answer(ident):
+        while True:
+            try:
+                line = lines.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                return None, f"no answer within {timeout} s"
+            if line is None:
+                said = launcher().printable(b"".join(errors).decode("utf-8", "replace").strip())[-300:] if errors \
+                    else ""
+                return None, "its connection ended without an answer" + (f" ({said})" if said else "")
+            try:
+                message = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(message, dict):
+                continue
+            if "method" in message and "id" in message:  # a request of the server's (ping, roots/list): answered
+                reply = {"jsonrpc": "2.0", "id": message["id"], **({"result": {}} if message["method"] == "ping" else
+                                                                   {"error": {"code": -32601, "message": "not here"}})}
+                with contextlib.suppress(OSError, ValueError):
+                    process.stdin.write((json.dumps(reply) + "\n").encode())
+                    process.stdin.flush()
+                continue
+            if message.get("id") == ident:
+                if "error" in message:
+                    error = message["error"] if isinstance(message["error"], dict) else {}
+                    text = str(error.get("message") or error)
+                    return None, launcher().printable(text[len("sandbox-ai: "):] if text.startswith("sandbox-ai: ")
+                                                      else text)[:600]
+                return message.get("result"), None
+    try:
+        for request in CHECK_REQUESTS[:1]:
+            process.stdin.write((json.dumps(request) + "\n").encode())
+        process.stdin.flush()
+        _result, why = answer(1)
+        if why:
+            return None, why
+        for request in CHECK_REQUESTS[1:]:
+            process.stdin.write((json.dumps(request) + "\n").encode())
+        process.stdin.flush()
+        result, why = answer(2)
+        if why:
+            return None, f"tools/list: {why}"
+        tools = result.get("tools") if isinstance(result, dict) else None
+        if not isinstance(tools, list):
+            return None, "tools/list: its answer has no list of tools"
+        return [str(tool.get("name")) for tool in tools if isinstance(tool, dict)], None
+    except (OSError, ValueError) as exc:
+        return None, f"its connection failed: {exc}"
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            process.stdin.close()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def fix_text(fixes):
+    """The commands of FIXES (fixes.py), one after the other ("" without any)."""
+    found = []
+    for item in fixes or []:
+        commands = [" ".join(shlex.quote(word) for word in command) for command in item.get("commands") or []]
+        found.append("; ".join(commands) if commands else str(item.get("title") or item.get("why") or ""))
+    return " | ".join(text for text in found if text)
+
+
+def check_server(name, servers, backend="podman", vpn=None, timeout=CHECK_SECONDS, shake=None, out=None):
+    """The check of server NAME (check_servers): {"server", "kind", "result": "ok" | "failed" | "skipped", "tools",
+    "tool_names", "seconds", "instance", "started", "reason", "fix", "log"}."""
+    shake = shake or handshake
+    definition = servers[name]
+    kind = "image" if "image" in definition else "rootfs" if "rootfs" in definition else \
+        "helper" if "helper" in definition else "command"
+    row = {"server": name, "kind": kind, "result": "failed", "tools": None, "tool_names": [], "seconds": 0.0,
+           "instance": name, "started": False, "reason": None, "fix": None, "log": str(state_dir(name) / "supervisor.log"),
+           "note": None}
+    below = below_recommended(definition) if kind in ("image", "rootfs") else {}
+    if below:  # (a server added before its catalog named them: Chromium and the JVMs fail later within the defaults)
+        row["note"] = (f"below the limits its catalog recommends ({limits_text(below)}): sandbox-ai mcp set {name} "
+                       "--recommended")
+    if kind == "helper":
+        return {**row, "result": "skipped", "reason": "a helper is an agent: it runs with the start that names it "
+                                                      "(--helper)"}
+    begun = time.monotonic()
+    a = launcher().parse_args(["codex", "--backend", backend])
+    a.mcp_workspace = str(check_workspace())  # (a server bound to the start's workspace gets the check's own)
+    try:
+        fixes = []
+        problems = [problem for problem in start_problems(a, [name], servers, fixes=fixes)[0]
+                    if not (vpn and problem.startswith(f"MCP server {name}: its VPN: "))]
+        if problems:
+            raise refused_with(problems, fixes, f"the MCP server {name}")
+        outcome = ensure_running(name, a, vpn)
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        reason = str(exc)
+        return {**row, "seconds": round(time.monotonic() - begun, 1), "reason": launcher().printable(reason)[:2000],
+                "fix": fix_text(getattr(exc, "fixes", None)) or ("see the server's log: sandbox-ai mcp show " + name)}
+    instance = (getattr(a, "mcp_instances", None) or {}).get(name, name)
+    row.update(instance=instance, started=outcome == "started", log=str(state_dir(instance) / "supervisor.log"))
+    try:
+        tools, why = shake(launcher().mcp_socket_dir(instance) / "server.sock", timeout)
+    finally:
+        if outcome == "started":  # (one that ran already serves its starts on)
+            with contextlib.redirect_stderr(io.StringIO()):
+                stop(instance)
+            forget_check_folders(name)
+    row["seconds"] = round(time.monotonic() - begun, 1)
+    if why:
+        problem = last_problem(instance)
+        return {**row, "reason": why, "fix": (problem or {}).get("fix") or f"read its log: {row['log']}"}
+    return {**row, "result": "ok", "tools": len(tools), "tool_names": tools[:200]}
+
+
+def forget_check_folders(name):
+    """The own folders the check's workspace gave server NAME (start_folders: its .workspaces/KEY), removed - never
+    through a link."""
+    folder = own_folders_root() / server_of(name) / WORKSPACES_FOLDER / workspace_key(check_workspace())
+    if folder.is_dir() and not folder.is_symlink() and not any(part.is_symlink() for part in folder.parents):
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_servers(names=(), backend="podman", vpn=None, timeout=CHECK_SECONDS, out=print, shake=None):
+    """`sandbox-ai mcp check [NAME...|--all]`: each server (NAMES; none: every defined one) checked as a start starts
+    it (check_server), one after the other; OUT says each as it is done. [row]."""
+    servers = definitions()
+    unknown = [name for name in names if name not in servers]
+    if unknown:
+        raise ValueError(f"Unknown MCP server: {', '.join(unknown)}; defined: {', '.join(sorted(servers)) or 'none'}")
+    rows = []
+    for name in list(dict.fromkeys(names)) or sorted(servers):
+        out(f"sandbox-ai mcp check: {name} ...")
+        row = check_server(name, servers, backend, vpn, timeout, shake)
+        rows.append(row)
+        out("  " + check_line(row))
+    return rows
+
+
+def check_line(row):
+    """One row of `mcp check` as people read it."""
+    printable = launcher().printable
+    note = "\n    " + printable(f"note: {row['note']}") if row.get("note") else ""
+    if row["result"] == "ok":
+        return printable(f"{row['server']}: ok - {row['tools']} tool{'s' if row['tools'] != 1 else ''}, "
+                         f"{row['seconds']:g} s") + note
+    if row["result"] == "skipped":
+        return printable(f"{row['server']}: skipped - {row['reason']}")
+    return printable(f"{row['server']}: FAILED - {row['reason']}") + "\n    " + printable(f"fix: {row['fix']}") + note
 
 
 def catalog_json(prefix, entry):
@@ -5498,7 +5872,7 @@ def catalog_json(prefix, entry):
               and item["target"].startswith("/") and item["target"].isprintable() and len(item["target"]) <= 200]
     return {"entry": f"{shown(prefix)}:{shown(entry.get('name'))}", "prefix": shown(prefix),
             "name": shown(entry.get("name")), "title": shown(entry.get("title", "")),
-            "network": shown(entry.get("network", "none")), "hosts": [shown(host) for host in entry.get("hosts", [])],
+            "network": shown(network_value(entry.get("network", "none"))), "hosts": [shown(host) for host in entry.get("hosts", [])],
             "published": bool(entry.get("digest")), "signature": {"good": "good", "bad": "bad"}.get(signature, "none"),
             # (0.1.232) what it pins (mcp update compares a definition with it) and whether it has a Bubblewrap form
             "digest": catalog_pin(entry)["image"], "bubblewrap": bool(catalog_pin(entry)["rootfs"]),
@@ -5506,7 +5880,9 @@ def catalog_json(prefix, entry):
             "env": variables, "mounts": mounts, "tool_timeout": entry_tool_timeout(entry),
             # (0.1.98) what Add… on another host shows as this machine's does: its description and the limits it
             # recommends (recommended_limits: checked, {} when it names none)
-            "description": shown(entry.get("description") or "", 1000), "limits": recommended_limits(entry)}
+            "description": shown(entry.get("description") or "", 1000), "limits": recommended_limits(entry),
+            # (0.1.249) whether it works behind Tor (mcp-live --mcp-vpn skips one that cannot)
+            "tor": dict(zip(("support", "note"), tor_support({}, entry)))}
 
 
 _copy = None
@@ -5615,7 +5991,48 @@ def build_cli(a, sources):
     return 0
 
 
-def cli(argv):
+def burp_cli(a):
+    """`sandbox-ai mcp burp extension|check [--as NAME] [--json]` (burp.py)."""
+    B = burp_module()
+    definition = definitions().get(a.local)
+    if not B.is_burp(definition):
+        raise ValueError(f"no Burp server {a.local}: sandbox-ai mcp add burp (host mode: your own Burp; --burp-mode "
+                         "container --burp-jar PATH: your jar in the server's container)")
+    record = definition["burp"]
+    if a.burp_command == "extension":
+        written = B.extension(definition)
+        if a.json:
+            print(json.dumps({"name": a.local, **written}, indent=2))
+        else:
+            print(f"{written['path']}\nSHA-256 {written['sha256']} (from {written['image']})\nIn Burp: Extensions, "
+                  "Add, Extension type Java, this file; then its MCP tab, Enabled (Server host 127.0.0.1)")
+        return 0
+    if record["mode"] != "host":
+        text = (f"{a.local} runs Burp Suite {B.edition_title(record.get('edition'))} in its container (container "
+                "mode): its tools answer once Burp started there, for each connection (sandbox-ai mcp start "
+                f"{a.local})")
+        print(json.dumps({"name": a.local, "mode": record["mode"], "edition": record.get("edition"), "ok": None,
+                          "text": text}, indent=2) if a.json else text)
+        return 0
+    url = definition["endpoint"]
+    found = B.probe(url)
+    warning = B.bind_warning(B.http_module().checked_url(url)[1])
+    if found["ok"]:
+        changed = {**definition, "burp": {**record, "edition": found["edition"],
+                                          "checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}
+        if a.local in read_config()[1]:
+            write_definition(a.local, validated_image(changed, a.local))
+    if a.json:
+        print(json.dumps({"name": a.local, "mode": "host", "endpoint": url, **found, "warning": warning}, indent=2))
+    else:
+        print(B.probe_text(url, found))
+        if warning:
+            print(f"warning: {warning}")
+    return 0 if found["ok"] else 1
+
+
+def parser():
+    """The parser of `sandbox-ai mcp` (cli)."""
     parser = argparse.ArgumentParser(prog="sandbox-ai mcp", formatter_class=help_style,
                                      description="Manage local MCP servers that run in their own sandboxes. Agents use "
                                                  "them with --mcp NAME.")
@@ -5672,6 +6089,23 @@ def cli(argv):
     detaching.add_argument("-l", "--live", action="store_true",
                            help="close its relay in the running sandbox now (the agent's connections to it end)")
     detaching.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
+    checking = commands.add_parser(
+        "check", help="Start each server as a start would and ask it for its tools: ok, or why",
+        description="Check MCP servers the way a start uses them: each is started as a start starts it (its "
+                    "definition, limits, folder defaults and VPN; servers bound to the start's workspace get an "
+                    "empty one), answers MCP initialize and tools/list through the same bridge an agent's connection "
+                    "takes, and is stopped again if the check started it. One line per server: ok, or the reason and "
+                    "the fix. The exit status is 1 when one failed.")
+    checking.add_argument("names", nargs="*", metavar="NAME", help="the servers to check (default with --all: every "
+                                                                  "defined one)")
+    checking.add_argument("-a", "--all", action="store_true", help="every defined server")
+    checking.add_argument("-b", "--backend", choices=["podman", "bwrap"], default="podman",
+                          help="the sandbox backend to start them with: podman or bwrap")
+    checking.add_argument("-v", "--vpn", metavar="PROFILE", help="put this VPN (or Tor) profile in front of each "
+                                                                "server that reaches the network")
+    checking.add_argument("-t", "--timeout", type=int, default=CHECK_SECONDS, metavar="SECONDS",
+                          help=f"how long each server has to start and answer (default {CHECK_SECONDS})")
+    checking.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
     showing = commands.add_parser("show", help="One server: what it is, its folders, network, limits, variables")
     showing.add_argument("name")
     showing.add_argument("-j", "--json", action="store_true", help="print the result as JSON (for programs)")
@@ -5689,10 +6123,10 @@ def cli(argv):
                          help="Size of its /tmp, e.g. 1g (memory: at most the memory limit); default: back to 64m")
     setting.add_argument("-R", "--recommended", action="store_true",
                          help="The limits its catalog entry recommends (those given here win)")
-    setting.add_argument("-n", "--network", choices=list(NETWORKS),
-                         help="the network of the server: full (the internet, not your local network), allowlist (only the "
-                              "hosts its catalog entry declares), lan (the internet and your local network: a warning) "
-                              "or none")
+    setting.add_argument("-n", "--network", choices=NetworkChoices(NETWORK_WORDS.values()),
+                         help="the network of the server: egress-all (the internet, not your local network), allowlist "
+                              "(only the hosts its catalog entry declares), lan (the internet and your local network: "
+                              "a warning) or offline; none and full, their older names, are taken too")
     setting.add_argument("-ap", "--allow-private", action=ListAppend, metavar="CIDR",
                          help="A network of yours a full or allowlist server may reach too (192.168.1.0/24; a "
                               "warning), all of them; one or more, separated by commas or spaces; repeatable")
@@ -5762,10 +6196,11 @@ def cli(argv):
                             "(required where the entry requires it, else only where there is one); NAME=VALUE keeps a "
                             "value that is no secret in the definition (ALLOW_PRIVATE_TARGETS=1; never a secret's); "
                             "NAME@SECRET takes the secret SECRET of sandbox-ai secrets; repeatable")
-    added.add_argument("-n", "--network", choices=list(NETWORKS),
-                       help="Override the entry's network: full (the internet, not your local network), allowlist "
-                            "(only the hosts its entry declares: the default of such an entry), lan (the internet "
-                            "and your local network: a warning) or none")
+    added.add_argument("-n", "--network", choices=NetworkChoices(NETWORK_WORDS.values()),
+                       help="Override the entry's network: egress-all (the internet, not your local network), "
+                            "allowlist (only the hosts its entry declares: the default of such an entry), lan (the "
+                            "internet and your local network: a warning) or offline; none and full, their older "
+                            "names, are taken too")
     added.add_argument("-ap", "--allow-private", action=ListAppend, default=[], metavar="CIDR",
                        help="A network of yours it may reach too, e.g. 192.168.1.0/24 (a warning); one or more, "
                             "separated by commas or spaces; repeatable")
@@ -5789,6 +6224,21 @@ def cli(argv):
                             "signature that does not verify is refused anyway")
     added.add_argument("-v", "--vpn", metavar="PROFILE",
                        help="Its network only through this VPN profile, with a kill switch (a server with network)")
+    added.add_argument("--burp-mode", choices=list(burp_module().MODES),
+                       help="The catalog's burp: host (the default: your own Burp, Community or Professional, loads "
+                            "the extension jar - sandbox-ai mcp burp extension - and is reached on 127.0.0.1:9876 from "
+                            "this host, never from an agent's sandbox) or container (your Burp jar runs headless in the "
+                            "server's container: --burp-jar)")
+    added.add_argument("--burp-url", metavar="URL",
+                       help="Host mode: your Burp's MCP endpoint if not http://127.0.0.1:9876/mcp (this host's "
+                            "loopback only)")
+    added.add_argument("--burp-jar", metavar="PATH",
+                       help="Container mode: your Burp jar (Community or Professional, PortSwigger's JAR download; "
+                            "never passed on): linked into the server's own folder, its SHA-256 recorded and checked "
+                            "before every start")
+    added.add_argument("--burp-edition", choices=list(burp_module().EDITIONS),
+                       help="Container mode: the edition of the jar (default: from its name); professional needs your "
+                            "licence key as the secret BURP_LICENSE, activated online once in the container")
     added.add_argument("-B", "--build", action="store_true",
                        help="An entry with no signed image yet (not published): build it here with Podman from its "
                             "reviewed source - the catalog's repository at the catalog's exact commit, servers/NAME, "
@@ -5805,6 +6255,20 @@ def cli(argv):
     added.add_argument("-y", "--yes", action="store_true",
                        help="With --build: build without the question (asked already: give --commit and "
                             "--source-sha256 of what was asked)")
+    burping = commands.add_parser("burp", help="Burp Suite: its extension jar, its endpoint checked",
+                                  description="The catalog's burp (sandbox-ai mcp add burp): host mode reaches the "
+                                              "MCP extension in your own Burp from this host, container mode runs "
+                                              "your Burp jar headless in the server's container.")
+    burp_commands = burping.add_subparsers(dest="burp_command", metavar="COMMAND", required=True)
+    for command, text in (("extension", "write the extension jar of the server's signed image for your Burp (sandbox-ai's "
+                                        "data folder, burp/burp-mcp-all.jar) and show its path and SHA-256"),
+                          ("check", "host mode: does Burp's MCP extension answer on its endpoint, with how many tools, "
+                                    "Community or Professional (kept in the definition); a bind address other than "
+                                    "loopback is warned about")):
+        burp_command = burp_commands.add_parser(command, help=text, description=text[0].upper() + text[1:] + ".")
+        burp_command.add_argument("-a", "--as", dest="local", default="burp", metavar="NAME",
+                                  help="the server's name (default burp)")
+        burp_command.add_argument("-j", "--json", action="store_true", help="the result as JSON")
     exporting = commands.add_parser("export", help="what a server of yours is, for another host (no secret's value)",
                                     description="What the server NAME of your mcp.json is, as another host needs to "
                                                 "know it (mcp import, mcp copy): a catalog server's entry and the "
@@ -5876,7 +6340,11 @@ def cli(argv):
                                               "--copy-image sends); it counts only when Podman then has REF, the "
                                               "server's pinned image.")
     loading.add_argument("ref", metavar="REF", help="REGISTRY/PATH@sha256:DIGEST")
-    a = parser.parse_args(argv)
+    return parser
+
+
+def cli(argv):
+    a = parser().parse_args(argv)
     if a.command == "tools":  # mcp_pins.py, with the same options
         return pins_module().main(list(argv[1:]))
     if a.command in ("export", "import", "copy", "image-load"):
@@ -5892,6 +6360,8 @@ def cli(argv):
         if a.command == "copy":
             return copier.copy_main(a)
         return copier.load_image(a.ref, out=lambda text: print(text, file=sys.stderr))
+    if a.command == "burp":
+        return burp_cli(a)
     if a.command in ("catalog", "add"):
         sources = [(f"c{index}", value) for index, value in enumerate(a.catalog)] or None
     if a.command == "catalog":
@@ -5909,7 +6379,8 @@ def cli(argv):
             state = ("" if entry.get("digest") else "  (not published yet)") + (
                 "  signed" if signature.get("state") == "good" else "  SIGNATURE BAD" if signature.get("state") == "bad"
                 else "  unsigned")
-            network = entry.get("network", "none") + (f" {','.join(entry.get('hosts', []))}" if entry.get("hosts") else "")
+            network = str(network_word(network_value(entry.get("network", "none")))) + (
+                f" {','.join(entry.get('hosts', []))}" if entry.get("hosts") else "")
             # One line per entry, whatever a catalog holds: its texts printable (a newline in an unsigned
             # catalog's title would otherwise forge another, "signed" row for the readers of these lines).
             def shown(text):
@@ -5924,9 +6395,10 @@ def cli(argv):
             if given:
                 raise ValueError(f"{option} is for --build")
         try:
+            given = {"mode": a.burp_mode, "url": a.burp_url, "jar": a.burp_jar, "edition": a.burp_edition}
             add(a.name, a.local, a.mount, a.env, a.network, a.memory, a.pids, sources, pull=not a.no_pull, vpn=a.vpn,
                 unsigned=a.unsigned, backend=a.backend, cpus=a.cpus, tmp=a.tmp, allow_private=a.allow_private,
-                allow_tcp=a.allow_tcp)
+                allow_tcp=a.allow_tcp, burp={k: v for k, v in given.items() if v} if any(given.values()) else None)
         except subprocess.CalledProcessError as exc:
             # Its image could not be pulled (its last lines are said above): nothing is added - a message, never a
             # traceback (the app's Preparing tab shows this).
@@ -5980,7 +6452,8 @@ def cli(argv):
             if e["last_problem"]:
                 problem = e["last_problem"]
                 notes.append(printable(f"{e['name']}: {problem.get('time')}: {problem.get('what')}: {problem.get('why')}"
-                                       f". Fix: {problem.get('fix')}"))
+                                       f". Fix: {problem.get('fix')}" + (f" (its log: {problem['log']})"
+                                                                         if problem.get("log") else "")))
             # Its instances with limits or folders of their own (--mcp-limits, --mcp-mount), below it.
             rows += [[f"  {i['instance']}", i["status"], limits_text(i["limits"]), "-", "",
                       printable(", ".join(f"{m.get('target')}={m.get('host')}:{m.get('mode')}"
@@ -5996,6 +6469,19 @@ def cli(argv):
         return 0
     if a.command == "show":
         return show(a.name, a.json)
+    if a.command == "check":
+        if bool(a.names) == a.all:
+            raise ValueError("give the servers to check (NAME ...) or --all")
+        if not 5 <= a.timeout <= 3600:
+            raise ValueError("--timeout must be 5 to 3600 seconds")
+        say = (lambda text: print(text, file=sys.stderr)) if a.json else print
+        rows = check_servers(a.names, a.backend, a.vpn, a.timeout, out=say)
+        if a.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            failed = [row["server"] for row in rows if row["result"] == "failed"]
+            print(f"{len(rows) - len(failed)} of {len(rows)} ok" + (f"; failed: {', '.join(failed)}" if failed else ""))
+        return 1 if any(row["result"] == "failed" for row in rows) else 0
     if a.command == "start" and a.for_start is None:
         if a.restart or a.json:
             raise ValueError("--restart and --json go with --for START")
@@ -6206,6 +6692,12 @@ class ContainerWatch:
                       "directory (RunRoot, under XDG_RUNTIME_DIR: a tmpfs mostly) - or out of inodes" if full else ""))
             fix = (("free space there (df -h and df -i on those folders; sandbox-ai gc --check shows what sandbox-ai "
                     "can free), then use the server again; ") if full else "") + self.log_fix()
+        elif re.search(r"cgroup|cannot set limits|controller", line, re.IGNORECASE):
+            # Podman (crun) refused a limit this host does not let it set: every connection ends so.
+            why = f"podman could not start its container (exit status {code}): {line}"
+            fix = ("this host does not let rootless Podman set that limit (sandbox-ai doctor shows the cgroup "
+                   "delegation; `loginctl enable-linger` gives a systemd user session); sandbox-ai leaves out the "
+                   "limits it knows are not enforced - check it with sandbox-ai mcp check " + self.server)
         else:
             why = f"it ended with exit status {code}" + (f": {line}" if line else "")
             fix = self.log_fix()
@@ -6341,7 +6833,8 @@ def full_text(exc):
 
 
 def last_problem(instance):
-    """The newest safeguards record of an instance (its state directory's), or None."""
+    """The newest safeguards record of an instance (its state directory's: the container watch's, the bridge's), or
+    None: {time, what, why, fix, log} - LOG the server's log (supervisor.log, where its own error output is)."""
     path = state_dir(instance) / WATCH_FILE
     if not path.is_file():
         return None
@@ -6349,7 +6842,8 @@ def last_problem(instance):
     if not records:
         return None
     entry = records[-1]
-    return {key: entry.get(key) for key in ("time", "what", "why", "fix")}
+    return {**{key: entry.get(key) for key in ("time", "what", "why", "fix")},
+            "log": str(state_dir(instance) / "supervisor.log")}
 
 
 if __name__ == "__main__":

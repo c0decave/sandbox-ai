@@ -1,4 +1,4 @@
-"""New bridge… clicked for real in the app's window, in every state the Sandboxes page can be in (2026-11-22: "when I
+"""New bridge… clicked for real in the app's window, in every state the Sessions page can be in (2026-11-22: "when I
 press New bridge in the app nothing happens"): no session, one, two, sessions only on hosts, a host that is slow or
 answers garbage, the sessions still being read, an error in the click, German, after a page switch, from the right
 click. Each click shows something - the dialog, or a message that says why not, or a line on the page that says what
@@ -326,7 +326,7 @@ def test_the_live_checks_app_driver_makes_the_bridge(real_window, env, monkeypat
     assert added == [["bridge", "add", "guard", "alpha", "--allow", "message", "--ask=first"]]
     assert [step["step"] for step in steps] == ["listed", "dialog", "question"]
     nobody = driver.drive(qapp, real_window, "guard", "nobody", seconds=1)
-    assert nobody["problem"].startswith("the Sandboxes page did not list both sessions")
+    assert nobody["problem"].startswith("the Sessions page did not list both sessions")
 
 
 def test_with_no_bridge_the_right_click_on_its_line_offers_new_bridge(real_window, env, monkeypatch, wait):

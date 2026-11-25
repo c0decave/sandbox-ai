@@ -11,7 +11,7 @@ it was until it is connected) and the remote systems connected with SSH… (besi
 sandbox-ai's hosts (HOST_FOLDER: read with one call per host in a thread, FilesPage.read_host_folders - a host that does
 not answer in time is marked, never waited for), opened over that host's connection in that folder; a heading divides
 each section (this machine's sandboxes, the hosts, each host's sandboxes, the remote systems) once there is more than
-this machine, and "Sandboxes of" (FilesPage.host_box) offers one host's alone - the Sandboxes page's host, followed
+this machine, and "Sandboxes of" (FilesPage.host_box) offers one host's alone - the Sessions page's host, followed
 as the other pages follow it (ui.FOLLOWERS); the hosts file is followed too (follow_hosts). Both panes may show
 remote systems at once - one connection shared when they
 show the same - so copies and moves go every way through the same transfer_items: this machine -> host, host -> this
@@ -2493,7 +2493,19 @@ class FilesPage(QWidget):
             return False
         if host in (None, LOCAL_HOST):
             self.pending_start = None
-            self.refresh_roots(select=real_folder(folder))
+            wanted = real_folder(folder)
+
+            def there():
+                # A folder the sandboxes' list does not name (a session whose record names no workspace, one listed
+                # under another path): opened as it is - never another sandbox's folder, the list's first, instead.
+                # It is added to the list as a folder chosen (Other folder… does the same: the sandbox side, every file
+                # in it an agent's) and shown.
+                shown = self.left.root is not None and real_folder(str(self.left.root.path)) == wanted
+                if not shown and os.path.isdir(wanted):
+                    if not any(real_folder(str(entry[2])) == wanted for entry in self.others):
+                        self.others.append(("other", "", wanted))
+                    self.refresh_roots(select=wanted)
+            self.refresh_roots(select=wanted, then=there)
             return True
         _state, roots, _why = self.host_folders.get(host, (None, [], None))
         if any(root[2] == folder for root in roots):
@@ -2648,7 +2660,7 @@ class FilesPage(QWidget):
         self.host_row.setVisible(bool(names))
 
     def host_filter_changed(self):
-        """The left pane offers the sandboxes of the host chosen (by the human here, or as the Sandboxes page's host:
+        """The left pane offers the sandboxes of the host chosen (by the human here, or as the Sessions page's host:
         HostFollow) - and shows that host's: what it shows stays when it is that host's, else that host's first
         sandbox's folder (this machine's: its first; a host's whose folders are on their way: the host itself until
         they come, then its first)."""

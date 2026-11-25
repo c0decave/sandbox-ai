@@ -32,7 +32,7 @@ PYTHON_COMMANDS = {"claude": ("agent_sandbox.py", "claude"), "codex": ("agent_sa
                    "rules": ("rules_cmd.py",), "cairn": ("cairn_workers.py",),
                    "top": ("monitor.py", "top"), "stats": ("monitor.py", "stats"),
                    "report": ("report.py",), "scan": ("lint.py",), "schedule": ("schedule.py",), "spend": ("spend.py",), "models": ("cloud_models.py",), "artex": ("artex.py",),
-                   "uninstall": ("uninstall.py",)}
+                   "install": ("install.py",), "uninstall": ("uninstall.py",)}
 
 
 # `sandbox-ai --help`: every command of the dispatcher once (tests/test_main_help.py checks it), in Docker's groups.
@@ -65,7 +65,8 @@ HELP = (
         ("logs", "Blocked egress and file access, with suggestions"),
         ("activity", "What the agents did: prompts, tools, files, network"),
         ("login", "Log in inside a sandbox; kept for all sandboxes"),
-        ("build", "Build the agent images and the others a start needs"))),
+        ("build", "Build the agent images and the others a start needs"),
+        ("install", "Images, MCP servers, toolchains: all, nothing or a part"))),
     ("Management Commands", (
         ("approvals", "Answer what running sandboxes ask"),
         ("artex", "ARTEX's console (--artex): its address and password"),

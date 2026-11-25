@@ -1428,6 +1428,42 @@ MCP_EOF_GRACE = 10  # seconds an instance has to exit once its input ended, befo
 MCP_PENDING_LIMIT = 1000  # requests of one connection the server has not answered yet
 MCP_CONNECT_SECONDS = 5  # how long a relay waits for a running server to take a connection (its backlog full)
 MCP_PROBE_SECONDS = 5  # how long a relay waits for a server's lists (its capabilities: McpConnection.handshake)
+MCP_WHY_SECONDS = 8.0  # how long an early end waits for the server's process to exit, to say why it ended
+MCP_REFUSE_SECONDS = 10  # how long a connection that gets no server waits for the request it is answered on
+MCP_REFUSING = 4  # such connections answered at once (more are closed without a word)
+
+
+def mcp_show_hint(name):
+    """"the human sees more: sandbox-ai mcp show NAME" - what an agent tells its human when its server failed (it
+    sees no host log; the human does). NAME: the server's name (an instance's NAME.HASH: its NAME)."""
+    name = str(name or "").partition(".")[0]
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
+        return f"the human sees more: sandbox-ai mcp show {name}"
+    return "the human sees more: sandbox-ai mcp list"
+
+
+def mcp_failure_record(what, why, fix, environ=None):
+    """A failure of the server this bridge serves - a connection it could not give a server, a server that ended
+    before it answered - as a safeguards record in its state directory (SANDBOX_AI_MCP_RECORDS: its safeguards.jsonl,
+    which `mcp list`, `mcp show`, the app's MCP page and doctor read as its last failure). Nothing without it (a
+    command server's bridge inside its sandbox: its launcher's log has it)."""
+    environ = os.environ if environ is None else environ
+    path, instance = environ.get("SANDBOX_AI_MCP_RECORDS"), environ.get("SANDBOX_AI_MCP_INSTANCE") or "?"
+    if not path:
+        return None
+    entry = {"v": 1, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "run": f"mcp-{instance}",
+             "kind": "mcp-server", "level": "error", "what": printable_text(redact_text(what), 300),
+             "why": printable_text(redact_text(why), 300), "fix": printable_text(redact_text(fix), 400),
+             "stays": False, "count": 1, "source": "sandbox-ai", "target": instance.partition(".")[0],
+             "details": {"instance": instance}}
+    with contextlib.suppress(OSError):
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode) and os.fstat(fd).st_size < 16 << 20:
+                os.write(fd, (json.dumps(entry) + "\n").encode())
+        finally:
+            os.close(fd)
+    return entry
 
 
 def relay_server_stderr(stream, out=None, tail=None):
@@ -1455,23 +1491,27 @@ class StderrTail:
         with self.lock:
             self.lines = [*self.lines, text][-self.LINES:]
 
-    def why(self, process, reader=None, wait=2.0):
+    def why(self, process, reader=None, wait=MCP_WHY_SECONDS):
         """"exit status N: ITS LAST LINE" (redacted, printable, bounded) of PROCESS once it ended (waited for WAIT
-        seconds, its stderr READER thread too), "" while it still runs: Podman's own error ("crun: the requested
-        cgroup controller ...", "statfs ...: no such file or directory") or the server's last word."""
+        seconds, its stderr READER thread too): Podman's own error ("crun: the requested cgroup controller ...",
+        "statfs ...: no such file or directory"), the VPN guard's refusal or the server's last word. One that still
+        runs after WAIT (its output closed, but Podman still removes its container, or the VPN guard its own: that
+        took longer than the 2 seconds waited until 0.1.248, and the agent was told no reason at all - the user,
+        2026-11-25, gowitness behind Tor): "its output closed (it is still ending): ITS LAST LINE"."""
         with contextlib.suppress(subprocess.TimeoutExpired, OSError, AttributeError):
             process.wait(timeout=wait)
         if reader is not None:
-            reader.join(wait)
+            reader.join(1.0 if getattr(process, "returncode", None) is None else wait)
         code = getattr(process, "returncode", None)
-        if code is None:
-            return ""
         with self.lock:
             lines = [line.strip() for line in self.lines if line.strip()]
         # Podman's error line where there is one (it comes last but a warning may follow), else the last line.
         line = next((text for text in reversed(lines) if text.startswith(("Error:", "error:", "Error "))),
                     lines[-1] if lines else "")
-        status = f"exit status {code}" if code >= 0 else f"ended by signal {-code}"
+        if code is None:
+            status = "its output closed (it is still ending)"
+        else:
+            status = f"exit status {code}" if code >= 0 else f"ended by signal {-code}"
         if not line:
             return f"{status}, nothing on its error output"
         return f"{status}: {printable_text(redact_text(line), self.SAID)}"
@@ -2126,9 +2166,10 @@ class McpConnection:
              "prompts": (("prompts/list", "prompts"),)}
     ASKED = "sandbox-ai: capabilities"  # in pending: one of the relay's own questions (no method of the protocol)
 
-    def __init__(self, gateway, connection, process, ended=None):
+    def __init__(self, gateway, connection, process, ended=None, name=None):
         self.gateway, self.connection, self.process = gateway, connection, process
         self.ended = ended  # () -> why the server's process ended (StderrTail.why), said with the open requests' error
+        self.name = name or getattr(gateway, "server", None)  # the server's name, for what its human runs (mcp show)
         self.write_lock, self.lock, self.forward_lock = threading.Lock(), threading.Lock(), threading.Lock()
         self.pending = {}  # JSON of a request's id: {"method", "tool", "started"}
         self.client = gateway.client(connection)
@@ -2298,13 +2339,24 @@ class McpConnection:
             with contextlib.suppress(OSError):
                 self.send(held["line"])
         said = "sandbox-ai: the MCP server ended before it answered"
-        if self.ended is not None and any(request["method"] != self.ASKED for request in open_requests.values()):
+        waiting = any(request["method"] != self.ASKED for request in open_requests.values())
+        why = ""
+        if self.ended is not None and waiting:
             # Why it ended (Podman's own line, its exit status): an agent and its human see the reason instead of a
             # server that "ends before the handshake" (the user, 2026-11-23); its supervisor.log has all of it.
             with contextlib.suppress(Exception):
-                why = self.ended()
-                if why:
-                    said += f" ({why})"
+                why = self.ended() or ""
+        elif waiting and isinstance(self.process, McpSocket):
+            # A running server's socket (the run's relay): its bridge on the host answers what it cannot serve with
+            # the reason - an end without one is its bridge's own (it was stopped, it crashed).
+            why = "its bridge on the host closed the connection without an answer: it was stopped or it ended"
+        if waiting:
+            said += (f" ({why})" if why else "") + f"; {mcp_show_hint(self.name)}"
+            if self.ended is not None and not re.match(r"exit status [1-9]|ended by signal", why):
+                # (a non-zero exit is recorded by the container's watch with its fix: mcp.ContainerWatch.ended)
+                mcp_failure_record(f"MCP server {self.name or '?'} ended before it answered",
+                                   why or "no reason was given", "read the server's log: sandbox-ai mcp show "
+                                   f"{str(self.name or 'NAME').partition('.')[0]}")
         for key, request in open_requests.items():
             if request["method"] == self.ASKED:
                 continue  # the relay's own question: no answer the agent waits for
@@ -2653,7 +2705,7 @@ class McpRelays:
         upstream = self.upstream_dir / name / "server.sock"
         spawn = relay.connect if dir_fd is not None else (lambda path=upstream: McpSocket(path))
         thread = threading.Thread(target=mcp_serve, daemon=True, args=(str(directory / "server.sock"), None),
-                                  kwargs={"gateway": gate, "spawn": spawn, "relay": relay})
+                                  kwargs={"gateway": gate, "spawn": spawn, "relay": relay, "name": name})
         with self.lock:
             self.relays[name] = relay
         thread.start()
@@ -2747,18 +2799,64 @@ def start_mcp_relays(relays, broker=None, taint=None, who=None, run_dir=None, up
     return threads
 
 
-def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=None, relay=None):
+def mcp_answer_refused(connection, reason, wait=MCP_REFUSE_SECONDS):
+    """A connection that gets no server (REASON: why, said as sandbox-ai's) answered instead of closed without a word:
+    the first request read within WAIT seconds gets an error with the reason - an agent then says why to its human,
+    rather than "connection closed" - and the connection is closed. Bounded: at most 64 lines or 1 MiB are read."""
+    with connection:
+        with contextlib.suppress(OSError, ValueError):
+            connection.settimeout(wait)
+            stream = connection.makefile("rb")
+            read = 0
+            for _ in range(64):
+                line = stream.readline(1 << 20)
+                read += len(line)
+                if not line or read > 1 << 20:
+                    return
+                with contextlib.suppress(ValueError, RecursionError, UnicodeDecodeError):
+                    message = json.loads(line)
+                    ident = message.get("id") if isinstance(message, dict) and "method" in message else None
+                    if isinstance(ident, (str, int)) and not isinstance(ident, bool):
+                        connection.sendall((json.dumps({"jsonrpc": "2.0", "id": ident, "error": {
+                            "code": -32000, "message": f"sandbox-ai: {reason}"}}) + "\n").encode())
+                        return
+
+
+def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=None, relay=None, name=None):
     """Server sandbox: one instance of the stdio MCP server per connection, behind the gateway (GATEWAY: its
     configuration, see McpGateway). Every tool call is written as a line `sandbox-ai-mcp-call {json}` to OUT
     (stderr: on the host, mcp.py writes these to the server's mcp-calls.jsonl). RELAY (McpRelay, the supervisor's
-    relays): it keeps the listener and the connections, and closing it ends this loop (returns 0)."""
+    relays): it keeps the listener and the connections, and closing it ends this loop (returns 0). NAME: the server's
+    name (default: the gateway's, else SANDBOX_AI_MCP_NAME), in what a connection it cannot serve is told."""
     out = out or sys.stderr
     gate = gateway if isinstance(gateway, McpGateway) else McpGateway(gateway, out)
+    name = name or gate.server or os.environ.get("SANDBOX_AI_MCP_NAME") or None
     server = listen_unix(socket_path)
     if relay is not None and not relay.listening(server):
         return 0
     slots = threading.BoundedSemaphore(MCP_INSTANCE_LIMIT)
+    refusing = threading.BoundedSemaphore(MCP_REFUSING)
     mounts = json.loads(os.environ.get("SANDBOX_AI_MCP_MOUNTS") or "[]")  # an image server's host folders
+
+    def refuse(connection, why, fix):
+        """CONNECTION gets no server: said in the log, recorded (mcp_failure_record) and answered with WHY."""
+        print(f"agent-sandbox: MCP server connection refused: {why}", file=sys.stderr, flush=True)
+        mcp_failure_record(f"MCP server {name or '?'}: a connection was refused", why, fix)
+        if not refusing.acquire(blocking=False):
+            connection.close()
+            return
+
+        def answer():
+            try:
+                mcp_answer_refused(connection, f"the MCP server was not started for this connection ({why}); "
+                                               f"{mcp_show_hint(name)}")
+            finally:
+                refusing.release()
+        try:
+            threading.Thread(target=answer, daemon=True).start()
+        except RuntimeError:
+            refusing.release()
+            connection.close()
     while True:
         try:
             connection, _ = server.accept()
@@ -2770,15 +2868,14 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
             raise
         changed = mounts_changed(mounts)
         if changed:
-            print(f"agent-sandbox: MCP server connection refused: {changed}", file=sys.stderr, flush=True)
-            connection.close()
+            refuse(connection, changed, f"start the server again (sandbox-ai mcp stop {name or 'NAME'}; the next start "
+                                        "starts it) after checking that folder")
             continue
         if not slots.acquire(blocking=False):
             # Each instance may be a container of its own: an agent opening connections in a loop must not
             # fill the host.
-            print(f"agent-sandbox: more than {MCP_INSTANCE_LIMIT} connections to this MCP server at once; "
-                  "connection refused", file=sys.stderr, flush=True)
-            connection.close()
+            refuse(connection, f"more than {MCP_INSTANCE_LIMIT} connections to this MCP server at once",
+                   "close connections the agent does not use, or wait for the open ones to end")
             continue
         if relay is not None and not relay.add(connection):  # closed meanwhile
             connection.close()
@@ -2795,9 +2892,18 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                                                    stderr=subprocess.PIPE)
                 except OSError as exc:
                     print(f"agent-sandbox: MCP server failed: {exc}", file=sys.stderr)
-                    slots.release()
-                    if relay is not None:  # never kept until the detach: the agent's end is closed here
+                    if relay is not None:  # never kept until the detach (the answer below is bounded on its own)
                         relay.discard(connection)
+                    try:
+                        # Answered with the reason, not closed without a word: a server whose bridge on the host is
+                        # gone (stopped, crashed, its socket folder removed) or whose process could not be started.
+                        why = exc.strerror or str(exc)
+                        said = (f"the MCP server is not running: its socket cannot be reached ({why}); the human "
+                                "starts it again" if spawn is not None else
+                                f"the MCP server could not be started ({why})")
+                        mcp_answer_refused(connection, f"{printable_text(said, 300)}; {mcp_show_hint(name)}")
+                    finally:
+                        slots.release()
                     return
                 pump = None
                 try:
@@ -2810,7 +2916,7 @@ def mcp_serve(socket_path, command, cwd="/work", out=None, gateway=None, spawn=N
                                                   daemon=True)
                         reader.start()
                         ended = (lambda process=process, reader=reader, tail=tail: tail.why(process, reader))
-                    session = McpConnection(gate, connection, process, ended=ended)
+                    session = McpConnection(gate, connection, process, ended=ended, name=name)
                     pump = threading.Thread(target=session.pump, daemon=True)
                     pump.start()
                     stream = connection.makefile("rb")

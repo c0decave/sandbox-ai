@@ -310,7 +310,7 @@ def test_a_board_start_with_credentials_runs_with_them_here_and_on_another_host(
 
 
 def test_secrets_and_logins_of_a_start_on_another_host_opens_that_hosts_credentials(world, wait):
-    """The Sandboxes page's "Secrets and logins…" of a start on lab: the Credentials page with lab chosen, so that
+    """The Sessions page's "Secrets and logins…" of a start on lab: the Credentials page with lab chosen, so that
     what is given next goes to that host."""
     window = world["window"]
     window.show_credentials_of("lab")
@@ -388,7 +388,7 @@ def test_a_sessions_agent_login_is_used_for_a_new_start_from_the_window(world, w
 def test_what_a_run_was_given_can_be_taken_back_in_the_window():
     """Finding 5 (fixed 2026-11-19; a strict xfail until then): what a run was given during the run - a Git login,
     an API key - was not among the rows the window can take back (Approvals › Allowed now); an API key could not be
-    taken back in the window at all, a Git login only by typing its URL into Sandboxes › Revoke…."""
+    taken back in the window at all, a Git login only by typing its URL into Sessions › Revoke…."""
     from sandbox_ai_app import approvals_sections as A
     shown = {"run": "claude-1a2b3c4d", "https": [], "tcp": [], "all_ports": [], "dns": [], "host_ports": [],
              "host_wildcards": [], "git": [{"url": "https://git.example.org", "user": "alice"}],

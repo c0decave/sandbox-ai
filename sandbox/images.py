@@ -34,9 +34,13 @@
                                                          its RUN steps without network unless --build-network (this
                                                          host's own, outside the firewall, VPN and Tor); refused
                                                          where a sandbox can write unless --trust-agent-written
-  sandbox-ai images build-image NAME --builtin TEMPLATE  the same of one of sandbox-ai's own Containerfiles
+  sandbox-ai images build-image NAME --builtin TEMPLATE [--accept-android-sdk-license]
+                                                         the same of one of sandbox-ai's own Containerfiles
                                                          (sandbox/service-images; showcase-web: nginx for the
-                                                         showcase presets), unchecked like yours
+                                                         showcase presets; android-emulator: the Android emulator,
+                                                         built from Google's downloads once you accepted their
+                                                         license; adb: an adb server for a USB device), unchecked
+                                                         like yours
   sandbox-ai images list [--json]                        your images, each marked UNCHECKED (nobody reviewed them)
   sandbox-ai images templates [--json]                   sandbox-ai's own Containerfiles for services (--builtin),
                                                          each with the images of yours built from it
@@ -1481,6 +1485,13 @@ RECIPES = {
               "apt": ["ffmpeg", "pulseaudio", "pulseaudio-utils", "sox", "espeak-ng", "imagemagick", "scrot",
                       "x11-apps"],
               "pip": ["piper-tts"]},
+    # GCC, not the toolchain cc (Clang with libc++): what links against libraries built with GCC and its libstdc++ -
+    # Qt's own builds (the toolchain qt, the preset qt-cpp). Debian's packages of the image's release (GCC 12).
+    "gcc": {"description": "C and C++ with GCC: gcc and g++ with libstdc++, GNU make and binutils (build-essential), "
+                           "CMake, Ninja, pkg-config and the OpenGL headers Qt's CMake packages ask for - for "
+                           "programs that link libraries built with GCC, such as Qt (the toolchain qt, the preset "
+                           "qt-cpp)",
+            "apt": ["build-essential", "cmake", "ninja-build", "pkg-config", "libgl1-mesa-dev"]},
     # Debian's own packages of the image's release (bookworm: Podman 4.3); start the variant with
     # --nested-containers, which configures Podman for the sandbox (storage in /var/tmp, the agent's network).
     # uidmap's setuid helpers stay without effect (no new privileges); the agent maps no IDs itself.
@@ -2160,9 +2171,16 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
     source = owned.add_mutually_exclusive_group(required=True)
     source.add_argument("-f", "--file", metavar="CONTAINERFILE", help="the Containerfile to build")
     source.add_argument("--builtin", metavar="TEMPLATE",
-                        help="one of sandbox-ai's own Containerfiles (sandbox/service-images) instead, for the "
-                             "showcase presets' services: showcase-web (nginx 1.28.0: a page of its own, /app/ to "
-                             "localhost:8000)")
+                        help="one of sandbox-ai's own Containerfiles (sandbox/service-images) instead: showcase-web "
+                             "(nginx 1.28.0 for the showcase presets: a page of its own, /app/ to localhost:8000), "
+                             "android-emulator (the Android emulator without a window for --service "
+                             "android-emulator), adb (an adb server for a USB device); sandbox-ai images templates "
+                             "lists them")
+    owned.add_argument("--accept-android-sdk-license", action="store_true",
+                       help="for --builtin android-emulator, which is built from Google's SDK downloads: you accept "
+                            "the Android Software Development Kit License Agreement "
+                            "(https://developer.android.com/studio/terms) - without it the question is asked on a "
+                            "terminal, never in the modes high and paranoid")
     owned.add_argument("--context", metavar="DIR", help="the build context (default: the Containerfile's folder)")
     owned.add_argument("--replace", action="store_true", help="build an image of that name anew")
     owned.add_argument("--trust-agent-written", action="store_true",
@@ -2317,6 +2335,8 @@ def main(argv, out=print, run=subprocess.run, stdin=None):
                                                *(["--replace"] if args.replace else []),
                                                *(["--trust-agent-written"] if args.trust_agent_written else []),
                                                *(["--build-network"] if args.build_network else []),
+                                               *(["--accept-android-sdk-license"]
+                                                 if args.accept_android_sdk_license else []),
                                                *(["--json"] if as_json else [])], out=out, run=run)
             return services_module().main(["list", *(["--json"] if as_json else [])], out=out, run=run)
         if args.command == "prep":

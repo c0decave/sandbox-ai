@@ -396,7 +396,7 @@ def ask_network_extra(p, a, current=()):
     def check_preset(value):
         if value not in presets:
             raise ValueError(f"Unknown preset {value!r}; choose from {', '.join(presets)}")
-    for value in ask_list(p, f"Host presets, comma-separated ({', '.join(presets)})", check_preset,
+    for value in ask_list(p, f"Host sets, comma-separated ({', '.join(presets)})", check_preset,
                           default("presets")):
         options.append(f"--allow-{value}")
     items = launcher().list_items  # the launcher's list options: separated by commas or spaces

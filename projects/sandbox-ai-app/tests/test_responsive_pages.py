@@ -221,7 +221,7 @@ def test_every_button_of_every_page_leaves_slow_work_to_the_background(qapp, swe
     # (the stopped session is read too - asking podman, slowly - though listed only with Ended checked)
     assert wait_for(qapp, lambda: window.sandboxes.loaded and len(window.sandboxes.instances) > 1
                     and window.sandboxes.table.rowCount() > 0, 60), \
-        "the Sandboxes page reads in the background and shows the fake run"
+        "the Sessions page reads in the background and shows the fake run"
     slow_clicks, clicked, selected = [], 0, 0
     stray = set(QtWidgets.QApplication.topLevelWidgets())
     for key, _title in PAGES:

@@ -275,7 +275,7 @@ RULES = [
      "a wildcard below a shared service lets the agent open any server anyone rents there, and send data there"),
     (STRICT, lambda a, l: _given(a.allow_host, "--allow-host"),
      "it opens hosts beyond the agent's provider (so does a Git token for another server)"),
-    (STRICT, lambda a, l: _given(a.allow, "--allow"), "it opens addresses"),
+    (STRICT, lambda a, l: _given(a.allow, "--allow-net"), "it opens addresses"),
     (STRICT, lambda a, l: _given(a.allow_tcp, "--allow-tcp"), "it opens TCP ports"),
     (STRICT, lambda a, l: _given(getattr(a, "vpn_bypass_tcp", None) or [], "--vpn-bypass-tcp"),
      "it reaches an address of your network past Tor, from your own address"),
@@ -499,7 +499,7 @@ def plan(a):
 # are found through the launcher's own canonical_options (weakening_options), never by a copy of the aliases.
 WEAKENING_OPTIONS = frozenset({
     # the network and the proxy
-    "--egress-all-allow", "--allow", "--allow-tcp", "--allow-host", "--allow-domain", "--allow-http", "--allow-host-port",
+    "--egress-all-allow", "--allow", "--allow-net", "--allow-tcp", "--allow-host", "--allow-domain", "--allow-http", "--allow-host-port",
     "--allow-shared-wildcard", "--yes",  # a wildcard below a shared service, and the yes to its risk question
     "--allow-pypi",
     "--allow-github", "--allow-gitlab", "--allow-kernel-org", "--allow-duckduckgo", "--allow-npm", "--frontier",

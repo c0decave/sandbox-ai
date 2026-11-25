@@ -518,6 +518,9 @@ def with_beyond_the_trio(args):
 
 
 NEWER = (
+    # (0.2.2: the release the agent intro came with)
+    ((0, 2, 2), "the default agent_intro (whether a start tells its agent what its sandbox has)",
+     lambda a: a[:1] == ["defaults"] and a[1:3] in (["set", "agent_intro"], ["unset", "agent_intro"])),
     ((0, 1, 213), "llm share, unshare and sync (an LLM server for all hosts)",
      lambda a: a[:2] in (["llm", "share"], ["llm", "unshare"], ["llm", "sync"])),
     ((0, 1, 196), "mcp add --build (an MCP server its catalog has no signed image of, built from its source)",
@@ -695,6 +698,9 @@ NET_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 DEVICE_PATH = re.compile(r"/dev/[A-Za-z0-9_+:.@-][A-Za-z0-9_+:.@/-]{0,250}")
 USB_SELECTOR = re.compile(r"usb:[0-9A-Fa-f]{4}:[0-9A-Fa-f]{4}(?::[!-~]{1,126})?")  # usb:VENDOR:PRODUCT[:SERIAL]
 DEVICE_ID = re.compile(r"[0-9]{1,9}")  # a grant's id, as devices list shows it
+# sandbox-ai install's items (install.ITEM): KIND:NAME, never an option.
+INSTALL_ITEM = re.compile(r"(image|mcp|toolchain|preset):[A-Za-z0-9][A-Za-z0-9_.@+:-]{0,127}")
+INSTALL_ITEMS_LIMIT = 200
 TOOLCHAIN = re.compile(r"(?!bin(?:@|$))[a-z][a-z0-9-]{0,31}(?:@[0-9A-Za-z][0-9A-Za-z.+_-]{0,63})?")  # toolchains.spec
 WORKSPACE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+@ -]{0,254}")  # the NAME of /workspaces/NAME
 WORKSPACE_AS = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # workspace add --name NAME (workspaces.NAME)
@@ -1005,6 +1011,17 @@ EMAIL = re.compile(r"[^\s<>@,;\"'-][^\s<>@,;\"']{0,63}@[A-Za-z0-9.-]{1,253}")  #
 PUBLISH_KINDS = ("crates", "github", "gitlab", "npm", "pypi", "testpypi")
 PUBLISH_URL = re.compile(r"https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})/?")  # publish_logins: https://HOST, no path
 MCP_ENTRY = re.compile(r"(?:[a-z0-9][a-z0-9-]{0,31}:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")  # duckduckgo, hub:binwalk
+# An MCP server's network in the agents' words (mcp.NETWORK_WORDS), and back to what every sandbox-ai takes.
+MCP_NETWORK_WORDS = {"none": "offline", "full": "egress-all"}
+MCP_NETWORK_ALIASES = {word: stored for stored, word in MCP_NETWORK_WORDS.items()}
+
+
+def mcp_network_words(text):
+    """A catalog line's network ("full duckduckgo.com"), its first word in the agents' words (egress-all ...)."""
+    word, space, rest = str(text).partition(" ")
+    return MCP_NETWORK_WORDS.get(word, word) + space + rest
+
+
 MCP_CATALOG_LINE = re.compile(r"(?P<prefix>[^:\s]+):(?P<name>\S+)  \[(?P<network>[^\]]*)\]  (?P<title>.*?)"
                               r"(?P<unpublished>  \(not published yet\))?  (?P<signature>signed|SIGNATURE BAD|unsigned)")
 # What `sandbox-ai mcp add` says when it refuses an entry only because its catalog no trusted key signed
@@ -1306,7 +1323,9 @@ DEFAULT_KEYS = ("ask_timeout", "budget", "canaries", "checkpoint_count", "checkp
                 # the storage check and its automatic rules (storage.py checks each value)
                 "storage_check", "storage_threshold_gb", "storage_growth_gb", "storage_caches_days",
                 "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days",
-                "fix_questions")
+                "fix_questions",
+                # whether a start tells its agent what its sandbox has (/sandbox/session/INTRO.md; intro.py)
+                "agent_intro")
 # (and the update mode's, changed by /update-mode: it makes the timer too)
 FIX_QUESTIONS = ("all", "each")  # fixes.QUESTIONS: fix_questions' values
 FILE_READS = ("folders", "files", "off")  # runtime.FILE_READS: file_reads' values
@@ -1659,6 +1678,9 @@ class Api:
             ("POST", H + r"/devices/(?P<name>[^/]+)", self.device_add, ("device-add",)),
             ("POST", H + r"/devices/(?P<name>[^/]+)/remove", self.device_remove, ()),
             # build toolchains: that host's store, a running start's, attach (asked first) and detach
+            # sandbox-ai install --list --json on that host: what can be installed there (images, MCP servers,
+            # toolchains, what presets need), its state and size; the installation itself runs in a terminal
+            ("GET", H + r"/install-items", self.install_list, ()),
             ("GET", H + r"/toolchains", self.toolchains, ()),
             ("GET", H + r"/toolchains/(?P<name>[^/]+)", self.run_toolchains, ()),
             ("POST", H + r"/toolchains/(?P<name>[^/]+)", self.toolchain_attach, ("toolchain-add",)),
@@ -1728,6 +1750,9 @@ class Api:
             ("POST", H + r"/mcp/(?P<name>[^/]+)/stop", self.mcp_stop, ("mcp-stop",)),
             # the newer image a server's catalog pins (sandbox-ai mcp update [NAME...]): one server, or all of yours
             ("POST", H + r"/mcp-update", self.mcp_update, ("mcp-update",)),
+            # each server started as a start would, asked for its tools, stopped again (sandbox-ai mcp check): changes
+            # nothing, so nothing is asked first
+            ("POST", H + r"/mcp-check", self.mcp_check, ()),
             # logins and identities (sandbox-ai git-logins, publish-logins, identities): secrets only by name
             # phone notifications (sandbox-ai notify): channels with secret names, never a token
             ("GET", H + r"/notify", self.notify_list, ()),
@@ -2951,6 +2976,11 @@ class Api:
             device = device_value(device)
         return self.done(params["host"], ["devices", "remove", name, device], 60)
 
+    def install_list(self, params, body):
+        """sandbox-ai install --list --json on that host: {"items": [{"id", "kind", "title", "installed", "size",
+        "note", "pending", "all", "needs"?}], "problems": [...]} (the catalogs are read there, over the network)."""
+        return self.json_of(params["host"], ["install", "--list", "--json"], 300, ok=(0,))
+
     def toolchains(self, params, body):
         """sandbox-ai toolchain list --json on that host: its store ([{"name", "version", "commands", "hosts",
         "allow", "signed_by", "used_by", ...}]) - what a running start there can be given."""
@@ -3940,6 +3970,9 @@ class Api:
             raise Refused(400, "telemetry is off or strict: the agents' telemetry is always off (there is no on)")
         if key == "hide_secrets" and value is not None and not isinstance(value, bool):
             raise Refused(400, "hide_secrets is true or false (true: logins and keys are left out of the file views)")
+        if key == "agent_intro" and value is not None and not isinstance(value, bool):
+            raise Refused(400, "agent_intro is true or false (false: a start tells its agent nothing about what its "
+                               "sandbox has)")
         if key == "name_style" and value is not None and value not in NAME_STYLES:
             raise Refused(400, f"name_style is {' or '.join(NAME_STYLES)}")
         if key == "desktop_notifications" and value is not None and value not in DESKTOP_NOTIFICATIONS:
@@ -3987,12 +4020,14 @@ class Api:
         # How starts are named, which safeguard warnings pop up and how a local model is kept from looping protect
         # nothing (the safeguards still refuse, and every record stays listed): no step down to confirm. Fewer desktop
         # notifications are one (lowered_default): "none" silences a canary's alarm while the app is closed.
+        # (agent_intro: telling the agent what its sandbox has, or not, opens and closes nothing)
         # (hide_secrets: hiding logins and keys in the file views protects; listing them again, the default, shows a
         # file's name, size and date only - its text is asked for each time: nothing to confirm either way)
         # (the storage settings: when the check runs, what it says, and its rules - each opt-in, each action of a
         # rule logged and said: no protection lowered)
         if body.get("confirm") is not True and key not in ("name_style", "safeguard_mute", "loop_guard",
-                                                           "hide_secrets") and not key.startswith("storage_"):
+                                                           "hide_secrets", "agent_intro") \
+                and not key.startswith("storage_"):
             weakest = {"mode": MODE_ORDER[0]}.get(key)
             if weakest is not None and value == weakest or key == "canaries" and no_canaries(value):
                 confirmed(body, "defaults-lower", f"{key} {json.dumps(value)}")  # the weakest there is: not read first
@@ -4264,6 +4299,18 @@ class Api:
         confirmed(body, "mcp-update", ", ".join(names) or "every server of yours from a catalog")
         return self.json_of(params["host"], [*args, "--yes"], 3600, ok=(0,))
 
+    def mcp_check(self, params, body):
+        """sandbox-ai mcp check [NAME...|--all] --json: "names" (none: every defined server), "vpn" (a VPN or Tor
+        profile in front of each server that reaches the network). [{"server", "result": "ok" | "failed" | "skipped",
+        "tools", "seconds", "reason", "fix", "note", "log"}] - a failed server is a row, not a failure of the call."""
+        names = strings(body.get("names", []), "names", 64)
+        if not all(MCP_NAME.fullmatch(name) for name in names):
+            raise Refused(400, "names: MCP servers' names (1-32 letters, digits, '_' or '-' each)")
+        args = ["mcp", "check", *(dict.fromkeys(names) or ["--all"]), "--json"]
+        if body.get("vpn") not in (None, ""):
+            args.append(f"--vpn={vpn_name(body['vpn'])}")
+        return self.json_of(params["host"], args, 3600, ok=(0, 1))
+
     def mcp_stop(self, params, body):
         name = self.mcp_server(params["name"])
         confirmed(body, "mcp-stop", name)
@@ -4295,7 +4342,8 @@ class Api:
                 continue
             hosts = [str(host) for host in item.get("hosts") if isinstance(host, str)] \
                 if isinstance(item.get("hosts"), list) else []
-            network = " ".join([str(item.get("network") or "none"), ",".join(hosts)]).strip()
+            # in the agents' words (offline, egress-all; 2026-11-24)
+            network = mcp_network_words(" ".join([str(item.get("network") or "none"), ",".join(hosts)]).strip())
             variables = [{"name": v["name"], "description": printable(" ".join(str(v.get("description") or "")
                                                                               .split()))[:500],
                           "secret": v.get("secret") is True, "required": v.get("required") is True}
@@ -4324,7 +4372,7 @@ class Api:
             match = MCP_CATALOG_LINE.fullmatch(line.rstrip())
             if match:
                 entries.append({"entry": f"{match['prefix']}:{match['name']}", "prefix": match["prefix"],
-                                "name": match["name"], "network": printable(match["network"]),
+                                "name": match["name"], "network": mcp_network_words(printable(match["network"])),
                                 "title": printable(match["title"]), "published": not match["unpublished"],
                                 "signature": {"signed": "good", "SIGNATURE BAD": "bad"}.get(match["signature"],
                                                                                            "none"),
@@ -4334,8 +4382,9 @@ class Api:
                 "output": printable(out.strip()[-20000:])}
 
     def mcp_add(self, params, body):
-        """sandbox-ai mcp add ENTRY with --as, --mount, --env, --network (none, full: the internet without your local
-        network, allowlist: only the entry's hosts, lan: your network too - asked first: mcp-lan), --memory, --pids,
+        """sandbox-ai mcp add ENTRY with --as, --mount, --env, --network (offline, egress-all: the internet without your
+        local network, allowlist: only the entry's hosts, lan: your network too - asked first: mcp-lan; none and full
+        taken as offline and egress-all), --memory, --pids,
         --catalog, --no-pull, --backend, --unsigned (asked: mcp-unsigned) and --vpn; a writable mount is asked first
         (mcp-writable-mount)."""
         entry = body.get("entry")
@@ -4364,11 +4413,14 @@ class Api:
         for value in strings(body.get("env", []), "env", 64):
             args.append(f"--env={mcp_env_spec(value)}")
         if body.get("network") not in (None, ""):
-            if body["network"] not in ("none", "full", "allowlist", "lan"):
-                raise Refused(400, "network is none, full, allowlist or lan")
-            if body["network"] == "lan":
+            # Either words: sent as every sandbox-ai takes them (none, full), the host may be an older one.
+            network = MCP_NETWORK_ALIASES.get(body["network"], body["network"]) if isinstance(body["network"], str) \
+                else body["network"]
+            if network not in ("none", "full", "allowlist", "lan"):
+                raise Refused(400, "network is offline, egress-all, allowlist or lan")
+            if network == "lan":
                 confirmed(body, "mcp-lan", entry)
-            args.append(f"--network={body['network']}")
+            args.append(f"--network={network}")
         if body.get("memory") not in (None, ""):
             if not (isinstance(body["memory"], str) and SIZE_VALUE.fullmatch(body["memory"])):
                 raise Refused(400, "memory is a size: 512m, 2g")
@@ -5423,7 +5475,7 @@ def terminal_command(query, runner=None):
     args = tool_command(kind, query, runner)
     if args is None:
         raise Refused(400, "kind is attach, start, update, install, uninstall, login, plugins, build, trust-hooks, "
-                           "team-start or demo-device")
+                           "team-start, demo-device or install-items")
     older = newer_needed(host, args)  # an option that host's sandbox-ai does not know: said, not run
     if older:
         raise older
@@ -5638,6 +5690,14 @@ def tool_command(kind, query, runner=None):
         if port not in (None, ""):
             port = whole(port, "port", 1024, 65535)
         return ["demo-device", "start", *([f"--port={port}"] if port not in (None, "") else [])]
+    if kind == "install-items":
+        # sandbox-ai install ITEM...: each item's own command (build, mcp add, toolchain add) in this terminal, its
+        # questions asked there (a pending MCP server's build); signed entries only (install.py)
+        items = [i for i in (query.get("items") or "").split(",") if i]
+        if not items or len(items) > INSTALL_ITEMS_LIMIT or not all(INSTALL_ITEM.fullmatch(i) for i in items):
+            raise Refused(400, f"items: 1 to {INSTALL_ITEMS_LIMIT} of KIND:NAME (image:claude, mcp:duckduckgo, "
+                               "toolchain:go, preset:python), comma-separated")
+        return ["install", *dict.fromkeys(items)]
     return None
 
 

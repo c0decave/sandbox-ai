@@ -1,4 +1,4 @@
-"""The recommended pairs of a use case - model x harness - for the Board, the Start page and the new-project wizard.
+"""The recommended pairs of a use case - model x harness - for the Board, the Board page and the new-project wizard.
 
 sandbox-ai's model_usecases ranks every model a server HAS by the use case's table, each with its best harness (the
 agent it was measured best in), then the models the table does not have ("not measured for this use case"), then the

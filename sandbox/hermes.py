@@ -429,7 +429,8 @@ def mcp_servers(names, bridge_args, timeouts=None):
 MCP_TOOL_SEARCH = {"tools": {"tool_search": {"enabled": "off"}}}
 
 LOOP_SKILL = "sandbox-ai-loop-guard"
-NOTE_SKILL = "sandbox-ai-network"  # the run's network note (agent_sandbox.network_note), loaded in every session
+NOTE_SKILL = "sandbox-ai-network"  # the start's note (agent_sandbox.start_note: the run's network note, the line
+#                                    that names its intro), loaded in every session
 
 
 def loop_skill(text):
@@ -439,9 +440,10 @@ def loop_skill(text):
 
 
 def note_skill(text):
-    """SKILL.md of the run's network note (how this run reaches the network through its Tor or VPN) for Hermes."""
-    return ("---\nname: " + NOTE_SKILL + "\ndescription: How this run reaches the network (sandbox-ai: its Tor or "
-            "VPN); loaded in every session.\n---\n\n" + text)
+    """SKILL.md of the start's note (how this run reaches the network through its Tor or VPN, and the line that
+    names /sandbox/session/INTRO.md: what the sandbox has) for Hermes."""
+    return ("---\nname: " + NOTE_SKILL + "\ndescription: What sandbox-ai tells you about this run - its network (Tor "
+            "or a VPN) and what the sandbox has; loaded in every session.\n---\n\n" + text)
 
 
 def thinking(a):

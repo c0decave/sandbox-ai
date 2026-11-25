@@ -5,7 +5,7 @@ removed with Delete; the inspector edits the selected node with fields built fro
 (their kinds, choices and help texts; what the administrator's policy forbids is greyed out). Every change is
 one step of undo/redo (whole snapshots of the model). Below the graph: the command line, the problems, the
 security badges and the launcher's own verdict (a dry run in the background after each change). Apply
-writes .sandbox-ai.json through the same review-and-trust step as the Start page; the layout is saved next
+writes .sandbox-ai.json through the same review-and-trust step as the Board page; the layout is saved next
 to it. Pure Python and Qt: nothing here needs Node.js or a browser engine.
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import applog, backend, board as B, board_icons, remote_chooser as RC, widgets
+from . import applog, backend, board as B, board_icons, remote_chooser as RC, remote_folders as RF, widgets
 from .prerequisites import Prerequisites, busy_now
 from .session_start import SessionStart, TeamStart
 from . import help_view, labels as OL, project_trust as PT, rules_tools, tables, theme
@@ -1310,6 +1310,12 @@ def summary(node, agent=None):
         parts += [part for value in list(props.get("--allow-domain", []))[:3]
                   for part in (B._domain(value), "*." + B._domain(value))]
         return ", ".join(parts) or tr("the agent's provider only")
+    if node.kind == "toolchains":  # which, and whether their registries are opened with them
+        names = [str(value) for value in props.get("--toolchain") or []]
+        if not names:
+            return tr("none chosen yet")
+        return printable(" · ".join([elide(", ".join(names), 60), tr("registries kept closed")
+                                     if props.get("--toolchain-offline") else tr("registries opened")]))
     if node.kind == "other":  # the options themselves, as the command line has them
         import shlex
         tokens = [str(token) for token in props.get("tokens") or []]
@@ -1563,8 +1569,9 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.inspector_request = None  # the window: show the inspector's panel again (a part was selected)
         self.fold_request = None  # the window: fold the inspector's docked panel (Esc, the empty canvas); True if so
         self.close_request = None  # the window: close the properties, folded or floating (their OK and Cancel)
+        self.fit_request = None  # the window: the properties' panel as big as the rows just made need
         self.kit_inventory, self.kit_loading = None, False  # sandbox-ai kits list --json, once read
-        # The agent sessions of this machine that run (the Sandboxes page's look): what a Bridge part may join; and the
+        # The agent sessions of this machine that run (the Sessions page's look): what a Bridge part may join; and the
         # waiters of the Bridge parts of the starts made here (each makes its bridges once both sessions run).
         self.running_sessions, self.bridge_waiters = [], []
         # ... and those of the user's hosts ({host: entries named HOST:NAME}), read in the background when a Bridge
@@ -1580,6 +1587,10 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.team_token, self.team_running, self.team_pending, self.team_verdict = 0, False, False, None
         self.team_board_token, self.team_shown, self.team_view = 0, None, None
         self.llm_servers, self.llm_loading = None, False  # sandbox-ai llm list --json, for the agent's Model server
+        # {host: its store and signed catalog (backend.host_toolchains)}, as last read for a toolchain field: what each
+        # toolchain needs of the network (toolchain_needs_text); the launcher's plan of the board as last checked.
+        self.toolchains_found, self.plan_found, self.needs_label = {}, (None, None), None
+        self.reach_label, self.reach_button = None, None  # the Network part's "Opened by other parts" (reach_row)
         # Your images (sandbox-ai images list) and the variants' bases of the host it starts on: the services choose
         # from them, the checks and the score use them (None: not read yet).
         self.user_images, self.image_bases, self.user_images_loading = None, None, False
@@ -1638,9 +1649,12 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         import_button.setToolTip(tr("Take a board's or session's file in: its plan first (what is created, reused, "
                                     "missing), then, confirmed, its parts written and the board shown here"))
         import_button.clicked.connect(lambda: self.import_board())
-        wizard_button = QPushButton(tr("Wizard…"))
-        wizard_button.setToolTip(tr("A new project step by step; it ends on this board"))
-        wizard_button.clicked.connect(lambda: self.open_wizard())
+        # A new project: the wizard (its folder, agent, network ...), which ends on this board. First in the row,
+        # named for what it does (it was "Wizard…" near the end: the user 2026-11-24 found no button for it).
+        new_project = self.new_project_button = QPushButton(tr("New project…"))
+        new_project.setToolTip(tr("Set up a new project: on this machine step by step (folder, agent, network), or "
+                                  "in a folder of a host of sandbox-ai hosts; it ends on this board"))
+        new_project.clicked.connect(lambda: self.new_project())
         # Another project folder for this very board: every part and setting stays (change_folder).
         self.change_folder_button = QPushButton(tr("Change folder…"))
         self.change_folder_button.setToolTip(tr(
@@ -1696,7 +1710,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         # row keeps its room for the buttons. (self.folder is still the board's record of its folder.)
         # What belongs together wraps together (user 2026-11-18): Undo with Redo, the zoom buttons, and Arrange beside
         # Fit - the zoom buttons right before them.
-        layout.addWidget(flow(open_button, new_button, save, save_preset, export_button, import_button, wizard_button,
+        layout.addWidget(flow(new_project, open_button, new_button, save, save_preset, export_button, import_button,
                               self.change_folder_button, widgets.together(undo, redo),
                               widgets.together(zoom_out, zoom_in), widgets.together(arrange, fit), self.cli_button,
                               self.copy_button, self.score_button))
@@ -2686,6 +2700,8 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         paste = menu.addAction(tr("Paste"), lambda: self.paste(point))
         paste.setEnabled(self.clipboard_parts() is not None)
         menu.addSeparator()
+        menu.addAction(tr("New project…"), lambda: self.new_project())
+        menu.addSeparator()
         menu.addAction(tr("Select all"), self.select_all)
         menu.addAction(tr("Fit the board"), self.fit)
         menu.addAction(tr("Zoom 100 %"), self.view.zoom_reset)
@@ -3084,6 +3100,11 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                                          "host")
             return
         plan, message = result if error is None else (None, str(error))
+        # The dry run's plan of this very board (None when refused): what the start really does for what the board
+        # adds - the registries it opens or keeps closed for the toolchains (show_toolchain_needs).
+        self.plan_found = (getattr(self, "checking_state", None), plan if isinstance(plan, dict) else None)
+        self.show_toolchain_needs()
+        self.show_reach()
         # A host that does not answer (ssh's own failure, nothing in time) is no launcher that refuses the options.
         silent = isinstance(error, backend.HostUnreachable)
         applog.changed(("board verdict", id(self)), "INFO", "board", "the launcher accepts the board's options"
@@ -3351,7 +3372,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
 
     def veil_also(self):
         """What a dialog of the Board veils besides the page: its panels (in docks of the window), and the Expert view
-        of the same start (other_view: the Start page's other view, start_link.StartLink)."""
+        of the same start (other_view: the Board page's other view, start_link.StartLink)."""
         other = self.__dict__.get("other_view")
         return [self.parts_panel, self.side, self.findings_panel, *([other] if other is not None else [])]
 
@@ -3528,6 +3549,8 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         self.note_shown()
         self.restore_focus(memo)
         self.focus_more(node)
+        if self.fit_request is not None:  # the window: the properties big enough for these rows (centred when opened)
+            QTimer.singleShot(0, self, lambda: self.fit_request is not None and self.fit_request())
 
     def edit_buttons(self, node):
         """OK (keep the changes made here), Cancel (back to the part as it was when its properties opened: those
@@ -3605,6 +3628,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             self.thinking_row(node)
             self.agent_llm_rows()
             self.text_row(node, "arguments", tr("Agent arguments"), tr("e.g. --verbose"))
+            self.intro_row(node)
         elif kind == "workspace":
             path = PathEdit(node.props.get("path", ""), host=self.host(), other_machine=True)
             path.fallback = lambda text: self.set_prop(node_id, "path", text.strip())
@@ -3678,7 +3702,9 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             self.inspector.addRow(tr("Project rules"), rules)
         options = B._options(self.sai)
         shown = [option for option in B.KINDS[kind].options
-                 if option not in ("--allow-http", "--no-llm-profile", "--use-case") and option in options
+                 # (--no-intro, --intro: the Agent part's check box "Tell the agent what its sandbox has", intro_row)
+                 if option not in ("--allow-http", "--no-llm-profile", "--use-case", "--no-intro", "--intro")
+                 and option in options
                  # (the part HOME and login: its "Login from" sets these, login_rows)
                  and not (kind == "home" and option in ("--no-auth", "--auth-file", "--auth-from-session"))
                  # (--no-llm-profile: the model profile's own switch, llm_profile_rows; --use-case: its choice)
@@ -3704,6 +3730,10 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                                              host=DP.host_name(self.host()))))
             again.clicked.connect(lambda _=False: self.refresh_devices())
             self.inspector.addRow("", again)
+        if kind == "toolchains":
+            self.toolchain_needs_row()
+        if kind == "network":
+            self.reach_row()
         if kind in ("devices", "limits"):
             self.live_rows(node)
         if kind == "engine":
@@ -3913,7 +3943,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
     # -- the Bridge part: a session bridge made once the board's start runs --
 
     def set_running(self, instances):
-        """The Sandboxes page's look ({key: Instance} of this machine): the sessions a Bridge part may join."""
+        """The Sessions page's look ({key: Instance} of this machine): the sessions a Bridge part may join."""
         from .bridges_view import candidates
         self.running_sessions = candidates(instances.values() if isinstance(instances, dict) else instances)
 
@@ -4446,7 +4476,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
     def resume_bridge_waits(self, rows):
         """The waits the app's state kept (ROWS: bridge_waits_kept's when the app was last left): those whose time is
         not over wait on, until then (said above the board); those whose time ran out while the app was closed, and
-        those that cannot be used, are said - make them on the Sandboxes page. Nothing is made without the usual
+        those that cannot be used, are said - make them on the Sessions page. Nothing is made without the usual
         question of each bridge."""
         from .bridges_view import BridgeWaiter, kept_waits
         entries, problems = kept_waits(self.sai, rows)
@@ -4468,7 +4498,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             lines = []
             if over:
                 lines.append(tr("The app was closed while the board's bridges waited for their sessions, and their wait "
-                                "is over: {list} not made. Make them on the Sandboxes page (New bridge…).",
+                                "is over: {list} not made. Make them on the Sessions page (New bridge…).",
                                 list=names(over)))
             if problems:
                 lines.append(tr("Waits kept from the last start of the app that cannot be used were dropped: {list}",
@@ -4778,6 +4808,16 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             current = self.board.node(node_id)
             if entry is not None and current is not None and not current.props.get("ports") and entry.get("ports"):
                 update(ports=[p for p in entry["ports"] if isinstance(p, int)][:16])  # the ports the image names
+            # One of sandbox-ai's own Containerfiles that brings what its service starts with (android-emulator: its
+            # ports, /dev/kvm, its limits): shown in the fields, where none of it was set here yet.
+            own = self.offered_templates().get(str(text or "").strip()) or (getattr(self, "image_templates", None)
+                                                                             or {}).get(str((entry or {}).get(
+                                                                                 "builtin") or ""))
+            current = self.board.node(node_id)
+            if own and current is not None and not current.props.get("ports") and not current.props.get("devices"):
+                brought = B.template_props(self.sai, current.props.get("name"), str(text or "").strip(), own)
+                if brought:
+                    update(**{key: value for key, value in brought.items() if key not in ("name", "image")})
         image.activated.connect(image_chosen)
         image.lineEdit().editingFinished.connect(image_chosen)
         row.addWidget(image, 1)
@@ -4805,6 +4845,19 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                 "(UNCHECKED).", name=printable(props.get("image")),
                 description=printable(str(template.get("description") or "")).rstrip("."), host=self.host_words()),
                 selectable=True))
+            terms = backend.license_terms(template)
+            if terms:
+                self.inspector.addRow(explanation(tr(
+                    "It is built from {by}'s downloads, published under the {title} ({url}), which forbids passing "
+                    "them on: sandbox-ai ships nothing of them, the build fetches and checks each file on {host}. You "
+                    "are asked to accept that license before it is built.", by=printable(terms["by"]),
+                    title=printable(terms["title"]), url=printable(terms["url"]), host=self.host_words()),
+                    selectable=True))
+        own = template or (getattr(self, "image_templates", None) or {}).get(str((entry or {}).get("builtin") or ""))
+        if own and own.get("spec"):
+            self.inspector.addRow(explanation(tr(
+                "Its service starts with what its Containerfile brings ({spec}); what you set here replaces it key "
+                "by key.", spec=printable(str(own["spec"]))), selectable=True))
 
         def number_list(text):
             return [int(part) for part in re.split(r"[\s,]+", text.strip()) if part.isdigit()]
@@ -4846,6 +4899,8 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
                 update(env=env_values(values))
             elif key == "secrets":
                 update(secrets=secret_values(values))
+            elif key == "devices":
+                update(devices=list(dict.fromkeys(v.strip() for v in values if v.strip())))
             else:
                 update(data=[v.strip() for v in values if v.strip()],
                        keep=bool(values) and bool(self.board.node(node_id).props.get("keep")))
@@ -4855,19 +4910,23 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             LF.ListKind("secrets", tr("Secrets"), placeholder="KEY=SECRET", tip=tr(
                 "KEY=SECRET per line: KEY gets the secret SECRET of sandbox-ai secrets (only its name is kept)")),
             LF.ListKind("data", tr("Data folders"), placeholder="/data", tip=tr(
-                "a writable folder per line, e.g. /data"))], {
+                "a writable folder per line, e.g. /data")),
+            LF.ListKind("devices", tr("Devices"), placeholder="/dev/kvm", tip=tr(
+                "a device of this computer per line, for the service alone - never for the agent: a path under /dev "
+                "or usb:VENDOR:PRODUCT (not in the security modes high and paranoid)"))], {
             "env": [(f"{e['name']}" if e.get("from_host") else f"{e['name']}={e.get('value', '')}")
                     for e in props.get("env") or []],
             "secrets": [e["name"] if (e.get("secret") or e["name"]) == e["name"] else f"{e['name']}={e['secret']}"
                         for e in props.get("secrets") or []],
-            "data": list(props.get("data") or [])}, name=tr("Variables, secrets, data folders"))
+            "data": list(props.get("data") or []), "devices": list(props.get("devices") or [])},
+            name=tr("Variables, secrets, data folders, devices"))
         if self.list_kinds.get("service"):
             lists.choose_kind(self.list_kinds["service"])
         lists.kind_chosen.connect(lambda key: self.list_kinds.__setitem__("service", key))
         lists.changed.connect(lists_changed)
         lists.set_provider("secrets", functools.partial(self.secret_suggestions, "--secret-env"))
-        self.inspector.addRow(tr("Variables, secrets, data folders"), lists)
-        for key in ("env", "secrets", "data"):
+        self.inspector.addRow(tr("Variables, secrets, data folders, devices"), lists)
+        for key in ("env", "secrets", "data", "devices"):
             self.option_fields[f"service:{key}"] = lists  # (where the keyboard was, when the rows are made anew)
         keep = QCheckBox(tr("keep the data with the start (a Podman volume; else a tmpfs that goes with the run)"))
         keep.setChecked(bool(props.get("keep")))
@@ -5836,7 +5895,10 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
         # The option's name in the language chosen; the option itself (--…) only while the setting show_flags is on.
         flag = long + (f"  ({option.short})" if option.short else "")
         widget.setToolTip(safe_tooltip(OL.tip(flag, option.help)))
-        label = QLabel(flag if OL.flags_shown() else OL.label(long))
+        # (a check box carries its own name: the row's label names it again only as its option, --…, when those are
+        # shown - "Toolchains without their registries" stood twice side by side, user 2026-11-24)
+        named = isinstance(widget, QCheckBox) and not OL.flags_shown()
+        label = QLabel("" if named else flag if OL.flags_shown() else OL.label(long))
         label.setToolTip(safe_tooltip(OL.tip(flag, option.help)))
         if long == "--rules":  # an example in the tooltip of its lines
             lines.setToolTip(rules_tools.tooltip())
@@ -5927,15 +5989,181 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
             if error is not None:
                 fill([], tr("Could not be read: {error}", error=printable_text(str(error))[-200:]))
                 return
+            self.toolchains_found[host] = result  # (what each needs of the network: show_toolchain_needs)
+            self.show_toolchain_needs()
             # every version: those in the store, then the catalog's others (jdk 17.0.21+9 as jdk@17)
+            # (one built on the host from its publisher's downloads, under a license - android-sdk: the start
+            # offers it and asks for the license on its own)
             items = [(tr("{name} {version} (in the store)", name=choice["name"], version=choice["version"])
                       if choice["stored"] else
+                      tr("{name} {version} (built on the host first, from its publisher's downloads: the start "
+                         "offers it and asks for its license)", name=choice["name"], version=choice["version"])
+                      if backend.license_terms(choice["row"]) else
                       tr("{name} {version} (add it first: sandbox-ai toolchain add {value})", name=choice["name"],
                          version=choice["version"], value=choice["value"]), choice["value"])
                      for choice in backend.toolchain_choices(result)]
             fill(items, None if items else tr("No toolchain in the store or the catalog ({problem})",
                                               problem=result.get("problem") or tr("the catalog is empty")))
         background(read, owner=self, timeout=90, done=found)
+
+    # -- what the board's toolchains need of the network, and what the start does about it --
+
+    def toolchain_needs_text(self, board=None):
+        """One line per toolchain of BOARD (the board shown): the registries it needs and whether the start opens
+        them (by default), keeps them closed (the part's check box) or is refused them (the security mode, the
+        administrator's policy) - B.toolchain_needs, with the launcher's plan of this very board where it is there.
+        "" while the host's toolchains are not read yet."""
+        board = board or self.board
+        found = self.toolchains_found.get(self.host())
+        if found is None:
+            return ""
+        state, plan = getattr(self, "plan_found", (None, None))
+        rows = B.toolchain_needs(board, found, plan if state == board.state() else None)
+        return "\n".join(B.toolchain_needs_lines(rows))
+
+    def toolchain_needs_row(self):
+        """The Toolchains part's row "Registries": what each toolchain needs opened and what the start does (set
+        automatically; the check box above keeps them closed; a strict mode refuses them)."""
+        self.needs_label = plain_label("", role="secondary", selectable=True)
+        self.needs_label.setAccessibleName(tr("Registries of the toolchains"))
+        self.inspector.addRow(tr("Registries"), self.needs_label)
+        self.show_toolchain_needs()
+
+    def show_toolchain_needs(self):
+        label = getattr(self, "needs_label", None)
+        if label is None or not alive(label):
+            return
+        part = self.board.first("toolchains")
+        if part is None or not part.props.get("--toolchain"):
+            label.setText(tr("No toolchain chosen yet."))
+        else:
+            label.setText(self.toolchain_needs_text() or tr("Reading what the toolchains need…"))
+
+    # -- the Network part: what the other parts open (the launcher's own account: the plan's "reach") --
+
+    def reach_text(self):
+        """(the lines of the Network part's list, whether the toolchains' registries can be closed or opened from
+        there): what the board's other parts open - a toolchain's registries, a Git login's server, an API key's
+        host, the model server, an agent feature - each with its source, and what the toolchains need that stays
+        closed with the reason. From the launcher's dry run of this very board (B.opened_by_parts: its "reach"),
+        worded as Approvals > Allowed now words a start's allowances (approvals_sections.started_rows)."""
+        from . import approvals_sections as AS
+        state, plan = getattr(self, "plan_found", (None, None))
+        if plan is None or state != self.board.state():
+            refusal = getattr(self, "launcher_refusal", None)
+            if state == self.board.state() and refusal and refusal[0]:
+                return [tr("Not known: the launcher refuses this board (below the board: why).")], False
+            return [tr("The launcher's check of the board says it in a moment…")], False
+        found = B.opened_by_parts(self.board, plan)
+        if found is None:
+            return [tr("Not known: the sandbox-ai that checks this board does not say what a start may reach "
+                       "(0.1.245 and newer do).")], False
+        lines, groups = [], {}
+        for row in AS.started_rows({"started": found["opened"]}):
+            what = B.registry_shown(row["names"]) if row["names"] else row["destination"]
+            groups.setdefault(row["why"], []).append(what)
+        for source, what in groups.items():  # (a source is a name - "toolchain go" -, one line: printable)
+            lines.append(tr("{what} - opened by {why}", what=printable(", ".join(dict.fromkeys(what))),
+                            why=printable(source)))
+        if found["closed"]:
+            needs = printable(", ".join(B.registry_shown(item) for item in found["closed"]))
+            lines.append(tr("{needs} - the toolchains need them; kept closed (the Toolchains part says so, or the "
+                            "board is offline)", needs=needs) if found["why"] == "offline" else
+                         tr("{needs} - the toolchains need them; refused by the administrator's policy", needs=needs)
+                         if found["why"] == "policy" else
+                         tr("{needs} - the toolchains need them; refused by {why}", needs=needs,
+                            why=printable(found["why"])))
+        toolchains = self.board.first("toolchains")
+        from_toolchains = any(entry.get("source") == "toolchain" for entry in found["opened"])
+        removable = toolchains is not None and (from_toolchains or (found["closed"] and found["why"] == "offline"
+                                                                    and toolchains.props.get("--toolchain-offline")))
+        return lines or [tr("Nothing: no other part opens a destination.")], bool(removable)
+
+    def reach_row(self):
+        """The Network part's row "Opened by other parts": read-only, what the start will reach because of another
+        part, each with its source (reach_text); the toolchains' registries can be closed and opened again from here
+        (the Toolchains part's check box, --toolchain-offline: one step of Undo)."""
+        self.reach_label = plain_label("", role="secondary", selectable=True)
+        self.reach_label.setAccessibleName(tr("Opened by other parts"))
+        self.reach_button = QPushButton()
+        self.reach_button.setAutoDefault(False)
+        self.reach_button.clicked.connect(lambda _=False: self.toggle_toolchain_registries())
+        holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(self.reach_label)
+        column.addWidget(self.reach_button, 0, Qt.AlignmentFlag.AlignLeft)
+        label = QLabel(tr("Opened by other parts"))
+        label.setToolTip(safe_tooltip(tr(
+            "What this start will reach because of another part of the board - a toolchain's registries, a Git "
+            "login's server, an API key's host, the model server, an agent feature - as the launcher's check of the "
+            "board says it. Read-only here: change it on the part that opens it.")))
+        self.inspector.addRow(label, holder)
+        self.show_reach()
+
+    def show_reach(self):
+        label, button = getattr(self, "reach_label", None), getattr(self, "reach_button", None)
+        if label is None or not alive(label) or button is None or not alive(button):
+            return
+        lines, removable = self.reach_text()
+        label.setText("\n".join(lines))
+        toolchains = self.board.first("toolchains")
+        closed = bool(toolchains is not None and toolchains.props.get("--toolchain-offline"))
+        button.setVisible(removable)
+        button.setText(tr("Open the toolchains' registries") if closed else
+                       tr("Keep the toolchains' registries closed"))
+        button.setToolTip(safe_tooltip(
+            tr("The start opens the registries the toolchains need again (the Toolchains part's check box cleared)")
+            if closed else
+            tr("The start mounts the toolchains and opens none of their registries (the Toolchains part's check box: "
+               "--toolchain-offline)")))
+
+    def toggle_toolchain_registries(self):
+        """The Network part's button: the Toolchains part's "Keep their registries closed" set or cleared."""
+        toolchains = self.board.first("toolchains")
+        if toolchains is not None:
+            self.set_prop(toolchains.id, "--toolchain-offline", not toolchains.props.get("--toolchain-offline"))
+
+    # -- the agent's intro: /sandbox/session/INTRO.md and the line that names it --
+
+    def intro_default(self):
+        """Whether a start tells its agent what its sandbox has when no option says otherwise: sandbox-ai's default
+        agent_intro (Settings > New projects), true without it."""
+        try:
+            defaults, _problem = self.sai.sandbox_defaults()
+        except Exception as _exc:  # noqa: BLE001 - a defaults file that cannot be read: sandbox-ai's own default
+            applog.swallowed("board_view", "BoardPage.intro_default: sandbox-ai's own default then", _exc)
+            defaults = {}
+        return defaults.get("agent_intro") is not False
+
+    def intro_row(self, node):
+        """The Agent part's check box "Tell the agent what its sandbox has": on by default (--no-intro when it is
+        cleared; --intro when it is ticked over a default of off). One step of Undo."""
+        node_id, default = node.id, self.intro_default()
+        box = self.intro_box = QCheckBox(tr("Tell the agent what its sandbox has"))
+        box.setChecked(bool(node.props.get("--intro")) or (default and not node.props.get("--no-intro")))
+        box.setToolTip(safe_tooltip(tr(
+            "The start writes /sandbox/session/INTRO.md: every folder, toolchain, MCP server, service and device with "
+            "where it is in the sandbox and how to use it - no secret, no host path. The agent is told to read it "
+            "(where it reads its instructions, never in a file of your project); it is written again when something "
+            "is added while the sandbox runs. Off: --no-intro.")))
+
+        def changed(on):
+            def update():
+                target = self.board.node(node_id)
+                if target is None:
+                    return
+                target.props.pop("--no-intro", None)
+                target.props.pop("--intro", None)
+                if on and not default:
+                    target.props["--intro"] = True
+                elif not on and default:
+                    target.props["--no-intro"] = True
+            self.change(tr("Change {name}", name=tr("Agent intro")), update)
+        box.toggled.connect(changed)
+        self.disable_if_forbidden(box, "--no-intro")
+        self.inspector.addRow("", box)
+        self.option_fields["--no-intro"] = box
 
     def list_changed(self, node_id, key, values):
         """A list field's KEY now holds VALUES. A GPU kind chosen in the device field (device_picker.gpu_value) is the
@@ -7248,7 +7476,7 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
 
     def import_session_state(self):
         """Import a session with its state…: session_state_dialogs.ImportDialog (sandbox-ai session import, checked
-        first) - the session it makes is on the Sandboxes page, to resume."""
+        first) - the session it makes is on the Sessions page, to resume."""
         try:
             supported = self.sai.session_state_supported()
         except Exception as _exc:  # noqa: BLE001 - not known: said as not supported
@@ -7412,6 +7640,95 @@ class BoardPage(Prerequisites, SessionStart, TeamStart, QWidget):
     def new_from_template(self, name=None):
         """A built-in preset by name, its placeholders left to fill in (kept for older callers)."""
         return self.new_from_preset(name or "development")
+
+    # -- New project…: on this machine (the wizard) or in a folder of a host (todos.txt board 10) --
+
+    def new_project(self, ask=True):
+        """New project… (its button, the canvas's menu, File > New project…, the project switcher): where the project
+        is - this machine or a host of sandbox-ai hosts, asked only while there is such a host -; this machine: the
+        wizard (ASK: the board's unapplied changes asked about first), a host: new_project_on."""
+        self.host_choice.reload()  # (a host added meanwhile is offered)
+        hosts = [self.host_choice.itemData(index) for index in range(self.host_choice.count())]
+        if len(hosts) <= 1:
+            return self.open_wizard(ask)
+        host = widgets.choose(self, tr("New project"), tr(
+            "Where is the new project? On this machine the wizard sets it up step by step. On a host, its folder "
+            "there is chosen (and created there if it is not), and the board starts on that host."),
+            [(host, tr("This machine") if host == LOCAL else printable(host)) for host in hosts])
+        if host is None:
+            return None
+        if host == LOCAL:
+            if self.host() != LOCAL:
+                self.host_choice.choose(LOCAL)
+            return self.open_wizard(ask)
+        return self.new_project_on(host)
+
+    def new_project_on(self, host):
+        """A new project in a folder of HOST. Its sandbox-ai must read project files there (`wizard trust --show`,
+        as the Board opens a host's folder): else refused with the update to do, before anything is made. Then the
+        folder is chosen from HOST's folders or typed (RC.choose_folder: New folder… there too), one not there yet is
+        created there after asking (RF.project_folder, over SFTP) - never anything on this machine -, and it is
+        opened as HOST's project (open_remote_project, HOST chosen beside Apply) and kept among HOST's recent folders.
+        True while it goes on in the background."""
+        self.show_notice(tr("Asking {host} whether its sandbox-ai can read a project there…", host=printable(host)))
+        background(lambda: self.sai.require_options(host, ("wizard", "trust"), ["--show", "--json"]), owner=self,
+                   timeout=90, done=lambda _result, error: self.new_project_checked(host, error))
+        return True
+
+    def new_project_checked(self, host, error):
+        title = tr("New project on {host}", host=printable(host))
+        if error is not None:
+            text = printable_text(str(error)) if isinstance(error, backend.HostTooOld) else \
+                tr("{host} did not answer.", host=printable(host)) if isinstance(error, TimeoutError) else \
+                printable_text(str(error))
+            self.show_notice(tr("No new project on {host}: {reason}", host=printable(host), reason=text),
+                             "notice-error")
+            warn(self, title, text)
+            return False
+        self.show_notice("")
+        # (beside the board's folder there, if it has one - a new project is no folder inside it -, else its HOME)
+        start = posixpath.dirname(self.host_folder(host).rstrip("/")) if self.host_folder(host) else ""
+        folder = RC.choose_folder(self, host, tr("Folder of the new project"), "project", start=start, sai=self.sai)
+        folder = str(folder or "").strip()
+        if not folder:
+            return False
+        if not backend.valid_directory(folder):
+            warn(self, title, tr("Give the absolute path of a folder on {host}.", host=printable(host)))
+            return False
+        self.new_project_folder(host, folder)
+        return True
+
+    def new_project_folder(self, host, folder, create=False):
+        """Whether FOLDER is on HOST (CREATE: made there), in the background; then new_project_found."""
+        self.show_notice(tr("Creating {path} on {host}…", path=printable(folder), host=printable(host)) if create
+                         else tr("Looking for {path} on {host}…", path=printable(folder), host=printable(host)))
+        background(lambda: RF.project_folder(self.sai, host, folder, create=create), owner=self,
+                   timeout=RC.CONNECT_WAIT + RC.MKDIR_WAIT,
+                   done=lambda found, error: self.new_project_found(host, folder, found, error))
+
+    def new_project_found(self, host, folder, found, error):
+        title = tr("New project on {host}", host=printable(host))
+        if error is not None:
+            text = tr("{host} did not answer.", host=printable(host)) if isinstance(error, TimeoutError) else \
+                printable_text(str(error))
+            self.show_notice(tr("No new project on {host}: {reason}", host=printable(host), reason=text),
+                             "notice-error")
+            warn(self, title, text)
+            return False
+        if found == "missing":
+            self.show_notice("")
+            if not confirm(self, title, tr("{path} is not on {host} yet. Create the folder there?",
+                                           path=printable(folder), host=printable(host)), tr("Create")):
+                return False
+            self.new_project_folder(host, folder, create=True)
+            return True
+        if self.host() != host and not self.host_choice.choose(host):
+            warn(self, title, tr("{host} is not among the hosts the Board starts on.", host=printable(host)))
+            return False
+        RC.remember_folder(host, folder)  # (the folders of HOST offered first next time: Recent folders on HOST)
+        applog.log("INFO", "board", f"new project {printable(folder)} on {printable(host)}"
+                                    + (" (folder created there)" if found == "created" else ""))
+        return self.open_remote_project(folder)
 
     def open_wizard(self, ask=True):
         if ask and not self.may_discard():

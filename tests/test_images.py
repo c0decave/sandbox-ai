@@ -510,6 +510,25 @@ def test_the_dev_recipe(config):
         im.recipe("dev", "claude")
 
 
+def test_the_gcc_recipe(config):
+    """`images recipe gcc` (the preset qt-cpp): GCC with libstdc++, GNU make, CMake, Ninja and the OpenGL headers
+    Qt's CMake packages ask for - Debian packages of the image's release, no fragment. Qt's own builds are GCC's: the
+    toolchain cc (Clang with libc++) cannot link them, so the compiler for the toolchain qt is the image's."""
+    lines = []
+    assert im.main(["recipe", "gcc", "--from", "claude"], out=lines.append) == 0
+    assert "sandbox-ai build gcc" in lines[-1] and "--image-variant gcc" in lines[-1]
+    document = json.loads((im.config_root() / "variants" / "claude" / "gcc" / "image.json").read_text())
+    assert document["apt"] == ["build-essential", "cmake", "ninja-build", "pkg-config", "libgl1-mesa-dev"]
+    assert not document.get("npm") and not document.get("pip") and not document.get("files")
+    path = im.config_root() / "variants" / "claude" / "gcc" / im.FRAGMENT
+    fragment = path.read_text() if path.exists() else ""
+    assert im.errors(im.check(document, fragment, {})) == []
+    assert "build-essential cmake ninja-build pkg-config libgl1-mesa-dev" in \
+        " ".join(im.containerfile("gcc", document, fragment).replace("\\\n", " ").split())
+    description = im.RECIPES["gcc"]["description"]
+    assert "libstdc++" in description and "Qt" in description and "qt-cpp" in description
+
+
 def test_the_django_recipe(config):
     """`images recipe django` (the showcase preset showcase-full-stack): Django 5.2 LTS and psycopg 3 in a venv of
     their own from sandbox-ai's lockfile (every wheel pinned by version and SHA-256, pip --require-hashes --no-deps
@@ -909,10 +928,13 @@ def test_the_android_dev_lock_is_what_its_script_makes():
     text = (ANDROID_DEV / "sdk.lock").read_text()
     assert "as nixpkgs keeps it (nixpkgs@" in text
     assert lock.confirmed(text) == {row[6]: row[5] for row in sdk_lock_rows() if row[5] != "-"}
-    confirmed = text.replace("-" + " " * 64 + " https://dl.google.com/android/repository/platform-tools_r37.0.1",
-                             "a" * 64 + " https://dl.google.com/android/repository/platform-tools_r37.0.1")
-    assert lock.confirmed(confirmed)["https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip"] \
-        == "a" * 64
+    # Every Google archive was downloaded once (2026-11-24: its size and Google's SHA-1 matched) and its SHA-256
+    # written here: every build, the service image android-emulator and the toolchain android-sdk check it too.
+    assert all(re.fullmatch(r"[0-9a-f]{64}", row[5]) for row in sdk_lock_rows())
+    url = "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip"
+    was = lock.confirmed(text)[url]
+    assert lock.confirmed(text.replace(was, "a" * 64))[url] == "a" * 64
+    assert url not in lock.confirmed(text.replace(was + " ", "-" + " " * 64))  # a row not confirmed yet
     assert [name for _, name, _ in lock.PACKAGES][-1] == "37.0/google_apis/x86_64"
     # Every pin was at least 14 days old (sandbox-ai's rule) when it was made, which its comment line says.
     for _, _, by in lock.PACKAGES:

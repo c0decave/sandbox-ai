@@ -517,7 +517,7 @@ the settings over the model's profile with the profiles' keys and checks: `param
 Two recommendations of one use case never name the same model and harness. Optional `unsafe`: the pairs the research
 marks unsafe for the use case (`model`, `examples`, `label`, `harness` where it was seen, `why` - the reason -,
 `evidence`, `round`, optional `date`, `runs`/`solved`, `score`): the model in every harness; never recommended in the
-same use case (the check refuses it), listed with the reason by `llm recommend USE_CASE`, the Board, the Start page,
+same use case (the check refuses it), listed with the reason by `llm recommend USE_CASE`, the Board, the Board page,
 the wizard and the web (never hidden), never picked by a start's `--use-case` on its own.
 
 **Pairs.** `llm recommend USE_CASE [--llm NAME]` (and the app and the web) shows every model of the server as a pair -
@@ -748,7 +748,7 @@ agent-sandbox: WARNING: --llm studio: gemma-4-12b-it would see 27 MCP tools, mor
 
 The dry run has the count as `mcp_tools` (`tools`, `about`, `budget`, `class`, `servers` with each one's count and
 where it comes from, `drop`, `left`); the app's Board shows it as a finding on the LLM part with the servers to leave
-out, the Start page below the model. Each server's tools are counted from its **pin** for the project (`sandbox-ai
+out, the Board page below the model. Each server's tools are counted from its **pin** for the project (`sandbox-ai
 mcp tools`: the tools/list it was trusted with), else from its **catalog's list** (the server's `servers/NAME/tools.json`
 in the signed catalog's repository, kept as `sandbox/mcp_catalog_tools.json`; `scripts/catalog_tools.py` makes it
 anew), else from sandbox-ai's own servers (the demo, a team's board); a server none of them knows (one of your own

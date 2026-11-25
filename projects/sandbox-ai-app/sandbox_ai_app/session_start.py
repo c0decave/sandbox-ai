@@ -6,7 +6,7 @@ session/terminal is not opened", "the session is not started at all it seems". T
 last start (a codename is replaced only once its start ran), and the next Start - with another agent - met the
 session of the first. Only a session of this machine, of the same agent, was turned into an attach.
 
-The Board and the Start page mix SessionStart in (beside prerequisites.Prerequisites, whose host(), sai and
+The Board and the Board page mix SessionStart in (beside prerequisites.Prerequisites, whose host(), sai and
 prerequisite_agent() it uses). Before a start with a session name goes to its terminal, session_in_the_way() looks
 at that name on the start's host - this machine: the session's own files, read at once; another host: the Sandboxes
 page's look when it is a few seconds old, else `sandbox-ai session status NAME --json` there, in the background:
@@ -31,7 +31,7 @@ from .i18n import tr
 from .widgets import ask_first, background, choose, warn
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
-SESSIONS_FRESH = 5  # seconds the Sandboxes page's look at a host may be old to answer for a start there
+SESSIONS_FRESH = 5  # seconds the Sessions page's look at a host may be old to answer for a start there
 SEEN_WAIT = 75  # seconds a host may take to say what is there under a name
 IN_THE_WAY = ("running", "paused", "orphaned")
 
@@ -58,7 +58,7 @@ def place(host):
 
 
 def seen_of(instance):
-    """The facts of a start the Sandboxes page lists (INSTANCE, of another host: its record is `list --json`'s) as
+    """The facts of a start the Sessions page lists (INSTANCE, of another host: its record is `list --json`'s) as
     backend.seen_facts gives them, or None when its record says too little."""
     from . import backend
     record = getattr(instance, "record", None)
@@ -163,7 +163,7 @@ class SessionStart:
         known = self.session_known(host, session)
         if known is not None:
             applog.log("DEBUG", "start", f"a session named {printable(session)} on {printable(host)}: known from the "
-                                         "Sandboxes page's look just now")
+                                         "Sessions page's look just now")
             return self.session_decided(host, agent, session, embedded, known, go_on)
 
         def done(seen, error):
@@ -186,7 +186,7 @@ class SessionStart:
         return True
 
     def session_known(self, host, session):
-        """What the Sandboxes page saw under SESSION on HOST when its look is at most SESSIONS_FRESH seconds old and
+        """What the Sessions page saw under SESSION on HOST when its look is at most SESSIONS_FRESH seconds old and
         found a start of that name that runs or is paused (another host's: its listing says all a start needs to
         know); None otherwise - then the host is asked."""
         window = self.window() if hasattr(self, "window") else None
@@ -196,7 +196,7 @@ class SessionStart:
         try:
             found = fresh(host, SESSIONS_FRESH)
         except Exception as exc:  # noqa: BLE001 - the host is asked instead
-            applog.swallowed("session_start", "SessionStart.session_known: the Sandboxes page's look", exc)
+            applog.swallowed("session_start", "SessionStart.session_known: the Sessions page's look", exc)
             return None
         for instance in found or []:
             if session in (instance.name, getattr(instance, "ident", None)) and instance.state in IN_THE_WAY:
@@ -221,7 +221,7 @@ class SessionStart:
         return True
 
     def session_attach(self, host, session, embedded, seen=None, resume=False):
-        """The terminal of the session SESSION on HOST, as Attach of the Sandboxes page opens it (RESUME: continued
+        """The terminal of the session SESSION on HOST, as Attach of the Sessions page opens it (RESUME: continued
         first, `sandbox-ai resume`): instead of a second start that the launcher refuses."""
         try:
             argv = self.sai.resume_argv(host, session) if resume else self.sai.attach_argv(host, session)
@@ -394,7 +394,7 @@ class SessionStart:
             return
         notify = getattr(self.window(), "notify", None) if hasattr(self, "window") and self.window() is not self \
             else None
-        if callable(notify):  # (the Start page has no such panel: a notification beside the tab's line)
+        if callable(notify):  # (the Board page has no such panel: a notification beside the tab's line)
             try:
                 notify(tr("Not started"), text, level="warning")
             except Exception as exc:  # noqa: BLE001 - the tab's line and the log have it

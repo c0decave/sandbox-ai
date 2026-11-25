@@ -341,7 +341,7 @@ def test_the_browser_tab_sits_beside_its_terminal_and_moves_to_a_window_and_back
     panel = tabs.widget(1)
     assert wait(lambda: "Connected" in panel.status.text(), 10), panel.status.text()
     menu = [entry[0] if entry else None for entry in terminals.tab_actions(1)]
-    assert menu == ["Open in its own window", "Focus in Sandboxes & sessions", None, "Close tab", "Close other tabs"]
+    assert menu == ["Open in its own window", "Focus in Sessions", None, "Close tab", "Close other tabs"]
     assert terminals.tab_actions(0)[0][0] == "Rename…", "a terminal tab keeps its own menu"
     actions = {entry[0]: entry for entry in terminals.tab_actions(1) if entry}
     actions["Open in its own window"][3]()
@@ -359,7 +359,7 @@ def test_the_browser_tab_sits_beside_its_terminal_and_moves_to_a_window_and_back
     assert tabs.widget(1) is panel and panel.back.isHidden() and not frame.isVisible()
     assert "Esc closes" not in panel.note.text(), "in a tab every key is the browser's"
     actions = {entry[0]: entry for entry in terminals.tab_actions(1) if entry}
-    actions["Focus in Sandboxes & sessions"][3]()
+    actions["Focus in Sessions"][3]()
     assert window.current_page() == "sandboxes" and page.current().key == f"session:{session.name}"
     actions["Close tab"][3]()
     assert [tabs.tabText(i) for i in range(tabs.count())] == [session.name, other.name]

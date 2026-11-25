@@ -3,7 +3,7 @@
 
   sandbox-ai toolchain catalog [--json] [--catalog FILE_OR_URL]
                                               what the signed catalog offers for this machine, every version
-  sandbox-ai toolchain add NAME[@VERSION] [--unsigned] [--catalog FILE_OR_URL]
+  sandbox-ai toolchain add NAME[@VERSION] [--unsigned] [--catalog FILE_OR_URL] [--accept-android-sdk-license]
                                               download it, check it, unpack it into the store (beside the other
                                               versions of NAME there)
   sandbox-ai toolchain list [--run RUN] [--json]
@@ -31,6 +31,11 @@ A toolchain is one archive of the files of one prefix and its manifest, an entry
 from a catalog whose signature verifies (--unsigned: one of an unsigned catalog of your own, said at every start;
 never one whose signature is bad), checks the archive against the entry's SHA-256 before anything of it is unpacked
 and unpacks it without trusting it (mcp_rootfs.unpack) into ~/.local/share/sandbox-ai/toolchains/SHA256/, read-only.
+
+A toolchain nobody but its publisher may pass on (android-sdk: Google's license forbids redistributing the Android
+SDK) has no archive in the catalog but a signed recipe ("recipes": toolchain_recipes.py): `add` says the license and
+asks (--accept-android-sdk-license for a script; never asked in the security modes high and paranoid), fetches each
+file from its publisher, holds it to the recipe's size and hashes and builds the tree in the store of this machine.
 
 In the sandbox it is mounted read-only (nosuid, nodev) at /opt/toolchains/NAME. /opt/toolchains itself is a folder
 of the run's session directory on the host, read-only in the sandbox: sandbox-ai writes one small wrapper per
@@ -92,7 +97,8 @@ PRESET = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 ARCHES = ("x86_64", "aarch64")
 TEXT_KEYS = ("title", "description", "license", "homepage")
 KEYS = frozenset({"name", "version", "arch", "url", "sha256", "size", "unpacked", "commands", "env", "caches",
-                  "hosts", "allow", "needs", "requires", "sources", *TEXT_KEYS})
+                  "hosts", "allow", "needs", "requires", "sources", "recipe", *TEXT_KEYS})
+RECIPES_LIMIT = 256                # entries of a catalog's "recipes"
 # Variables no toolchain sets (each with why). A toolchain's env goes into the agent's own environment at a start
 # and into env.sh, which every `bash -c` of the agent reads (BASH_ENV): one of these would steer code the toolchain
 # does not ship - the agent, sandbox-ai's hooks in it (/usr/bin/python3 -I /sandbox/runtime.py), its shells, git,
@@ -119,12 +125,24 @@ ENV_REFUSALS = (
      "it decides where connections go, what they trust or where their keys are written"),
 )
 ENV_REFUSED = re.compile("|".join(f"(?:{pattern})" for pattern, _ in ENV_REFUSALS))
+# The one exception: PYTHONPATH as one folder of the toolchain's own tree (pyside6: {prefix}/python), so that the
+# Python packages a toolchain ships are importable in the python3 on PATH and in a virtual environment. The tree is
+# the signed, read-only one; any other value - a folder the sandbox can write, a list - stays refused, and so does
+# every other PYTHON* variable. sandbox-ai's own hooks run python3 -I, which does not read it.
+PYTHON_PATH = re.compile(r"\{prefix\}(?:/[A-Za-z0-9_+@-][A-Za-z0-9._+@-]*)+")
 LIMITS = {"commands": 256, "env": 32, "caches": 16, "hosts": 64, "allow": 8, "libraries": 16, "requires": 4,
           "sources": 64}
 # What sandbox-ai's own agent images have (Debian bookworm: node:lts-bookworm-slim, with openssl): what a
 # toolchain's "needs" is checked against under Podman. An image of your own is not known (a note instead of a check).
+# The second group is of their GUI base (Containerfile.*: libglib2.0-0, libegl1, libgl1, libx11-6, libfontconfig1,
+# libxkbcommon0, libdbus-1-3 and what curl and FreeType bring): what Qt's libraries load (pyside6, qt).
 OWN_IMAGE = {"glibc": "2.36", "libraries": frozenset({"libgcc_s.so.1", "libstdc++.so.6", "libatomic.so.1",
-                                                     "libz.so.1", "libssl.so.3", "libcrypto.so.3"})}
+                                                     "libz.so.1", "libssl.so.3", "libcrypto.so.3",
+                                                     "libzstd.so.1", "libglib-2.0.so.0", "libgthread-2.0.so.0",
+                                                     "libEGL.so.1", "libGL.so.1", "libX11.so.6",
+                                                     "libfontconfig.so.1", "libfreetype.so.6", "libxkbcommon.so.0",
+                                                     "libbrotlicommon.so.1", "libbrotlidec.so.1",
+                                                     "libgssapi_krb5.so.2", "libdbus-1.so.3"})}
 # glibc's own libraries: never named in "needs.libraries" (the floor covers them).
 GLIBC_LIBRARIES = frozenset({"libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1",
                              "libutil.so.1", "libresolv.so.2", "libanl.so.1", "libmvec.so.1",
@@ -188,7 +206,10 @@ def below_prefix(value, top="the toolchain's prefix"):
 
 def refused_variable(name, value=None):
     """Why no toolchain may set the variable NAME (to VALUE: None for a cache's folder), or None. A variable of
-    telemetry (telemetry_guard: named for it, or an opt-out) only with sandbox-ai's own value."""
+    telemetry (telemetry_guard: named for it, or an opt-out) only with sandbox-ai's own value. PYTHONPATH only as one
+    folder of the toolchain's own tree (PYTHON_PATH)."""
+    if name == "PYTHONPATH" and value is not None and PYTHON_PATH.fullmatch(value):
+        return None
     for pattern, why in ENV_REFUSALS:
         if re.fullmatch(pattern, name):
             return why
@@ -242,13 +263,22 @@ def validated(entry, where="toolchain", keep_refused=False):
         raise ValueError(f"{where}: version must be 1-64 letters, digits, '.', '+', '_' or '-'")
     if entry.get("arch") not in ARCHES:
         raise ValueError(f"{where}: arch is one of {', '.join(ARCHES)}")
-    url = entry.get("url")
-    if not isinstance(url, str) or len(url) > 2048 or any(c <= " " or c > "~" for c in url) or \
-            not (url.startswith("https://") or url.startswith("/") or url.startswith("file:///")):
+    made = entry.get("recipe")
+    url = entry.get("url", "" if made is not None else None)
+    if made is not None and url:
+        raise ValueError(f"{where}: it is a recipe, not an archive: it has no url")
+    if made is None and (not isinstance(url, str) or len(url) > 2048 or any(c <= " " or c > "~" for c in url) or
+                         not (url.startswith("https://") or url.startswith("/") or url.startswith("file:///"))):
         raise ValueError(f"{where}: url must be an https URL (or a local file of a catalog of your own)")
     if not isinstance(entry.get("sha256"), str) or not SHA256.fullmatch(entry["sha256"]):
         raise ValueError(f"{where}: sha256 must be 64 hex digits")
     result = {"name": name, "version": version, "arch": entry["arch"], "url": url, "sha256": entry["sha256"]}
+    if made is not None:
+        # Built on this machine (toolchain_recipes.py): the recipe's own SHA-256 names its tree, as an archive's does.
+        recipes = module("toolchain_recipes")
+        result["recipe"] = recipes.validated(made, f"{where}: recipe")
+        if recipes.digest(name, version, entry["arch"], result["recipe"]) != entry["sha256"]:
+            raise ValueError(f"{where}: sha256 is not its recipe's (a recipe changed under its name)")
     for key in ("size", "unpacked"):
         value = entry.get(key, 0)
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 16 << 30:
@@ -393,9 +423,16 @@ def read_catalog(source=None, fetch=None, keys=None):
         raise ValueError(f"{source}: not a toolchain catalog (schema {SCHEMA}, version 1)")
     signature = catalog_signature(source, data, fetch, keys)
     entries, problems = [], []
-    for index, entry in enumerate(document["toolchains"][:1024]):
+    # "recipes": the toolchains built on this machine (toolchain_recipes.py), signed with the others. A list of its
+    # own: a sandbox-ai from before them reads "toolchains" alone and is not told of entries it cannot take.
+    recipes = document.get("recipes") if isinstance(document.get("recipes"), list) else []
+    listed = [(f"entry {index + 1}", entry) for index, entry in enumerate(document["toolchains"][:1024])] + \
+        [(f"recipe {index + 1}", entry) for index, entry in enumerate(recipes[:RECIPES_LIMIT])]
+    for label, entry in listed:
         try:
-            entries.append({**validated(entry, f"entry {index + 1}"), "_signature": signature, "_catalog": source})
+            if label.startswith("recipe") and not (isinstance(entry, dict) and isinstance(entry.get("recipe"), dict)):
+                raise ValueError(f"{label}: an entry of \"recipes\" has a recipe")
+            entries.append({**validated(entry, label), "_signature": signature, "_catalog": source})
         except ValueError as exc:
             problems.append(f"{source}: {exc}: left out")
     return entries, signature, problems
@@ -592,10 +629,13 @@ def installed():
                 continue
             if checked["name"] != name or checked["version"] != version or not tree(checked["sha256"]).is_dir():
                 continue
-            signer = entry.get("signed_by")
+            signer, terms = entry.get("signed_by"), entry.get("terms")
             found.setdefault(name, {})[version] = {
                 **checked, "signed_by": signer if isinstance(signer, str) else None,
                 "added": entry.get("added") if isinstance(entry.get("added"), str) else None,
+                # (a toolchain built here: the license that was accepted for it, when and how)
+                **({"terms": {key: str(terms.get(key) or "")[:80] for key in ("id", "how", "accepted")}}
+                   if isinstance(terms, dict) else {}),
                 "path": str(tree(checked["sha256"]))}
     return found
 
@@ -687,50 +727,120 @@ def download(url, sha256, target, opener=None, limit=ARCHIVE_LIMIT, progress=Non
     return size
 
 
-def install(entry, unsigned=False, out=print, opener=None):
+def python_path_problem(entry, target):
+    """Why the folder ENTRY puts on Python's module path (env PYTHONPATH={prefix}/FOLDER) in its tree TARGET cannot be
+    used, or None: it must be a folder of the tree, and nothing in it may be named as a module of Python's standard
+    library, sitecustomize or usercustomize - every Python process of the sandbox would load it instead of its own
+    (the catalog's build refuses such a tree too: checked again here, on what was unpacked)."""
+    value = (entry.get("env") or {}).get("PYTHONPATH")
+    if value is None:
+        return None
+    if not PYTHON_PATH.fullmatch(str(value)):
+        return f"env PYTHONPATH is {shown(value)}: only one folder of the toolchain's own tree"
+    folder = Path(target) / str(value)[len("{prefix}/"):]
+    if folder.is_symlink() or not folder.is_dir():
+        return f"env PYTHONPATH names {shown(value)}, which is no folder of its tree"
+    standard = set(getattr(sys, "stdlib_module_names", ())) | {"os", "sys", "site", "json", "re", "io", "abc", "ssl",
+                                                                "types", "typing", "codecs", "encodings", "importlib",
+                                                                "collections", "subprocess", "sitecustomize",
+                                                                "usercustomize"}
+    shadows = sorted(item.name for item in folder.iterdir() if item.name.split(".")[0] in standard)
+    if shadows:
+        return (f"{shown(value)} holds {', '.join(shown(name, 60) for name in shadows[:5])}: Python's own module of that "
+                "name (or one that runs at every start of Python) would be replaced in every Python of the sandbox")
+    return None
+
+
+def default_mode(launcher=None):
+    """The security mode of a command that is no start: "mode" of your defaults (defaults.json), never below the
+    administrator's min_mode; medium without either."""
+    launcher = launcher or module("agent_sandbox")
+    modes, name = launcher.MODES, launcher.MODES.DEFAULT
+    try:
+        document = json.loads(launcher.read_config_bytes(launcher.defaults_file(), 1 << 16).decode())
+        if isinstance(document, dict) and document.get("mode") in modes.NAMES:
+            name = document["mode"]
+    except (OSError, ValueError, RecursionError, AttributeError):
+        pass
+    try:
+        floor = launcher.load_policy().get("min_mode")
+    except ValueError:
+        floor = None
+    return floor if floor in modes.NAMES and modes.rank(floor) > modes.rank(name) else name
+
+
+def install(entry, unsigned=False, out=print, opener=None, accepted=False, mode=None, terminal=None, read=None,
+            given=None):
     """ENTRY (of read_catalog) into the store: its signature checked, its archive downloaded and checked against its
     SHA-256, unpacked without trusting it (mcp_rootfs.unpack), every command's file found in the tree. The installed
-    entry; one that is there already is only named."""
+    entry; one that is there already is only named. An entry with a "recipe" is built here instead
+    (toolchain_recipes.build: each download from its publisher, held to the recipe's size and hashes), after the
+    license it names was accepted - ACCEPTED (its --accept-... option), or a yes on this terminal (TERMINAL, READ: for
+    tests), never asked in the modes high and paranoid (MODE). GIVEN: the value it was asked for by (NAME, NAME@17)."""
     rootfs = module("mcp_rootfs")
     signer = check_signature(entry, unsigned, out)
     label = f"{entry['name']} {entry['version']}"
+    made, agreed = entry.get("recipe"), None
+    if made:
+        recipes = module("toolchain_recipes")
+        terms = recipes.terms_of(entry)
+        if terms:
+            how = recipes.accept(terms, f"the toolchain {label}", "sandbox-ai toolchain add "
+                                 + (given or f"{entry['name']}@{entry['version']}"), accepted, mode, terminal, read,
+                                 lambda text: out(f"sandbox-ai toolchain: {text}"))
+            agreed = {"id": terms["id"], "how": how, "accepted": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     with store_lock():
         found = installed()
         target = tree(entry["sha256"])
         if not target.is_dir():
-            wanted = entry.get("size", 0) + entry.get("unpacked", 0) + RESERVE
+            largest = max((size for _, size in recipes.downloads(entry)), default=0) if made else entry.get("size", 0)
+            wanted = largest + entry.get("unpacked", 0) + RESERVE
             free = shutil.disk_usage(store()).free
             if wanted > RESERVE and free < wanted:
                 raise ValueError(f"{label} needs {wanted >> 20} MiB in {store()} (its archive, its files and a "
                                  f"reserve); {free >> 20} MiB are free")
-            out(f"sandbox-ai toolchain: downloading {label}"
-                + (f" ({entry['size'] >> 20} MiB)" if entry.get("size") else "") + f" from {shown(entry['url'])}")
-            archive = store() / f".download-{os.getpid()}-{entry['sha256'][:12]}"
-            with contextlib.suppress(OSError):
-                os.unlink(archive)
-            download(entry["url"], entry["sha256"], archive, opener)
-            try:
-                out(f"sandbox-ai toolchain: unpacking {label}")
-                with open(archive, "rb") as stream:
-                    rootfs.unpack(stream, target, case_sensitive=case_sensitive(store()))
-            finally:
+            if made:
+                fetched = recipes.downloads(entry)
+                out(f"sandbox-ai toolchain: building {label} on this machine: {len(fetched)} "
+                    f"download{'s' if len(fetched) != 1 else ''} of its publisher "
+                    f"({sum(size for _, size in fetched) >> 20} MiB), each checked against the recipe")
+                recipes.build(entry, target, out, opener, case_sensitive=case_sensitive(store()))
+            else:
+                out(f"sandbox-ai toolchain: downloading {label}"
+                    + (f" ({entry['size'] >> 20} MiB)" if entry.get("size") else "") + f" from {shown(entry['url'])}")
+                archive = store() / f".download-{os.getpid()}-{entry['sha256'][:12]}"
                 with contextlib.suppress(OSError):
                     os.unlink(archive)
+                download(entry["url"], entry["sha256"], archive, opener)
+                try:
+                    out(f"sandbox-ai toolchain: unpacking {label}")
+                    with open(archive, "rb") as stream:
+                        rootfs.unpack(stream, target, case_sensitive=case_sensitive(store()))
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.unlink(archive)
         missing = [path for path in entry["commands"].values() if not (target / path).is_file()]
         if missing:
             if not any(target == tree(other["sha256"]) for versions in found.values() for other in versions.values()):
                 rootfs.remove(target)
-            raise ValueError(f"{label}: its archive has no {missing[0]}, which its manifest names as a command: "
-                             "not added")
+            raise ValueError(f"{label}: its {'tree' if made else 'archive'} has no {missing[0]}, which its manifest "
+                             "names as a command: not added")
+        python_problem = python_path_problem(entry, target)
+        if python_problem:
+            if not any(target == tree(other["sha256"]) for versions in found.values() for other in versions.values()):
+                rootfs.remove(target)
+            raise ValueError(f"{label}: {python_problem}: not added")
         record = {**{key: value for key, value in entry.items() if key in KEYS}, "signed_by": signer,
-                  "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                  "added": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **({"terms": agreed} if agreed else {})}
         found.setdefault(entry["name"], {})[entry["version"]] = record
         save_installed(found)
     return {**record, "path": str(target)}
 
 
-def add(value, catalog=None, unsigned=False, out=print, fetch=None, opener=None, keys=None):
-    """`toolchain add NAME[@VERSION]`: the entry and the toolchains it requires, installed."""
+def add(value, catalog=None, unsigned=False, out=print, fetch=None, opener=None, keys=None, accepted=False,
+        mode=None, terminal=None, read=None):
+    """`toolchain add NAME[@VERSION]`: the entry and the toolchains it requires, installed. ACCEPTED, MODE, TERMINAL,
+    READ: how the license of one that is built here is accepted (install)."""
     name, version = spec(value)
     entries, _, problems = read_catalog(catalog, fetch, keys)
     for problem in problems:
@@ -746,7 +856,8 @@ def add(value, catalog=None, unsigned=False, out=print, fetch=None, opener=None,
             out(f"{wanted} {entry['version']} is in the store already")
             done.append(have)
         else:
-            done.append(install(entry, unsigned, out, opener))
+            done.append(install(entry, unsigned, out, opener, accepted, mode, terminal, read,
+                                given=str(value) if wanted == name else wanted))
             given = selector(wanted, entry["version"], installed().get(wanted) or {})
             out(f"added {wanted} {entry['version']} ({', '.join(entry['commands'])}): sandbox-ai AGENT --toolchain "
                 f"{given}, or into a running sandbox: sandbox-ai toolchain attach RUN {given}")
@@ -1075,7 +1186,8 @@ def save(record, entries):
 
 
 def registered(entry, source, opened=()):
-    manifest = {key: value for key, value in entry.items() if key in KEYS}
+    # (without a recipe's steps and texts: the run needs what is mounted, not how it was built)
+    manifest = {key: value for key, value in entry.items() if key in KEYS and key != "recipe"}
     return {"name": entry["name"], "version": entry["version"], "sha256": entry["sha256"], "source": source,
             "state": "attached", "since": time.time(), "manifest": manifest, "signed_by": entry.get("signed_by"),
             "opened": list(opened)}
@@ -1329,6 +1441,17 @@ def keep(record, value, add=True):
     return True
 
 
+def refuse_live(record, value, why, keeper=keep):
+    """Refuse a live attach to RECORD that only a restart can give (WHY), keeping --toolchain VALUE in the run's
+    session so that its next start has it: the restart is all that is left to do."""
+    session = session_of(record)
+    if session and keeper(record, value):
+        raise ValueError(f"{shown(record.get('run'))} {why}. --toolchain {value} is kept in the session's options: "
+                         f"its next start has it - restart it now with: sandbox-ai resume {shown(session)} --restart")
+    raise ValueError(f"{shown(record.get('run'))} {why}: start it with --toolchain {value} (sandbox-ai resume NAME "
+                     f"--restart --toolchain {value})")
+
+
 def attach_offered(record, value, offline=False, out=print, launcher=None, read=None, terminal=None, **kwargs):
     """`toolchain attach RUN VALUE` as typed: a toolchain (or one it requires) that is not in the store is offered
     to be added from the signed catalog first (fixes.py, as a start offers it: asked on a terminal, your
@@ -1356,19 +1479,17 @@ def attach(record, value, offline=False, out=print, runner=None, finder=finder_d
     launcher = launcher or module("agent_sandbox")
     check_policy(launcher)
     name, version = spec(value)
-    if launcher.machine_record(record):
-        raise ValueError(f"{shown(record.get('run'))} runs in podman machine's VM: a toolchain cannot be mounted "
-                         f"into it while it runs. Start it with the toolchain: sandbox-ai resume NAME --restart "
-                         f"--toolchain {value}")
-    if record.get("podman_url"):
-        raise ValueError(f"{shown(record.get('run'))} runs on another Podman service (--podman-url): start it with "
-                         f"--toolchain {value}")
-    folder = session_folder(record.get("session_dir", ""))
-    if not (folder / "bin").is_dir():
-        raise ValueError(f"{shown(record.get('run'))} was started by a sandbox-ai without toolchains (it has no "
-                         f"{MOUNT}): restart it with --toolchain {value}")
-    have = attached(record)
     plan = resolved([value], found)
+    folder = session_folder(record.get("session_dir", ""))
+    if launcher.machine_record(record):
+        refuse_live(record, value, "runs in podman machine's VM: a toolchain cannot be mounted into it while it runs",
+                    keeper)
+    if record.get("podman_url"):
+        refuse_live(record, value, "runs on another Podman service (--podman-url): a toolchain cannot be mounted "
+                    "into it while it runs", keeper)
+    if not (folder / "bin").is_dir():
+        refuse_live(record, value, f"was started by a sandbox-ai without toolchains (it has no {MOUNT})", keeper)
+    have = attached(record)
     target = next(entry for entry in plan if entry["name"] == name)
     wanted = [entry for entry in plan if not any(other["name"] == entry["name"] for other in have)]
     for entry in wanted:
@@ -1455,6 +1576,7 @@ def attach(record, value, offline=False, out=print, runner=None, finder=finder_d
         out("  kept in the session's options: a restart starts with it")
     out("  commands the agent starts from now on find it; a shell that is open reads its variables with: "
         f". {ENV_FILE}")
+    module("intro").refreshed(record, out)  # /sandbox/session/INTRO.md names it (a run with an intro)
     return [item["name"] for item in done]
 
 
@@ -1496,6 +1618,7 @@ def detach(record, value, force=False, out=print, runner=None, finder=finder_def
     out(f"detached {name} from {shown(record.get('run'))}"
         + (f"; the hosts opened with it stay open until the run ends (sandbox-ai net revoke "
            f"{shown(record.get('run'))} ...)" if entry.get("opened") else ""))
+    module("intro").refreshed(record, out)
 
 
 def run_listing(record):
@@ -1523,7 +1646,8 @@ def store_listing(found=None, runs=None):
              "size": entry["unpacked"] or entry["size"], "commands": sorted(entry["commands"]),
              "hosts": entry["hosts"], "allow": entry["allow"], "needs": entry["needs"],
              "requires": entry["requires"], "signed_by": entry.get("signed_by"), "added": entry.get("added"),
-             "used_by": users_of(entry["sha256"], runs), "refused": entry.get("refused")}
+             "used_by": users_of(entry["sha256"], runs), "refused": entry.get("refused"),
+             "recipe": bool(entry.get("recipe")), "terms": terms_shown(entry)}
             for name, versions in sorted(found.items())
             for version, entry in sorted(versions.items(), key=lambda item: version_key(item[0]))]
 
@@ -1546,8 +1670,35 @@ def catalog_listing(entries, found=None, arch=None):
                      "commands": sorted(entry["commands"]), "hosts": entry["hosts"], "allow": entry["allow"],
                      "needs": entry["needs"], "requires": entry["requires"],
                      "signed": (entry.get("_signature") or {}).get("state") == "good",
-                     "installed": bool(have and have["sha256"] == entry["sha256"])})
+                     "installed": bool(have and have["sha256"] == entry["sha256"]),
+                     # built on this machine from its publisher's downloads, after its license was accepted
+                     "recipe": bool(entry.get("recipe")), "terms": terms_shown(entry)})
     return rows
+
+
+def terms_shown(entry):
+    """{"id", "title", "by", "url", "option"[, "accepted", "how"]} of the license a toolchain built on this machine
+    asks you to accept (or that was accepted for it), or None."""
+    terms = module("toolchain_recipes").terms_of(entry) if entry.get("recipe") else None
+    if not terms:
+        return None
+    agreed = entry.get("terms") if isinstance(entry.get("terms"), dict) else {}
+    return {**{key: terms[key] for key in ("id", "title", "by", "url", "option")},
+            **{key: agreed[key] for key in ("accepted", "how") if agreed.get(key)}}
+
+
+def built_here_lines(rows):
+    """What the catalog's table says below it of the toolchains that are built on this machine."""
+    lines = []
+    for row in rows:
+        if row.get("recipe") and not any(line.startswith(f"{row['name']} is ") for line in lines):
+            terms = row.get("terms")
+            lines.append(f"{row['name']} is built on this machine from its publisher's downloads (a signed recipe, "
+                         "no archive of ours)" + (
+                             f": it is under the {terms['title']} ({terms['url']}), which you accept when you add "
+                             f"it - asked on a terminal, or sandbox-ai toolchain add {row['name']} {terms['option']}"
+                             if terms else ""))
+    return lines
 
 
 def table(rows):
@@ -1585,8 +1736,16 @@ def show_lines(entry):
                              or "nothing"),
               f"  needs: {needs_shown(entry['needs'])}"
               + (f"; the toolchains {', '.join(entry['requires'])}" if entry["requires"] else ""),
-              f"  archive: {shown(entry['url'])}", f"  sha256: {entry['sha256']}",
+              *([f"  archive: {shown(entry['url'])}"] if not entry.get("recipe") else
+                ["  built on this machine from its publisher's downloads (a signed recipe, no archive):",
+                 *(f"    {shown(url)} ({size} bytes)" for url, size in module("toolchain_recipes").downloads(entry))]),
+              f"  sha256: {entry['sha256']}" + (" (of the recipe)" if entry.get("recipe") else ""),
               f"  signed by: {signer or unsigned}"]
+    terms = terms_shown(entry)
+    if terms:
+        lines.append(f"  license: {terms['title']} ({terms['url']}), " + (
+            f"accepted {terms['accepted']} ({'with ' + terms['option'] if terms.get('how') == 'option' else 'asked'})"
+            if terms.get("accepted") else f"accepted when you add it (asked, or {terms['option']})"))
     if "path" in entry:
         lines.append(f"  store: {entry['path']}")
     for source in entry.get("sources") or []:
@@ -1612,7 +1771,8 @@ def help_style(prog):
 HELP_EPILOG = """Steps:
   1. sandbox-ai toolchain catalog                what there is for this machine (every version)
   2. sandbox-ai toolchain add NAME               download, check, keep it (+ what it needs)
-     NAME@VERSION: another version (jdk@17, python@3.12: the newest of it), kept beside the others
+     NAME@VERSION: another version (jdk@17, python@3.12), kept beside the others;
+     android-sdk (a license): --accept-android-sdk-license
   3. sandbox-ai AGENT --toolchain NAME           a start with it (repeatable)
   4. sandbox-ai toolchain attach RUN NAME        or into a sandbox that runs, without a restart
   5. sandbox-ai toolchain detach RUN NAME        out of it again (--force while it is in use)
@@ -1638,6 +1798,11 @@ def parser():
     adder.add_argument("--unsigned", action="store_true",
                        help="take an entry of a catalog that is not signed by a trusted key (never one whose "
                             "signature is bad)")
+    adder.add_argument("--accept-android-sdk-license", action="store_true",
+                       help="for android-sdk, which is built on this machine from Google's downloads: you accept the "
+                            "Android Software Development Kit License Agreement "
+                            "(https://developer.android.com/studio/terms) - without it the question is asked on a "
+                            "terminal, never in the modes high and paranoid")
     lister = commands.add_parser("list", help="the store; --run: a running sandbox's toolchains")
     lister.add_argument("--run", metavar="RUN", nargs="?", const="", help="the toolchains of a running sandbox")
     lister.add_argument("--json", action="store_true", help="as JSON")
@@ -1680,13 +1845,16 @@ def main(argv, out=print):
                  needs_shown(row["needs"], row.get("requires")),
                  "yes" if row["installed"] else "-", ", ".join(row["commands"][:8])
                  + (" ..." if len(row["commands"]) > 8 else "")] for row in rows)])))
+            for line in built_here_lines(rows):
+                out(line)
             older = next((row for row in rows if "@" in row["toolchain"]), None)
             if older:
                 out(f"NAME is what `sandbox-ai toolchain add` and --toolchain take: {older['name']} for its newest, "
                     f"{older['toolchain']} for {older['version']}")
             return 0
         if args.command == "add":
-            add(args.name, args.catalog, args.unsigned, out=out)
+            add(args.name, args.catalog, args.unsigned, out=out, accepted=args.accept_android_sdk_license,
+                mode=default_mode())
             return 0
         if args.command == "remove":
             remove(args.name, out=out)

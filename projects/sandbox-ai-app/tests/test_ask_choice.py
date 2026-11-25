@@ -1,6 +1,6 @@
 """--ask in words (ask_choice.py): the Start page's chooser, the Board's approvals part with its third choice "Always
 allow everything" (--ask allow, sandbox-ai 0.1.80), marked and explained; the security score, the beginner guide,
-the wizard (which keeps it), the trust question, the Sandboxes page's mark, and a host too old for it."""
+the wizard (which keeps it), the trust question, the Sessions page's mark, and a host too old for it."""
 import os
 from types import SimpleNamespace
 

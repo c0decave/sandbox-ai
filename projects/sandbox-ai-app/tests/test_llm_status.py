@@ -1,6 +1,6 @@
 """What an LLM server has loaded and uses now (sandbox-ai llm status, wizard models --status) in the app: the LLM
 page's line per server, read in the background after the list and every STATUS_REFRESH seconds while the page is
-shown (never on the GUI thread, one read at a time), the dialog's Test connection, and the Sandboxes page's line for
+shown (never on the GUI thread, one read at a time), the dialog's Test connection, and the Sessions page's line for
 a start with --llm NAME. Also: every model a server lists is offered (70, 120 or more), in choosers whose popup
 scrolls and whose typing filters. Stand-ins record what they were asked; nothing reaches a server or a host."""
 import json

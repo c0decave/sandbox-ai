@@ -568,6 +568,11 @@ def logged_in():
         "memory": "2g", "pids": 256, "no_pull": True, "backend": "both", "vpn": "home"},
      ["mcp", "add", "--as=bw", "--mount=/mnt/samples=/home/u/samples:ro", "--env=VT_KEY", "--network=full",
       "--memory=2g", "--pids=256", "--no-pull", "--backend=both", "--vpn=home", "hub:binwalk"]),
+    # the network in the agents' words (2026-11-24): sent as every sandbox-ai takes it (an older host too)
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "hub:binwalk", "network": "offline"},
+     ["mcp", "add", "--network=none", "hub:binwalk"]),
+    ("POST", "/api/hosts/ct1/mcp", {"entry": "web-fetch", "network": "egress-all"},
+     ["mcp", "add", "--network=full", "web-fetch"]),
     # the variables as `mcp add --env` takes them: NAME, NAME=VALUE (nothing of a secret's), NAME@SECRET
     ("POST", "/api/hosts/ct1/mcp", {"entry": "gowitness", "env": ["ALLOW_PRIVATE_TARGETS=1", "TOKEN@my_token",
                                                                   "LABEL=a value with spaces", "EMPTY="]},
@@ -2593,6 +2598,9 @@ READS = (["defaults", "show", "--json"], ["limits", "web", "--show", "--json"], 
 # has to be put here or in the table, deliberately.
 SAFE_POSTS = {r"/api/hosts", r"/api/hosts-status", r"/api/hosts/(?P<host>[^/]+)/test",
               r"/api/hosts/(?P<host>[^/]+)/fix-plan",  # (what a start lacks: read only, nothing is made)
+              # (mcp check: each server started as a start would, asked for its tools, stopped again if the check
+              # started it - nothing ends that was running, nothing is removed or weakened)
+              r"/api/hosts/(?P<host>[^/]+)/mcp-check",
               r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/export",
               r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/session-files-search",  # (a search: read only)
               r"/api/hosts/(?P<host>[^/]+)/starts/(?P<name>[^/]+)/checkpoints",
@@ -4574,6 +4582,45 @@ def test_the_mcp_add_form_takes_values_and_secrets_and_shows_the_catalogs_variab
     assert result["other"] == ["", 0]
 
 
+GIVE_DRIVER = FAKE_DOM + r"""
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "local", kind: "local" }, { name: "ct1", kind: "ssh", ssh: "root@ct1" }]; state.giveTo = { host: "ct1", name: "api" };', context);
+  answer = (method, path) => (path === "/api/hosts/ct1/starts" ? [{ name: "web", state: "running", kind: "session" }, { name: "api", state: "running", kind: "run" }, { name: "files", state: "running", kind: "mcp" }] : { output: "given" });
+  const giving = vm.runInContext('giveCredentialsCard("ct1")', context);
+  main.append(giving.box); await settle();
+  const run = document.getElementById("give-run");
+  result.runs = [run.children.map(o => o.value !== undefined ? o.value : o.attributes.value), run.value, vm.runInContext("state.giveTo", context)];
+  giving.fill("https://git.example.org", "GITEA");
+  document.getElementById("give-key-host").value = "API.example.com";
+  document.getElementById("give-key-secret").value = "EXAMPLE_KEY";
+  button(giving.box, "Give…").fire("click");
+  result.ask = giving.box.all().find(n => n.className === "confirm").textContent;
+  result.before = calls.filter(c => c.method === "POST").length;
+  button(giving.box, "Yes, give it").fire("click"); await settle();
+  result.post = calls.filter(c => c.method === "POST").map(c => [c.path, JSON.parse(c.body)]).pop();
+  console.log(JSON.stringify(result));
+})().catch(e => { console.error(e.stack); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_a_git_login_and_an_api_key_are_given_to_a_running_sandbox_on_the_logins_page(tmp_path):
+    """Proposal D (2026-11-24): Git logins and API keys during a run come from one place, the page Logins (Give to a
+    running sandbox); a start's Network card leads there with that start chosen. The same request as before (net
+    allow RUN --git-token-* / --api-key), asked first; an MCP server is not offered."""
+    result = run_driver(tmp_path, GIVE_DRIVER, "give")
+    assert result["runs"] == [["web", "api"], "api", None]
+    for part in ("a Git login for https://git.example.org", "the secret EXAMPLE_KEY as the API key EXAMPLE_KEY",
+                 "api on ct1", "at once"):
+        assert part in result["ask"], (part, result["ask"])
+    assert result["before"] == 0
+    assert result["post"] == ["/api/hosts/ct1/net/api", {
+        "op": "allow", "allow_host": [], "allow_tcp": [], "host_ports": [], "dns": False,
+        "git_login": {"url": "https://git.example.org", "kind": "secret", "ref": "GITEA"},
+        "api_key": {"host": "api.example.com", "name": "EXAMPLE_KEY", "secret": "EXAMPLE_KEY"}, "confirm": True}]
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="needs node")
 def test_the_page_splits_options_confirms_in_place_and_keeps_the_starts_table(tmp_path):
     result = run_driver(tmp_path, PAGE_DRIVER, "page")
@@ -4644,7 +4691,10 @@ const buttonsOf = (r) => r.all().filter(n => n.tagName === "button");
   const card = document.getElementById("network-card");
   result.cardOpen = Boolean(card) && !button(card, "Allow…").disabled;
   // W4: Allow widens at once: asked first, naming what
-  for (const id of ["net-tcp", "net-ports", "net-git-url", "net-git-ref"]) document.getElementById(id).value = "";
+  for (const id of ["net-tcp", "net-ports"]) document.getElementById(id).value = "";
+  // D (2026-11-24): a Git login or an API key is given on the page Logins; the card leads there, this start chosen
+  result.netNoLogins = ["net-git-url", "net-git-ref", "net-key-host", "net-key-secret"].map(id => document.getElementById(id) === null);
+  result.netGiveLink = Boolean(button(card, "Git login or API key…"));
   document.getElementById("net-dns").checked = true;
   document.getElementById("net-hosts").value = "*.example.org";
   button(card, "Allow…").fire("click");
@@ -4799,6 +4849,7 @@ def test_prompts_stale_rows_queued_refreshes_retired_cards_and_the_fleet(tmp_pat
     assert result["netPost"] == {"op": "allow", "allow_host": ["*.example.org"], "allow_tcp": [], "host_ports": [],
                                  "dns": True, "confirm": True}
     assert result["untaint"], "a tainted run offers Untaint…"
+    assert result["netNoLogins"] == [True] * 4 and result["netGiveLink"], "Git logins and API keys: on Logins"
     # W9: the rows of a listing that failed: as last seen, greyed, buttons off
     assert result["stale"] == ["stale", True, True, True]
     assert result["cardWhileStale"], "a host that did not answer is no news about its start"
@@ -5678,9 +5729,9 @@ def test_the_mcp_catalog_and_the_activity_are_read_as_the_commands_print_them(lo
                                                        "garbage line\n", "sandbox-ai mcp: catalog not read: c1: 404\n")
     status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {})
     assert status == 200 and out["entries"] == [
-        {"entry": "hub:binwalk", "prefix": "hub", "name": "binwalk", "network": "none", "title": "Binwalk firmware analysis",
+        {"entry": "hub:binwalk", "prefix": "hub", "name": "binwalk", "network": "offline", "title": "Binwalk firmware analysis",
          "published": True, "signature": "good", "catalog": "axross-mcp-hub (github.com/c0decave)", "env": []},
-        {"entry": "c0:duck", "prefix": "c0", "name": "duck", "network": "full duckduckgo.com", "title": "DuckDuckGo search",
+        {"entry": "c0:duck", "prefix": "c0", "name": "duck", "network": "egress-all duckduckgo.com", "title": "DuckDuckGo search",
          "published": False, "signature": "none", "catalog": "c0", "env": []}]
     status, out = logged_in("POST", "/api/hosts/ct1/mcp-catalog", {"catalogs": ["https://example.org/mine/catalog.json"]})
     assert status == 200 and [e["catalog"] for e in out["entries"]] == ["axross-mcp-hub (github.com/c0decave)",
@@ -5913,12 +5964,12 @@ const posts = () => calls.filter(c => c.method !== "GET").map(c => [c.path, JSON
   result.presets = [pypi.checked, pypi.disabled, Boolean(pypi.title), Boolean(github.checked), github.disabled];
   byId("net-hosts").value = "api.example.org"; byId("net-hosts").fire("input");
   github.checked = true; github.fire("change");
-  byId("net-git-ref").value = "GITEA_TOKEN"; byId("net-git-ref").fire("input");
+  byId("net-allow").value = "192.0.2.0/24"; byId("net-allow").fire("input");
   // another start's card in between: this one is closed
   vm.runInContext("networkCard", context)(main, { name: "api", id: "api-1", host: "ct1", state: "running", kind: "session" }); await settle();
   result.otherEmpty = byId("net-hosts").value || "";
   vm.runInContext("networkCard", context)(main, web); await settle();
-  result.again = [byId("net-hosts").value, Boolean(byId("net-preset-github").checked), byId("net-git-ref").value, byId("net-preset-pypi").disabled];
+  result.again = [byId("net-hosts").value, Boolean(byId("net-preset-github").checked), byId("net-allow").value, byId("net-preset-pypi").disabled];
   const allow = () => button(byId("network-card"), "Allow…").fire("click");
   vm.runInContext('state.me.confirm = []', context);
   allow(); await settle();
@@ -5955,7 +6006,7 @@ def test_the_network_and_resources_cards_show_what_the_run_has_and_keep_what_was
     result = run_driver(tmp_path, CARD_DRAFTS_DRIVER, "carddrafts")
     assert result["presets"] == [True, True, True, False, False], "pypi given: ticked, greyed, said why"
     assert result["otherEmpty"] == "", "another start's card starts empty"
-    assert result["again"] == ["api.example.org", True, "GITEA_TOKEN", True]
+    assert result["again"] == ["api.example.org", True, "192.0.2.0/24", True]
     assert result["sentPresets"] and all("pypi" not in sent for sent in result["sentPresets"]), "given: never sent"
     assert result["afterRefusal"] == "api.example.org", "refused: what was typed stays"
     assert result["afterTaken"] == "", "taken: done with"
@@ -7291,6 +7342,19 @@ def test_name_style_is_a_default_that_lowers_nothing(logged_in):
     assert '["name_style", N_(' in script and 't("empty: a codename like brisk-otter-lantern")' in script
 
 
+
+def test_agent_intro_is_a_default_that_lowers_nothing(logged_in):
+    """Whether a start tells its agent what its sandbox has (/sandbox/session/INTRO.md, todos.txt board 6): true or
+    false, set and unset without a question (it opens and closes nothing); anything else refused before a host."""
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "agent_intro", "value": False})
+    assert status == 200, out
+    assert logged_in.runner.calls == [("ct1", ["defaults", "set", "agent_intro", "false"])]
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "agent_intro", "value": "no"})
+    assert status == 400 and "agent_intro is true or false" in out["error"]
+    status, out = logged_in("POST", "/api/hosts/ct1/defaults", {"key": "agent_intro", "value": None})
+    assert status == 200 and logged_in.runner.calls[-1] == ("ct1", ["defaults", "unset", "agent_intro"])
+    assert any(test(["defaults", "set", "agent_intro", "false"]) for _, _, test in w.NEWER), "an older host says so"
+
 # -- the names of a host's secrets and VPN profiles offered where a field takes one (offerNames: a <datalist>) --
 
 NAMES_DRIVER = FAKE_DOM + r"""
@@ -8257,3 +8321,86 @@ def test_the_web_help_has_the_apps_pattern(tmp_path):
     assert ["sandbox-ai net allow RUN api.example.com", "Copy"] in result["commands"]
     assert result["folds"][-1] == ["Command line", False] and not any(opened for _name, opened in result["folds"])
     assert "default-deny firewall" in result["foldText"], "the details are there, folded"
+
+
+STARTED_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.page = "starts"; state.hosts = [{ name: "ct1", kind: "ssh", ssh: "root@ct1" }];', context);
+  let shown = { https: [], tcp: [], host_ports: [], host_wildcards: [], started: [
+    { kind: "preset", what: "claude", source: "provider", detail: "claude", hosts: ["api.anthropic.com", "claude.ai"] },
+    { kind: "preset", what: "--allow-pypi", source: "project", detail: "/p/.sandbox-ai.json", hosts: ["pypi.org"], scope: "every start of the project" },
+    { kind: "tcp", what: "192.0.2.4:22", source: "option" }] };
+  answer = (method, path) => (path === "/api/hosts/ct1/net/web" && method === "GET" ? shown : method === "GET" ? [] : { output: "ok" });
+  const web = { name: "web", id: "web-1", host: "ct1", state: "running", kind: "session" };
+  vm.runInContext("networkCard", context)(main, web); await settle();
+  const card = byId("network-card");
+  const tables = card.all().filter(n => n.tagName === "table");
+  result.rows = tables[0].all().filter(n => n.tagName === "tr").map(r => r.children.map(c => c.textContent));
+  result.revokes = tables[0].all().filter(n => n.tagName === "button").length;
+  shown = { https: [], tcp: [] };
+  vm.runInContext("networkCard", context)(main, web); await settle();
+  result.older = byId("network-card").textContent.includes("it was started by an older sandbox-ai");
+  console.log(JSON.stringify(result));
+})();
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_network_card_lists_what_the_start_opened_with_its_source(tmp_path):
+    """The one place that says what a sandbox may reach and why (todos 2026-11-24, "Netzwerkfreigaben"): the Network
+    card lists what its start opened (net show's "started"), each with its source and how long it holds, above what was
+    allowed during the run; none of it has a Revoke (it is the start's); an older run says it is not recorded."""
+    result = run_driver(tmp_path, STARTED_DRIVER, "started")
+    rows = [row for row in result["rows"] if row and row[0] != "Kind"]
+    assert rows[0] == ["HTTPS (TCP/443)", "api.anthropic.com, claude.ai", "the agent's provider (claude)", "this start"]
+    assert rows[1] == ["HTTPS (TCP/443)", "--allow-pypi: pypi.org", "the project file (/p/.sandbox-ai.json)",
+                       "every start of the project"]
+    assert rows[2] == ["TCP", "192.0.2.4:22", "the start's own options", "this start"]
+    assert result["revokes"] == 0
+    assert result["older"]
+
+
+INSTALL_ITEMS_DRIVER = FAKE_DOM + r"""
+const byId = (id) => document.getElementById(id);
+(async () => {
+  const result = {};
+  vm.runInContext('state.me = { user: "admin", csrf: "c", terminals: true }; state.host = "ct1"; state.hosts = [{ name: "ct1", kind: "ssh", ssh: "root@ct1" }]; var terminalsOpened = []; openTerminal = (params, title) => { terminalsOpened.push(params); };', context);
+  const items = [
+    { id: "image:claude", kind: "images", installed: true, size: 2000000000, note: "", pending: false, all: true },
+    { id: "image:codex", kind: "images", installed: false, size: null, note: "a build", pending: false, all: true },
+    { id: "mcp:hub:nmap", kind: "mcp", installed: false, size: null, note: "pending", pending: true, all: false },
+    { id: "toolchain:rust", kind: "toolchains", installed: false, size: 150935140, note: "a download", pending: false, all: true },
+    { id: "preset:rust", kind: "presets", installed: false, size: 150935140, note: "", pending: false, all: true, needs: ["image:claude", "toolchain:rust"] }];
+  answer = (method, path) => (path === "/api/hosts/ct1/install-items" ? { items, problems: ["MCP catalogs: one not read"] } : method === "GET" ? [] : { output: "ok" });
+  vm.runInContext("installItemsCard", context)(main, "ct1"); await settle();
+  const card = byId("install-card");
+  button(card, "List what can be installed").fire("click"); await settle();
+  const boxes = card.all().filter(n => n.tagName === "input" && n.attributes.type === "checkbox");
+  result.boxes = boxes.map(b => [b.value, b.disabled]);
+  result.text = card.textContent;
+  button(card, "All").fire("click");
+  result.all = boxes.filter(b => b.checked).map(b => b.value);
+  button(card, "None").fire("click");
+  boxes.find(b => b.value === "mcp:hub:nmap").checked = true; boxes.find(b => b.value === "mcp:hub:nmap").fire("change");
+  boxes.find(b => b.value === "preset:rust").checked = true; boxes.find(b => b.value === "preset:rust").fire("change");
+  button(card, "Install 2 in a terminal").fire("click"); await settle();
+  result.opened = vm.runInContext("terminalsOpened", context);
+  console.log(JSON.stringify(result));
+})();
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="needs node")
+def test_the_images_page_lists_what_can_be_installed_and_starts_it_in_a_terminal(tmp_path):
+    """Web counterpart of the app's Install menu (todos 2026-11-24): the list of what that host can install (state,
+    size, what a preset needs), All (what --all takes) / None, and the ticked items as `sandbox-ai install ITEM...`
+    in a terminal there."""
+    result = run_driver(tmp_path, INSTALL_ITEMS_DRIVER, "install-items")
+    assert result["boxes"] == [["image:claude", True], ["image:codex", False], ["mcp:hub:nmap", False],
+                               ["toolchain:rust", False], ["preset:rust", False]]
+    assert "2.0 GB" in result["text"] and "150.9 MB" in result["text"] and "needs image:claude, toolchain:rust" in \
+        result["text"] and "pending (built after a question)" in result["text"] and "one not read" in result["text"]
+    assert result["all"] == ["image:codex", "toolchain:rust"], "never a pending server or a preset as such"
+    assert result["opened"] == [{"kind": "install-items", "host": "ct1", "items": "mcp:hub:nmap,preset:rust"}]

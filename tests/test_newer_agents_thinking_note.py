@@ -138,8 +138,10 @@ def home(tmp_path, monkeypatch):
 
 
 def tor_start(agent):
+    """A Tor start whose note is the network note alone (--no-intro: with the agent's intro the notes are joined in
+    agent-note.md - tests/test_intro.py)."""
     v.main(["add", "anon", "--tor", "--force"])
-    a = s.parse_args([agent, "--backend", "podman", "--vpn", "anon"])
+    a = s.parse_args([agent, "--backend", "podman", "--vpn", "anon", "--no-intro"])
     v.validate(a)
     a.run_id = f"{agent}-note"
     return a
@@ -177,7 +179,8 @@ def test_letta_gets_the_note_file_for_its_mod(home):
     a = tor_start("letta")
     config = json.loads(s.agent_files(a)["letta/sandbox-ai-start.json"])
     assert config["note"] == v.NOTE_PATH
-    assert json.loads(s.agent_files(s.parse_args(["letta"]))["letta/sandbox-ai-start.json"])["note"] is None
+    assert json.loads(s.agent_files(s.parse_args(["letta", "--no-intro"]))["letta/sandbox-ai-start.json"])["note"] \
+        is None
 
 
 @pytest.fixture
@@ -357,7 +360,7 @@ def tor_host(host):
 
 
 def test_e2e_nanobot_through_tor_gets_the_note_as_an_always_loaded_skill(tor_host, tmp_path):
-    session = kept_start(tor_host, tmp_path, "nanobot", "--vpn", "tor-test", env=TOR)
+    session = kept_start(tor_host, tmp_path, "nanobot", "--vpn", "tor-test", "--no-intro", env=TOR)
     note = (session / "network.md").read_text()
     skill = (session / "kits/skills/sandbox-ai-network/SKILL.md").read_text()
     assert "\nalways: true\n" in skill and skill.rstrip().endswith(note.strip())
@@ -366,8 +369,8 @@ def test_e2e_nanobot_through_tor_gets_the_note_as_an_always_loaded_skill(tor_hos
 
 
 def test_e2e_letta_and_opencode2_through_tor_get_the_note_in_their_place(tor_host, tmp_path):
-    session = kept_start(tor_host, tmp_path, "letta", "--vpn", "tor-test", env=TOR)
+    session = kept_start(tor_host, tmp_path, "letta", "--vpn", "tor-test", "--no-intro", env=TOR)
     assert json.loads((session / "letta/sandbox-ai-start.json").read_text())["note"] == "/sandbox/session/network.md"
-    session = kept_start(tor_host, tmp_path, "opencode2", "--vpn", "tor-test", env=TOR)
+    session = kept_start(tor_host, tmp_path, "opencode2", "--vpn", "tor-test", "--no-intro", env=TOR)
     content = json.loads(json.loads((session / "config.json").read_text())["env"]["OPENCODE_CONFIG_CONTENT"])
     assert content["instructions"] == ["/sandbox/session/network.md"]

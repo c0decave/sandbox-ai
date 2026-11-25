@@ -74,7 +74,7 @@ def review_detail(review, change):
              f"{tr('Why it matters')}: {printable(change.get('why'))}",
              f"{tr('Decision')}: {decision_text(change)}"]
     if not change.get("restorable"):
-        lines.append(tr("Restore: not possible here - {why}; the start's checkpoint may have it (Sandboxes > "
+        lines.append(tr("Restore: not possible here - {why}; the start's checkpoint may have it (Sessions > "
                         "Checkpoints…)", why=printable(change.get("why_not") or tr("no before-state recorded"))))
     lines.append("")
     lines += [printable(line) for line in change.get("diff") or []]

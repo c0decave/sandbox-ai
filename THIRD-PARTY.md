@@ -47,6 +47,15 @@ and the Kotlin compiler 2.4.21 (Apache-2.0, JetBrains) are downloaded from their
   carries the text of the Android Software Development Kit License Agreement (Google LLC), as sdkmanager's own does.
 - `recipes/android-dev/android-sdk-license`: the acceptance sdkmanager records for that license (the SHA-1 of its text).
 
+The same holds for the toolchain `android-sdk` (`sandbox-ai toolchain add android-sdk`: the signed catalog of
+sandbox-ai-mcp holds a recipe - URLs, sizes, hashes -, never the files) and for the service image
+`android-emulator` (`sandbox/service-images/android-emulator`: built on your machine from the emulator, one system
+image, platform-tools and the command-line tools of the same `sdk.lock`). Both ask you to accept the Android
+Software Development Kit License Agreement before anything is fetched; its section 3.4 forbids redistributing the
+SDK, so sandbox-ai publishes no archive and no image with any part of it. The service image `adb`
+(`sandbox/service-images/adb`) holds Debian's own `adb` and `fastboot` (android-platform-tools, Apache-2.0), built
+by Debian from the Android Open Source Project: nothing of Google's SDK downloads.
+
 ## Fonts (projects/sandbox-ai-app/sandbox_ai_app/typefaces, sandbox/web/fonts)
 
 Bundled unchanged, each from its family's official repository at a pinned commit (older than 14 days when pinned on

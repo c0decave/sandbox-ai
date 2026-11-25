@@ -469,16 +469,29 @@ def test_the_builtin_containerfiles_are_pinned_and_run_as_a_service_can(config):
         for _, ref in external:
             parsed = sv.parse_reference(ref)
             assert parsed["domain"] == "docker.io" and parsed["tag"], ref  # the registry written out
-            assert sv.re.fullmatch(r"\d+\.\d+\.\d+(-[a-z0-9.]+)?", parsed["tag"]), f"{ref}: an exact release"
-        lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")]
-        assert not [line for line in lines if line.split()[0] in ("ENTRYPOINT", "CMD", "VOLUME", "ADD")], name
+            # (nginx 1.28.0-alpine; Debian's releases have two numbers: 12.12-slim)
+            assert sv.re.fullmatch(r"\d+\.\d+(\.\d+)?(-[a-z0-9.]+)?", parsed["tag"]), f"{ref}: an exact release"
+        info = sv.template_info(name)
+        lines = [line.strip() for line in sv.re.sub(r"\\\n", " ", text).splitlines()
+                 if line.strip() and not line.startswith("#")]
+        assert not [line for line in lines if line.split()[0] in ("CMD", "VOLUME", "ADD")], name
+        # An ENTRYPOINT only as an init of its own before the service's program (tini: hostinit.image_init).
+        entry = [line for line in lines if line.split()[0] == "ENTRYPOINT"]
+        assert all(line.startswith('ENTRYPOINT ["/usr/bin/tini", "-s", "--", ') for line in entry), name
         users = [line.split()[1] for line in lines if line.split()[0] == "USER"]
         assert users and sv.re.fullmatch(r"[0-9]+:[0-9]+", users[-1]), name
-        assert int(users[-1].split(":")[0]) not in (0, 1, 2), "none of the firewall's own users"
+        assert int(users[-1].split(":")[0]) not in (1, 2), "none of the firewall's own users"
+        # The container's root only where the template says why (service.json "root": a device the host gave to
+        # your user alone); it gets no capability either way.
+        assert (int(users[-1].split(":")[0]) == 0) == bool(info.get("root")), name
+        shared = {f"shared/{Path(item).name}" for item in info.get("context", [])}
         for line in lines:
             if line.split()[0] == "COPY":
                 for source in line.split()[1:-1]:
-                    assert not source.startswith("--") and (folder / source).is_file(), (name, line)
+                    assert not source.startswith("--") and ((folder / source).is_file() or source in shared), \
+                        (name, line)
+        for item in info.get("context", []):  # files of sandbox-ai itself: never a link, never outside sandbox/
+            assert (ROOT / "sandbox" / item).is_file() and not (ROOT / "sandbox" / item).is_symlink(), item
     conf = (sv.BUILTIN_IMAGES / "showcase-web" / "nginx.conf").read_text()
     assert "listen 8080;" in conf and "pid /tmp/nginx.pid;" in conf and "proxy_pass http://127.0.0.1:8000/;" in conf
     assert not sv.re.search(r"^\s*user\s", conf, sv.re.M), "no user directive: the master runs as 101 already"

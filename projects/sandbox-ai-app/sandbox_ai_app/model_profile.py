@@ -1,4 +1,4 @@
-"""The model x harness profile of a board's (or the Start page's) model in its agent, shown where the model is chosen.
+"""The model x harness profile of a board's (or the Board page's) model in its agent, shown where the model is chosen.
 
 sandbox-ai applies a profile at every start with --llm NAME:MODEL (its model_profiles.py and model_profiles.json: the
 local-model research's sampling, context window, turn limit and the harness's own switches) UNDER the user's own
@@ -7,7 +7,7 @@ This module looks the profile up in this machine's sandbox-ai (sai.module("model
 words: a badge ("Model profile: qwen3-coder-next × opencode (verified)"), its values with "your value wins" where the
 board or the server sets one itself, and its warnings for a pair known not to work (a warning, never a refusal).
 
-No Qt: the Board page (board_view.py) and the Start page (ui.py) show it.
+No Qt: the Board page (board_view.py) and the Board page (ui.py) show it.
 """
 from __future__ import annotations
 

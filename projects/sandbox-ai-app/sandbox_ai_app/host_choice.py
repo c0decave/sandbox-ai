@@ -148,7 +148,7 @@ class HostChooser(QWidget):
         self.box.setToolTip(safe_tooltip(tooltip or tr("This machine, or a host of sandbox-ai hosts (over SSH)")))
         self.box.currentIndexChanged.connect(lambda _=0: self.changed.emit(self.host()))
         row.addWidget(self.box, 1)
-        # Whose host it shows when the window's pages follow the Sandboxes page's host (HostFollow): hidden otherwise.
+        # Whose host it shows when the window's pages follow the Sessions page's host (HostFollow): hidden otherwise.
         self.note = follow_note()
         row.addWidget(self.note)
         self.problem = None
@@ -197,7 +197,7 @@ class HostChooser(QWidget):
         return host_label(host or self.host())
 
 
-# -- the pages follow the Sandboxes page's host --
+# -- the pages follow the Sessions page's host --
 
 def follow_note():
     """The line beside a page's host chooser that says whose host the page shows (HostFollow fills it)."""
@@ -211,16 +211,16 @@ def follow_label(host):
 
 
 class HostFollow(QObject):
-    """The host chosen on the Sandboxes page, for every page with a host chooser of its own (the window attaches
+    """The host chosen on the Sessions page, for every page with a host chooser of its own (the window attaches
     them): such a page shows that host from then on, until the human chooses another one on the page itself - which
-    holds until the Sandboxes page's host changes again. "All hosts" there changes only a page that can show all of
+    holds until the Sessions page's host changes again. "All hosts" there changes only a page that can show all of
     them (its chooser has an entry None). A page that is hidden takes the host when it is shown next (before it
     reads, then once: no SSH for a page nobody looks at); the page's own host change drops what its reads of the
     host before still bring. The note beside each chooser says whose host the page shows."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.host, self.chosen = None, False  # the Sandboxes page's host (None: all hosts); chosen there yet
+        self.host, self.chosen = None, False  # the Sessions page's host (None: all hosts); chosen there yet
         self.pages, self.pending = {}, {}  # {key: (page, [combo], note)}, {key: host it takes when shown}
         self.applying = None  # the page given the host now (its chooser's change is not the human's)
 
@@ -237,7 +237,7 @@ class HostFollow(QObject):
             self.offer(key)
 
     def choose(self, host):
-        """The Sandboxes page's host is HOST now (None: all hosts)."""
+        """The Sessions page's host is HOST now (None: all hosts)."""
         self.host, self.chosen = host, True
         for key in list(self.pages):
             self.offer(key)
@@ -299,9 +299,9 @@ class HostFollow(QObject):
             note.hide()  # (all hosts there and here, or all hosts there and a page of one host: nothing to say)
             return
         if shown == self.host:
-            text = tr("{host}, as on the Sandboxes page", host=follow_label(shown))
+            text = tr("{host}, as on the Sessions page", host=follow_label(shown))
         else:
-            text = tr("{host}, chosen here; the Sandboxes page shows {other}", host=follow_label(shown),
+            text = tr("{host}, chosen here; the Sessions page shows {other}", host=follow_label(shown),
                       other=follow_label(self.host))
         note.setText(text)
         note.setToolTip(safe_tooltip(text))

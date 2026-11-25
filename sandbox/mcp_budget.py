@@ -14,7 +14,7 @@ each class of model the tools it copes with; this module counts what a start bri
                     the budget (the largest first) and what is left (report, start_report)
 
 The launcher says it as a WARNING line (warning_lines) and puts the report in the dry run ("mcp_tools"); the app's
-Board makes a finding of it, its Start page a note below the model. The human decides: nothing is refused.
+Board makes a finding of it, its Expert view a note below the model. The human decides: nothing is refused.
 Standard library only; Python 3.9.
 """
 import importlib.util

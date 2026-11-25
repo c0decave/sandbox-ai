@@ -1,6 +1,6 @@
 """Skills, subagents, commands and plugins for a RUNNING sandbox (sandbox-ai kits|plugins attach|detach, kits
 restart-agent): the Kits page's "Give to a running sandbox…" (a kit, a skill or a plugin chosen there, the start chosen
-here among the running ones of this machine and the hosts) and the Sandboxes page's "Add skills/plugins…" (its start
+here among the running ones of this machine and the hosts) and the Sessions page's "Add skills/plugins…" (its start
 given, what to give chosen here). Each is asked first (kits-attach, kits-detach); afterwards what the agent needs to
 see it is said - nothing, a command to type in it, or a restart of the agent inside the sandbox, offered then and asked
 first too (agent-restart: the sandbox, network and MCP servers stay, the conversation continues)."""
@@ -23,7 +23,7 @@ KINDS = (("kit", N_("A kit")), ("skill", N_("A skill folder")), ("command", N_("
 
 
 class GiveDialog(QDialog):
-    """What to give (KIND, VALUE) to which running start: with START given (the Sandboxes page) only what; else (the
+    """What to give (KIND, VALUE) to which running start: with START given (the Sessions page) only what; else (the
     Kits page, what given) the host and one of its running starts, read in the background (host_running_starts)."""
 
     def __init__(self, parent, sai, host=LOCAL, start=None, kind="kit", value=""):

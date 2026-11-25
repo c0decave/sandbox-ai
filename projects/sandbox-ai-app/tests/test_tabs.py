@@ -450,25 +450,27 @@ def test_panels_follow_their_page_float_close_and_are_kept(window, monkeypatch, 
     docks = window.docks
     window.show_page("board")
     qapp.processEvents()
-    assert docks["parts"].isVisible() and not docks["questions"].isVisible()
+    assert docks["parts"].isVisible() and docks["inspector"].isVisible()
     # The inspector is a panel folded to a strip at first, the findings wait until asked for.
-    assert docks["inspector"].isVisible() and window.inspector_fold.folded and not docks["findings"].isVisible()
-    assert docks["inspector"].widget() is window.board.side
-    assert docks["parts"].widget() is window.board.parts_panel and docks["questions"].widget() is window.approvals.open_box
+    assert window.inspector_fold.folded and not docks["findings"].isVisible()
+    assert docks["inspector"].widget() is window.board.side and docks["parts"].widget() is window.board.parts_panel
     window.show_page("approvals")
     qapp.processEvents()
-    assert docks["questions"].isVisible() and not docks["parts"].isVisible()
-    # Floated, the questions stay on every page; closed, the parts stay away until View > Panels.
-    docks["questions"].setFloating(True)
-    window.show_page("board")
+    assert not docks["parts"].isVisible()
+    # Floated, a panel stays on every page; closed, the parts stay away until View > Panels.
+    docks["parts"].setFloating(True)
+    window.show_page("launch")
     qapp.processEvents()
-    assert docks["questions"].isVisible()
+    assert docks["parts"].isVisible()
+    docks["parts"].setFloating(False)
+    window.show_page("board")
     docks["parts"].close()
     qapp.processEvents()
     assert not docks["parts"].isVisible() and not window.panel_actions["parts"].isChecked()
     window.show_page("launch")
     window.show_page("board")
     assert not docks["parts"].isVisible(), "closed stays closed"
+    docks["inspector"].setFloating(True)
     window.state.flush()
     saved = json.loads(state_file().read_text())["docks"]
     assert saved["closed"] == ["findings", "parts"] and saved["state"]
@@ -477,16 +479,36 @@ def test_panels_follow_their_page_float_close_and_are_kept(window, monkeypatch, 
         again.show()
         again.show_page("launch")
         qapp.processEvents()
-        assert again.docks["questions"].isFloating() and again.docks["questions"].isVisible()
+        assert again.docks["inspector"].isFloating() and again.docks["inspector"].isVisible()
         assert "parts" in again.closed_docks and not again.panel_actions["parts"].isChecked()
         again.panel_actions["parts"].trigger()  # View > Panels brings it back, on its page
         qapp.processEvents()
         assert again.current_page() == "board" and again.docks["parts"].isVisible()
         again.actions["panels-reset"].trigger()
         qapp.processEvents()
-        assert not again.docks["questions"].isFloating() and again.closed_docks == {"findings"}
+        assert not again.docks["inspector"].isFloating() and again.closed_docks == {"findings"}
     finally:
         close(again)
+
+
+def test_the_approvals_questions_are_its_first_tab_not_a_panel(window, monkeypatch, qapp):
+    """User 2026-11-24: the questions (their panel above the page before) are the Approvals page's first tab, the rest
+    its second (Inspection); the tab chosen stays while the app runs; a way to a question opens Questions."""
+    window.show()
+    page = window.approvals
+    assert "questions" not in window.docks and "questions" not in window.panel_actions
+    window.show_page("approvals")
+    qapp.processEvents()
+    assert page.page_tabs.currentWidget() is page.open_box and page.open_box.isVisible()
+    page.show_inspection("always")
+    window.show_page("launch")
+    window.show_page("approvals")
+    assert page.page_tabs.currentWidget() is page.inspection, "kept while the app runs"
+    window.open_question(None)
+    assert page.page_tabs.currentWidget() is page.open_box, "Open approvals of a notification: the questions"
+    page.show_inspection()
+    window.show_approvals_questions()
+    assert window.current_page() == "approvals" and page.page_tabs.currentWidget() is page.open_box
 
 
 def test_switching_tabs_does_not_wait_for_a_slow_disk(window, env, monkeypatch, wait):

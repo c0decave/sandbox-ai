@@ -961,7 +961,7 @@ def check_mcp_network(servers=None, problem=None):
     try:
         mcp = launcher().load_mcp_module()
         found = mcp.server_list() if servers is None else servers
-        networked = [entry for entry in found if entry.get("network") not in (None, "none")]
+        networked = [entry for entry in found if entry.get("network") not in (None, "none", "offline")]
         if networked and problem is None:
             problem = mcp.egress_module().prerequisite_problem("podman")
     except Exception as exc:  # noqa: BLE001 - the other checks go on
@@ -1002,6 +1002,40 @@ def check_mcp_images(servers=None):
     unsigned = any(not entry["newer"].get("signed") for entry in newer)
     return ("warn", "MCP images", printable("; ".join(mcp.newer_text(entry["name"], entry["newer"]) for entry in newer)),
             printable(f"sandbox-ai mcp update {' '.join(names)}" + (" --unsigned" if unsigned else "")))
+
+
+MCP_FAILURE_DAYS = 7  # how long a server's last failure is said by doctor
+
+
+def check_mcp_servers(servers=None, now=None):
+    """The MCP servers' health as this host saw it: one whose last failure (its container watch's, its bridge's:
+    mcp.last_problem) is of the last MCP_FAILURE_DAYS days - with when, why, the fix and its log - and those below
+    the limits their catalog recommends (they fail later, Chromium and the JVMs first). `sandbox-ai mcp check --all`
+    starts each to find out now. SERVERS: mcp.server_list()."""
+    try:
+        mcp = launcher().load_mcp_module()
+        found = mcp.server_list() if servers is None else servers
+    except Exception as exc:  # noqa: BLE001 - the other checks go on
+        return "skip", "MCP servers", f"not looked at ({launcher().printable(str(exc))[:200]})", ""
+    if not found:
+        return "skip", "MCP servers", "none defined", ""
+    printable = launcher().printable
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((now or time.time()) - MCP_FAILURE_DAYS * 86400))
+    failed = [entry for entry in found if isinstance(entry.get("last_problem"), dict)
+              and str(entry["last_problem"].get("time") or "") >= since]
+    below = [entry for entry in found if entry.get("below_recommended")]
+    if not failed and not below:
+        return "ok", "MCP servers", f"{len(found)} defined, no failure in the last {MCP_FAILURE_DAYS} days " \
+            "(sandbox-ai mcp check --all starts each now)", ""
+    detail = "; ".join([printable(f"{entry['name']}: {entry['last_problem'].get('time')}: "
+                                  f"{entry['last_problem'].get('why')}")[:400] for entry in failed]
+                       + [printable(f"{entry['name']}: below the limits its catalog recommends "
+                                    f"({mcp.limits_text(entry['below_recommended'])})") for entry in below])
+    fix = " | ".join([printable(f"{entry['name']}: {entry['last_problem'].get('fix')} (its log: "
+                                f"{entry['last_problem'].get('log')})")[:500] for entry in failed]
+                     + [f"sandbox-ai mcp set {entry['name']} --recommended" for entry in below]
+                     + (["then: sandbox-ai mcp check " + " ".join(entry["name"] for entry in failed)] if failed else []))
+    return "warn", "MCP servers", detail, fix
 
 
 def check_machine(runner=None, home=None, tmpdir=None):
@@ -1072,7 +1106,8 @@ def checks(backend="podman", podman_url=None, cwd=None):
     result += [check_login(agent) for agent in AGENTS]
     result += [check_kit(agent) for agent in AGENTS] + [check_kits(), check_plugins(), check_memory(cwd)]
     result += [check_git_identity(), check_secrets(), check_project(cwd), check_mode(cwd), check_settings_files(),
-               check_sessions(), check_orphans(), check_remote_folders(), check_mcp_network(), check_mcp_images()]
+               check_sessions(), check_orphans(), check_remote_folders(), check_mcp_network(), check_mcp_images(),
+               check_mcp_servers()]
     return result
 
 

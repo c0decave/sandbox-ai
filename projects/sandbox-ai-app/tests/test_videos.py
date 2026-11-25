@@ -143,7 +143,7 @@ def test_one_video_per_page_in_the_series_order_in_the_language_wanted(tmp_path)
     assert set(chosen[0].others) == {"de", "en"}
     assert chosen[1].seconds == pytest.approx(62) and chosen[1].length() == "1:02"
     assert chosen[1].subtitles == tmp_path / "a" / "sandbox-ai-app-02-board-en.vtt"
-    assert chosen[0].title() == "Part 1: Start" and chosen[2].title() == "Part 18: Help"
+    assert chosen[0].title() == "Part 1: Board: Expert view" and chosen[2].title() == "Part 18: Help"
     german_only = V.catalog([series(tmp_path / "b")], "en")
     assert [v.language for v in german_only] == ["de", "de", "de"]  # there is none in English: the German one
     assert V.for_page(german_only, "board").number == 2 and V.for_page(german_only, "kits") is None

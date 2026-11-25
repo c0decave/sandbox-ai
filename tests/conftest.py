@@ -65,6 +65,10 @@ def pytest_configure(config):
         os.environ.setdefault("SANDBOX_AI_INIT_BINARY", "/usr/libexec/podman/catatonit")
         # A start compacts no logs in the background (test_statedirs.py turns it on).
         os.environ.setdefault("SANDBOX_AI_AUTO_COMPACT", "0")
+        # A start tells its agent nothing about its sandbox (no INTRO.md, no line in the agent's instructions): the
+        # tests compare each harness's own configuration exactly. The intro's tests turn it on for every harness
+        # (test_intro.py, test_resources_reach_agent.py); a user's start has it on.
+        os.environ.setdefault("SANDBOX_AI_INTRO", "0")
     config.addinivalue_line("markers", "agent_live: launches real sandboxes")
     config.addinivalue_line("markers", "agent_provider: makes a real authenticated model request")
     config.addinivalue_line("markers", "agent_network: downloads from the internet inside the sandbox")

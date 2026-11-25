@@ -82,6 +82,14 @@ def namespace(proc, pid, kind):
         return None
 
 
+def started(proc, pid):
+    """The start time of PID (/proc/PID/stat field 22, clock ticks since boot); a process without one (gone, or a
+    test's stand-in) sorts last."""
+    data = read(proc / str(pid) / "stat")
+    fields = (data or b"").decode("utf-8", "replace").rpartition(")")[2].split()
+    return int(fields[19]) if len(fields) > 19 and fields[19].isdigit() else float("inf")
+
+
 def cgroup_path(proc, pid):
     """The cgroup v2 path of PID ("/user.slice/..."), or None."""
     data = read(proc / str(pid) / "cgroup")
@@ -142,6 +150,10 @@ def sandbox_processes(record, proc=PROC, owned=None):
     anchors = [pid for pid in anchors if owned(pid)]
     if not anchors:
         return None
+    # The anchor is the sandbox's oldest process (its init, the supervisor's first): one the agent ran a moment ago
+    # sees the same file, and a short-lived one as the anchor was gone before the helper could use it ("process N of
+    # the sandbox is gone"). The lowest PID is not the oldest once PIDs wrapped around.
+    anchors.sort(key=lambda pid: (started(proc, pid), pid))
     anchor = anchors[0]
     if record.get("backend") == "podman":
         # All rootless containers share Podman's user namespace; the pod's cgroup is this sandbox's alone.
@@ -1424,6 +1436,7 @@ def add(record, value, out=print, runner=run_helper, finder=sandbox_processes, r
         f"{record.get('run')} {shown(value)})")
     if grant["track"]:
         watcher(record)
+    module("intro").refreshed(record, out)  # /sandbox/session/INTRO.md names it (a run with an intro)
     return done[0] if len(done) == 1 else done
 
 
@@ -1447,6 +1460,7 @@ def remove(record, value, out=print, runner=run_helper, finder=sandbox_processes
         save(record, grants)
     log(record, "remove", grant, nodes=list(grant.get("nodes") or {}))
     out(f"removed {', '.join(grant.get('nodes') or {}) or shown(value)} from {record.get('run')}")
+    module("intro").refreshed(record, out)
 
 
 def listing(record):

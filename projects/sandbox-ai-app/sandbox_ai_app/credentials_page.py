@@ -35,6 +35,7 @@ from .widgets import (
 )
 
 LOCAL = "local"  # the host of this machine's own secrets (sandbox-ai hosts' name for it)
+GIT_URL_EXAMPLE, GIT_USER_DEFAULT = "https://git.example.org", "x-access-token"  # the same in every language
 GIVE_KEY, GIVE_LOGIN = "secrets give", "git-logins give"  # the commands a host's older sandbox-ai may not know
 # The overview's kinds, in the order of the tabs.
 KINDS = (("logins", N_("Agent login")), ("secrets", N_("Secret")), ("git", N_("Git login")),
@@ -274,7 +275,8 @@ class GitLoginsBox(LoginsBox):
             self.give_button.setToolTip(safe_tooltip(tr(
                 "A sandbox started before this login was added gets it now (sandbox-ai git-logins give RUN URL "
                 "--secret NAME): its connection proxy logs in with it, no token enters the sandbox; every sandbox "
-                "started later has it anyway")))
+                "started later has it anyway. With no login chosen: a login whose token is in a variable, a secret "
+                "or a file, not stored here")))
             self.give_button.clicked.connect(lambda _=False: self.give())
             # (Not in the row, which must fit a small window: on the list's right click, and from the Give dialog.)
             self.give_far_button = QPushButton(tr("Give to a sandbox on another host…"), self)
@@ -357,9 +359,16 @@ class GitLoginsBox(LoginsBox):
         host = self.host
         entry = self.chosen()
         if entry is None:
-            self.message.setText(tr("Choose a login in the list first."))
+            # A login not stored here (what the Allow… dialog took until 2026-11-24): its server and where its token
+            # is - a variable, a secret or a file of that host, never the token.
+            dialog = OtherLoginDialog(self, host)
+            if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted or dialog.entry() is None:
+                return
+            entry = dialog.entry()
+            background(give_targets(self.sai, host), owner=self, source=self.give_button, timeout=90,
+                       done=lambda found, error: self.give_to(entry, found, error, host))
             return
-        if not entry.get("secret"):
+        if not (entry.get("secret") or entry.get("env") or entry.get("file")):
             self.message.setText(tr("This login names no secret: only a login with its token in a secret can be given."))
             return
         background(give_targets(self.sai, host), owner=self, source=self.give_button, timeout=90,
@@ -377,7 +386,7 @@ class GitLoginsBox(LoginsBox):
             return
         run, keep, called = dialog.run(), dialog.keep.isChecked(), dialog.run_label()
         target = git_login_url(entry)
-        question = give_login_question(target, entry["secret"], called, keep)
+        question = give_login_question(target, token_place(entry), called, keep)
         if not ask_first(self, "net-allow", tr("Give the login"), where_given(host, question), tr("Give")):
             return
         self.message.setText(tr("Giving the login…"))
@@ -991,7 +1000,7 @@ class CredentialsPage(QWidget):
             self.tabs.setTabIcon(index, theme.dot("ok") if count else theme.dot("muted"))
 
     def show_given(self, host, run=None):
-        """The Given to sandboxes tab for HOST, the rows of RUN selected (Sandboxes › Secrets and logins…)."""
+        """The Given to sandboxes tab for HOST, the rows of RUN selected (Sessions › Secrets and logins…)."""
         self.hosts.set_host(host)
         index = self.tab_of("given")
         if index >= 0:
@@ -1583,11 +1592,28 @@ def git_login_url(entry):
     return url
 
 
+def token_source(entry):
+    """--secret NAME, --env VARIABLE or --file PATH: where the token of the login ENTRY is."""
+    for key in ("secret", "env", "file"):
+        if entry.get(key):
+            return [f"--{key}", str(entry[key])]
+    raise ValueError("a Git login names where its token is: a secret, a variable or a file")
+
+
+def token_place(entry):
+    """Where the token of ENTRY is, for people: "secret NAME", "variable NAME", "file PATH"."""
+    for key, word in (("secret", N_("secret {name}")), ("env", N_("variable {name}")), ("file", N_("file {name}"))):
+        if entry.get(key):
+            return tr(word, name=printable(str(entry[key])))
+    return ""
+
+
 def give_login_args(run, entry, keep, in_sandbox=False):
-    """What follows `sandbox-ai git-logins give` for the login ENTRY ({url, user, secret}): --secret NAME [--user
-    USER] [--keep] [--in-sandbox] -- RUN URL (the URL after "--" is never read as an option)."""
+    """What follows `sandbox-ai git-logins give` for the login ENTRY ({url, user, and secret, env or file}): --secret
+    NAME (--env VARIABLE, --file PATH) [--user USER] [--keep] [--in-sandbox] -- RUN URL (the URL after "--" is never
+    read as an option)."""
     user = str(entry.get("user") or "")
-    return ["--secret", entry["secret"], *(["--user", user] if user else []),
+    return [*token_source(entry), *(["--user", user] if user else []),
             *(["--keep"] if keep else []), *(["--in-sandbox"] if in_sandbox else []), "--", run,
             str(entry.get("url", "")).rstrip("/")]
 
@@ -1663,10 +1689,10 @@ def send_then(parent, sai, secret, message, source, then):
 def give_login_question(target, secret, called, keep):
     """What is asked before a Git login is given to the running sandbox CALLED: what it does, and where the token
     is (with the run's connection proxy - never in the sandbox)."""
-    question = tr("Give the Git login for {url} (secret {secret}) to {run} until it ends, at once?\n\nIts connection "
+    question = tr("Give the Git login for {url} ({where}) to {run} until it ends, at once?\n\nIts connection "
                   "proxy logs in with it on the wire from now on (clone, fetch, push); the token does not enter the "
                   "sandbox, and where the run already has a login for that server, this one is used.",
-                  url=printable(target), secret=printable(secret), run=called)
+                  url=printable(target), where=secret, run=called)
     if keep:
         question += "\n\n" + tr("It is also kept for the later starts of its project: written into its trusted "
                                  ".sandbox-ai.json.")
@@ -1812,6 +1838,56 @@ class NoteLabel(QLabel):
     def resizeEvent(self, event):  # noqa: N802
         super().resizeEvent(event)
         self.fit()
+
+
+class OtherLoginDialog(QDialog):
+    """A Git login that is not stored here, for Give to a running sandbox…: its server, and where its token is on
+    HOST - a variable, a secret or a file (git-logins give --env/--secret/--file), never the token."""
+
+    def __init__(self, parent, host=LOCAL):
+        super().__init__(parent)
+        self.setWindowTitle(tr("Give a Git login") if host in (None, LOCAL) else
+                            tr("Give a Git login on {host}", host=printable(host)))
+        form = QFormLayout(self)
+        form.addRow(explanation(tr("A login not in the list: name its server and where its token is - never the token. "
+                                   "The sandbox to give it to is chosen next.")))
+        self.url = QLineEdit()
+        self.url.setPlaceholderText(GIT_URL_EXAMPLE)
+        self.user = QLineEdit()
+        self.user.setPlaceholderText(GIT_USER_DEFAULT)
+        self.kind = QComboBox()
+        for kind, label in (("secret", tr("secret")), ("env", tr("variable")), ("file", tr("file"))):
+            self.kind.addItem(label, kind)
+        self.ref = QLineEdit()
+        self.ref.setPlaceholderText(tr("NAME of the variable or secret, or the file"))
+        row = QHBoxLayout()
+        row.addWidget(self.kind)
+        row.addWidget(self.ref, 1)
+        form.addRow(tr("Git server"), self.url)
+        form.addRow(tr("User"), self.user)
+        form.addRow(tr("Token in"), row)
+        self.problem = plain_label("", role="notice-error")
+        self.problem.hide()
+        form.addRow(self.problem)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.checked_accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def entry(self):
+        """{url, user, and secret, env or file}, or None while the server or the place of its token is missing."""
+        url, ref = self.url.text().strip(), self.ref.text().strip()
+        if not url or not ref:
+            return None
+        return {"url": url, self.kind.currentData(): ref, "user": self.user.text().strip()}
+
+    def checked_accept(self):
+        if self.entry() is None:
+            self.problem.setText(tr("A Git login needs both: the server's URL and the variable, secret or file of its "
+                                    "token."))
+            self.problem.show()
+            return
+        self.accept()
 
 
 class GiveDialog(QDialog):

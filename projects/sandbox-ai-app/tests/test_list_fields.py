@@ -388,12 +388,18 @@ def field_of(page, option="--allow-host"):
 
 
 def row_labels(page):
-    from PySide6.QtWidgets import QFormLayout
+    """Each row's name: its label, or a check box's own text where the label is empty (a check box names its row
+    once - todos.txt board 3, test_board_todos.test_a_check_boxs_row_names_it_once)."""
+    from PySide6.QtWidgets import QCheckBox, QFormLayout
     found = []
     for row in range(page.inspector.rowCount()):
         item = page.inspector.itemAt(row, QFormLayout.ItemRole.LabelRole)
         if item is not None and item.widget() is not None:
-            found.append(item.widget().text())
+            text = item.widget().text()
+            field = page.inspector.itemAt(row, QFormLayout.ItemRole.FieldRole)
+            if not text and field is not None and isinstance(field.widget(), QCheckBox):
+                text = field.widget().text()
+            found.append(text)
     return found
 
 

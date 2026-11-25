@@ -30,6 +30,8 @@ RUN gh --version
 # themselves are fetched at runtime, e.g. `uvx playwright install chromium`.
 # libEGL, libGL, the xcb cursor and xkb libraries: Qt (PySide6) runs offscreen too (a desktop app's tests,
 # sandbox-ai's own: the sandbox-ai-tests preset); gdb shows the native stack of a crash.
+# libxcb-icccm4 and libxcb-keysyms1: Qt's xcb platform (a Qt program with --gui) loads them beside libxcb-cursor0;
+# libpulse0: Qt Multimedia loads it (sound itself: the image variant media).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc x11-utils fonts-liberation fonts-dejavu-core \
     libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcairo-gobject2 libcups2 \
@@ -37,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangocairo-1.0-0 libx11-6 libx11-xcb1 libxcb1 libxcb-shm0 libxcomposite1 \
     libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxkbcommon0 libxrandr2 libxrender1 libxtst6 \
     libegl1 libgl1 libopengl0 libxkbcommon-x11-0 libxcb-cursor0 libxshmfence1 libxkbfile1 libfontconfig1 gdb \
+    libxcb-icccm4 libxcb-keysyms1 libpulse0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /uvx /usr/local/bin/
 RUN python3 -m pip --version && uv --version

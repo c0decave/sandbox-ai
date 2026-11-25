@@ -513,3 +513,72 @@ def test_a_clicked_check_of_a_copy_newer_than_the_newest_release_says_so_plainly
     text = "sandbox-ai 0.1.193 is newer than the newest release 0.1.188: nothing to update"
     assert window.update_said == text and window.statusBar().currentMessage() == text
     assert window.update_notice.isHidden() and window.notified == [], "nothing offered, nothing notified"
+
+
+# -- the status line: no text over another (the user 2026-11-24: "Updates suchen und finden ... unten links waren
+# Texte überlappend als ein Update gefunden wurde") --
+
+def overlaps(window):
+    """[(a, b)] of what overlaps in the window's status bar now: two widgets shown, or a widget shown where QStatusBar
+    paints its message (from the left up to its first permanent widget)."""
+    bar = window.statusBar()
+    shown = [w for w in bar.findChildren(QtWidgets.QWidget, options=QtCore.Qt.FindChildOption.FindDirectChildrenOnly)
+             if w.isVisible() and not isinstance(w, QtWidgets.QSizeGrip) and w.width() > 0]
+    found = [(a.objectName() or type(a).__name__, b.objectName() or type(b).__name__)
+             for i, a in enumerate(shown) for b in shown[i + 1:] if a.geometry().intersects(b.geometry())]
+    if bar.currentMessage():
+        permanent = [w for w in shown if w is not window.update_notice]
+        right = min([w.geometry().left() for w in permanent] or [bar.width()])
+        message = QtCore.QRect(0, 0, right, bar.height())
+        found += [("message", w.objectName() or type(w).__name__) for w in shown
+                  if w is window.update_notice and w.geometry().intersects(message)]
+    return found
+
+
+def test_an_update_found_never_writes_over_a_message(window, monkeypatch):
+    """Offscreen, the window shown: the start's message (sandbox-ai VERSION from PATH) is in the status line when the
+    daily check finds a newer release - its notice was shown over that text. Then a check you click (Checking…, then
+    what it found), and a message of another page while the notice is shown."""
+    route(monkeypatch, "self", "/home/u/bin/sandbox-ai.pyz")
+    window.resize(1100, 700)
+    window.show()
+    QtWidgets.QApplication.processEvents()
+    bar = window.statusBar()
+    assert bar.currentMessage(), "the start's message is there"
+    window.update_checked(0, NEWER, "")  # the daily check, nobody clicked
+    QtWidgets.QApplication.processEvents()
+    assert overlaps(window) == [], overlaps(window)
+    assert window.update_notice.isVisible(), "the newer release is offered"
+    window.update_checked(0, NEWER, "")  # (the next check: the same)
+    started = []
+    monkeypatch.setattr(window.update_check, "start", lambda argv: started.append(argv) or True)
+    window.check_updates()  # clicked: Checking… while the notice is there
+    QtWidgets.QApplication.processEvents()
+    assert overlaps(window) == [], overlaps(window)
+    window.update_checked(0, NEWER, "")
+    QtWidgets.QApplication.processEvents()
+    assert overlaps(window) == [], overlaps(window)
+    bar.clearMessage()  # (its time is up)
+    QtWidgets.QApplication.processEvents()
+    assert window.update_notice.isVisible() and overlaps(window) == []
+    bar.showMessage("The browser of web is open in Terminals", 8000)  # another page's message
+    QtWidgets.QApplication.processEvents()
+    assert overlaps(window) == [], overlaps(window)
+    window.busy_label.setText("Running: Kits & plugins…")  # the bar laid out again (QStatusBar's own hiding is undone)
+    QtWidgets.QApplication.processEvents()
+    assert overlaps(window) == [], overlaps(window)
+    bar.clearMessage()
+    QtWidgets.QApplication.processEvents()
+    assert window.update_notice.isVisible(), "back once the message is gone"
+    # The update ran: Restart the app, over no message either.
+    bar.showMessage("A terminal window instead of a tab", 20000)
+    window.update_ended("0.10.1", 0)
+    QtWidgets.QApplication.processEvents()
+    assert overlaps(window) == [], overlaps(window)
+    window.hide()
+
+
+def test_the_starts_message_goes_after_a_while(window):
+    """The start's own message (sandbox-ai VERSION from PATH) is not kept for ever: the version stays bottom right."""
+    from sandbox_ai_app import ui
+    assert ui.START_MESSAGE_MS and 0 < ui.START_MESSAGE_MS <= 30000

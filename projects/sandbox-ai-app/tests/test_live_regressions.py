@@ -258,7 +258,7 @@ def test_tor_research_v2_variant_per_agent(board_page, tor_user):
 
 def test_second_start_attaches(qapp, user, monkeypatch):
     """User: the app started a running session a second time: 'is running; attach with…', exit status 1. A start with
-    the name of a session the Sandboxes page knows running opens `sandbox-ai session attach NAME` instead."""
+    the name of a session the Sessions page knows running opens `sandbox-ai session attach NAME` instead."""
     from sandbox_ai_app.ui import MainWindow
     monkeypatch.setattr(terminal, "available", lambda web=None: (True, ""))
     window = MainWindow(backend.SandboxAI(), check_updates=False, approvals_interval=0)

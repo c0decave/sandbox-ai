@@ -435,7 +435,7 @@ def test_a_bridge_whose_wait_ended_while_the_app_was_closed_is_said_at_the_next_
         pump(qapp, 10)
         assert board.bridge_waiters == [] and made == []
         said = [text for title, text, _ in widgets.SHOWN if title == "Not bridged"]
-        assert said and "claude-board-1 → docs" in said[0] and "Sandboxes page" in said[0], widgets.SHOWN
+        assert said and "claude-board-1 → docs" in said[0] and "Sessions page" in said[0], widgets.SHOWN
         assert again.state.flush() and again.state.data.get("bridge_waits") == [], "said once"
         assert not raised, raised[0][-3000:]
     finally:

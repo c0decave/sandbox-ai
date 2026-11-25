@@ -328,7 +328,7 @@ def allow_buttons(owner, keys):
             "run": tr("Every same request of this run (this session) is allowed without a question ({keys})",
                       keys=keys["run"]),
             "always": tr("Allowed now and remembered for the project: also at its later starts and resumed "
-                         "sessions, without a question (Forget… under Remembered lifts it; {keys})",
+                         "sessions, without a question (Forget… under Inspection › Remembered lifts it; {keys})",
                          keys=keys["always"])}
     made = []
     for action, scope, label in ALLOW_SCOPES:
@@ -658,7 +658,7 @@ class ApprovalsPage(QWidget):
         filter_row.addWidget(questions_of)
         filter_row.addWidget(self.host_filter)
         from .host_choice import follow_note
-        self.follow_note = follow_note()  # whose questions, when the window's pages follow the Sandboxes page's host
+        self.follow_note = follow_note()  # whose questions, when the window's pages follow the Sessions page's host
         filter_row.addWidget(self.follow_note)
         filter_row.addStretch()
         open_layout.addLayout(filter_row)
@@ -738,7 +738,7 @@ class ApprovalsPage(QWidget):
         self.block_button.setAccessibleName(tr("Block always"))
         self.block_button.setProperty("role", "danger")
         self.block_button.setToolTip(tr("Refused now and at every later start of this project, without a question "
-                                        "(Forget… below lifts it; Ctrl+Shift+K)"))
+                                        "(Inspection › Remembered › Forget… lifts it; Ctrl+Shift+K)"))
         self.block_button.clicked.connect(lambda: self.act("block"))
         self.ask_again_button = QPushButton(tr("Ask again"))
         self.ask_again_button.setAccessibleName(tr("Ask again"))
@@ -851,34 +851,50 @@ class ApprovalsPage(QWidget):
         always_layout.addLayout(row)
         self.always_message = plain_label(role="secondary", selectable=True)
         always_layout.addWidget(self.always_message)
-        # Which sandbox the page is about (the active tab's, one chosen, all), then its sections: the questions (the
-        # window moves them into a panel of their own, above the page: its tab goes then), what was refused, what
-        # it may reach now, what is remembered for the projects and the answers given.
+        # Two tabs (user 2026-11-24: "zwei große Bereiche: das, was aktuell aktiv angefragt wird, und die Sandboxes
+        # selber"): Questions - what is asked now, of every host - and Inspection - which sandbox the page is about (the
+        # active tab's, one chosen, all) and its sections, each a tab of the whole height: what it may reach now and
+        # what is remembered for the projects (what was refused and the answers given are tabs of the questions'
+        # table). The page opens on Questions; the tab chosen stays while the app runs; a new question never switches
+        # it (the count in its title and the notification say it).
         self.active_entry, self.last_runs = None, {}
         self.header = ContextHeader(sai, sai.approval_seconds)
-        layout.addWidget(self.header)
         self.blocked = BlockedSection(sai, self.header)
         self.allowed = AllowedSection(sai, self.header)
         self.sections = QTabWidget()
         widgets.arrow_tabs(self.sections)  # (the app's tab row: arrows at its end when the tabs do not fit)
-        self.sections.setAccessibleName(tr("Approvals"))
+        self.sections.setAccessibleName(tr("Inspection"))
         self.history_box, self.always_box = history_box, always_box
         self.section_titles = {}
         # (Blocked and History are tabs of the one table now: Refused, Timed out, All. The Blocked section reads what
         # the sandboxes refused without a question for it, unseen, and does what is allowed about those.)
-        for widget, title in ((open_box, tr("Questions")), (self.allowed, tr("Allowed now")),
-                              (always_box, tr("Remembered"))):
+        for widget, title in ((self.allowed, tr("Allowed now")), (always_box, tr("Remembered"))):
             self.section_titles[widget] = title
             self.sections.addTab(widget, title)
         for hidden in (self.blocked, history_box):  # (children of the page: they go with it)
             hidden.setParent(self)
             hidden.hide()
+        self.inspection = QWidget()
+        inspection_layout = QVBoxLayout(self.inspection)
+        inspection_layout.setContentsMargins(0, 0, 0, 0)
+        inspection_layout.addWidget(self.header)
+        inspection_layout.addWidget(self.sections, 1)
+        self.page_tabs = QTabWidget()
+        widgets.arrow_tabs(self.page_tabs)
+        self.page_tabs.setAccessibleName(tr("Approvals"))
+        for widget, title in ((open_box, tr("tab|Questions")), (self.inspection, tr("Inspection"))):
+            self.section_titles[widget] = title
+            self.page_tabs.addTab(widget, title)
+        self.page_tabs.setTabToolTip(0, tr("What your sandboxes ask now, on every host: answer it here"))
+        self.page_tabs.setTabToolTip(1, tr("One sandbox at a time: what it may reach and why, what it was given during "
+                                           "the run, and what is remembered for the projects"))
         self.section_counts = {}
         self.blocked.counted.connect(lambda count: self.show_all())
         self.allowed.counted.connect(lambda count: self.count_section(self.allowed, count))
         self.header.changed.connect(self.context_changed)
         self.sections.currentChanged.connect(lambda _=0: self.section_shown())
-        layout.addWidget(self.sections, 1)
+        self.page_tabs.currentChanged.connect(lambda _=0: self.section_shown())
+        layout.addWidget(self.page_tabs, 1)
         self.entries, self.questions, self.labels, self.seen, self.history_key = [], {}, {}, set(), None
         self.entry_keys, self.local_pending = [], []
         # The other hosts: {host: [RemoteQuestion]} as last read, why a host did not answer, the reads running
@@ -889,7 +905,7 @@ class ApprovalsPage(QWidget):
         # ({(host, run, id): time.monotonic() of the answer}) that a read begun after the answer still listed.
         self.remote_seen, self.answered_there = {}, {}
         self.hosts_reading, self.hosts_again, self.known_hosts = None, False, None
-        # Questions only come from sandboxes that run: a host whose starts were read (the Sandboxes page, set_fleet)
+        # Questions only come from sandboxes that run: a host whose starts were read (the Sessions page, set_fleet)
         # and showed none running is not asked for questions at all (quiet), until a read of its starts shows one or
         # the app starts something there (woken: {host or None for every host: time.monotonic() until then}). This
         # machine the same way: while its registry lists no running sandbox, no question folder is read (scan).
@@ -1147,12 +1163,14 @@ class ApprovalsPage(QWidget):
             self.fill_hosts(sorted({*(self.known_hosts or ()), host}))
             index = self.host_filter.findData(host)
         self.host_filter.setCurrentIndex(max(0, index))
+        self.show_questions()
         self.show_all()
 
     def select_question(self, key):
         """Select the question KEY (host, run, id), e.g. from its notification; False when it is gone."""
         if key not in self.questions:
             return False
+        self.show_questions()
         if self.host_filter.currentData() not in (None, key[0]):
             self.host_filter.setCurrentIndex(0)  # every host's: the question must be seen
         self.show_all()
@@ -1376,6 +1394,8 @@ class ApprovalsPage(QWidget):
         return self.window() is self or self.isVisible()
 
     def section_shown(self):
+        if self.page_tabs.currentWidget() is not self.inspection:
+            return
         current = self.sections.currentWidget()
         if current is self.blocked:
             self.blocked.refresh()
@@ -1383,11 +1403,39 @@ class ApprovalsPage(QWidget):
             self.allowed.refresh()
 
     def count_section(self, widget, count):
-        """A section's tab says how many entries it has."""
-        index = self.sections.indexOf(widget)
-        if index >= 0:
-            title = self.section_titles.get(widget, "")
-            self.sections.setTabText(index, f"{title} ({count})" if count else title)
+        """A tab says how many entries it has (Questions: how many wait for an answer)."""
+        for tabs in (self.page_tabs, self.sections):
+            index = tabs.indexOf(widget)
+            if index >= 0:
+                title = self.section_titles.get(widget, "")
+                text = f"{title} ({count})" if count else title
+                if tabs.tabText(index) != text:
+                    tabs.setTabText(index, text)
+
+    def show_reach(self, host, run):
+        """Inspection › Allowed now for RUN of HOST (Sessions › What it may reach…, a terminal tab's While it runs):
+        everything it may reach and why, with Revoke…, Untaint…, Keep for later starts… and Copy as text."""
+        if host == LOCAL and run not in self.header.runs:
+            try:
+                self.last_runs = self.sai.live_runs()  # (started a moment ago: not scanned yet)
+            except Exception as exc:  # noqa: BLE001 - shown as not running
+                applog.swallowed("pages", "ApprovalsPage.show_reach: the running sandboxes cannot be read", exc)
+            self.update_context()
+        self.header.choose(host, run)
+        self.show_inspection("allowed")
+        self.context_changed()
+
+    def show_questions(self):
+        """The Questions tab (a question's notification, Hosts › Show questions)."""
+        self.page_tabs.setCurrentWidget(self.open_box)
+
+    def show_inspection(self, section=None):
+        """The Inspection tab, at SECTION ("allowed": Allowed now, "always": Remembered; None: as it was left) - every
+        way to a section below the questions leads here (Sessions › What it may reach…, a refusal's Forget)."""
+        widget = {"allowed": self.allowed, "always": self.always_box}.get(section)
+        if widget is not None:
+            self.sections.setCurrentWidget(widget)
+        self.page_tabs.setCurrentWidget(self.inspection)
 
     def of_project(self, record):
         workspace = record.get("workspace") if isinstance(record, dict) else None
@@ -1406,7 +1454,7 @@ class ApprovalsPage(QWidget):
         if self.project_pending:
             title += "  " + tr("({count} of the current project)", count=self.project_pending)
         self.open_box.setTitle(title)
-        if hasattr(self, "none_waiting"):
+        if hasattr(self, "page_tabs"):
             self.count_section(self.open_box, len(waiting))
         # The questions themselves are taken every time (a host's newer read counts down from its own time left).
         self.questions = {key: (run, q, host) for key, (host, run, _, q) in zip(keys, pending)}
@@ -1906,7 +1954,7 @@ class ApprovalsPage(QWidget):
         project, entry = key
         host = getattr(self, "always_shown", LOCAL)  # the host whose list is shown, never the one chosen meanwhile
         text = tr("Forget {entry} for {project}? The project's next sandboxes ask again. Sandboxes running now keep "
-                  "what they already allowed until they end (take it back there with Sandboxes › Revoke…, sandbox-ai "
+                  "what they already allowed until they end (take it back there with Sessions › Revoke…, sandbox-ai "
                   "net revoke).", entry=printable(entry), project=printable(project))
         if host != LOCAL:
             text = tr("On {host}: {text}", host=printable(host), text=text)
@@ -1925,7 +1973,7 @@ class ApprovalsPage(QWidget):
         host = getattr(self, "always_shown", LOCAL)  # the host whose list is shown, never the one chosen meanwhile
         text = widgets.several(tr(
             "Forget these {count} entries? Their projects' next sandboxes ask again. Sandboxes running now keep what "
-            "they already allowed until they end (take it back there with Sandboxes › Revoke…, sandbox-ai net revoke).",
+            "they already allowed until they end (take it back there with Sessions › Revoke…, sandbox-ai net revoke).",
             count=len(keys)), [f"{printable(entry)} ({printable(project)})" for project, entry in keys])
         if host != LOCAL:
             text = tr("On {host}: {text}", host=printable(host), text=text)
@@ -2026,7 +2074,7 @@ class ApprovalsPage(QWidget):
             self.answers.pop(self.key_of(entry), None)
             self.change(entry, back, back_scope, undoing=True)
         self.undo_note = tr("Undone for the run; “always” stays remembered for the project until you forget it "
-                            "under Remembered.") if any(scope == "always" for _, _, scope, _ in items) else tr("Undone.")
+                            "under Inspection › Remembered.") if any(scope == "always" for _, _, scope, _ in items) else tr("Undone.")
         self.message.setText(tr("Undoing…"))
 
     def answer(self, decision, scope=None, entry=None, parent=None, open_here=False, asked=False):

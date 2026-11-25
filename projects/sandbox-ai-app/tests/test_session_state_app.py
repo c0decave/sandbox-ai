@@ -1,4 +1,4 @@
-"""Duplicate…, Export with state… and Import… of the Sandboxes page, and the state options of Copy/Move to host…,
+"""Duplicate…, Export with state… and Import… of the Sessions page, and the state options of Copy/Move to host…,
 offscreen against stand-ins that record what sandbox-ai was asked (nothing is copied, imported or started): the words
 of each command, what is asked first (logins and keys along: session-export-secrets; network approvals granted again:
 session-grant-approvals; an import's configuration that gives the sandbox secrets or folders: session-import), an

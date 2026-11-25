@@ -203,7 +203,8 @@ PROVIDERS = {
 }
 # --frontier: OpenAI and Anthropic endpoints for any agent (e.g. OpenCode).
 FRONTIER = PROVIDERS["codex"] + PROVIDERS["claude"]
-# --allow-<preset>: common destinations, TCP/443 via pinned DNS like --allow-host.
+# --allow-SET: the host sets ("host sets" in every text since 2026-11-24; "preset" is a start template, --preset),
+# common destinations, TCP/443 via pinned DNS like --allow-host. (PRESETS and a.presets: their names in the code.)
 PRESETS = {
     "pypi": ["pypi.org", "files.pythonhosted.org"],
     "github": ["github.com", "api.github.com", "codeload.github.com", "raw.githubusercontent.com",
@@ -515,7 +516,9 @@ DEFAULTS_KEYS = {"version", "subnet", "subnet6", "mode", "canaries", "keep_days"
                  "storage_check", "storage_threshold_gb", "storage_growth_gb", "storage_caches_days",
                  "storage_compact_days", "storage_pack_days", "storage_logs_days", "package_min_age_days",
                  # what a start lacks (fixes.py): one question for everything (all, the default) or one per fix (each)
-                 "fix_questions"}
+                 "fix_questions",
+                 # the agent's intro (intro.py): false starts without it (--intro turns it on for a start)
+                 "agent_intro"}
 # The update mode's keys of your defaults (updates.py: `sandbox-ai update mode` sets them and its timer).
 UPDATE_KEYS = ("update_mode", "update_window", "update_source")
 # The workspace checkpoints' keys of your defaults (checkpoints.py SETTINGS: what each means, its default).
@@ -558,7 +561,7 @@ NAME_STYLES = ("codename", "project")  # starts.NAME_STYLES: how a start without
 SESSION_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"
 # The directory of a start: its first name, with a suffix when that directory is taken (sessions.new_key).
 START_ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}"
-__version__ = "0.1.241"
+__version__ = "0.2.2"
 CONFIG_NAME = ".sandbox-ai.json"
 RULES_NAME = "rules.json"  # ~/.config/sandbox-ai/rules.json: your own rules, for every start
 # Label on session pods: the session's tmux directory, so a stale pod can be told apart from someone else's.
@@ -700,7 +703,7 @@ SHORT_OPTIONS = {
     "--auth-from-session": "-as",
     "--image-variant": "-iv", "--nested-containers": "-ct", "--service": "-sv",
     "--copy": "-cp", "--state-dir": "-S", "--kit": "-k", "--kit-dir": "-K", "--no-default-kit": "-nk",
-    "--no-memory": "-nm", "--no-plugins": "-np", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
+    "--no-memory": "-nm", "--no-plugins": "-np", "--intro": "-in", "--no-intro": "-ni", "--env": "-e", "--log-dir": "-l", "--gui": "-gu",
     "--gui-screen": "-gs", "--audio": "-au", "--gui-vnc": "-gv", "--gui-wayland": "-gw",
     "--browser": "-bw", "--browser-control": "-bc", "--browser-profile": "-bp",
     "--cairn": "-cr", "--cairn-workers": "-cw", "--cairn-origin": "-co", "--cairn-goal": "-cg", "--cairn-hint": "-ch",
@@ -780,7 +783,7 @@ HELP_GROUPS = [  # --help: options by topic, in this order
     ("Git", ["--identity", "--git-identity", "--git-token-env", "--git-token-file", "--git-token-secret", "--git-logins", "--token-proxy",
              "--git-credentials"]),
     ("Agent", ["--model", "--effort", "--show-thinking", "--dangerously-skip-permissions", "--local-config",
-               *AGENT_FEATURES.values()]),
+               "--intro", "--no-intro", *AGENT_FEATURES.values()]),
     ("Model server (LLM)", ["--llm", "--use-case", "--llm-models", "--llm-param", "--llm-tools",
                             "--no-llm-profile", "--llm-traffic", "--llm-traffic-limit"]),
     ("Login and secrets", ["--copy-auth", "--no-auth", "--auth-file", "--auth-from-session", "--import-codex-auth",
@@ -1024,8 +1027,11 @@ def build_parser(agent=None):
     p.add_argument("--profile", action="append", default=[], choices=PROFILES, metavar="NAME",
                    help="Network profile: " + "; ".join(f"{name}: {value['help']}" for name, value in PROFILES.items())
                         + "; repeatable")
-    p.add_argument("--allow", action=ListOption, default=[], metavar="IP_OR_CIDR",
-                   help=f"Allow destination on all IP protocols/ports; {LIST_HELP}")
+    # --allow-net: the documented name (2026-11-24); --allow, its older name, stays an alias everywhere (the last name:
+    # option_strings[-1] and canonical_options keep --allow, what every reader of saved options and older hosts know).
+    p.add_argument("--allow-net", "--allow", dest="allow", action=ListOption, default=[], metavar="IP_OR_CIDR",
+                   help="Every port and protocol of an address or network (IP or CIDR), e.g. a machine of your LAN; "
+                        f"--allow is the same (its older name); {LIST_HELP}")
     # Lower case: host names are case-insensitive, EXAMPLE.org and example.org are one host (one pin, one entry).
     p.add_argument("--allow-host", action=ListOption, default=[], metavar="HOST", type=str.lower,
                    help=f"Pin hostname and allow TCP/443; {LIST_HELP}")
@@ -1047,7 +1053,7 @@ def build_parser(agent=None):
                         "service given with --allow-host (as --allow-shared-wildcard)")
     for preset, hosts in PRESETS.items():
         p.add_argument(f"--allow-{preset}", action="append_const", const=preset, dest="presets", default=[],
-                       help=f"Allow {', '.join(hosts)} (TCP/443)")
+                       help=f"Host set: allow {', '.join(hosts)} (TCP/443)")
     p.add_argument("--allow-tcp", action=ListOption, default=[], metavar="IP:PORT",
                    help=f"Allow one TCP port on one address, e.g. a local LLM server; IPv6 as [ADDR]:PORT; {LIST_HELP}")
     p.add_argument("--allow-host-port", action=ListOption, default=[], metavar="PORT",
@@ -1245,7 +1251,11 @@ def build_parser(agent=None):
                         "removed with the run, behind the same firewall, connection proxy, allow-list and kill switch, "
                         "with no capabilities, a read-only root and its own limits. Its image is unchecked (nobody "
                         "reviewed it). Keys: image port ready ready-timeout env secret data keep user read-only memory "
-                        "cpus pids (sandbox-ai images --help). Repeatable")
+                        "cpus pids device (device=: a device of this host for the service alone, never for the agent; "
+                        "sandbox-ai images --help). sandbox-ai's own, built once with sandbox-ai images build-image "
+                        "NAME --builtin NAME and started with their keys by --service NAME: android-emulator (the "
+                        "Android emulator with /dev/kvm for itself: adb connect android-emulator:5555), adb (an adb "
+                        "server for a USB device: adb:device=usb:VENDOR:PRODUCT). Repeatable")
     p.add_argument("--nested-containers", action="store_true",
                    help="Podman: the agent may run containers itself (podman, buildah, unshare -rn): it becomes root "
                         "of a user namespace of its own, with the subordinate IDs of the sandbox but the proxy's and "
@@ -1262,8 +1272,9 @@ def build_parser(agent=None):
                         "agent's PATH, and open the registries it names (as --allow-host; not in the modes high and "
                         "paranoid, which mount it and keep them closed). NAME is the newest in the store, "
                         "NAME@VERSION that version or the newest it starts (jdk@17, python@3.12); one version of a "
-                        "toolchain per sandbox. Repeatable. Into a running sandbox: sandbox-ai toolchain attach RUN "
-                        "NAME")
+                        "toolchain per sandbox. android-sdk (the Android SDK; android-sdk@36, @35) is built on this "
+                        "machine from Google's downloads once you accepted their license (sandbox-ai toolchain add "
+                        "android-sdk). Repeatable. Into a running sandbox: sandbox-ai toolchain attach RUN NAME")
     p.add_argument("--toolchain-offline", action="store_true",
                    help="Mount the toolchains without opening their registries")
     p.add_argument("--copy-auth", action="store_true",
@@ -1295,6 +1306,14 @@ def build_parser(agent=None):
                         "loaded nor kept")
     p.add_argument("--no-plugins", action="store_true",
                    help="No plugins from sandbox-ai's plugin store (Claude) or the kits (OpenCode)")
+    p.add_argument("--intro", action="store_const", const=True, default=None,
+                   help="Tell the agent what its sandbox has (the default): /sandbox/session/INTRO.md lists each "
+                        "folder, toolchain, MCP server, service and device with where it is and how to use it - no "
+                        "secret, no host path -, and one line where the agent reads its instructions names the file "
+                        "(never a file of your repository). Rewritten when something is attached while it runs")
+    p.add_argument("--no-intro", action="store_const", const=False, dest="intro",
+                   help="Start without the intro: no INTRO.md, no line in the agent's instructions (your default: "
+                        "sandbox-ai defaults set agent_intro false; an environment's: SANDBOX_AI_INTRO=0)")
     p.add_argument("--env", action="append", default=[], metavar="NAME", help="Pass named host variable to agent only; values never printed")
     p.add_argument("--secret-env", action="append", default=[], metavar="NAME[=SECRET]",
                    help="Give the agent the environment variable NAME with the value of the secret SECRET (default: "
@@ -1504,9 +1523,16 @@ def build_parser(agent=None):
     return p
 
 
+# Options that have a documented name and an older one: {documented: the name every reader of saved options knows}.
+# canonical_options writes the older one, so project files, presets, kept starts, MCP definitions, board bundles and
+# older hosts read them as before; both are accepted everywhere (argparse: one action, two names).
+OPTION_ALIASES = {"--allow-net": "--allow"}
+
+
 def long_option(action):
-    """The long name of an argparse action (its first --option)."""
-    return next((name for name in action.option_strings if name.startswith("--")), action.option_strings[0])
+    """The long name of an argparse action (its first --option; an alias's: the name OPTION_ALIASES keeps)."""
+    name = next((name for name in action.option_strings if name.startswith("--")), action.option_strings[0])
+    return OPTION_ALIASES.get(name, name)
 
 
 def bare_optional(action, tokens, index):
@@ -1534,6 +1560,9 @@ def canonical_options(tokens):
             continue
         if token.startswith("--") or not token.startswith("-") or token == "-":
             name = token.split("=", 1)[0]
+            if name in OPTION_ALIASES:  # --allow-net X: --allow X (its older name, which every reader knows)
+                token = OPTION_ALIASES[name] + token[len(name):]
+                name = OPTION_ALIASES[name]
             if name in actions and "=" not in token and bare_optional(actions[name], tokens, index):
                 result.append(f"{name}={actions[name].const}")  # --browser alone: --browser=chromium
                 continue
@@ -1990,6 +2019,17 @@ def policy_refuses_registry(a, kind, value):
 def toolchain_fix(value):
     """The fix for the toolchain VALUE (NAME[@VERSION]) that is not in the store: added from the signed catalog (its
     archive downloaded, its hash and signature checked - `toolchain add` refuses anything else)."""
+    recipes = load_toolchains_module().module("toolchain_recipes")
+    terms = recipes.TERMS.get(recipes.LICENSED.get(str(value).partition("@")[0]))
+    if terms:
+        # Built on this machine from its publisher's downloads, under a license: yours to accept - a question of
+        # its own (No first), never done by --fix, refused in high and paranoid; its yes is the acceptance.
+        return FIXES.fix("toolchain", value, f"the toolchain {value} is not in the store",
+                         f"accept the {terms['title']} and build it here from {terms['by']}'s downloads (the signed "
+                         "catalog's recipe)", [["sandbox-ai", "toolchain", "add", value, terms["option"]]],
+                         duration="a download of about 1 GB",
+                         security=f"by this you accept the {terms['title']} ({terms['url']}): {terms['says']}",
+                         choice=f"license:toolchain:{value}", terms=recipes.LICENSED[str(value).partition("@")[0]])
     return FIXES.fix("toolchain", value, f"the toolchain {value} is not in the store",
                      "add it from the signed catalog", [["sandbox-ai", "toolchain", "add", value]],
                      duration="a download")
@@ -2826,6 +2866,8 @@ def parse_args(argv, parser=None):
         for flag in ("frontier", "dns", "egress_all_allow", "offline"):
             if profile.get(flag):
                 setattr(a, flag, True)
+    a.implied_allows = {}  # what further options opened, by source (reach(): "what it may reach, and why")
+    before = opened_now(a)
     credentials = []
     for kind, value in git_token_values(a):
         try:
@@ -2846,22 +2888,27 @@ def parse_args(argv, parser=None):
                 a.presets.append("github")  # api.github.com and the download hosts too
         elif credential["host"] not in a.allow_host:  # pins the name; other ports need --allow-tcp
             a.allow_host.append(credential["host"])
+    before = note_opened(a, "git-login", before)
     for host, _, _ in api_key_values(a, check=False):
         if host not in a.allow_host:
             a.allow_host.append(host)  # validate() reports a wrong --api-key
+    before = note_opened(a, "api-key", before)
     for host in publish_hosts(a):
         if host not in a.allow_host:
             a.allow_host.append(host)
+    before = note_opened(a, "publish", before)
     if a.llm:
         llm = load_llm_module()
         llm.network_options(a, loopback_reachable(a))
         a.llm_vpn_note = llm.apply_vpn(a)
+        before = note_opened(a, "llm", before)
     # --AGENT-enable: each feature's hosts (and secrets) for the run's agent, or for one --with: they are the run's.
     if "hermes" in team(a):
         load_hermes_module().network_options(agent_view(a, "hermes"))
     for agent in ("qwen", "goose", "openhands", "nanobot", "letta", "opencode2", "pi"):
         if agent in team(a):
             agent_module(agent).network_options(agent_view(a, agent))
+    note_opened(a, "feature", before)
     if a.image is None and companions(a) and not a.image_variant:
         # Every agent of the run in one image: the team image, with the layers of the agents beyond its base (a
         # built one that holds them all is taken instead when this one is not there: start_image_checks).
@@ -3028,6 +3075,203 @@ def host_wildcards(a):
     if a.offline:
         return []
     return sorted({host for host in a.allow_host if host.startswith("*.")})
+
+
+def opened_now(a):
+    """What the options open so far: (names, TCP targets, host ports, presets), each a set (note_opened)."""
+    return (set(a.allow_host), set(a.allow_tcp), set(a.allow_host_port), set(a.presets))
+
+
+def note_opened(a, source, before):
+    """Remember what was opened since BEFORE (opened_now) as opened by SOURCE (a.implied_allows: {"host:NAME",
+    "tcp:IP:PORT", "port:N", "preset:NAME": source}); returns what is open now."""
+    now = opened_now(a)
+    for kind, was, current in zip(("host", "tcp", "port", "preset"), before, now):
+        for value in current - was:
+            a.implied_allows.setdefault(f"{kind}:{value}", source)
+    return now
+
+
+# The sources of what a start may reach (reach()), as `sandbox-ai net show` names them; SCOPES: how long each holds.
+REACH_SOURCES = {"provider": "the agent's provider", "frontier": "--frontier", "profile": "the profile",
+                 "project": "the project file", "option": "the start's options", "approved": "approved always",
+                 "toolchain": "a toolchain's registries", "git-login": "a Git login", "api-key": "an API key",
+                 "publish": "a publish login", "llm": "--llm", "feature": "an agent feature",
+                 "policy": "the administrator's policy"}
+REACH_SCOPES = {"project": "every start of the project", "approved": "every start of the project"}
+
+
+def option_values(tokens, names):
+    """{option: [values]} of the options NAMES in TOKENS (long forms, as canonical_options writes them; "--x=v" or
+    "--x v"; a value may list several, separated by commas or spaces); a flag of NAMES that takes no value: [True]."""
+    found, index, tokens = {}, 0, [str(t) for t in tokens or []]
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if token == "--":
+            break
+        name, has, value = token.partition("=")
+        if name not in names:
+            continue
+        if names[name] is None:  # a flag
+            found.setdefault(name, []).append(True)
+            continue
+        if not has:
+            if index >= len(tokens):
+                break
+            value, index = tokens[index], index + 1
+        found.setdefault(name, []).extend(v for v in re.split(r"[\s,]+", value.lower() if names[name] == "lower"
+                                                               else value) if v)
+    return found
+
+
+REACH_OPTIONS = {"--allow-host": "lower", "--allow-domain": "lower", "--allow-shared-wildcard": "lower",
+                 "--allow-tcp": "", "--allow": "", "--allow-net": "", "--allow-host-port": "", "--nameserver": "", "--dns": None,
+                 "--frontier": None, "--egress-all-allow": None, "--offline": None, "--profile": "",
+                 **{f"--allow-{name}": None for name in PRESETS}}
+
+
+def given_by(tokens):
+    """What TOKENS (start options) name themselves: {"hosts", "tcp", "nets", "ports", "presets", "profiles"} (sets)
+    and the flags "dns", "frontier", "egress", "offline"."""
+    values = option_values(tokens, REACH_OPTIONS)
+    hosts = set(values.get("--allow-host", [])) | set(values.get("--allow-shared-wildcard", []))
+    for value in values.get("--allow-domain", []):
+        try:
+            domain = domain_of(value)
+        except ValueError:
+            continue
+        hosts |= {domain, "*." + domain}
+    return {"hosts": hosts, "tcp": set(values.get("--allow-tcp", [])),
+            "nets": set(values.get("--allow", [])) | set(values.get("--allow-net", [])),
+            "ports": set(values.get("--allow-host-port", [])), "nameservers": set(values.get("--nameserver", [])),
+            "presets": {name for name in PRESETS if values.get(f"--allow-{name}")},
+            "profiles": set(values.get("--profile", [])), "dns": bool(values.get("--dns")),
+            "frontier": bool(values.get("--frontier")), "egress": bool(values.get("--egress-all-allow")),
+            "offline": bool(values.get("--offline"))}
+
+
+def reach(a):
+    """What the start A may reach, and why: [{"kind", "what", "source", "detail"?, "hosts"?, "scope"?}] - its
+    provider's hosts, the presets (with their names), host names and wildcards, TCP targets, networks, the host's
+    ports, DNS, everything (--egress-all-allow) or nothing (--offline) - each with the source that opened it
+    (REACH_SOURCES: the agent's provider, a profile, the project file, the start's own options, an approval
+    "always", a toolchain, a Git login, an API key, --llm, an agent feature) and, where it outlasts this start, its
+    scope (REACH_SCOPES). For run.json (`sandbox-ai net show` lists it beside what was allowed during the run, the
+    app and the web show it) and the plan. What only the policy, the mode or a kill switch takes away is not in it."""
+    project = given_by((getattr(a, "project_document", None) or {}).get("options") or [])
+    typed = given_by(getattr(a, "start_tokens", None) or [])
+    implied = getattr(a, "implied_allows", None) or {}
+    remembered_hosts = set(getattr(a, "remembered_hosts", None) or [])
+    approved_tcp = set(getattr(a, "approved_tcp", None) or [])
+    plan = getattr(a, "toolchain_plan", None) or {}
+    toolchain_hosts, toolchain_presets = set(plan.get("hosts") or []), set(plan.get("presets") or [])
+    toolchain_names = ", ".join(str(e.get("name")) for e in plan.get("entries") or [] if isinstance(e, dict))
+    profiles = [name for name in getattr(a, "profile", None) or [] if name in PROFILES]
+    entries = []
+
+    def add(kind, what, source, detail=None, **more):
+        entry = {"kind": kind, "what": what, "source": source, **({"detail": detail} if detail else {}), **more}
+        if source in REACH_SCOPES:
+            entry["scope"] = REACH_SCOPES[source]
+        entries.append(entry)
+
+    def source_of(kind, value, given_key):
+        """(source, detail) of VALUE: the project file, the start's options, an approval, a toolchain, another
+        option that implies it (implied_allows), else the start's options (a preset's, the mode's, the app's)."""
+        if value in project[given_key]:
+            return "project", getattr(a, "project_config", None)
+        if value in typed[given_key]:
+            return "option", None
+        if kind == "host" and value in remembered_hosts or kind == "tcp" and value in approved_tcp:
+            return "approved", None
+        if kind == "host" and value in toolchain_hosts:
+            return "toolchain", toolchain_names
+        if f"{kind}:{value}" in implied:
+            source = implied[f"{kind}:{value}"]
+            return source, getattr(a, "llm", None) if source == "llm" else None
+        return "option", None
+
+    if a.offline:
+        add("nothing", "--offline", "project" if project["offline"] else "profile" if "offline" in profiles
+            else "option", "offline" if "offline" in profiles and not project["offline"] else None)
+        return entries
+    if a.egress_all_allow:
+        source = "project" if project["egress"] else "profile" if "egress-all" in profiles and not typed["egress"] \
+            else "option"
+        add("everything", "--egress-all-allow", source, "egress-all" if source == "profile" else None)
+    covered = set()
+    if not (a.no_provider_defaults or a.local_config):
+        for agent in team(a):
+            hosts = [host for host in PROVIDERS.get(agent, []) if host not in covered]
+            if hosts:
+                add("preset", agent, "provider", agent, hosts=hosts)
+                covered.update(hosts)
+    if a.frontier:
+        hosts = [host for host in FRONTIER if host not in covered]
+        if hosts:
+            by_profile = [p for p in profiles if PROFILES[p].get("frontier")]
+            source = "project" if project["frontier"] else "option" if typed["frontier"] or not by_profile \
+                else "profile"
+            add("preset", "--frontier", source, by_profile[0] if source == "profile" else None, hosts=hosts)
+            covered.update(hosts)
+    for name in a.presets:
+        hosts = PRESETS.get(name, [])
+        by_profile = [p for p in profiles if name in PROFILES[p].get("presets", [])]
+        if name in project["presets"]:
+            source, detail = "project", getattr(a, "project_config", None)
+        elif name in typed["presets"]:
+            source, detail = "option", None
+        elif by_profile:
+            source, detail = "profile", by_profile[0]
+        elif name in toolchain_presets:
+            source, detail = "toolchain", toolchain_names
+        elif f"preset:{name}" in implied:
+            source, detail = implied[f"preset:{name}"], None
+        else:
+            source, detail = "option", None
+        add("preset", f"--allow-{name}", source, detail, hosts=list(hosts))
+        covered.update(hosts)
+    for host in allowed_hosts(a):
+        if host not in covered:
+            add("https", host, *source_of("host", host, "hosts"))
+            covered.add(host)
+    for wildcard in host_wildcards(a):
+        add("wildcard", wildcard, *source_of("host", wildcard, "hosts"))
+    for target in dict.fromkeys(a.allow_tcp):
+        add("tcp", target, *source_of("tcp", target, "tcp"))
+    for net in dict.fromkeys(a.allow):
+        add("network", net, *source_of("net", net, "nets"))
+    for port in dict.fromkeys(str(p) for p in a.allow_host_port):
+        add("host-port", port, *source_of("port", port, "ports"))
+    servers = nameservers(a)
+    if servers:
+        if a.nameserver:
+            source = "project" if set(a.nameserver) <= project["nameservers"] else "option"
+        elif a.egress_all_allow and not a.dns:
+            source = entries[0]["source"] if entries and entries[0]["kind"] == "everything" else "option"
+        else:
+            source = "project" if project["dns"] else "option" if typed["dns"] or "dns" not in profiles else "profile"
+        add("dns", ", ".join(servers), source, "dns" if source == "profile" else None)
+    for target in getattr(a, "vpn_bypass_tcp", None) or []:
+        add("tcp", str(target), "option", "past Tor")
+    return entries
+
+
+def reach_source_text(entry):
+    """How `sandbox-ai net show` names the source of a reach() ENTRY: "the agent's provider (claude)",
+    "the project file (/path/.sandbox-ai.json)"."""
+    text = REACH_SOURCES.get(entry.get("source"), str(entry.get("source")))
+    return f"{text} ({entry['detail']})" if entry.get("detail") else text
+
+
+def recorded_reach(a):
+    """reach(A) for run.json and the plan; [] where it cannot be told (never stops a start: it only explains)."""
+    try:
+        return reach(a)
+    except Exception as exc:  # noqa: BLE001 - an explanation, never a reason to refuse a start
+        LOG.warning("start", f"what the start may reach could not be listed: {exc}")
+        return []
 
 
 def host_ports(a):
@@ -3262,6 +3506,10 @@ def load_user_defaults(a):
     if "connection_bodies" in document and document["connection_bodies"] not in RUNTIME.CONNECTION_BODIES:
         raise ValueError(f"{path}: connection_bodies is one of {', '.join(RUNTIME.CONNECTION_BODIES)} (text: a binary "
                          "answer is logged by its size, digest and first bytes; all: its first 64 KiB too)")
+    if "agent_intro" in document and not isinstance(document["agent_intro"], bool):
+        # (intro.py: /sandbox/session/INTRO.md and the line that names it in the agent's instructions)
+        raise ValueError(f"{path}: agent_intro is true or false (false: a start tells its agent nothing about what its "
+                         "sandbox has - no INTRO.md, no line in its instructions; --intro turns it on for one start)")
     if "hide_secrets" in document and not isinstance(document["hide_secrets"], bool):
         # (session_inspect.py: true leaves logins and keys out of the file views; false or none: listed and marked)
         raise ValueError(f"{path}: hide_secrets is true or false (true: files that look like logins or keys are left "
@@ -6567,10 +6815,13 @@ def hosts_file(hosts, own=()):
 
 def own_host_names(a):
     """The host names the sandbox of A may call itself: its pod's (Podman gives a pod's containers the pod's name
-    as host name) and agent-sandbox (Bubblewrap's)."""
+    as host name), agent-sandbox (Bubblewrap's) and the names of its services."""
     names = ["agent-sandbox"]
     if getattr(a, "run_id", None) or getattr(a, "vpn_pod", None) or getattr(a, "pod_name", None):
         names.append(pod_name(a))
+    # The services beside it (--service) share its network namespace: each one's name is the loopback too
+    # (adb connect android-emulator:5555, psql -h db), as localhost:PORT is.
+    names += [str(service.get("name")) for service in getattr(a, "services", None) or []]
     return [name for name in names if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", name or "")]
 
 
@@ -7466,6 +7717,21 @@ def codex_telemetry_defaults(home, level):
         replace_private(content.encode(), home, ".codex/config.toml")
 
 
+def codex_own_instructions(home):
+    """developer_instructions of the sandbox HOME's ~/.codex/config.toml (yours: a kit's, a session's), or None:
+    the start's note is given as -c developer_instructions, which replaces the file's for the run - so the note is
+    joined after yours (agent_command). A file that cannot be read or parsed: None (the note alone, as before)."""
+    toml = load_privacy_module()._toml_module()
+    if toml is None:
+        return None
+    try:
+        path = check_home_path(home, home / ".codex/config.toml")
+        value = toml.loads(read_config_bytes(path).decode()).get("developer_instructions") if path.exists() else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, str) and value.strip() and len(value) <= 65536 else None
+
+
 def codex_companion_defaults(home):
     """Codex --with is started from the shell, without the launcher's --sandbox: its own sandbox cannot set up
     inside sandbox-ai's, so ~/.codex/config.toml says sandbox_mode = "danger-full-access" unless it says
@@ -7668,6 +7934,9 @@ def prepare_home(a, home):
         codex_companion_defaults(home)
     if "codex" in team(a) and runs_agent(a):
         codex_telemetry_defaults(home, telemetry_level(a))
+    if a.agent == "codex" and runs_agent(a):
+        # Your own developer_instructions stay: the start's note (-c developer_instructions) is joined after them.
+        a.codex_own_instructions = codex_own_instructions(home)
     if "opencode2" in team(a) and runs_agent(a):
         # Its shared background service off: every command runs its own server and ends with it (opencode2.py).
         relative = load_opencode2_module().SERVICE_FILE
@@ -9298,7 +9567,9 @@ def network_note(a):
     return load_vpn_module().agent_note(a)
 
 
-# Where each agent reads the network note from its start (beside /sandbox/session/network.md, which the skill names).
+# Where each agent reads the start's note (start_note: the run's network note and the line that names its intro,
+# /sandbox/session/INTRO.md) from its start - beside /sandbox/session/network.md, which the skill names. Never a file
+# of the user's repository.
 NOTE_PLACES = {"claude": "/etc/claude-code/CLAUDE.md (Claude Code's managed instructions, read-only)",
                "codex": "-c developer_instructions (a developer message of its own)",
                "opencode": "OPENCODE_CONFIG_CONTENT's instructions: /sandbox/session/network.md (your AGENTS.md stays)",
@@ -9316,13 +9587,81 @@ NOTE_PLACES = {"claude": "/etc/claude-code/CLAUDE.md (Claude Code's managed inst
                         "first message of each conversation)"}
 
 
+_intro_module = None
+
+
+def load_intro_module():
+    """intro.py: the agent's intro (/sandbox/session/INTRO.md: what its sandbox has) and the line that names it."""
+    global _intro_module
+    if _intro_module is None:
+        spec = importlib.util.spec_from_file_location("sandbox_intro", HERE / "intro.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _intro_module = module
+    return _intro_module
+
+
+INTRO_VARIABLE = "SANDBOX_AI_INTRO"  # =0: no start of this environment tells its agent (=1: each does); over your
+#                                      defaults file, under --intro and --no-intro (a script's or a CI job's choice;
+#                                      sandbox-ai's own tests start with =0, the intro's tests without it)
+
+
+def intro_on(a):
+    """The agent is told what its sandbox has (intro.py): an agent the sandbox runs itself (no probe, no MCP server's
+    sandbox), unless --no-intro - or the environment's SANDBOX_AI_INTRO=0, or your default agent_intro false, each
+    without --intro."""
+    if not runs_agent(a) or a.probe or getattr(a, "mcp_socket_dir", None):
+        return False
+    chosen = getattr(a, "intro", None)
+    if chosen is not None:
+        return bool(chosen)
+    if os.environ.get(INTRO_VARIABLE) in ("0", "1"):
+        return os.environ[INTRO_VARIABLE] == "1"
+    return getattr(a, "intro_default", None) is not False
+
+
+def start_note(a):
+    """What the agent reads from its start, where NOTE_PLACES says: the run's network note (network_note) and the
+    line that names its intro (intro.LINE); None when the run has neither."""
+    return joined_text(network_note(a), load_intro_module().LINE if intro_on(a) else None)
+
+
+def note_path(a):
+    """The file a harness that takes a file reads at its start (OpenCode, OpenCode 2, Letta Code): the notes joined
+    (/sandbox/session/agent-note.md) when the run has an intro, the network note's own file when it has only that,
+    None for neither."""
+    if intro_on(a):
+        return load_intro_module().NOTE_PATH
+    return load_vpn_module().NOTE_PATH if network_note(a) else None
+
+
+def intro_plan(a):
+    """The dry run's "intro": the file, its text, the line and where this agent reads it; None without (--no-intro)."""
+    if not intro_on(a):
+        return None
+    return load_intro_module().plan(a, launcher_namespace(), note_place(a))
+
+
+def note_place(a):
+    """Where this run's agent reads the start's note (NOTE_PLACES), with the file a harness that takes one is given
+    (note_path: the notes joined when the run has an intro)."""
+    return NOTE_PLACES[a.agent].replace(load_vpn_module().NOTE_PATH, note_path(a) or load_vpn_module().NOTE_PATH)
+
+
 def note_files(a):
-    """{path in the session directory: content} of the network note: network.md (/sandbox/session/network.md) and
-    for Claude Code its managed CLAUDE.md (hook_mount mounts that directory at /etc/claude-code)."""
-    note = network_note(a)
-    if not note:
-        return {}
-    return {load_vpn_module().NOTE_FILE: note, **({"claude-code/CLAUDE.md": note} if a.agent == "claude" else {})}
+    """{path in the session directory: content} of what the agent reads from its start: the network note's
+    network.md (/sandbox/session/network.md), the intro's INTRO.md and agent-note.md (the notes joined, for a harness
+    that takes a file), and for Claude Code its managed CLAUDE.md (hook_mount mounts that directory at
+    /etc/claude-code)."""
+    note, whole = network_note(a), start_note(a)
+    files = {load_vpn_module().NOTE_FILE: note} if note else {}
+    if whole and a.agent == "claude":
+        files["claude-code/CLAUDE.md"] = whole
+    if intro_on(a):
+        intro = load_intro_module()
+        files[intro.FILE] = intro.text(intro.resources(a, launcher_namespace()))
+        files[intro.NOTE_FILE] = whole
+    return files
 
 
 def joined_text(*parts):
@@ -10325,7 +10664,7 @@ def hook_mount(a, session):
         module = agent_module(a.agent)
         return Path(session) / module.SESSION_DIR, module.MANAGED_DIR
     # Claude Code's: its hooks, and the network note as its managed CLAUDE.md (note_files).
-    if a.agent not in MANAGED_DIRS or not (managed_hooks(a) or a.agent == "claude" and network_note(a)
+    if a.agent not in MANAGED_DIRS or not (managed_hooks(a) or a.agent == "claude" and start_note(a)
                                            or a.agent == "codex" and getattr(a, "codex_plugins", None)):
         return None
     return Path(session) / PurePosixPath(MANAGED_DIRS[a.agent]).name, MANAGED_DIRS[a.agent]
@@ -10960,6 +11299,8 @@ def register_run(a, run, session):
         **({"dsh_web_port": dsh_web_ui_port(a)} if dsh_web_ui_port(a) else {}),
         # The MCP servers this run reaches (--mcp, helpers included): sandbox-ai mcp list names whom each serves.
         "mcp_servers": [] if a.mcp_socket_dir else list(dict.fromkeys(a.mcp)),
+        # The agent was told what its sandbox has (/sandbox/session/INTRO.md, written again by a live attach).
+        "intro": intro_on(a),
         # Those it reaches in an instance of its own (--mcp-limits, --mcp-mount, --mcp-env, or NAME ran with another
         # definition): {server: NAME.HASH}; the kill switch finds their sandboxes by it.
         **({"mcp_instances": {name: mcp_instance(a, name) for name in dict.fromkeys(a.mcp)
@@ -10984,6 +11325,8 @@ def register_run(a, run, session):
            if getattr(a, "kits_live", None) else {}),
         # The security mode: `sandbox-ai net allow` and `sandbox-ai approvals` keep to it (modes.py).
         "mode": a.runtime_mode,
+        # What it may reach from its start, each with its source (sandbox-ai net show, the app, the web: reach()).
+        "reach": recorded_reach(a),
         # The network profiles it started with (--profile; sandbox-ai net list shows them), and whether it is offline.
         "profiles": [name for name in (getattr(a, "profile", None) or []) if isinstance(name, str)],
         "offline": bool(getattr(a, "offline", False)),
@@ -11500,8 +11843,8 @@ def prepare_kits(a, home, staging):
     # no kit at all: `sandbox-ai kits attach` copies into them while the sandbox runs (kits_live.py).
     every_kind = not a.no_default_kit or bool(a.kit) or bool(a.kit_dir)
     staged, more = kits.stage(a.agent, plan, staging, check, every_kind=every_kind)
-    if a.agent == "nanobot" and network_note(a):
-        staged = nanobot_note_skill(staging, staged, network_note(a))
+    if a.agent == "nanobot" and start_note(a):
+        staged = nanobot_note_skill(staging, staged, start_note(a))
     notes += more + kit_source_notes(plan, a)
     a.kit_hooks = kits.stage_hooks(a.agent, kits.sources(a), staging / "hooks", KIT_HOOKS_TARGET)
     notes += kit_hook_notes(a.agent, a.kit_hooks)
@@ -11599,7 +11942,7 @@ def own_environment(a):
         env.update(load_opencode2_module().environment(a, opencode2_content(a)))
     if a.agent == "goose" and thinking_shown(a) is False:
         env.pop("GOOSE_CLI_SHOW_THINKING", None)  # any value of it turns Goose's thinking on
-    if a.agent == "goose" and network_note(a):  # the network note in its Top Of Mind file, every turn (agent_files)
+    if a.agent == "goose" and start_note(a):  # the start's note in its Top Of Mind file, every turn (agent_files)
         env["GOOSE_MOIM_MESSAGE_FILE"] = load_goose_module().LOOP_FILE
     return env
 
@@ -11691,8 +12034,8 @@ def agent_environment(a):
                              *(["file://" + OPENCODE_HOOK_RECHECK] if opencode_recheck(a) else [])]
     if "opencode" in companions(a) and hooks_active(a):
         content["plugin"] = ["file://" + OPENCODE_HOOK_PLUGIN]  # the rules hold for it too
-    if a.agent == "opencode" and network_note(a):  # one more of its instruction files: its AGENTS.md stays
-        content["instructions"] = [load_vpn_module().NOTE_PATH]
+    if a.agent == "opencode" and note_path(a):  # one more of its instruction files: its AGENTS.md stays
+        content["instructions"] = [note_path(a)]
     if "opencode" in team(a) and runs_agent(a):
         content.update(OPENCODE_TELEMETRY_CONFIG)  # after the project's and your own configuration: this wins
     if content:
@@ -11712,6 +12055,10 @@ def agent_environment(a):
         env["BROWSER"] = "/sandbox/session/bin/xdg-open"
     if a.gui:
         env["DISPLAY"] = GUI_DISPLAY
+        # Qt on that display, unless you chose (--env QT_QPA_PLATFORM): a Qt toolchain (pyside6, qt) says offscreen
+        # for the sandbox without a display, at a start and in every new shell (env.sh, where nothing set it).
+        if "QT_QPA_PLATFORM" not in a.env:
+            env["QT_QPA_PLATFORM"] = "xcb"
     if getattr(a, "audio", None) == "virtual":
         env["PULSE_SERVER"] = f"unix:{RUNTIME.AUDIO_SOCKET}"
     if a.gui_wayland:
@@ -11728,7 +12075,7 @@ def opencode2_content(a):
     opencode2 = load_opencode2_module()
     servers = opencode2.mcp_servers(a.mcp, mcp_bridge_args, mcp_tool_timeouts(a)) if a.mcp else None
     model = load_llm_module().opencode2_model(a) if a.llm else None
-    return opencode2.config_content(a, servers, model, load_vpn_module().NOTE_PATH if network_note(a) else None,
+    return opencode2.config_content(a, servers, model, note_path(a),
                                     hooks=bool(module_hooks(a)), plugins=getattr(a, "opencode2_plugins", None) or ())
 
 
@@ -11903,8 +12250,10 @@ def agent_command(a, binary):
         args = [*codex_telemetry_args(telemetry_level(a)), *args]
         # The network note as a developer message of its own: over your config.toml's developer_instructions for
         # this run; your own -c developer_instructions=... after it wins.
-        if network_note(a):
-            args = ["-c", "developer_instructions=" + toml_string(network_note(a)), *args]
+        # (joined after your own developer_instructions of the sandbox HOME's config.toml: codex_own_instructions)
+        if start_note(a):
+            args = ["-c", "developer_instructions=" + toml_string(
+                joined_text(getattr(a, "codex_own_instructions", None), start_note(a))), *args]
     # A helper's command is its server (python3): agent_mcp.py gives the agent its flags for each task.
     if a.dangerously_skip_permissions and not a.probe and not getattr(a, "helper_of", None):
         args = [flag for flag in DANGER_ARGS[a.agent] if flag not in args] + args
@@ -11923,12 +12272,12 @@ def agent_command(a, binary):
     if a.llm and a.binary is None and not a.probe:
         launchers = list(load_llm_module().agent_arguments(a))
         args = [*launchers, *args]
-    if a.agent == "qwen" and a.binary is None and not getattr(a, "helper_of", None) and network_note(a):
-        # Qwen Code takes one --append-system-prompt: the loop guard's text (--llm) and the network note share it.
+    if a.agent == "qwen" and a.binary is None and not getattr(a, "helper_of", None) and start_note(a):
+        # Qwen Code takes one --append-system-prompt: the loop guard's text (--llm) and the start's note share it.
         if launchers[:1] == ["--append-system-prompt"]:
-            args[1] = joined_text(args[1], network_note(a))
+            args[1] = joined_text(args[1], start_note(a))
         else:
-            args = ["--append-system-prompt", network_note(a), *args]
+            args = ["--append-system-prompt", start_note(a), *args]
     if a.binary is None and not a.probe and not getattr(a, "helper_of", None):
         args = [*model_effort_args(a), *thinking_args(a), *args]
     if a.agent == "qwen" and a.binary is None and not a.probe and not getattr(a, "helper_of", None):
@@ -14837,7 +15186,7 @@ def hermes_files(a):
     if a.llm:
         llm = load_llm_module()
         model, loop_text = llm.hermes_config(a), llm.loop_text(llm.loop_guard_of(a, llm.selection(a)[0]))
-    note = network_note(a)
+    note = start_note(a)
     config = hermes.managed_config(a, telemetry_level(a), mcp, model, note=bool(note), hooks=managed_hook_groups(a))
     return hermes.files(a, config, loop_text, note)
 
@@ -14987,14 +15336,14 @@ def agent_files(a):
     if a.agent == "dsh":
         dsh = load_dsh_module()
         mcp = dsh.mcp_rows(a.mcp, mcp_bridge_args, mcp_tool_timeouts(a)) if a.mcp else None
-        return dsh.files(a, dsh.patch(a, mcp, llm.dsh_config(a) if llm else None, network_note(a),
+        return dsh.files(a, dsh.patch(a, mcp, llm.dsh_config(a) if llm else None, start_note(a),
                                       hooks=hooks_active(a)))
     if a.agent == "goose":
         goose = load_goose_module()
         mcp = goose.extensions(a.mcp, mcp_bridge_args, mcp_tool_timeouts(a)) if a.mcp else None
         # Its Top Of Mind file holds the loop guard's text (--llm) and the network note.
         return goose.files(a, goose.managed_config(a, mcp),
-                           joined_text(llm.goose_loop_text(a) if llm else None, network_note(a)),
+                           joined_text(llm.goose_loop_text(a) if llm else None, start_note(a)),
                            managed_hook_groups(a))
     if a.agent == "openhands":
         openhands = load_openhands_module()
@@ -15002,8 +15351,8 @@ def agent_files(a):
         keys = api_key_environment(a)
         provider = openhands.api_provider(a)
         loop = llm.openhands_loop(a) if llm else None
-        if network_note(a):  # the network note after the loop guard's text, in its system message's suffix
-            loop = {**(loop or {}), "instructions": joined_text((loop or {}).get("instructions"), network_note(a))}
+        if start_note(a):  # the start's note after the loop guard's text, in its system message's suffix
+            loop = {**(loop or {}), "instructions": joined_text((loop or {}).get("instructions"), start_note(a))}
         return openhands.files(a, openhands.managed_settings(
             a, mcp, llm.openhands_llm(a) if llm else None, keys.get(provider[1]) if provider else None, loop))
     if a.agent == "nanobot":
@@ -15015,8 +15364,7 @@ def agent_files(a):
         letta = load_letta_module()
         servers = letta.mcp_servers(a.mcp, mcp_bridge_args) if a.mcp and not getattr(a, "helper_of", None) else None
         return letta.files(a, letta.start_config(a, servers, llm.letta_model(a) if llm else None,
-                                                 load_vpn_module().NOTE_PATH if network_note(a) else None,
-                                                 managed_hook_groups(a)))
+                                                 note_path(a), managed_hook_groups(a)))
     if a.agent == "opencode2":
         # Its configuration layer to read, and with --llm the provider file and the loop guard's text (read-only).
         return load_opencode2_module().files(a, opencode2_content(a), llm.opencode2_files(a) if llm else None,
@@ -15026,8 +15374,8 @@ def agent_files(a):
         servers = pi.mcp_servers(a.mcp, mcp_bridge_args, mcp_tool_timeouts(a)) \
             if a.mcp and not getattr(a, "helper_of", None) else None
         config = pi.extension_config(a, servers, llm.pi_llm(a) if llm else None, module_hooks(a))
-        if network_note(a):  # the network note after the loop guard's text: a section of Pi's system prompt
-            config["instructions"] = joined_text(config.get("instructions"), network_note(a))
+        if start_note(a):  # the start's note after the loop guard's text: a section of Pi's system prompt
+            config["instructions"] = joined_text(config.get("instructions"), start_note(a))
         return pi.files(a, config)
     qwen = load_qwen_module()
     return qwen.files(a, qwen.managed_settings(a, telemetry_level(a), llm.qwen_settings(a) if llm else None,
@@ -15412,6 +15760,8 @@ def launch_once(argv, floor_by=None, preset_bridge=None, state=None, preset_cata
     a.preset_bridge = preset_bridge  # (never from a project file, a kept start or a session's saved options)
     # The checked document is passed on; nothing re-reads the file later.
     a.project_config, a.project_document = (str(config_path) if config_path else None), document
+    # What the start's own options name (a preset's and the app's included): reach() tells them from the file's.
+    a.start_tokens = list(argv)
     if not a.dry_run and not a.probe and not a.mcp_socket_dir and a.session is None:
         # Which folder the agent works in, and whose configuration applies: the mix-up this prevents is giving
         # --workspace another checkout and getting that one as /work. (A session's supervisor says it, relayed to
@@ -15428,6 +15778,7 @@ def launch_once(argv, floor_by=None, preset_bridge=None, state=None, preset_cata
     a.llm_traffic_default, a.llm_traffic_limit_default = (user_defaults.get("llm_traffic"),
                                                           user_defaults.get("llm_traffic_limit"))
     a.name_style_default = user_defaults.get("name_style")  # name_start(): after --name-style
+    a.intro_default = user_defaults.get("agent_intro")  # intro_on(): after --intro and --no-intro
     a.budget_default = user_defaults.get("budget")  # run_budget(): after --budget (and the project file's)
     a.file_reads = user_defaults.get("file_reads") or "folders"  # the file log's reads (runtime.FileReads)
     a.connection_bodies = user_defaults.get("connection_bodies") or "text"  # runtime.binary_answer
@@ -15608,6 +15959,8 @@ def launch_once(argv, floor_by=None, preset_bridge=None, state=None, preset_cata
                           "allow_tcp": [f"{addr}:{port}" for addr, port in tcp_targets(a)],
                           "host_ports": host_ports(a),
                           "network_profiles": a.profile,
+                          # what it may reach, each with its source (sandbox-ai net show lists it while it runs)
+                          "reach": recorded_reach(a),
                           "git_identity": a.git_identity,
                           "privacy_check": a.privacy_check,
                           "ask": (a.ask if asking(a) else "off") if proxy_enabled(a) else None,
@@ -15646,7 +15999,9 @@ def launch_once(argv, floor_by=None, preset_bridge=None, state=None, preset_cata
                           "sandbox_network": sandbox_network(a),
                           "vpn": load_vpn_module().plan(a) if a.vpn else None,
                           "network_note": {"text": network_note(a), "file": load_vpn_module().NOTE_PATH,
-                                           "agent_reads_it": NOTE_PLACES[a.agent]} if network_note(a) else None,
+                                           "agent_reads_it": note_place(a)} if network_note(a) else None,
+                          # the agent's intro (intro.py): what its sandbox has, and where it reads the line naming it
+                          "intro": intro_plan(a),
                           "podman_url": a.podman_url,
                           "local_config": str(a.local_config) if a.local_config else None,
                           "llm": load_llm_module().plan(a) if a.llm else None,
@@ -15981,7 +16336,10 @@ def launch_once(argv, floor_by=None, preset_bridge=None, state=None, preset_cata
             files["npmrc"] = npmrc
         if managed_hooks(a) or getattr(a, "codex_plugins", None):
             files.update(hook_files(a))  # Codex's requirements.toml: its hooks, the kits' plugins' requirements
-        files.update(note_files(a))  # the network note: network.md, Claude Code's managed CLAUDE.md
+        # the network note (network.md) and the intro (INTRO.md, agent-note.md), Claude Code's managed CLAUDE.md
+        files.update(note_files(a))
+        if intro_on(a):  # what INTRO.md was made from, on the host: a live attach writes it again (intro.refresh)
+            load_intro_module().write_state(a.control_dir, load_intro_module().resources(a, launcher_namespace()))
         if hermes_managed(a):
             files.update(hermes_files(a))
         if hermes_guarded(a):  # Hermes' telemetry guard, in every process of its Python (hermes_guard.py)

@@ -40,7 +40,8 @@ NEEDS_YOURS = {"cairn-pentest-board": "a value of yours: target", "pentest-lab":
                "artex-pentest": "a value of yours: target",
                "archivist-1995": "display (--gui)", "onboarding-buddy": "display (--gui)",
                "pixel-art-factory": "display (--gui)", "web-frontend": "display (--gui)",
-               "radio-sandbox-ai": "sound (--audio)", "android-development": "an image variant of yours",
+               "radio-sandbox-ai": "sound (--audio)", "android-development": "a license of yours",
+               "qt-cpp": "an image variant of yours",
                "paranoid": "asks you before every action"}
 # What a start with --llm refuses by design: these run with --provider-login (the agent's own provider).
 LLM_REFUSED = {**{name: "--mode high" for name in ("canary-course", "code-audit", "forensics", "observer",

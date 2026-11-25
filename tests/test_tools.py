@@ -224,7 +224,7 @@ def test_summarize_and_report(scenario, tmp_path, capsys):
     text = "\n".join(lines)
     assert "\x1b" not in text and "\x07" not in text
     if scenario == "happy":
-        assert summary["suggestions"][0] == {"option": "--allow-pypi", "why": "pypi.org belongs to that preset", "count": 2}
+        assert summary["suggestions"][0] == {"option": "--allow-pypi", "why": "pypi.org belongs to that host set", "count": 2}
         assert "--allow-tcp 192.0.2.9:8080" in text
     elif scenario == "sad":
         assert "Blocked egress: none" in text

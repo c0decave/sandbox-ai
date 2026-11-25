@@ -1,6 +1,6 @@
 """Build toolchains in the app, offscreen: the Board's part Toolchains (--toolchain in the start's arguments, kept in
 the board's state, said in the review), and for a running sandbox Add toolchain… and Remove toolchain… on the
-Sandboxes page - its buttons, its row's right-click menu, and a terminal tab's menu under While it runs - each asked
+Sessions page - its buttons, its row's right-click menu, and a terminal tab's menu under While it runs - each asked
 first, against a stand-in that records what was asked of the host (`sandbox-ai toolchain ...`): nothing is mounted."""
 import json
 import os
@@ -131,6 +131,53 @@ def test_a_toolchain_of_the_catalog_is_downloaded_first_and_not_attached_when_th
     assert ran(sai, "box", "toolchain", "attach") is None and picked.notices[-1][1][0] == 1
 
 
+ANDROID = {"name": "android-sdk", "version": "37.0.0", "commands": ["adb", "aapt2"], "hosts": ["dl.google.com"],
+           "allow": [], "size": 1064 << 20, "recipe": True, "signed": True,
+           "terms": {"id": "android-sdk-license", "title": "Android Software Development Kit License Agreement",
+                     "by": "Google", "url": "https://developer.android.com/studio/terms",
+                     "option": "--accept-android-sdk-license"}}
+
+
+def test_a_toolchain_under_a_license_is_added_only_after_its_own_question(ui, sai, picked, monkeypatch):
+    """android-sdk (2026-11-24): built on the host from Google's downloads, under their license. The list says so, the
+    license is a question of its own after the usual one (its default: No), and only a yes hands the option on -
+    without it nothing is added or attached."""
+    page = page_on(ui, sai, monkeypatch, running("box"))
+    sai.answers[("toolchain", "list", "--json")] = (0, "[]", "")
+    sai.answers[("toolchain", "catalog")] = catalog(ANDROID)
+    sai.answers[("toolchain", "add")] = (0, "added android-sdk", "")
+    licenses = []
+    monkeypatch.setattr(ui.widgets, "accept_license",
+                        lambda parent, what, terms=None, text=None: licenses.append((what, terms)) or False)
+    page.add_toolchain()
+    assert "a license to accept" in picked.seen[0][1][0] and "downloaded from the signed catalog" not in \
+        picked.seen[0][1][0]
+    assert "built in the store first from Google's downloads (1064 MiB" in ui.asked[-1][1]
+    assert licenses == [("The toolchain android-sdk", ANDROID["terms"])]
+    assert ran(sai, "box", "toolchain", "add") is None and ran(sai, "box", "toolchain", "attach") is None
+    monkeypatch.setattr(ui.widgets, "accept_license", lambda parent, what, terms=None, text=None: True)
+    page.add_toolchain()
+    assert ran(sai, "box", "toolchain", "add") == ("box", "toolchain", "add", "android-sdk",
+                                                    "--accept-android-sdk-license")
+    assert ran(sai, "box", "toolchain", "attach") == ("box", "toolchain", "attach", "api", "android-sdk")
+    # A row whose option this app does not know is no license it accepts for you: added as any other (the host's
+    # sandbox-ai then refuses without its option, and says so).
+    sai.asked.clear()
+    sai.answers[("toolchain", "catalog")] = catalog({**ANDROID, "terms": {**ANDROID["terms"], "option": "--yes"}})
+    page.add_toolchain()
+    assert ran(sai, "box", "toolchain", "add") == ("box", "toolchain", "add", "android-sdk")
+
+
+def test_the_boards_field_says_which_toolchain_is_built_on_the_host_under_a_license():
+    choices = backend.toolchain_choices({"installed": [], "catalog": [dict(ANDROID, toolchain="android-sdk"),
+                                                                    dict(JDK, toolchain="jdk", signed=True)]})
+    by_name = {choice["name"]: choice for choice in choices}
+    assert backend.license_terms(by_name["android-sdk"]["row"])["option"] == "--accept-android-sdk-license"
+    assert backend.license_terms(by_name["jdk"]["row"]) is None
+    assert i18n.TEXTS["{name} {version} (built on the host first, from its publisher's downloads: the start offers "
+                      "it and asks for its license)"]["de"].startswith("{name} {version} (wird zuerst auf dem Host")
+
+
 def test_what_is_attached_or_not_signed_is_not_offered(ui, sai, picked, monkeypatch):
     page = page_on(ui, sai, monkeypatch, running())
     sai.answers[("toolchain", "list", "--json")] = (0, json.dumps([GO]), "")
@@ -202,7 +249,7 @@ def test_the_actions_are_on_the_rows_right_click_and_in_a_terminal_tabs_menu(win
                for action in ([top] + (top.menu().actions() if top.menu() is not None else []))}
     assert entries["Add toolchain…"].isEnabled() and not entries["Remove toolchain…"].isEnabled()
     assert entries["Add toolchain…"].toolTip() == page.run_named["add-toolchain"].toolTip()  # with its reason
-    # ... and the right click on a row of the Sandboxes page offers the same two buttons
+    # ... and the right click on a row of the Sessions page offers the same two buttons
     from sandbox_ai_app import widgets
     offered = [inner for entry in page.table.menu_entries()
                for inner in (entry.entries if isinstance(entry, widgets.MenuGroup) else [entry])]
@@ -245,6 +292,36 @@ def test_every_version_is_offered_by_what_the_host_takes_for_it():
     assert [c["value"] for c in backend.toolchain_choices({"installed": [], "catalog": [jdk_row("21.0.13+9"),
                                                                                         jdk_row("17.0.21+9")]})] == \
         ["jdk", "jdk@17.0.21+9"]
+
+
+def test_the_boards_toolchains_field_lists_the_qt_toolchains_with_their_versions(sai, qapp, monkeypatch):
+    """The user, 2026-11-24: Qt for Python and C++ as toolchains - the Board's field (and its inspector) offers
+    pyside6 and qt with their versions, the long-term line by its start (pyside6@6.11, qt@6.11), as the host names
+    them; nothing of it is a list in the app."""
+    from conftest import wait_until
+    from sandbox_ai_app.board_view import BoardPage
+
+    def row(name, version, toolchain, commands):
+        return {"name": name, "version": version, "toolchain": toolchain, "commands": commands, "hosts": [],
+                "allow": [], "size": 700 << 20}
+    store = [row("pyside6", "6.12.0", "pyside6", ["pyside6-uic"])]
+    catalog = [row("pyside6", "6.12.0", "pyside6", ["pyside6-uic"]),
+               row("pyside6", "6.11.3", "pyside6@6.11", ["pyside6-uic"]),
+               row("qt", "6.12.0", "qt", ["qmake", "moc"]), row("qt", "6.11.3", "qt@6.11", ["qmake", "moc"])]
+    assert [(c["value"], c["version"], c["stored"]) for c in backend.toolchain_choices(
+        {"installed": store, "catalog": catalog})] == [
+        ("pyside6", "6.12.0", True), ("pyside6@6.11", "6.11.3", False), ("qt", "6.12.0", False),
+        ("qt@6.11", "6.11.3", False)]
+    view = BoardPage(sai, lambda *a, **k: None, lambda: {"board_grid": 20})
+    monkeypatch.setattr(sai, "host_toolchains", lambda host="local": {
+        "installed": store, "catalog": catalog, "signed": True, "problem": None})
+    filled = []
+    view.value_provider("--toolchain")(lambda items, note=None: filled.append((items, note)))
+    wait_until(qapp, lambda: filled, 10.0)
+    assert filled[0] == ([("pyside6 6.12.0 (in the store)", "pyside6"),
+                          ("pyside6 6.11.3 (add it first: sandbox-ai toolchain add pyside6@6.11)", "pyside6@6.11"),
+                          ("qt 6.12.0 (add it first: sandbox-ai toolchain add qt)", "qt"),
+                          ("qt 6.11.3 (add it first: sandbox-ai toolchain add qt@6.11)", "qt@6.11")], None)
 
 
 def test_the_boards_toolchains_field_lists_every_version(sai, qapp, monkeypatch):

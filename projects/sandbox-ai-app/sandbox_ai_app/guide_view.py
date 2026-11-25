@@ -12,6 +12,7 @@ from . import applog
 from . import board as B
 from . import board_icons, theme
 from . import guide, tours
+from . import list_fields as LF
 from .board_view import VALUE_NAMES, PathEdit
 from .files import printable
 from .widgets import safe_tooltip
@@ -320,6 +321,13 @@ class NodeGuide(QDialog):
         if question.form == "flag":
             widget = QCheckBox(tr(question.label))
             widget.setChecked(bool(current))
+            if question.key == "--toolchain-offline":  # (what the toolchains chosen need: closed then, said there)
+                widget.toggled.connect(lambda _on: self.show_needs())
+        elif question.form == "list" and self.provider_of(question.key) is not None:
+            # What the board's host has to choose from, as in the part's properties (list_fields: a drop-down, the
+            # chosen ones as chips): its toolchains - the store's and the signed catalog's, every version - and its
+            # devices. (It was a box to type names into: "in der Erstsetup KEIN Dropdown", user 2026-11-24.)
+            widget = self.list_field(question, current)
         elif question.form == "list":
             widget = QPlainTextEdit("\n".join(current))
             widget.setPlaceholderText(question.placeholder)
@@ -383,12 +391,65 @@ class NodeGuide(QDialog):
             widget.currentIndexChanged.connect(lambda _i: self.model_changed())
             widget.lineEdit().editingFinished.connect(self.model_changed)
         layout.addWidget(widget)
+        if question.key == "--toolchain" and isinstance(widget, LF.ListFields):
+            # What each chosen toolchain needs of the network (its package registries), as the properties show it.
+            self.needs_note = plain_label("", role="secondary", selectable=True)
+            layout.addWidget(self.needs_note)
+            widget.changed.connect(lambda _key, _values: self.show_needs())
+            self.show_needs()
         if question.key == "effort":  # an effort the model chosen does not take was reset: said here
             self.effort_note = plain_label(role="secondary")
             self.effort_note.hide()
             layout.addWidget(self.effort_note)
         layout.addStretch(1)
         return page
+
+    def provider_of(self, key):
+        """What the board offers for the list question KEY (BoardPage.value_provider: provider(fill)), or None."""
+        ask = getattr(self.parent(), "value_provider", None)
+        if key not in ("--toolchain", "--device") or ask is None:
+            return None
+        provider = ask(key)
+        if provider is None:
+            return None
+        if key == "--toolchain":
+            def with_needs(fill):  # (once the host's toolchains are read: what the chosen ones need, below)
+                provider(lambda items, note="": (fill(items, note), self.show_needs()))
+            return with_needs
+        from . import device_picker as DP
+
+        def devices_only(fill):  # (a GPU kind is the part's own question, GPU: never a --device)
+            provider(lambda items, note="": fill([item for item in items or [] if not DP.gpu_of(
+                item[1] if isinstance(item, (tuple, list)) and len(item) > 1 else item)], note))
+        return devices_only
+
+    def list_field(self, question, current):
+        """The list question as one field with the host's values to choose from (list_fields.ListFields)."""
+        kind = LF.ListKind(question.key, tr(question.label), tip=tr(question.help),
+                           placeholder=LF.EXAMPLES.get(question.key) or question.placeholder)
+        if question.key == "--device":
+            from . import device_picker as DP
+            kind.check = DP.check_board_value
+        field = LF.ListFields([kind], {question.key: current}, name=tr(question.label))
+        field.set_provider(question.key, self.provider_of(question.key))
+        return field
+
+    def show_needs(self):
+        """Below the toolchains: what each chosen one needs of the network and what the start does about it."""
+        note, board = getattr(self, "needs_note", None), self.parent()
+        if note is None or not hasattr(board, "toolchains_found"):
+            return
+        question, field = self.inputs.get("--toolchain", (None, None))
+        values = field.values("--toolchain") if isinstance(field, LF.ListFields) else []
+        found = board.toolchains_found.get(board.host())
+        offline = self.inputs.get("--toolchain-offline")
+        rows = B.needs_rows(values, found, offline=bool(offline and offline[1].isChecked()),
+                            mode=B.security_mode(board.board)) if found else []
+        try:
+            note.setText("\n".join(B.toolchain_needs_lines(rows)))
+            note.setVisible(bool(rows))
+        except RuntimeError:  # (a late answer for a dialog already gone)
+            pass
 
     def chosen_model(self):
         """The model answered so far (the model page's choice, else the node's)."""
@@ -477,6 +538,9 @@ class NodeGuide(QDialog):
         for key, (question, widget) in self.inputs.items():
             if isinstance(widget, QCheckBox):
                 found[key] = widget.isChecked()
+            elif isinstance(widget, LF.ListFields):  # the chips, and what was typed and not added yet
+                widget.take_typed()
+                found[key] = widget.values(key)
             elif isinstance(widget, QPlainTextEdit):
                 found[key] = widget.toPlainText()
             elif isinstance(widget, QComboBox) and widget.isEditable():

@@ -37,6 +37,7 @@ class Hosts:
         self.gate = threading.Event()
         self.asked, self.on_gui = [], []
         self.lists = {"lab": [row("pg", ports=[5432])], "slow": [row("slowimg")], "fast": [row("fastimg")]}
+        self.templates = [TEMPLATE]
 
     def __call__(self, name, *args, timeout=120, input=None):
         if threading.current_thread() is threading.main_thread():
@@ -54,7 +55,7 @@ class Hosts:
                 self.gate.wait(20)
             return 0, json.dumps(self.lists.get(name, [])), ""
         if args == ("images", "templates", "--json"):
-            return 0, json.dumps([TEMPLATE]), ""
+            return 0, json.dumps(self.templates), ""
         if args == ("images", "--json"):
             return 0, "[]", ""
         return 1, "", "not asked in this test"
@@ -335,3 +336,107 @@ def test_board_start_e2e_builds_sandbox_ais_own_image_then_starts(page, wait, qa
     assert wait(lambda: started, 30), [t for _, t, _ in widgets.SHOWN]
     assert "web:image=showcase-web,port=8080" in started[0]
     assert not [t for title_, t, _ in widgets.SHOWN if title_ == "Not started"]
+
+
+# -- Android as a service (2026-11-24): what a template brings, a service's devices, a license to accept --
+
+TERMS = {"id": "android-sdk-license", "title": "Android Software Development Kit License Agreement", "by": "Google",
+         "url": "https://developer.android.com/studio/terms", "option": "--accept-android-sdk-license"}
+EMULATOR = {"template": "android-emulator", "description": "the Android emulator without a window",
+            "image": "android-emulator", "built": [], "build_network": True, "terms": TERMS, "arches": ["x86_64"],
+            "spec": "port=5555,port=5554,port=5550,ready=5550,ready-timeout=600,data=/avd,memory=6g,cpus=2,"
+                    "pids=1024,device=/dev/kvm"}
+
+
+def test_a_service_keeps_its_devices_and_a_template_shows_what_it_brings(page, wait, qapp):
+    """A service's device= (for the service alone: the emulator's /dev/kvm) is a property of the Service part like its
+    ports, and choosing one of sandbox-ai's own Containerfiles that brings its service's keys fills the fields."""
+    spec = "adb:image=adb,port=5037,data=/adb,device=usb:18d1:4ee7,device=/dev/bus/usb/001/004"
+    props = B.service_props(page.sai, spec)
+    assert props["devices"] == ["usb:18d1:4ee7", "/dev/bus/usb/001/004"] and B.service_spec(props) == spec
+    assert B.default_service("x")["devices"] == [] and B.service_spec(B.default_service("x")) == "x:image=x"
+    page.hosts.templates = [TEMPLATE, EMULATOR]
+    page.add_node("service", **{**B.default_service("android-emulator"), "image": ""})
+    assert page.host_choice.choose("lab")
+    assert wait(lambda: page.user_images is not None and page.image_templates is not None
+                and not page.user_images_loading, 30)
+    qapp.processEvents()
+    combo = combo_of(page)
+    combo.setCurrentIndex(combo.findData("android-emulator"))
+    combo.activated.emit(combo.currentIndex())
+    node = page.board.first("service")
+    assert node.props["image"] == "android-emulator" and node.props["ports"] == [5555, 5554, 5550]
+    assert node.props["devices"] == ["/dev/kvm"] and node.props["memory"] == "6g" and node.props["ready"] == 5550
+    assert B.service_spec(node.props).endswith("memory=6g,cpus=2,pids=1024,device=/dev/kvm")
+    page.inspect(node)
+    labels = " ".join(w.text() for w in page.inspector_holder.findChildren(QtWidgets.QLabel))
+    assert "Android Software Development Kit License Agreement" in labels
+    assert "You are asked to accept that license before it is built" in labels
+    assert "Its service starts with what its Containerfile brings" in labels
+
+
+def test_a_license_is_handed_on_only_as_this_app_knows_it(page, monkeypatch):
+    assert backend.license_terms(EMULATOR) == TERMS and backend.license_terms(TEMPLATE) is None
+    assert backend.license_terms({"terms": {**TERMS, "option": "--yes-to-everything"}}) is None
+    assert backend.license_terms({"terms": {**TERMS, "url": ""}}) is None
+    ran = []
+    monkeypatch.setattr(page.sai, "host_run", lambda host, *args, **kwargs: ran.append((host, args)) or (0, "", ""))
+    assert page.sai.toolchain_add("android-sdk", "lab", accept=TERMS["option"])[0] == 0
+    assert ran == [("lab", ("toolchain", "add", "android-sdk", "--accept-android-sdk-license"))]
+    assert page.sai.toolchain_add("android-sdk", "lab", accept="--unsigned")[0] == 2 and len(ran) == 1
+    page.sai.toolchain_add("go", "lab")
+    assert ran[-1] == ("lab", ("toolchain", "add", "go"))
+
+
+def test_a_license_is_a_question_of_its_own_whose_default_is_no(home, monkeypatch):
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", False)
+    assert widgets.accept_license(None, "The toolchain android-sdk", TERMS) is False
+    title, text, _ = widgets.SHOWN[-1]
+    assert title == "License" and "Android Software Development Kit License Agreement" in text
+    assert "https://developer.android.com/studio/terms" in text and "Do you accept that license?" in text
+    assert "sandbox-ai ships nothing of it" in text
+    monkeypatch.setattr(widgets, "AUTO_ANSWER", True)
+    assert widgets.accept_license(None, "The toolchain android-sdk", TERMS) is True
+    assert widgets.accept_license(None, "x", text="by this you accept the license of Example") is True
+    assert "by this you accept the license of Example" in widgets.SHOWN[-1][1]
+
+
+def emulator_start(page, wait, monkeypatch):
+    page.hosts.templates = [TEMPLATE, EMULATOR]
+    page.add_node("service", **{**B.default_service("android-emulator"), "image": "android-emulator",
+                                "ports": [5555]})
+    assert page.host_choice.choose("lab")
+    assert wait(lambda: page.image_templates is not None and not page.user_images_loading, 30)
+    assert page.board_needs().get("--service") == ["android-emulator"]
+    tabs = []
+    monkeypatch.setattr(page.sai, "host_terminal", lambda host, *args: ["ssh", "-tt", host, "sandbox-ai", *args])
+    monkeypatch.setattr(page, "prerequisite_terminal",
+                        lambda: lambda argv, title, ended: tabs.append((argv, title, ended)) or True)
+    return tabs
+
+
+def test_a_start_builds_the_emulators_image_only_after_the_license_was_accepted(page, wait, qapp, monkeypatch):
+    tabs = emulator_start(page, wait, monkeypatch)
+    assert page.check_prerequisites(then=lambda: None)
+    assert wait(lambda: tabs, 30)
+    steps = json.loads(tabs[0][0][-1])
+    assert steps[0][1] == ["ssh", "-tt", "lab", "sandbox-ai", "images", "build-image", "android-emulator", "--builtin",
+                           "android-emulator", "--accept-android-sdk-license"], steps
+    asked = [text for title, text, _ in widgets.SHOWN if title == "License"]
+    assert len(asked) == 1 and "The service image android-emulator" in asked[0]
+    assert "Android Software Development Kit License Agreement" in asked[0]
+
+
+def test_a_license_that_is_not_accepted_builds_nothing(page, wait, qapp, monkeypatch):
+    from sandbox_ai_app import prerequisites
+    tabs = emulator_start(page, wait, monkeypatch)
+    real = widgets.choose
+    # Yes to everything else; the license's own question: not accepted.
+    monkeypatch.setattr(prerequisites, "accept_license", lambda parent, what, terms=None, text=None: False)
+    said = []
+    monkeypatch.setattr(page, "show_missing", lambda title, problems: said.append([text for text, _ in problems]))
+    assert page.check_prerequisites(then=lambda: None)
+    assert wait(lambda: said, 30), widgets.SHOWN
+    assert tabs == [] and real is widgets.choose
+    assert any("its license was not accepted" in text for text in said[-1]), said
+

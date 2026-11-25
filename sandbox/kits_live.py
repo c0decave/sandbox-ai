@@ -60,6 +60,7 @@ START_KIT_PREFIX = "start-"
 RESTART_FILE = "agent-restart.sh"  # agent_sandbox.AGENT_RESTART_FILE, in the session directory
 RESTART_TARGET = "/sandbox/session/agent-restart.sh"
 KINDS = ("skills", "agents", "commands", "prompts")
+AT_A_START = ("hooks", "kit")  # what a kit kept for later starts holds that only a start gives (keep_for_a_start)
 
 # How each agent takes what arrives while it runs, per kind, at the version sandbox-ai pins (Containerfile.AGENT):
 # "auto" - it re-reads by itself; "command" - after the command named (typed in the agent); "restart" - only when the
@@ -185,7 +186,7 @@ def read_state(record):
         data = {}
     data = data if isinstance(data, dict) else {}
     entries = [e for e in data.get("entries") or [] if isinstance(e, dict) and isinstance(e.get("name"), str)
-               and e.get("kind") in KINDS]
+               and e.get("kind") in KINDS + AT_A_START]
     plugins = [p for p in data.get("plugins") or [] if isinstance(p, dict) and isinstance(p.get("plugin"), str)]
     return {"entries": entries, "plugins": plugins}
 
@@ -200,7 +201,8 @@ def listing(start):
     entry, record, live = target(start)
     state = read_state(record)
     for item in state["entries"]:
-        item["path"] = f"{live['kinds'].get(item['kind'], '?')}/{item['name']}"
+        item["path"] = "(its next start)" if item["kind"] in AT_A_START else \
+            f"{live['kinds'].get(item['kind'], '?')}/{item['name']}"
     return {"start": entry["name"], "run": record.get("run"), "agent": live.get("agent"), **state,
             "restart": bool(live.get("restart"))}
 
@@ -224,6 +226,58 @@ def entry_name(value, what):
         raise ValueError(f"{what} {printable(value)}: its name must be 1-128 letters, digits, '_', '.', '@', '+', '-' "
                          "(not starting with '.' or '-')")
     return name
+
+
+class AtAStartOnly(ValueError):
+    """A kit with nothing a running sandbox takes (no skills, subagents, commands or prompts): what it brings instead -
+    hooks, a memory file, plugins - reaches a sandbox only at its start (the user 2026-11-24: the built-in kit
+    hallmark-hook, only a hook, was refused with "brings no skills, agents, commands", which named neither its hook nor
+    why). BRINGS: [(what, why it waits for a start)]; USABLE: whether a later start of this agent would use any of it
+    (hooks the agent cannot run would not); APPROVE: the command that approves its hooks, None when approved or none."""
+
+    def __init__(self, agent, kit, label, path, plan):
+        k = kits()
+        self.agent, self.kit, self.label = agent, kit, label
+        self.brings, self.usable, self.approve, self.problem = [], False, None, None
+        for hook_label, folder in k.kit_hook_sources(agent, [(label, path)]):
+            info = k.read_hooks(agent, folder)
+            if info["errors"]:
+                self.problem = f"Its hooks cannot run: {info['errors'][0]}"
+                self.brings.append(("hooks", self.problem))
+                continue
+            self.usable = True
+            argument = k.trust_argument(hook_label, folder)
+            if not k.hooks_trusted(agent, info["sha256"], argument):
+                self.approve = f"sandbox-ai kits trust-hooks {argument}"
+            self.brings.append(("hooks", "Hooks are not given while the sandbox runs: they are part of the agent's "
+                                         "managed configuration, set at its start, and run only once approved"))
+        if plan["memory"]:
+            self.usable = True
+            self.brings.append((k.MEMORY_FILE[agent][0], "The project's memory starts from it at a first start"))
+        if plan["plugins"]:
+            self.usable = True
+            self.brings.append(("plugins", "A running sandbox gets a plugin with sandbox-ai plugins attach START "
+                                           "NAME@MARKETPLACE, a start from the kit"))
+        kinds = ", ".join(k.LAYOUT[agent])
+        if not self.brings:
+            text = (f"{label} brings nothing for {agent_title(agent)} (no {kinds}, hooks, "
+                    f"{k.MEMORY_FILE[agent][0]} or plugins)")
+        else:
+            text = (f"{label} brings only {' and '.join(what for what, _ in self.brings)} for {agent_title(agent)} "
+                    f"(no {kinds}). " + ". ".join(why for _, why in self.brings))
+        super().__init__(text)
+
+    def text(self, shown, kept=False):
+        """What it says for the start SHOWN: why, and how a later start gets it - attached with --keep (KEPT: it is)
+        and the sandbox started again."""
+        parts = [str(self)]
+        if self.usable:
+            if self.approve:
+                parts.append(f"Approve its hooks first: {self.approve}")
+            parts.append(("Kept for its later starts (" + self.label + "): restart" if kept else
+                          "To use it: attach it with --keep (it goes into the start's kits), then restart")
+                         + f" the sandbox: sandbox-ai resume {shown} --restart (the conversation continues)")
+        return ". ".join(parts) + "."
 
 
 def wanted(agent, kit=None, skill=None, command=None, agent_file=None):
@@ -262,7 +316,7 @@ def wanted(agent, kit=None, skill=None, command=None, agent_file=None):
                          "trust-hooks); --keep gives them to its later starts")
         entries = {kind: dict(items) for kind, items in plan["entries"].items() if items}
         if not entries:
-            raise ValueError(f"{label} brings no {', '.join(layout)} for {agent_title(agent)}")
+            raise AtAStartOnly(agent, kit, label, path, plan)
         return entries, notes, label
     if skill is not None:
         if "skills" not in layout:
@@ -308,6 +362,8 @@ def advice(agent, kind, on_machine=False, restart_possible=True):
     KIND that arrived while it runs."""
     how, command = (MACHINE_RELOAD.get(agent, {}).get(kind) if on_machine else None) or \
         RELOAD.get(agent, {}).get(kind, ("restart", None))
+    if kind in AT_A_START:  # (a kit kept for later starts: only the sandbox's next start gives it)
+        how, command = "sandbox", None
     title = agent_title(agent)
     word = {"skills": "skill", "agents": "subagent", "commands": "command", "prompts": "prompt",
             "plugins": "plugin"}.get(kind, kind)
@@ -321,6 +377,10 @@ def advice(agent, kind, on_machine=False, restart_possible=True):
             text = f"{title} takes up the new {word} once you type {command} in it"
             if agent == "hermes":
                 text += " (its slash commands; its skill index is the conversation's: /new, or the agent started again)"
+    elif kind in AT_A_START:
+        text = (f"{title} gets a kit's {'hooks' if kind == 'hooks' else 'hooks, memory file and plugins'} at the "
+                "sandbox's start: restart the sandbox to use them: sandbox-ai resume START --restart (the conversation "
+                "continues)")
     elif how == "sandbox":
         text = (f"{title} gets a {word} at the sandbox's start (a read-only mount of its own): it is in the start's kits "
                 "now; restart the sandbox to use it: sandbox-ai resume START --restart (the conversation continues)")
@@ -439,7 +499,12 @@ def attach(start, kit=None, skill=None, command=None, agent_file=None, agent=Non
     if restart and not live.get("restart"):
         raise ValueError(f"{shown} cannot start its agent again inside the sandbox (no detached tmux session: a task, "
                          "--no-tmux or a run started without a terminal)")
-    entries, notes, label = wanted(run_agent, kit, skill, command, agent_file)
+    try:
+        entries, notes, label = wanted(run_agent, kit, skill, command, agent_file)
+    except AtAStartOnly as only:
+        if not (keep and only.usable):
+            raise ValueError(only.text(shown)) from None
+        return keep_for_a_start(entry, record, live, only, out)
     # What the agent would read at once: through the hidden-text checker first (as kits add-skill and host-import).
     findings = [dict(item, file=f"{kind}/{name}/{item['file']}" if item["file"] else f"{kind}/{name}")
                 for kind, items in entries.items() for name, (_, path) in items.items()
@@ -533,6 +598,28 @@ def attach(start, kit=None, skill=None, command=None, agent_file=None, agent=Non
     return result
 
 
+def keep_for_a_start(entry, record, live, only, out=print):
+    """--keep of a kit that brings only what a start gives (AtAStartOnly: hooks, a memory file, plugins): nothing for
+    the running sandbox, the kit into the start's options; recorded as attached (kind "hooks" for its hooks, else
+    "kit"), so that kits detach takes it out of the later starts again. The result of attach."""
+    shown, kit = printable(entry["name"]), only.kit
+    keep_option(entry, kit)
+    kept = f"kit {kit}"
+    kind = "hooks" if any(what == "hooks" for what, _ in only.brings) else "kit"
+    with run_lock(record):
+        state = read_state(record)
+        state["entries"] = [e for e in state["entries"] if not (e["kind"] == kind and e["name"] == kit)] + [
+            {"kind": kind, "name": kit, "from": only.label, "kit": kit, "kept": kept}]
+        write_state(record, state)
+    reload = {"kind": kind, **advice(only.agent, kind)}
+    message = only.text(shown, kept=True)
+    mcp().LOG.info("kits", f"attach {only.label} to {entry['name']}: kept for its later starts only "
+                           f"({', '.join(what for what, _ in only.brings)})")
+    out(message)
+    return {"start": entry["name"], "run": record.get("run"), "agent": only.agent, "attached": [], "notes": [],
+            "kept": kept, "reload": [reload], "restarted": False, "message": message}
+
+
 def detach(start, name, kind=None, restart=False, out=print):
     """`sandbox-ai kits detach START NAME [--kind KIND]`: what `kits attach` gave the running START (an entry by its
     name, or everything a kit NAME gave) out of its sandbox now; out of its later starts too where it was kept.
@@ -591,12 +678,17 @@ def detach(start, name, kind=None, restart=False, out=print):
     if restart:
         restart_agent(start, out=out, target_found=(entry, record, live))
         result["restarted"] = True
-    names = ", ".join(f"{e['kind'][:-1]} {e['name']}" for e in chosen)
+    names = ", ".join(f"hooks of kit {e['name']}" if e["kind"] == "hooks" else f"kit {e['name']}"
+                      if e["kind"] == "kit" else f"{e['kind'][:-1]} {e['name']}" for e in chosen)
     pending = [item for item in reloads if item["reload"] != "auto"]
-    result["message"] = (f"{shown} no longer has the {names}{' (nor its later starts)' if kept_removed else ''}."
-                         + (" The agent was started again (its conversation continues)." if result["restarted"] else
-                            " An agent that read it already may still name it until it reads its folders again"
-                            + (f" ({', '.join(i['command'] or 'a restart' for i in pending)})." if pending else ".")))
+    if all(e["kind"] in AT_A_START for e in chosen):  # (only kept for later starts: keep_for_a_start)
+        result["message"] = f"The later starts of {shown} no longer get the {names}."
+    else:
+        result["message"] = (f"{shown} no longer has the {names}{' (nor its later starts)' if kept_removed else ''}."
+                             + (" The agent was started again (its conversation continues)." if result["restarted"]
+                                else " An agent that read it already may still name it until it reads its folders "
+                                     "again" + (f" ({', '.join(i['command'] or 'a restart' for i in pending)})."
+                                                if pending else ".")))
     mcp().LOG.info("kits", f"detach {name} from {entry['name']}: {names}")
     out(result["message"])
     return result

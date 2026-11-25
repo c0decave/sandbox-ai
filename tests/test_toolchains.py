@@ -2,6 +2,7 @@
 MCP catalog's own key), the store (SHA-256 before anything is unpacked, unpacked without trusting it), what a
 toolchain needs from the system, the wrappers and variables, the start's plan, and attach/detach with the namespace
 helper faked (as tests/test_devices.py; the live check toolchain-live runs it for real)."""
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -182,6 +183,24 @@ def test_add_refuses_an_unsigned_catalog_and_never_takes_a_bad_signature(tmp_pat
     # --unsigned takes an unsigned one, and the store remembers that nobody signed it
     t.add("go", catalog(tmp_path, [entry(tmp_path)]), unsigned=True, out=said.append, keys=trusted)
     assert t.installed()["go"]["1.25.4"]["signed_by"] is None and any("added unsigned" in line for line in said)
+
+
+def test_a_pythonpath_folder_that_shadows_pythons_own_modules_is_not_added(tmp_path, signing_key, data_home):
+    """PYTHONPATH comes before Python's standard library: a json.py (or a sitecustomize) in the toolchain's folder
+    would be loaded by every Python of the sandbox. The catalog's build refuses such a tree; the store checks what it
+    unpacked again (defence in depth) and keeps nothing of it."""
+    _key, trusted = signing_key
+    for bad in ("json.py", "sitecustomize.py", "encodings"):
+        members = {**GO, "python": None, "python/PySide6": None, "python/PySide6/__init__.py": b"",
+                   f"python/{bad}" if bad.endswith(".py") else f"python/{bad}": b"" if bad.endswith(".py") else None}
+        source = catalog(tmp_path, [entry(tmp_path, members=members, env={"PYTHONPATH": "{prefix}/python"})])
+        with pytest.raises(ValueError, match=f"holds {bad}.*would be replaced in every Python.*not added"):
+            t.add("go", source, unsigned=True, out=[].append, keys=trusted)
+        assert not t.installed() and not list(t.store().glob("[0-9a-f]*"))
+    members = {**GO, "python": None, "python/PySide6": None, "python/PySide6/__init__.py": b""}
+    source = catalog(tmp_path, [entry(tmp_path, members=members, env={"PYTHONPATH": "{prefix}/python"})])
+    t.add("go", source, unsigned=True, out=[].append, keys=trusted)
+    assert t.installed()["go"]["1.25.4"]
 
 
 def test_the_signature_is_the_mcp_catalogs_own_trust(tmp_path, signing_key):
@@ -590,12 +609,50 @@ def test_attach_is_refused_before_anything_is_mounted(running, tmp_path):
         t.attach(r.record, "zig", **r.options)
     old = {**r.record, "session_dir": str(tmp_path / "old-session")}
     (tmp_path / "old-session").mkdir()
-    with pytest.raises(ValueError, match="started by a sandbox-ai without toolchains.*restart it with --toolchain go"):
+    with pytest.raises(ValueError, match=r"started by a sandbox-ai without toolchains \(it has no /opt/toolchains\): "
+                       r"start it with --toolchain go \(sandbox-ai resume NAME --restart --toolchain go\)"):
         t.attach(old, "go", **r.options)
     with pytest.raises(ValueError, match="processes were not found"):
         t.attach(r.record, "go", **{**r.options, "finder": lambda record: None})
     assert r.calls == [] and r.opened == [] and t.run_listing(r.record) == []
     assert not (r.logs / "toolchains.jsonl").exists() or "attach" not in (r.logs / "toolchains.jsonl").read_text()
+
+
+def test_an_attach_only_a_restart_can_give_is_kept_for_the_restart(running, tmp_path, monkeypatch):
+    """A run started by a sandbox-ai without toolchains (or in podman machine's VM, or on another Podman service)
+    cannot take a toolchain while it runs: the attach keeps --toolchain in the run's session, so the restart it
+    names is all that is left to do (the user: "if I restart it now, will it be set?")."""
+    r = running
+    kept = []
+    monkeypatch.setattr(t, "session_of", lambda record: "codex-22fb374a")
+    options = {**r.options, "keeper": lambda record, value, add=True: kept.append(value) or True}
+    old = {**r.record, "session_dir": str(tmp_path / "old-session")}
+    (tmp_path / "old-session").mkdir()
+    with pytest.raises(ValueError, match=r"without toolchains \(it has no /opt/toolchains\)\. --toolchain go is kept "
+                       r"in the session's options: its next start has it - restart it now with: sandbox-ai resume "
+                       r"codex-22fb374a --restart"):
+        t.attach(old, "go", **options)
+    with pytest.raises(ValueError, match="podman machine's VM.*--toolchain go is kept.*resume codex-22fb374a --restart"):
+        t.attach(r.record, "go", **{**options, "launcher": Launcher(machine=True)})
+    with pytest.raises(ValueError, match="--podman-url.*--toolchain go is kept"):
+        t.attach({**r.record, "podman_url": "unix:///run/other.sock"}, "go", **options)
+    assert kept == ["go", "go", "go"] and r.calls == [] and r.opened == []
+    with pytest.raises(ValueError, match="zig is not in the store"):  # nothing unknown is kept
+        t.attach(old, "zig", **options)
+    assert kept == ["go", "go", "go"]
+
+
+def test_keep_puts_the_toolchain_into_a_real_sessions_options(tmp_path, monkeypatch):
+    sessions = t.module("sessions")
+    saved = {"codex-22fb374a": {"options": ["--agent", "codex", "--toolchain", "go"]}}
+    monkeypatch.setattr(t, "session_of", lambda record: "codex-22fb374a")
+    monkeypatch.setattr(sessions, "load", lambda name: dict(saved[name]))
+    monkeypatch.setattr(sessions, "save", lambda name, data: saved.__setitem__(name, data))
+    monkeypatch.setattr(sessions, "session_lock", lambda name, create=False: contextlib.nullcontext())
+    assert t.keep({"start": "codex-22fb374a"}, "jdk") is True
+    assert saved["codex-22fb374a"]["options"] == ["--agent", "codex", "--toolchain", "go", "--toolchain", "jdk"]
+    assert t.keep({"start": "codex-22fb374a"}, "jdk") is True  # once
+    assert saved["codex-22fb374a"]["options"].count("jdk") == 1
 
 
 def test_a_helper_that_fails_attaches_nothing(running):
@@ -842,7 +899,7 @@ REFUSED_NAMES = [
     "MALLOC_CHECK_", "MALLOC_ARENA_MAX", "NLSPATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "HOSTALIASES",
     "RES_OPTIONS", "LOCALDOMAIN", "RESOLV_HOST_CONF",
     # interpreters: their startup, options and module paths
-    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONINSPECT", "PYTHONWARNINGS",
+    "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONINSPECT", "PYTHONWARNINGS",
     "PYTHONPYCACHEPREFIX", "PYTHONBREAKPOINT", "PYTHONSAFEPATH", "PERL5OPT", "PERL5LIB", "PERL5DB", "PERLLIB",
     "RUBYOPT", "RUBYLIB", "NODE_OPTIONS", "NODE_PATH", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
     "NODE_REPL_EXTERNAL_MODULE", "NODE_COMPILE_CACHE", "BUN_OPTIONS", "DENO_DIR", "JAVA_TOOL_OPTIONS",
@@ -899,6 +956,66 @@ def test_a_toolchain_may_not_set_a_variable_that_steers_other_code(tmp_path, nam
 def test_an_ordinary_toolchain_variable_is_taken(tmp_path, name, value):
     assert t.validated(entry(tmp_path, env={name: value}))["env"] == {name: value}
     assert t.refused_variable(name, value) is None
+
+
+@pytest.mark.parametrize("value", [
+    "/root/lib", "/tmp/x", "/work/lib", "lib", "", "{prefix}", "{prefix}/", "{prefix}/..", "{prefix}/a/../../x",
+    "{prefix}/.hidden", "{prefix}/python:/root/lib", "{prefix}/python:{prefix}/more", "/opt/toolchains/other/python",
+    "{prefix}/python ", "{prefix}//python", "$HOME/lib",
+])
+def test_pythonpath_is_taken_only_as_one_folder_of_the_toolchains_own_tree(tmp_path, value):
+    """Qt for Python (pyside6) ships Python packages: PYTHONPATH={prefix}/python makes them importable. Anything
+    else - a folder the sandbox can write, a second folder, a way out of the tree - would put other code into every
+    Python process."""
+    with pytest.raises(ValueError, match="a toolchain may not set PYTHONPATH: |only \\{prefix\\} may stand|"
+                                         "must map variable names"):
+        t.validated(entry(tmp_path, env={"PYTHONPATH": value}))
+    assert t.refused_variable("PYTHONPATH", value)
+    assert t.refused_variable("PYTHONPATH") and t.refused_variable("PYTHONPATH", None)  # never a cache's folder
+    with pytest.raises(ValueError, match="a toolchain may not set PYTHONPATH: "):
+        t.validated(entry(tmp_path, caches={"PYTHONPATH": "python"}))
+
+
+def test_pythonpath_of_its_own_tree_reaches_the_agent_the_shells_and_the_wrappers(tmp_path):
+    item = t.validated(entry(tmp_path, env={"PYTHONPATH": "{prefix}/python", "QT_QPA_PLATFORM": "offscreen"}))
+    assert item["env"] == {"PYTHONPATH": "{prefix}/python", "QT_QPA_PLATFORM": "offscreen"}
+    assert "refused" not in item and t.env_problem(item) is None
+    assert t.refused_variable("PYTHONPATH", "{prefix}/lib/python3/site-packages") is None
+    assert t.environment([item]) == {"PYTHONPATH": "/opt/toolchains/go/python", "QT_QPA_PLATFORM": "offscreen"}
+    folder = tmp_path / "session"
+    folder.mkdir()
+    t.write_session(folder, [item])
+    line = '[ -n "${PYTHONPATH+x}" ] || export PYTHONPATH=/opt/toolchains/go/python'  # yours, where you set one
+    assert line in (folder / "env.sh").read_text() and line in (folder / "bin" / "go").read_text()
+
+
+def test_qts_libraries_are_ones_sandbox_ais_images_have(tmp_path):
+    """What Qt's own builds load (the toolchains pyside6 and qt name these 16; sandbox-ai-mcp measured them): under
+    Podman they are checked against the agent images' GUI base, under Bubblewrap against the host."""
+    libraries = ["libstdc++.so.6", "libgcc_s.so.1", "libz.so.1", "libzstd.so.1", "libglib-2.0.so.0",
+                 "libgthread-2.0.so.0", "libEGL.so.1", "libGL.so.1", "libX11.so.6", "libfontconfig.so.1",
+                 "libfreetype.so.6", "libxkbcommon.so.0", "libbrotlicommon.so.1", "libbrotlidec.so.1",
+                 "libgssapi_krb5.so.2", "libdbus-1.so.3"]
+    assert len(libraries) == t.LIMITS["libraries"]
+    item = t.validated(entry(tmp_path, needs={"glibc": "2.34", "libraries": libraries}))
+    assert t.needs_problem(item, "podman") == (None, None)
+    assert t.needs_problem({**item, "needs": {"glibc": "2.38", "libraries": libraries}}, "podman")[0] == \
+        "go 1.25.4 needs glibc 2.38 or newer, sandbox-ai's images have 2.36"  # Qt's aarch64 builds: not offered
+    problem, _ = t.needs_problem(item, "bwrap", glibc=lambda: (2, 39),
+                                 has_library=lambda name: name not in ("libEGL.so.1", "libGL.so.1"))
+    assert problem.startswith("go 1.25.4 needs libEGL.so.1, libGL.so.1, which this host does not have")
+    # every one of them is installed by every agent image's Containerfile, by name or by a package that depends on it
+    packages = {"libglib2.0-0", "libegl1", "libgl1", "libx11-6", "libfontconfig1", "libxkbcommon0", "libdbus-1-3",
+                "curl"}
+    for path in sorted((ROOT / "sandbox").glob("Containerfile.*")):
+        text = path.read_text()
+        if "node:lts-bookworm-slim" not in text or "xvfb" not in text:
+            continue  # (not an agent image: a service's, the browser's)
+        words = set(text.replace("\\\n", " ").split())
+        assert packages <= words, (path.name, sorted(packages - words))
+        # --gui: Qt's xcb platform plugin loads these two beside libxcb-cursor0; Qt Multimedia loads libpulse
+        assert {"libxcb-cursor0", "libxcb-icccm4", "libxcb-keysyms1", "libxkbcommon-x11-0", "libpulse0"} <= words, \
+            path.name
 
 
 def test_the_catalogs_own_toolchains_set_none_of_them():

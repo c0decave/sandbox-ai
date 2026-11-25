@@ -15,11 +15,11 @@ pytestmark = pytest.mark.skipif(not os.environ.get("SANDBOX_AI_HOME") and not ba
 from test_ui import env, read_now, window  # noqa: E402,F401 - the page's fixtures
 
 
-# == Sandboxes page: stopped sessions only with "Ended" (2026-11-14) ==================================================
+# == Sessions page: stopped sessions only with "Ended" (2026-11-14) ==================================================
 
 def test_a_stopped_session_is_listed_only_with_ended(window, env, monkeypatch, wait):  # noqa: F811
     """User: "warum werden bei Sitzung und Session beendete Sessions angezeigt, obwohl beendete nicht angeklickt
-    ist?" - a kept session that is stopped was listed on the Sandboxes page with "Ended" off."""
+    ist?" - a kept session that is stopped was listed on the Sessions page with "Ended" off."""
     page = window.sandboxes
     stopped = backend.Instance("session", "session:old", "old", session="old", state="stopped", host="local")
     running = backend.Instance("session", "session:work", "work", session="work", state="running", host="local")
@@ -334,7 +334,7 @@ def test_the_close_button_of_every_tab_lies_inside_its_tab_in_every_theme(qapp, 
 def test_the_rename_question_and_its_message_are_wide_enough_for_their_title(window, env, monkeypatch, wait,  # noqa: F811
                                                                              language):
     """User: "box msg in Sitzung & Session umbenennen ist zu klein. Bitte auch alle anderen Boxen prüfen ob sie korrekt
-    dargestellt werden." The Sandboxes page's Rename… as the app runs it: the question (Qt's input dialog) and the
+    dargestellt werden." The Sessions page's Rename… as the app runs it: the question (Qt's input dialog) and the
     message with the outcome were as narrow as their text, and the window manager cut their title "Rename
     auburn-kakapo-bamboo". Both are now as wide as the title needs (in bold, with a title bar's buttons beside it)
     and show their text whole (tests/test_dialog_sizes.py checks every other dialog)."""

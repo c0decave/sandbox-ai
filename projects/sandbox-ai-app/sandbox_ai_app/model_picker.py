@@ -1,4 +1,4 @@
-"""The model picker beside the Model choice (the Board's agent part, the Start page): every model of the model servers
+"""The model picker beside the Model choice (the Board's agent part, the Board page): every model of the model servers
 in a list that a search field filters as it is typed, sorted by name, parameter count (7B, 70B) or size, and
 filtered by what a model is for - text, code, vision (VL), image (diffusion), embedding, reasoning - shown as small
 tags per model. What a model can do comes from its server (Ollama's families, LM Studio's type, OpenRouter's

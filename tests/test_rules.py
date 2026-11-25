@@ -1213,6 +1213,8 @@ def test_mcp_servers_behind_a_vpn_keep_their_gateway(host, monkeypatch):
     vpn = m.launcher().load_vpn_module()
     vpn.check_vpn_container = lambda *args, **kwargs: {"id": "c" * 64, "started": "t"}
     vpn.check_pod_vpn = lambda *args, **kwargs: {}
+    # Its profile is there (an image server's profile that is not is refused before anything starts).
+    vpn.load_profile = lambda name: {"name": name, "type": "wireguard"}
     monkeypatch.setattr(m.launcher(), "load_vpn_module", lambda: vpn)
     assert m.ensure_running("img", s.parse_args(["codex"])) == "started"
     cmd = started[-1]

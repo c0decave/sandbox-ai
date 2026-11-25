@@ -732,7 +732,7 @@ def test_a_secret_is_told_by_its_look_as_before_and_without_an_import_per_value(
 
 def test_the_owners_of_a_hosts_starts_are_worked_out_in_one_pass(monkeypatch):
     """Performance round 1 (0.1.94): start_tree.owners asked every start what it reaches once per MCP server (a host
-    with 150 starts and 300 servers: 900,000 calls, 60 ms of the Sandboxes page's every look - on the GUI thread);
+    with 150 starts and 300 servers: 900,000 calls, 60 ms of the Sessions page's every look - on the GUI thread);
     once per start now, the same owners."""
     from sandbox_ai_app import start_tree
     from sandbox_ai_app.backend import Instance

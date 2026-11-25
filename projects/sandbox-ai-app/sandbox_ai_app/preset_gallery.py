@@ -162,7 +162,8 @@ def draw_thumbnail(board, size, ratio):
 
 class PresetCard(QFrame):
     """One preset: its picture, title, description, difficulty, score and what is left to fill in."""
-    chosen = Signal(object)  # clicked: selected
+    chosen = Signal(object)  # selected by the keyboard (Tab): shown whole
+    clicked = Signal(object)  # selected by the mouse: where it is
     opened = Signal(object)  # double-clicked: created
     menu_requested = Signal(object, object)  # right click: selected, then the gallery's menu at (card, global point)
 
@@ -193,8 +194,11 @@ class PresetCard(QFrame):
         if PR.live_text(preset):  # its last live check: ✓/✗ (nothing without one)
             meta.append(PR.live_text(preset).split(" ", 1)[0] + " " + tr("live check"))
         self.meta = plain_label(" · ".join(meta), role="secondary")
+        layout.addStretch()  # (a card as high as its row: its facts at the bottom, in line with the row's others)
         layout.addWidget(self.meta)
-        layout.addStretch()
+        # Where it comes from (its hosts, the app's own, yours): one list over every host shows it on each card.
+        self.where = plain_label(PR.where_short(preset), role="secondary")
+        layout.addWidget(self.where)
         self.setToolTip(safe_tooltip("\n".join(preset.text(n) for n in preset.notes)))
         self.setAccessibleName(preset.text(preset.title))
         self.select(False)
@@ -223,25 +227,41 @@ class PresetCard(QFrame):
         return super().event(event)
 
     def select(self, on):
+        """Drawn over the card (paintEvent), never a style of its own: a selection border changed the card's size in
+        a theme whose cards have a thinner one - its description wrapped anew, its row grew, and the cards moved
+        while one clicked along a row (todos 2026-11-24)."""
         self.selected = on
-        accent = theme.colors()["accent"]
-        self.setStyleSheet(f'QFrame[role="card"] {{ border: 2px solid {accent}; }}' if on else "")
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        if getattr(self, "selected", False):
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pen = QPen(QColor(theme.colors()["accent"]), 3.0)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            radius = float(min(theme.data().get("radius", 6), 12))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5), radius, radius)
+            painter.end()
 
     def mousePressEvent(self, event):  # noqa: N802
-        self.chosen.emit(self)
+        self.clicked.emit(self)  # (what is clicked is seen: never scrolled to)
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802
-        self.chosen.emit(self)
+        self.clicked.emit(self)
         self.opened.emit(self)
 
     def contextMenuEvent(self, event):  # noqa: N802
-        self.chosen.emit(self)
+        self.clicked.emit(self)
         self.menu_requested.emit(self, event.globalPos())
         event.accept()
 
     def focusInEvent(self, event):  # noqa: N802
-        self.chosen.emit(self)
+        # (a click's focus: the click chose it already - never scrolled; Tab: shown whole)
+        (self.clicked if event.reason() in (Qt.FocusReason.MouseFocusReason, Qt.FocusReason.PopupFocusReason,
+                                            Qt.FocusReason.ActiveWindowFocusReason) else self.chosen).emit(self)
         super().focusInEvent(event)
 
 
@@ -252,23 +272,39 @@ class PresetGallery(QDialog):
                  host="local"):
         super().__init__(parent)
         self.sai, self.directory, self.agent, self.policy = sai, directory, agent, policy or {}
-        # Where the board starts (the Board's host): its presets, servers and profiles are offered, and the demo
-        # device starts there.
+        # Where the board starts (the Board's host): its servers and profiles are offered, the demo device starts there,
+        # and a preset that comes from another host is checked against it (prepare).
         self.host = host or "local"
-        self.documents, self.host_problems = None, []  # that host's sandbox-ai presets once read (None: not yet)
-        self.catalogue, self.reading = None, None if self.host == "local" else self.host
+        # One list over every host (todos 2026-11-24: "presets sollten im grunde zusammengefasst angezeigt werden ...
+        # per default alle zusammen"): this machine's presets at once, each other host's as it said them last, then
+        # read anew in the background (read_host_presets). {host: (documents or None - not read yet -, problems)}
+        self.hosts = PR.known_hosts(sai, self.host)
+        self.read = {name: PR.remembered(name) for name in self.hosts if name != "local"}
+        self.reading = {name for name in self.hosts if name != "local"}
+        self.catalogue, self.preparing = None, None
         self.current_board, self.backend_name = board, backend_name
         self.result_ = None  # (preset, values) once created
         self.setWindowTitle(tr("New from preset"))
         self.resize(1180, 760)
+        widgets.as_large_as_window(self)  # (todos 2026-11-24: "fast so groß wie das hauptfenster und zentriert")
         layout = QVBoxLayout(self)
         self.search = QLineEdit()
         self.search.setPlaceholderText(tr("Search: vpn, mcp, offline, llm, gpu…"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.filter)
+        self.host_filter = QComboBox()
+        self.host_filter.setAccessibleName(tr("Host"))
+        self.host_filter.setToolTip(tr("Show the presets of one host only (the app's own and yours belong to this "
+                                       "computer). Every preset starts on the board's host."))
+        self.host_filter.addItem(tr("All hosts"), "")
+        for name in self.hosts:
+            self.host_filter.addItem(tr("This machine") if name == "local" else name, name)
+        self.host_filter.currentIndexChanged.connect(lambda _index: self.filter(self.search.text()))
         from . import help_view
         search_row = QHBoxLayout()
         search_row.addWidget(self.search, 1)
+        search_row.addWidget(plain_label(tr("Host:"), word_wrap=False))
+        search_row.addWidget(self.host_filter)
         search_row.addWidget(help_view.HelpButton("gallery.cards"))
         layout.addLayout(search_row)
         # On the left: the categories (a click shows that section of the cards: no scrolling down to find it), then
@@ -288,13 +324,14 @@ class PresetGallery(QDialog):
         self.title = plain_label(role="title")
         self.description = plain_label()
         self.meta = plain_label(role="secondary")
+        self.where = plain_label(role="secondary")  # where it comes from, and what a start on the board's host does
         self.notes = plain_label(role="secondary")
         self.fill_in = plain_label()
         self.command = QPlainTextEdit()
         self.command.setReadOnly(True)
         self.command.setFont(MONO)
         self.command.setMaximumHeight(110)
-        for widget in (self.title, self.description, self.meta, self.fill_in, self.notes):
+        for widget in (self.title, self.description, self.meta, self.where, self.fill_in, self.notes):
             side.addWidget(widget)
         # A preset that practises on the emulated serial device (hardware-analysis): it starts here, on the host the
         # board starts on (sandbox-ai demo-device start there).
@@ -312,7 +349,7 @@ class PresetGallery(QDialog):
         side.addStretch()
         # The details scroll where the dialog is lower than they need (a large font on a laptop: at most 90% of the
         # screen) - a wrapped note was squeezed and cut instead.
-        side_scroll = QScrollArea()
+        side_scroll = self.details = QScrollArea()
         side_scroll.setObjectName("presetDetails")
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -325,6 +362,9 @@ class PresetGallery(QDialog):
         self.problem = plain_label(role="notice-warn", selectable=True)
         self.problem.hide()
         layout.addWidget(self.problem)
+        self.status = plain_label(role="secondary", selectable=True)  # a host asked before the board is made
+        self.status.hide()
+        layout.addWidget(self.status)
         row = QHBoxLayout()
         save = QPushButton(tr("Save the board as a preset…"))
         save.setToolTip(tr("Keep the board shown now as a preset of your own, with its values and folders if you "
@@ -358,45 +398,56 @@ class PresetGallery(QDialog):
         layout.addLayout(row)
         self.made, self.section_list, self.selected, self.queue = [], [], None, []
         self.populate()
-        if self.host != "local":
-            self.read_host_presets()
+        for name in sorted(self.reading):
+            self.read_host_presets(name)
 
     # -- the cards --
 
-    def read_host_presets(self):
-        """The sandbox-ai presets of the board's host (`sandbox-ai presets list --json` there), read in the background;
-        meanwhile the ones it said last (or none: the app's own and yours) are shown."""
-        host = self.host
-        self.reading = host
+    def read_host_presets(self, host):
+        """The sandbox-ai presets of HOST (`sandbox-ai presets list --json` there), read in the background; meanwhile
+        the ones it said last (or none) are shown."""
+        self.reading.add(host)
         background(PR.host_documents, self.sai, host, owner=self, timeout=90,
                    done=lambda result, error: self.host_presets_read(host, result, error))
 
     def host_presets_read(self, host, result, error):
-        if host != self.host:
-            return
-        self.reading = None
+        self.reading.discard(host)
         if error is not None:
-            self.host_problems = [tr("The presets of {host} could not be read: {error}", host=printable(host),
-                                     error=printable_text(error)[-300:])]
-            self.documents = PR.remembered(host)[0] if PR.remembered(host) else []
+            kept = PR.remembered(host)
+            self.read[host] = ((kept[0] if kept else []),
+                               [tr("The presets of {host} could not be read: {error}", host=printable(host),
+                                   error=printable_text(error)[-300:])])
         else:
-            self.documents, self.host_problems = list(result[0]), list(result[1])
-        self.populate(select=self.selected.preset.key if self.selected is not None else None)
+            found = (list(result[0]), list(result[1]))
+            if self.read.get(host) == found:
+                return  # (as it said last, shown already: the cards are not made anew)
+            self.read[host] = found
+        # (the one chosen stays chosen, and the cards stay where they were scrolled to)
+        self.populate(select=self.selected.preset.key if self.selected is not None else None,
+                      keep=self.scroll.verticalScrollBar().value())
 
     def presets(self):
-        """The catalogue of the board's host: its sandbox-ai presets, the app's own and yours, by category."""
-        self.catalogue = PR.catalogue(self.sai, self.host, self.documents, self.host_problems)
+        """One catalogue over every host (PR.combined): sandbox-ai's presets of each, the app's own and yours, by
+        category."""
+        self.catalogue = PR.combined(self.sai, self.host, {name: found for name, found in self.read.items()
+                                                           if found is not None})
         self.mine = self.catalogue.mine()
         problems, notes = list(self.catalogue.problems), []
         if problems:
             notes.append(tr("Some of your presets were left out: {problems}", problems="; ".join(problems)))
-        if self.reading == self.host and self.documents is None:
-            notes.append(tr("Reading the presets of {host}…", host=printable(self.host)))
+        waiting = sorted(name for name in self.reading if self.read.get(name) is None)
+        if waiting:
+            notes.append(tr("Reading the presets of {host}…", host=", ".join(map(printable, waiting))))
         self.problem.setText(" ".join(notes))
         self.problem.setVisible(bool(notes))
         return self.catalogue.groups()
 
-    def populate(self, select=None):
+    def shows(self, preset, text):
+        """Whether PRESET is shown: it matches the search TEXT and comes from the host chosen (all: any)."""
+        wanted = self.host_filter.currentData()
+        return PR.matches(preset, text, self.catalogue) and (not wanted or wanted in PR.from_hosts(preset))
+
+    def populate(self, select=None, keep=None):
         """The gallery's sections and cards made anew: every section at once, with its count; the cards of the first
         FIRST_CARDS presets (and of the one to SELECT) now, the others BATCH_CARDS at a time while the gallery is shown
         (make_next) - made in one go, a card per preset (106 and more), they held the GUI thread (R2-23). The search,
@@ -411,13 +462,13 @@ class PresetGallery(QDialog):
         for key, title, presets in self.presets():
             if key == PR.SAI_CATEGORY and not presets:
                 continue  # a sandbox-ai without presets of its own: no empty section
-            heading = plain_label(tr(title), role="section")
+            heading = section_heading(tr(title))
             described = self.catalogue.description(key)
             if described:
                 heading.setToolTip(safe_tooltip(described))
                 self.section_notes[key] = explanation(described)
             box = QWidget()
-            flow = FlowLayout(box, spacing=10)
+            flow = FlowLayout(box, spacing=10, fill=True)  # (a row of cards: one block, each as high as the row)
             cards = []
             self.queue += [(cards, flow, preset) for preset in presets]
             if key == "mine" and not presets:
@@ -449,7 +500,10 @@ class PresetGallery(QDialog):
         if wanted is not None:
             self.choose(wanted)
         self.filter(self.search.text())
-        if select is None:
+        if keep is not None:
+            self.scroll.widget().layout().activate()
+            self.scroll.verticalScrollBar().setValue(keep)
+        elif select is None:
             self.scroll.verticalScrollBar().setValue(0)
         self.next_batch()
 
@@ -460,9 +514,10 @@ class PresetGallery(QDialog):
             board = self.build(preset)
             card_ = PresetCard(preset, board, B.badges(board, self.policy)[0])
             card_.chosen.connect(self.choose)
+            card_.clicked.connect(lambda chosen: self.choose(chosen, reveal=False))
             card_.opened.connect(lambda _card: self.create())
             card_.menu_requested.connect(self.card_menu)
-            if text.strip() and not PR.matches(preset, text, self.catalogue):
+            if not self.shows(preset, text):
                 card_.setVisible(False)
             flow.addWidget(card_)
             cards.append(card_)
@@ -516,9 +571,10 @@ class PresetGallery(QDialog):
     def filter(self, text):
         for heading, box, cards, key in self.section_list:
             for card_ in cards:
-                card_.setVisible(PR.matches(card_.preset, text, self.catalogue))
-            shown = sum(PR.matches(preset, text, self.catalogue) for preset in self.section_presets[key])
-            visible = bool(shown) or (key == "mine" and not text.strip())
+                card_.setVisible(self.shows(card_.preset, text))
+            shown = sum(self.shows(preset, text) for preset in self.section_presets[key])
+            visible = bool(shown) or (key == "mine" and not text.strip()
+                                      and self.host_filter.currentData() in ("", "local", None))
             heading.setVisible(visible)
             box.setVisible(visible)
             if key in self.section_notes:
@@ -531,7 +587,8 @@ class PresetGallery(QDialog):
         self.fit_categories()
         if self.selected is None or self.selected.isHidden():
             visible = [c for c in self.made if not c.isHidden()]
-            if not visible and self.queue and text.strip():  # matches among the cards not made yet: made now
+            if not visible and self.queue and (text.strip() or self.host_filter.currentData()):
+                # (matches among the cards not made yet: made now)
                 self.finish_cards()
                 visible = [c for c in self.made if not c.isHidden()]
             self.choose(visible[0] if visible else None)
@@ -561,7 +618,14 @@ class PresetGallery(QDialog):
         from .widgets import context_menu, exec_dropped
         exec_dropped(context_menu(self, self.menu_entries()), point)
 
-    def choose(self, card_):
+    def choose(self, card_, reveal=True):
+        """CARD_ selected and shown on the left; REVEAL (the keyboard, a selection made by the gallery): its row
+        scrolled into view where it is not whole - a click never scrolls (todos 2026-11-24: clicking along a row, the
+        right side sometimes moved)."""
+        if card_ is not None and card_ is self.selected:
+            if reveal:
+                self.reveal(card_)
+            return
         if self.selected is not None and self.selected is not card_:
             self.selected.select(False)
         self.selected = card_
@@ -571,7 +635,7 @@ class PresetGallery(QDialog):
         self.rename_button.setEnabled(card_ is not None and card_.preset.source == "mine")
         if card_ is None:
             self.title.setText(tr("No preset matches"))
-            for widget in (self.description, self.meta, self.notes, self.fill_in):
+            for widget in (self.description, self.meta, self.where, self.notes, self.fill_in):
                 widget.setText("")
             self.command.setPlainText("")
             return
@@ -589,11 +653,31 @@ class PresetGallery(QDialog):
         lines = [f"{p.marker}: {preset.text(p.label)}" + (" " + tr("(optional)") if p.optional else "")
                  for p in preset.placeholders]
         self.fill_in.setText(tr("To fill in:") + "\n" + "\n".join(lines) if lines else tr("Nothing to fill in."))
+        self.where.setText(PR.where_text(preset, self.host))
         self.notes.setText("\n\n".join(preset.text(n) for n in preset.notes))
         self.demo_button.setVisible(needs_demo_device(preset))
         self.demo_status.setVisible(False)
         self.command.setPlainText(B.command_line(self.sai, board))
-        self.scroll.ensureWidgetVisible(card_)
+        self.details.verticalScrollBar().setValue(0)  # another preset: its details from the top
+        if reveal:
+            self.reveal(card_)
+
+    def reveal(self, card_):
+        """Scroll the cards just so far that CARD_'s row is whole in view (nothing when it is: Qt's
+        ensureWidgetVisible kept a 50 px margin and scrolled by each card's own height - along a row of cards of
+        different heights the cards moved)."""
+        box = card_.parentWidget()
+        holder = self.scroll.widget()
+        if box is None or holder is None or not card_.isVisibleTo(holder):
+            return
+        row = [c for c in box.findChildren(PresetCard) if c.isVisibleTo(holder) and c.y() == card_.y()] or [card_]
+        top = card_.mapTo(holder, card_.rect().topLeft()).y()
+        bottom = top + max(c.height() for c in row)
+        bar, seen = self.scroll.verticalScrollBar(), self.scroll.viewport().height()
+        if top < bar.value():
+            bar.setValue(top)
+        elif bottom > bar.value() + seen:
+            bar.setValue(min(top, bottom - seen))
 
     def keyPressEvent(self, event):  # noqa: N802
         """Arrows move between the cards shown (also from the search box); Enter creates."""
@@ -638,10 +722,35 @@ class PresetGallery(QDialog):
     # -- creating --
 
     def create(self, fill_later=False):
-        """The selected preset: its placeholders asked for (unless FILL_LATER), then the dialog closes."""
-        if self.selected is None:
+        """The selected preset: made ready for the board's host (prepare: its ruleset from its host, what the board's
+        host cannot do refused with why - in the background), its placeholders asked for (unless FILL_LATER), then
+        the dialog closes. True when created now; None while a host is asked."""
+        if self.selected is None or self.preparing is not None:
             return False
-        preset, values = self.selected.preset, {}
+        preset = self.selected.preset
+        if PR.needs_preparing(preset, self.host):
+            self.preparing = preset.key
+            self.create_button.setEnabled(False)
+            self.status.setText(tr("Asking {hosts} about {name}…", name=preset.text(preset.title), hosts=", ".join(
+                map(printable, dict.fromkeys([*([preset.host] if preset.rules_file else []), self.host])))))
+            self.status.show()
+            outcome = []
+            background(PR.prepare, self.sai, preset, self.host, self.agent, owner=self, timeout=120,
+                       done=lambda result, error: outcome.append(self.prepared(preset, fill_later, result, error)))
+            return outcome[0] if outcome else None
+        return self.made_ready(preset, fill_later)
+
+    def prepared(self, preset, fill_later, result, error):
+        self.preparing = None
+        self.create_button.setEnabled(self.selected is not None)
+        self.status.hide()
+        if error is not None:
+            warn(self, tr("Not created"), printable_text(error))
+            return False
+        return self.made_ready(result, fill_later)
+
+    def made_ready(self, preset, fill_later=False):
+        values = {}
         if preset.placeholders and not fill_later:
             form = PlaceholderForm(self.sai, preset, self, agent=self.agent, host=self.host)
             if widgets.AUTO_ANSWER is None and widgets.exec_dropped(form) != QDialog.DialogCode.Accepted:
@@ -969,6 +1078,18 @@ class PlaceholderForm(QDialog):
     def fill_later(self):
         self.later = True
         self.accept()
+
+
+def section_heading(text):
+    """A section's heading over the cards: underlined, with room above it (todos 2026-11-24:
+    "kategorienueberschriften auf der rechten seite unterstreichen")."""
+    heading = plain_label(text, role="section")
+    heading.setObjectName("presetSection")
+    font = heading.font()
+    font.setUnderline(True)
+    heading.setFont(font)
+    heading.setStyleSheet("QLabel#presetSection { text-decoration: underline; padding-top: 10px; }")
+    return heading
 
 
 def preset_categories(sai):

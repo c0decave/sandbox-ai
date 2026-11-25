@@ -1,8 +1,10 @@
 """The image recipe android-dev and the preset android-development end to end through ./sandbox-ai (user 2026-11-21:
 "a full blown android preset for android dev" with one image that has every Android development tool): a user's host
-with only Podman faked (tests/live_fakes.py). The recipe makes the variant, `presets` lists the preset, `presets
-check` names the variant until it is made, the build builds it, and a dry-run start with the preset is the variant's
-image with the Android hosts, the host's adb server and /dev/kvm as asked. The image itself (4 GB of Google's
+with only Podman faked (tests/live_fakes.py). Since 2026-11-24 the preset proposes the toolchain android-sdk and the
+emulator's service instead; the variant still works when it is named (--preset-value variant=android-dev
+--preset-value sdk=), which is what this test starts: the recipe makes the variant, `presets` lists the preset,
+`presets check` names the variant until it is made, the build builds it, and a dry-run start with the preset is the
+variant's image with the Android hosts, the host's adb server and no device. The image itself (4 GB of Google's
 downloads) is built only by a real build; its pins are checked in tests/test_images.py."""
 import json
 import os
@@ -44,13 +46,28 @@ def test_the_android_development_preset_from_recipe_to_start(host):
     shown = ok(host.run("presets", "show", "android-development"))
     assert "images recipe android-dev --from AGENT && sandbox-ai build android-dev" in shown
     assert "value kvm: /dev/kvm for the Android emulator" in shown and "(default /dev/kvm) (optional)" in shown
+    assert "value sdk: The toolchain with the Android SDK" in shown and "(default android-sdk) (optional)" in shown
     assert "android-development.rules.json" in shown
-    # Before the variant is made, check names the recipe; the start names it too.
-    check = host.run("presets", "check", "android-development", "--agent", "claude", "--value", "kvm=")
+    # As it comes, the preset brings the toolchain android-sdk: not in the store, check names its add and the
+    # license it asks you to accept; the start offers it as a question of its own, never done by --fix.
+    lacking = host.run("presets", "check", "android-development", "--agent", "claude", "--value", "kvm=")
+    assert lacking.returncode != 0 and "sandbox-ai toolchain add android-sdk" in lacking.stdout + lacking.stderr
+    assert "Android Software Development Kit License Agreement" in lacking.stdout + lacking.stderr
+    fixes = json.loads(ok(host.run("claude", "--preset", "android-development", "--preset-value", "kvm=",
+                                   "--fix-plan")))["fixes"]
+    fix = next(item for item in fixes if item["id"] == "toolchain:android-sdk")
+    assert fix["terms"] == "android-sdk-license" and fix["choice"] and fix["verdict"] == "offered"
+    assert fix["command"] == "sandbox-ai toolchain add android-sdk --accept-android-sdk-license"
+    assert "https://developer.android.com/studio/terms" in fix["security"]
+    # The image variant instead (the values variant and sdk). Before it is made, check names the recipe; the start
+    # names it too.
+    variant = ("--value", "variant=android-dev", "--value", "sdk=", "--value", "kvm=")
+    start = ("--preset-value", "variant=android-dev", "--preset-value", "sdk=", "--preset-value", "kvm=")
+    check = host.run("presets", "check", "android-development", "--agent", "claude", *variant)
     assert check.returncode != 0
     assert "sandbox-ai images recipe android-dev --from claude && sandbox-ai build android-dev" in \
         check.stdout + check.stderr
-    refused = host.run("claude", "--preset", "android-development", "--preset-value", "kvm=", "--dry-run")
+    refused = host.run("claude", "--preset", "android-development", *start, "--dry-run")
     assert refused.returncode != 0
     assert "images recipe android-dev --from claude && sandbox-ai build android-dev" in refused.stderr
     # The recipe makes the variant; the build builds it (Podman faked) as the variant's own image.
@@ -65,11 +82,11 @@ def test_the_android_development_preset_from_recipe_to_start(host):
     assert built.returncode == 0, built.stderr[-3000:]
     tags = [call[call.index("--tag") + 1] for call in host.builds() if "--tag" in call]
     assert "localhost/claude-sandbox-android-dev:latest" in tags
-    assert ok(host.run("presets", "check", "android-development", "--agent", "claude", "--value", "kvm="))
+    assert ok(host.run("presets", "check", "android-development", "--agent", "claude", *variant))
     # The start: the variant's image, the Android hosts and nothing wider, the host's adb server, no /dev/kvm when
     # it is left out; codex takes claude's variant over.
-    plan = json.loads(ok(host.run("claude", "--preset", "android-development", "--preset-value", "kvm=",
-                                  "--dry-run")))
+    plan = json.loads(ok(host.run("claude", "--preset", "android-development", *start, "--dry-run")))
+    assert plan["toolchains"] == [] and plan["services"] == []
     assert plan["image"] == "localhost/claude-sandbox-android-dev:latest"
     assert set(HOSTS) <= set(plan["https_hosts"]) and plan["host_wildcards"] == []
     assert plan["host_ports"] == [5037] and plan["devices"] == [] and plan["mcp"] == []
@@ -77,6 +94,6 @@ def test_the_android_development_preset_from_recipe_to_start(host):
     assert "android-emulator start" in plan["agent_args"][-1]
     assert any(str(ruleset).endswith("android-development.rules.json") for ruleset in
                json.dumps(plan["rulesets"]).split('"')), plan["rulesets"]
-    other = host.run("codex", "--preset", "android-development", "--preset-value", "kvm=", "--dry-run")
+    other = host.run("codex", "--preset", "android-development", *start, "--dry-run")
     assert other.returncode == 0, other.stderr[-2000:]
     assert json.loads(other.stdout)["image"] == "localhost/codex-sandbox-android-dev:latest"

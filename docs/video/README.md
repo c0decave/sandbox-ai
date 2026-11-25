@@ -91,7 +91,7 @@ The README's screenshots in `docs/screenshots/` are these pages in English, stag
 
 ## The app series, spoken
 
-One video per page of the app (Start, Board, Sandboxes & sessions, ... Help: `SERIES` in `storyboard.py`), each
+One video per page of the app (Board: Expert view, Board, Sessions, ... Help: `SERIES` in `storyboard.py`), each
 with a title card, the real page and its dialogs (`capture_app.py`), what the page is for, what you do there and
 its safety points, and a closing card that names the next page. The German narration is spoken by an offline voice:
 German text, but every English IT term (Sandbox, Proxy, Workspace, Session, Board, Plugin, Hook, MCP server,

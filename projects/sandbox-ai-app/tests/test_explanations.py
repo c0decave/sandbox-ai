@@ -533,7 +533,7 @@ def test_the_approvals_page_says_each_thing_once(window, qapp):
              if isinstance(label, widgets.Explanation)]
     texts = [label.text() for label in hints]
     assert any(text.startswith("A request waits up to") for text in texts)
-    assert any(text.startswith("Listed: what was allowed while it runs") for text in texts)
+    assert any(text.startswith("Everything it may reach now. Why says where each comes from") for text in texts)
     assert page.header.state.property("role") == "secondary" and not isinstance(page.header.state,
                                                                                  widgets.Explanation), \
         "how the sandbox runs is its state: shown"

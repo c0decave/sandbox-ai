@@ -17,7 +17,7 @@ What works through it, for each server (the oracle below, written from what each
     server the exits cannot reach - said when it is added and when it starts;
   - "refused": cannot work behind Tor at all and is refused with the reason: nmap's connect scans would see every
     port open (tor's TransPort accepts each connection before an exit tries the target);
-  - "no network": reaches nothing; a VPN for it is refused ("a VPN needs network full").
+  - "no network": reaches nothing; a VPN for it is refused ("a VPN needs network egress-all").
 
 The entries are those of the catalogs as published (2026-11-14), the fields that matter here."""
 import importlib.util
@@ -171,7 +171,7 @@ def test_every_catalog_server_behind_tor(world, prefix, entry, expected):
     out = []
     support = expected if isinstance(expected, str) else expected[0]
     if support == "no network":
-        with pytest.raises(ValueError, match="a VPN needs network full"):
+        with pytest.raises(ValueError, match="a VPN needs network egress-all"):
             add_behind_tor(world, prefix, entry, out)
         return
     if support == "refused":

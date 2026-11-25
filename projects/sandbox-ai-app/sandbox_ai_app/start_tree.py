@@ -1,4 +1,4 @@
-"""The Sandboxes page's tree: the hosts at the top (this machine, each host of `sandbox-ai hosts`), under each host its
+"""The Sessions page's tree: the hosts at the top (this machine, each host of `sandbox-ai hosts`), under each host its
 starts, under each start the starts that belong to it (owners(): the MCP servers and helpers started for it or that
 only it uses, the members of a team it leads) and what else belongs to it (the MCP servers it reaches, its helpers,
 its pod with Podman; the starts an MCP server serves). MCP servers that belong to no start stand together below
@@ -277,7 +277,7 @@ class Cell:
 
 
 class StartTree(QTreeWidget):
-    """The tree of the Sandboxes page; see the module. FOLDED(bool) after View › Fold all / Unfold all."""
+    """The tree of the Sessions page; see the module. FOLDED(bool) after View › Fold all / Unfold all."""
     folded = Signal(bool)
     row_chosen = Signal()  # selectRow: a row chosen from elsewhere (show_instance, a test), not the page's own
 

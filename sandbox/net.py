@@ -2,9 +2,11 @@
 """sandbox-ai net: change what a running sandbox may reach, without restarting it.
 
   sandbox-ai net list                                  running sandboxes
-  sandbox-ai net show [RUN]                            what was allowed during the run
-  sandbox-ai net allow [RUN] [--allow-host HOST] [--allow-domain DOMAIN] [--allow-tcp IP:PORT] [--allow IP_OR_CIDR]
-                       [--allow-PRESET]                  (--allow-domain D: --allow-host D --allow-host '*.D')
+  sandbox-ai net show [RUN]                            what it may reach and why (its start, the run)
+  sandbox-ai net allow [RUN] [--allow-host HOST] [--allow-domain DOMAIN] [--allow-tcp IP:PORT]
+                       [--allow-net IP_OR_CIDR]            every port of it (--allow: its older name)
+                       [--allow-SET]                       a host set: --allow-github, --allow-pypi ...
+                                                           (--allow-domain D: --allow-host D --allow-host '*.D')
                        [--dns] [--nameserver IP]           real DNS lookups (as --dns at the start)
                        [--git-token-env|--git-token-file|--git-token-secret URL=REF]   a Git login
                        [--git-token-in-sandbox]            that login where the run's proxy cannot log in
@@ -1878,7 +1880,7 @@ def check_token_file(record, path):
 
 
 def git_network(args, logins):
-    """Open what each login's server needs, as at the start: github.com its preset, another HTTPS server its name
+    """Open what each login's server needs, as at the start: github.com its host set, another HTTPS server its name
     (TCP/443; another port needs --allow-tcp). A server on the host's loopback is reached only if the run forwards
     its port (--allow-host-port at the start): notes for those."""
     notes = []
@@ -1977,11 +1979,35 @@ def tainted_text(state):
         (f" (and {more} later source{'s' if more != 1 else ''})" if more > 0 else "")
 
 
+REACH_KINDS = {"preset": "HTTPS", "https": "HTTPS", "wildcard": "HTTPS *.", "tcp": "TCP", "network": "all ports",
+               "host-port": "host port", "dns": "DNS", "everything": "everything", "nothing": "nothing"}
+
+
+def started_rows(started):
+    """The rows of what a run may reach from its start (run.json "reach", agent_sandbox.reach): KIND, SOURCE, HOLDS
+    FOR, WHAT - a preset or the provider's hosts as its name and the names it opens."""
+    l, rows = launcher(), []
+    for entry in started:
+        if not isinstance(entry, dict):
+            continue
+        what = str(entry.get("what") or "")
+        hosts = [str(h) for h in entry.get("hosts") or [] if isinstance(h, str)]
+        if entry.get("source") == "provider":
+            what = ", ".join(hosts)
+        elif hosts:
+            what = f"{what}: {', '.join(hosts)}"
+        rows.append([REACH_KINDS.get(entry.get("kind"), str(entry.get("kind"))), l.printable(l.reach_source_text(entry)),
+                     str(entry.get("scope") or "this start"), l.printable(what)])
+    return rows
+
+
 def show(result, out=print, names=None, run=None, as_json=False, logins=(), wildcards=(), api_keys=(), title=None,
-         hints=True):
-    """What was allowed during the run, grouped by kind; HTTPS addresses under the names they were allowed
-    for (from `net allow --allow-host`, presets and approved lookups; never looked up anew: a name the
-    agent chose may carry data). HINTS: how to lift the cut, untaint and take back (not for an orphaned run: refused)."""
+         hints=True, started=None):
+    """What the run may reach and why: STARTED (run.json "reach": what its start opened, each with its source; None
+    for a run of an older sandbox-ai, which did not record it), then what was allowed during the run, grouped by
+    kind; HTTPS addresses under the names they were allowed for (from `net allow --allow-host`, presets and approved
+    lookups; never looked up anew: a name the agent chose may carry data). HINTS: how to lift the cut, untaint and
+    take back (not for an orphaned run: refused)."""
     printable = launcher().printable
     names = names or {}
     by_address = {}
@@ -2001,6 +2027,7 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
     risky = shared_of(wildcards)  # below a shared service: anyone can rent a name there (marked as a risk)
     if as_json:
         out(json.dumps({"run": run, "cut": cut, "all_ports": nets, "dns": dns,
+                        **({"started": [e for e in started if isinstance(e, dict)]} if isinstance(started, list) else {}),
                         **({"taint": taint} if taint is not None else {}),
                         "host_wildcards": list(wildcards),
                         **({"shared_wildcards": risky} if risky else {}),
@@ -2023,6 +2050,13 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
             out(t.style(f"  take it back: sandbox-ai net untaint {printable(run) if run else '[RUN]'}", "muted"))
         out("")
     total = len(nets) + len(https) + len(tcp) + len(dns) + len(relayed)
+    if isinstance(started, list):
+        t.section(f"{title or (printable(run) if run else 'this sandbox')}: what it may reach from its start", out,
+                  note="each with its source; the administrator's policy, the security mode and the kill switch "
+                       "can only narrow it")
+        t.table(["KIND", "SOURCE", "HOLDS FOR", "WHAT"], started_rows(started), out,
+                empty="nothing: no network (or nothing it was started with)")
+        out("")
     if git:
         t.section("Git logins added during this run", out,
                   note="its proxy logs in on the wire; a token \"in the sandbox\" is readable by the agent")
@@ -2050,6 +2084,9 @@ def show(result, out=print, names=None, run=None, as_json=False, logins=(), wild
               note=f"{total} destination{'s' if total != 1 else ''}, added with `sandbox-ai net allow` or approvals")
     if not total:
         out("  nothing beyond its start options")
+        if started is None:
+            out(t.style("  its start's own allowances are not recorded: it was started by an older sandbox-ai (its "
+                        "start command names them)", "muted"))
         return
     if https:
         out("")
@@ -2106,7 +2143,7 @@ def show_orphan(record, out=print, as_json=False):
              for address in entry.get("addresses", []) if isinstance(address, str)})}, False, str(exc)
     given = {"names": names, "run": record.get("run"), "logins": git_logins(record),
              "wildcards": run_wildcards(record), "api_keys": added_api_keys(record), "title": who(record),
-             "hints": False}
+             "hints": False, "started": record.get("reach")}
     if as_json:
         shown = []
         show(result, shown.append, as_json=True, **given)
@@ -2410,7 +2447,13 @@ def parser(lean=False):
     listing.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts")
     listing.add_argument("-w", "--wide", "--no-trunc", dest="wide", action="store_true",
                          help="also each run's id and workspace (whole)")
-    shown = commands.add_parser("show", help="what was allowed during the run")
+    shown = commands.add_parser("show", help="what the sandbox may reach and why: from its start and during the run",
+                                description="What a running sandbox may reach, and why: what its start opened, each "
+                                            "with its source (the agent's provider, a network profile, a host set, the project "
+                                            "file, the start's options, an approval \"always\", a toolchain, a Git "
+                                            "login, an API key, --llm) and how long it holds; then what was allowed "
+                                            "during the run (sandbox-ai net allow, approvals), the kill switch and "
+                                            "the taint.")
     shown.add_argument("run", nargs="?")
     shown.add_argument("-j", "--json", action="store_true", help="as JSON, for scripts")
     shown.add_argument("-k", "--keep", action="store_true",
@@ -2464,8 +2507,9 @@ def parser(lean=False):
                                   f"with the same checks (no public suffix or hosting service); {each}")
         command.add_argument("-t", "--allow-tcp", action=lists, default=[], metavar="IP:PORT",
                              help=f"allow TCP to IP:PORT ([IPv6]:PORT); {each}")
-        command.add_argument("-a", "--allow", action=lists, default=[], metavar="IP_OR_CIDR",
-                             help=f"every protocol and port; {each}")
+        command.add_argument("-a", "--allow-net", "--allow", dest="allow", action=lists, default=[],
+                             metavar="IP_OR_CIDR", help=f"every port and protocol of an address or network (--allow: "
+                                                        f"its older name); {each}")
         command.add_argument("-R", "--dns", action="store_true",
                              help="real DNS: the sandbox's DNS stub forwards every name to "
                                   f"{' and '.join(launcher().DEFAULT_NAMESERVERS)} (each lookup logged); addresses "
@@ -2501,7 +2545,7 @@ def parser(lean=False):
         for preset, hosts in launcher().PRESETS.items():
             short = [launcher().SHORT_OPTIONS[f"--allow-{preset}"]] if f"--allow-{preset}" in launcher().SHORT_OPTIONS else []
             command.add_argument(*short, f"--allow-{preset}", action="append_const", const=preset, dest="presets",
-                                 default=[], help=f"{', '.join(hosts)} (TCP/443)")
+                                 default=[], help=f"host set: {', '.join(hosts)} (TCP/443)")
         if name == "allow":
             command.add_argument("-k", "--keep", action="store_true",
                                  help="also keep it for the next starts: the options go into the project's "
@@ -2987,7 +3031,7 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
             result = ask(record["directory"], {"op": "show"})
             show(result, out, names=remembered(record), run=record.get("run", args.run), as_json=args.json,
                  logins=git_logins(record), wildcards=run_wildcards(record), api_keys=added_api_keys(record),
-                 title=who(record, args.run))
+                 title=who(record, args.run), started=record.get("reach"))
             if getattr(args, "keep", False) or getattr(args, "keep_all", False):
                 tokens, workspaces, notes = running_options(record, result, everything=args.keep_all)
                 said = (lambda line: print(line, file=sys.stderr)) if args.json else out  # the JSON stays JSON
@@ -3076,8 +3120,9 @@ def main(argv, out=print, resolver=resolve, brief=False, prog="net", command=Non
         ports = request.get("host_ports", [])
         network = request["nets"] or request["https"] or request["tcp"] or request.get("dns") or hosts or ports
         if not (network or logins or wildcards or keys):
-            raise ValueError(f"nothing to {args.command}: give --allow-host, --allow-domain, --allow-tcp, --allow, "
-                             "--dns, --allow-host-port, a preset, a --git-token-* login or an --api-key")
+            raise ValueError(f"nothing to {args.command}: give --allow-host, --allow-domain, --allow-tcp, --allow-net, "
+                             "--dns, --allow-host-port, a host set (--allow-github ...), a --git-token-* login or an "
+                             "--api-key")
         if ports and args.command == "allow":
             if "--allow-host-port" in (launcher().load_policy().get("forbid") or []):
                 raise ValueError("--allow-host-port is forbidden by the administrator's policy")

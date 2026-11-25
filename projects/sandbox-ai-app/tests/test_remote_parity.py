@@ -183,7 +183,7 @@ def test_no_running_start_on_the_host_is_said_with_its_name(qapp, sai, monkeypat
     assert offered == [] and page.message.text() == "No sandbox runs on ct1 now."
 
 
-# -- 4, 10-13: the Sandboxes page with a start of ct1 selected --
+# -- 4, 10-13: the Sessions page with a start of ct1 selected --
 
 @pytest.fixture
 def sandboxes(qapp, sai, monkeypatch):
@@ -250,6 +250,59 @@ def test_what_was_added_during_the_run_is_read_on_its_host(sandboxes, sai):
     assert ("workspace", "list", "wild-dromouse", "--json") in asked(sai)
     assert "on ct1" in page.workspaces_label.text() and "/srv/more" in page.workspaces_label.text()
     assert page.added_workspaces == [], "Remove… of a host's start reads that host's list afresh"
+
+
+def changes_of(monkeypatch, *labels):
+    """[(label's name, before, after)] of every setText that changed what a label shows, from now on."""
+    changed = []
+    for name, label in labels:
+        def recorded(text, name=name, label=label, real=label.setText):
+            if text != label.text():
+                changed.append((name, label.text(), text))
+            real(text)
+        monkeypatch.setattr(label, "setText", recorded)
+    return changed
+
+
+@pytest.mark.parametrize("where", ["host", "local"])
+@pytest.mark.parametrize("added", [False, True])
+def test_a_refresh_with_nothing_new_changes_no_line(where, added, sandboxes, sai, monkeypatch):
+    """The user 2026-11-24: "Auf Sandboxen und Sitzungen wird unten immer ein Text aktualisiert, dadurch scheint es
+    wie Blinken ... nicht alle 2 Sekunden 'Kein Gerät während des Laufs hinzugefügt'": every refresh of the page (the
+    row selected again) emptied the lines of what was added during the run and filled them when the read came back.
+    Now a line changes only with what it says; nothing added: no line at all."""
+    page, instance = sandboxes
+    if where == "local":
+        instance = backend.Instance("session", "local:web", "web", run="claude-abc", state="running", agent="claude",
+                                    session="web")
+        monkeypatch.setattr(page, "current", lambda: instance)
+        monkeypatch.setattr(sai, "devices_added", lambda run: ["/dev/ttyUSB0"] if added else [])
+        monkeypatch.setattr(sai, "workspaces", lambda run: [{"host": "/srv/more", "sandbox": "/workspaces/more",
+                                                             "mode": "rw", "source": "added", "note": ""}]
+                            if added else [])
+    else:
+        answer(sai, ["devices", "list", "wild-dromouse", "--json"],
+               [{"id": "7", "source": "added", "value": "/dev/ttyUSB0", "nodes": ["/dev/ttyUSB0"]}] if added else [])
+        answer(sai, ["workspace", "list", "wild-dromouse", "--json"],
+               [{"host": "/srv/more", "sandbox": "/workspaces/more", "mode": "rw", "source": "added", "note": ""}]
+               if added else [])
+    page.load_devices()
+    lines = (page.devices_label, page.workspaces_label)
+    if added:
+        assert "/dev/ttyUSB0" in page.devices_label.text() and "/srv/more" in page.workspaces_label.text()
+        assert not any(line.isHidden() for line in lines)
+    else:
+        assert [line.text() for line in lines] == ["", ""], "nothing added: no line saying so"
+        assert all(line.isHidden() for line in lines)
+    changed = changes_of(monkeypatch, ("devices", page.devices_label), ("workspaces", page.workspaces_label))
+    for _ in range(3):  # (the page's refreshes: the row is selected again, what was added read again)
+        page.load_devices()
+    assert changed == [], changed
+    # Another start selected: its own lines (none here), never the ones before.
+    other = backend.Instance("session", "local:other", "other", state="stopped", agent="claude", session="other")
+    monkeypatch.setattr(page, "current", lambda: other)
+    page.load_devices()
+    assert [line.text() for line in lines] == ["", ""]
 
 
 def test_a_report_of_a_start_of_the_host_is_made_there(sandboxes, sai, monkeypatch, tmp_path):

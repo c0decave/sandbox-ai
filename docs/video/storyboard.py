@@ -89,8 +89,9 @@ COURSE = {
 # The pages of the desktop app (sandbox-ai-app), in the order of its navigation; used for the schematic when no
 # screenshot was captured, and by capture_app.py for the page keys.
 APP_NAV = [  # the app's own words (its German translation calls approvals "Freigaben")
-    (T("Project", "Projekt"), [("launch", T("Start", "Start")), ("board", T("Board", "Board"))]),
-    (T("Running", "Laufend"), [("sandboxes", T("Sandboxes & sessions", "Sandboxen & Sitzungen")),
+    (T("Project", "Projekt"), [("launch", T("Board: Expert view", "Board: Ansicht Experte")),
+                               ("board", T("Board", "Board")),
+                               ("sandboxes", T("Sessions", "Sitzungen")),
                                ("terminals", T("Terminals", "Terminals")),
                                ("approvals", T("Approvals", "Freigaben"))]),
     (T("Manage", "Verwalten"), [("files", T("File manager", "Dateimanager")), ("kits", T("Kits & plugins", "Kits & Plugins")),
@@ -681,7 +682,7 @@ CHAPTERS = [
     {
         "id": "network",
         "title": T("Network: allow-list, proxy, approvals", "Netz: Freigaben, Proxy, Rückfragen"),
-        "topics": [T("Presets such as --allow-github", "Voreinstellungen wie --allow-github"),
+        "topics": [T("Host sets such as --allow-github", "Host-Sets wie --allow-github"),
                    T("The connection proxy and DNS", "Der Verbindungs-Proxy und DNS"),
                    T("sandbox-ai net allow; questions: once, run, always", "sandbox-ai net allow; Rückfragen: once, run, always")],
         "scenes": [
@@ -704,10 +705,10 @@ CHAPTERS = [
                  ["`--offline`  `--egress-all-allow`", T("nothing at all; every outbound destination", "gar nichts; jedes ausgehende Ziel")],
              ],
              "captions": [
-                 T("Presets open well-known hosts on HTTPS only. --allow-host pins one name; --allow-host-port reaches a service on your own machine, such as a local Git server.",
-                   "Voreinstellungen öffnen bekannte Hosts nur über HTTPS. --allow-host legt einen Namen fest; --allow-host-port erreicht einen Dienst auf Ihrem Rechner, etwa einen lokalen Git-Server."),
+                 T("Host sets open well-known hosts on HTTPS only. --allow-host pins one name; --allow-host-port reaches a service on your own machine, such as a local Git server.",
+                   "Host-Sets öffnen bekannte Hosts nur über HTTPS. --allow-host legt einen Namen fest; --allow-host-port erreicht einen Dienst auf Ihrem Rechner, etwa einen lokalen Git-Server."),
              ]},
-            {"kind": "terminal", "heading": T("Presets in the plan", "Voreinstellungen im Plan"),
+            {"kind": "terminal", "heading": T("Host sets in the plan", "Host-Sets im Plan"),
              "steps": [
                  {"cmd": "sandbox-ai claude --allow-github --allow-pypi --dry-run", "live": True,
                   "pick": ["https_hosts", "https_networks", "nameservers"]},
@@ -1186,8 +1187,8 @@ CHAPTERS = [
              "captions": [
                  T("sandbox-ai-app is a graphical front end for everything shown so far. Every action runs the sandbox-ai command itself.",
                    "sandbox-ai-app ist eine grafische Oberfläche für alles bisher Gezeigte. Jede Aktion führt den sandbox-ai-Befehl selbst aus."),
-                 T("The Start page shows one start in two views: the Board, and Expert, built from the launcher's own option parser, so a new option appears without a new app.",
-                   "Die Seite Start zeigt einen Start in zwei Ansichten: das Board und Experte, gebaut aus dem Optionsparser des Starters, eine neue Option erscheint also ohne neue App."),
+                 T("The Board page shows one start in two views: the Board, and Expert, built from the launcher's own option parser, so a new option appears without a new app.",
+                   "Die Seite Board zeigt einen Start in zwei Ansichten: das Board und Experte, gebaut aus dem Optionsparser des Starters, eine neue Option erscheint also ohne neue App."),
              ]},
             {"kind": "app", "page": "board", "shot": "board-preset", "heading": T("The board: one sandbox as a graph", "Das Board: eine Sandbox als Graph"),
              "bullets": [
@@ -1212,8 +1213,8 @@ CHAPTERS = [
                  T("Emergency stop (Ctrl+Shift+X): every sandbox here and on your hosts", "Notaus (Strg+Umschalt+X): jede Sandbox hier und auf Ihren Hosts"),
              ],
              "captions": [
-                 T("Sandboxes and sessions lists everything that runs or is kept, each start with its parts, and a button for each command.",
-                   "Sandboxen & Sitzungen listet alles, was läuft oder aufbewahrt ist, jeden Start mit seinen Teilen, und einen Knopf für jeden Befehl."),
+                 T("Sessions lists everything that runs or is kept, each start with its parts, and a button for each command.",
+                   "Sitzungen listet alles, was läuft oder aufbewahrt ist, jeden Start mit seinen Teilen, und einen Knopf für jeden Befehl."),
                  T("The kill switch cuts a sandbox's network at once, out of the agent's reach; the emergency stop cuts all of them.",
                    "Der Kill-Switch kappt das Netz einer Sandbox sofort, außerhalb der Reichweite des Agenten; der Notaus kappt alle."),
              ]},
@@ -1221,13 +1222,13 @@ CHAPTERS = [
              "bullets": [
                  T("Open questions of all sandboxes, each saying why it is asked", "Offene Fragen aller Sandboxen, jede mit dem Grund"),
                  T("Allow once, for the run or always; deny; block always", "Einmal, für den Lauf oder immer erlauben; ablehnen; immer sperren"),
-                 T("Blocked: every refusal of the run with its reason and process, to allow or ask again", "Blockiert: jede Ablehnung des Laufs mit Grund und Prozess, zum Erlauben oder Wieder-Fragen"),
+                 T("Refused: every refusal of the run with its reason and process, to allow or ask again", "Abgelehnt: jede Ablehnung des Laufs mit Grund und Prozess, zum Erlauben oder Wieder-Fragen"),
              ],
              "captions": [
-                 T("The approvals page shows the open questions of every running sandbox, with the run, what is asked and why.",
-                   "Die Seite Freigaben zeigt die offenen Fragen jeder laufenden Sandbox, mit Lauf, Anliegen und Grund."),
-                 T("Below them, Blocked lists every refusal of the run: one click allows it for the run, or asks again next time.",
-                   "Darunter listet Blockiert jede Ablehnung des Laufs: Ein Klick erlaubt sie für den Lauf oder fragt beim nächsten Mal wieder."),
+                 T("The approvals page shows the open questions of every running sandbox on its first tab, with the run, what is asked and why; its second tab inspects one sandbox.",
+                   "Die Seite Freigaben zeigt auf ihrem ersten Tab die offenen Fragen jeder laufenden Sandbox, mit Lauf, Anliegen und Grund; ihr zweiter Tab prüft eine Sandbox."),
+                 T("Its tab Refused lists every refusal of the run: one click allows it for the run, or asks again next time.",
+                   "Ihr Tab Abgelehnt listet jede Ablehnung des Laufs: Ein Klick erlaubt sie für den Lauf oder fragt beim nächsten Mal wieder."),
              ]},
             {"kind": "app", "page": "files", "shot": "files-editor", "heading": T("Files: a two-pane file manager", "Dateien: ein Dateimanager mit zwei Bereichen"),
              "bullets": [
@@ -1418,8 +1419,8 @@ SERIES = {
                 "topics": [T("Host, agent, model and preset", "Host, Agent, Modell und Preset"),
                            T("Every option of the launcher", "Jede Option des Starters"),
                            T("Dry run, start, session", "Probelauf, Start, Session")],
-                "intro": [T("The Start page starts one agent in one sandbox. Its Expert view shows every option as a field and the whole command line; Board or Expert above the page, or F6, switches the view.",
-                            "Die Seite Start startet einen Agenten in einer Sandbox. Ihre Ansicht Experte zeigt jede Option als Feld und die ganze Befehlszeile; Board oder Experte über der Seite, oder F6, wechselt die Ansicht.")],
+                "intro": [T("The Board page starts one agent in one sandbox. Its Expert view shows every option as a field and the whole command line; Board or Expert above the page, or F6, switches the view.",
+                            "Die Seite Board startet einen Agenten in einer Sandbox. Ihre Ansicht Experte zeigt jede Option als Feld und die ganze Befehlszeile; Board oder Experte über der Seite, oder F6, wechselt die Ansicht.")],
                 "scenes": [
                     {"kind": "app", "page": "launch", "heading": T("Who starts where", "Wer startet wo"),
                      "focus": [0.16, 0.15, 0.92, 0.31],
@@ -1498,8 +1499,8 @@ SERIES = {
                 "topics": [T("A sandbox as parts you connect", "Eine Sandbox als verbundene Teile"),
                            T("Presets, the agents and what they need", "Presets, die Agenten und was sie brauchen"),
                            T("Findings, score, Save and Apply", "Befunde, Wert, Speichern und Übernehmen")],
-                "intro": [T("The Start page opens as its Board: one sandbox as a graph of parts, the agent, its workspaces, the proxy, the network and everything else it may use. Expert shows the same start as text.",
-                            "Die Seite Start öffnet sich als ihr Board: eine Sandbox als Graph aus Teilen, der Agent, seine Workspaces, der Proxy, das Netz und alles andere, was er benutzen darf. Experte zeigt denselben Start als Text.")],
+                "intro": [T("The Board page opens as its Board: one sandbox as a graph of parts, the agent, its workspaces, the proxy, the network and everything else it may use. Expert shows the same start as text.",
+                            "Die Seite Board öffnet sich als ihr Board: eine Sandbox als Graph aus Teilen, der Agent, seine Workspaces, der Proxy, das Netz und alles andere, was er benutzen darf. Experte zeigt denselben Start als Text.")],
                 "scenes": [
                     {"kind": "app", "page": "board", "heading": T("Parts and connections", "Teile und Verbindungen"),
                      "zoom": [0.14, 0.13, 0.99, 0.95],
@@ -1585,8 +1586,8 @@ SERIES = {
                 "topics": [T("Every start, grouped with its parts", "Jeder Start, mit seinen Teilen gruppiert"),
                            T("Change a running sandbox; its own browser", "Eine laufende Sandbox ändern; ihr eigener Browser"),
                            T("Kill switch, emergency stop; schedules on a tab of their own", "Kill-Switch, Notaus; Zeitpläne in einem eigenen Tab")],
-                "intro": [T("Sandboxes and sessions lists every sandbox of your account, here and on your hosts, with a button for each thing you can do with it.",
-                            "Sandboxen & Sitzungen listet jede Sandbox Ihres Kontos, hier und auf Ihren Hosts, mit einem Knopf für alles, was Sie damit tun können.")],
+                "intro": [T("Sessions lists every sandbox of your account, here and on your hosts, with a button for each thing you can do with it.",
+                            "Sitzungen listet jede Sandbox Ihres Kontos, hier und auf Ihren Hosts, mit einem Knopf für alles, was Sie damit tun können.")],
                 "scenes": [
                     {"kind": "app", "page": "sandboxes", "heading": T("One tree of everything", "Ein Baum für alles"),
                      "focus": [0.16, 0.29, 0.99, 0.71],
@@ -1708,8 +1709,8 @@ SERIES = {
                      "captions": [
                          T("In a session the agent runs in tmux: one window for the agent, one for a shell. Control b, then d, detaches; the session keeps running.",
                            "In einer Session läuft der Agent in tmux: ein Fenster für den Agenten, eines für eine Shell. Strg b, dann d, trennt; die Session läuft weiter."),
-                         T("Attach on the page Sandboxes and sessions brings it back, in the app or in a terminal window.",
-                           "Verbinden auf der Seite Sandboxen & Sitzungen holt sie zurück, in der App oder in einem Terminalfenster."),
+                         T("Attach on the Sessions page brings it back, in the app or in a terminal window.",
+                           "Verbinden auf der Seite Sitzungen holt sie zurück, in der App oder in einem Terminalfenster."),
                      ]},
                     {"kind": "bullets", "heading": T("Copy, paste and logins", "Kopieren, Einfügen und Anmelden"),
                      "bullets": [
@@ -1743,8 +1744,8 @@ SERIES = {
             {
                 "id": "approvals", "page": "approvals",
                 "topics": [T("Questions, and why they are asked; a tool call in full", "Fragen, und warum sie gestellt werden; ein Tool-Aufruf vollständig"),
-                           T("Blocked: every refusal of a run", "Blockiert: jede Ablehnung eines Laufs"),
-                           T("Allowed now, remembered, history", "Jetzt erlaubt, gemerkt, Verlauf")],
+                           T("Refused: every refusal of a run", "Abgelehnt: jede Ablehnung eines Laufs"),
+                           T("Inspection: what it may reach, remembered", "Inspektion: was sie erreichen darf, gemerkt")],
                 "intro": [T("When an agent wants something its options do not allow, its sandbox asks you instead of failing. The Approvals page is where you answer.",
                             "Wenn ein Agent etwas will, das seine Optionen nicht erlauben, fragt seine Sandbox Sie, statt zu scheitern. Auf der Seite Freigaben antworten Sie.")],
                 "scenes": [
@@ -1756,8 +1757,8 @@ SERIES = {
                          T("Allow once, for this run or always; deny; block always", "Einmal, für diesen Lauf oder immer erlauben; ablehnen; immer sperren"),
                      ],
                      "captions": [
-                         T("The questions of every sandbox, here and on your hosts, wait at the top: a connection, a name lookup, a push with privacy warnings, a page to open.",
-                           "Oben warten die Fragen jeder Sandbox, hier und auf Ihren Hosts: eine Verbindung, ein Lookup, ein Push mit Datenschutz-Warnungen, eine Seite zum Öffnen."),
+                         T("The page has two tabs. The first, Questions, holds the questions of every sandbox, here and on your hosts: a connection, a name lookup, a push with privacy warnings, a page to open.",
+                           "Die Seite hat zwei Tabs. Der erste, Fragen, hält die Fragen jeder Sandbox, hier und auf Ihren Hosts: eine Verbindung, ein Lookup, ein Push mit Datenschutz-Warnungen, eine Seite zum Öffnen."),
                          T("The selected question says why it is asked. You allow it once, for this run or always for the project: one click, and a short note offers to undo it.",
                            "Die gewählte Frage sagt, warum sie gestellt wird. Sie erlauben sie einmal, für diesen Lauf oder immer für das Projekt: ein Klick, und ein kurzer Hinweis bietet Rückgängig an."),
                          T("Without an answer within a minute the request fails, but the question stays open under Timed out: allowed later, the next try goes through. No answer is no decision.",
@@ -1777,31 +1778,31 @@ SERIES = {
                          T("When the question's line has to shorten them, they open by themselves. Allow once lets exactly this call through; the same tool with other arguments asks again.",
                            "Muss die Zeile der Frage sie kürzen, klappen sie von selbst auf. Einmal erlauben lässt genau diesen Aufruf durch; dasselbe Tool mit anderen Argumenten fragt neu."),
                      ]},
-                    {"kind": "app", "page": "approvals", "shot": "approvals-blocked", "heading": T("Blocked", "Blockiert"),
+                    {"kind": "app", "page": "approvals", "shot": "approvals-blocked", "heading": T("Refused", "Abgelehnt"),
                      "zoom": [0.14, 0.3, 1.0, 0.94],
                      "bullets": [
                          T("Every refusal of the run, with its reason and the process", "Jede Ablehnung des Laufs, mit Grund und Prozess"),
-                         T("Allow for this run, Allow always…, Ask again, Deny for this run", "Für diesen Lauf erlauben, Immer erlauben…, Wieder fragen, Für diesen Lauf ablehnen"),
+                         T("Allow for this run, Always, also for later sessions…, Ask again, Deny for this run", "Für diesen Lauf erlauben, Immer, auch für Folgesitzungen…, Wieder fragen, Für diesen Lauf ablehnen"),
                          T("The security mode, the policy and the kill switch still hold", "Sicherheitsmodus, Richtlinie und Kill-Switch gelten weiter"),
                      ],
                      "captions": [
-                         T("Below the questions the page is about one sandbox. Blocked lists everything it was refused, with the reason and the process that tried.",
-                           "Unter den Fragen geht es um eine Sandbox. Blockiert listet alles, was ihr verweigert wurde, mit dem Grund und dem Prozess, der es versucht hat."),
+                         T("The table's tab Refused lists everything a sandbox was refused, with the reason and the process that tried.",
+                           "Der Tab Abgelehnt der Tabelle listet alles, was einer Sandbox verweigert wurde, mit dem Grund und dem Prozess, der es versucht hat."),
                          T("From there you allow it for this run, allow it always as an exception rule, shown before it is written, or let the next try ask again.",
                            "Von dort erlauben Sie es für diesen Lauf, immer als Ausnahmeregel, die vor dem Schreiben gezeigt wird, oder lassen den nächsten Versuch wieder fragen."),
                          T("The network settings open destinations, but they do not change what a ruleset decides: a request a rule asks about is asked even when its host is open.",
                            "Die Netzeinstellungen öffnen Ziele, ändern aber nicht, was ein Regelwerk entscheidet: Eine Anfrage, nach der eine Regel fragt, wird gefragt, auch wenn ihr Host offen ist."),
                      ]},
-                    {"kind": "bullets", "heading": T("Allowed now, remembered, history", "Jetzt erlaubt, gemerkt, Verlauf"),
+                    {"kind": "bullets", "heading": T("Inspection: one sandbox", "Inspektion: eine Sandbox"),
                      "bullets": [
-                         T("Allowed now: what the run may reach beyond its options; Revoke… takes it back", "Jetzt erlaubt: was der Lauf über seine Optionen hinaus erreicht; Zurücknehmen… nimmt es zurück"),
+                         T("Allowed now: everything it may reach and why, from its start and the run; Revoke…, Untaint…, Keep for later starts…, Copy as text", "Jetzt erlaubt: alles, was sie erreichen darf, und warum, vom Start und aus dem Lauf; Zurücknehmen…, Markierung zurücknehmen…, Für spätere Starts behalten…, Als Text kopieren"),
                          T("Remembered: answers that hold for later starts; Forget… asks again", "Gemerkt: Antworten für spätere Starts; Vergessen… fragt wieder"),
-                         T("History: every question with its answer", "Verlauf: jede Frage mit ihrer Antwort"),
+                         T("Questions › All: every question with its answer", "Fragen › Alle: jede Frage mit ihrer Antwort"),
                          T("Notifications only when turned on in Settings; one answer settles a question everywhere", "Benachrichtigungen nur, wenn in den Einstellungen eingeschaltet; eine Antwort erledigt eine Frage überall"),
                      ],
                      "captions": [
-                         T("Allowed now shows what the run may reach beyond its start options, and takes it back. Remembered keeps your answers for later starts.",
-                           "Jetzt erlaubt zeigt, was der Lauf über seine Startoptionen hinaus erreichen darf, und nimmt es zurück. Gemerkt hält Ihre Antworten für spätere Starts."),
+                         T("The second tab, Inspection, is about one sandbox. Allowed now lists everything it may reach, each with why and for how long, and takes back what the run added. Remembered keeps your answers for later starts.",
+                           "Der zweite Tab, Inspektion, gilt einer Sandbox. Jetzt erlaubt listet alles, was sie erreichen darf, jeweils mit Grund und Dauer, und nimmt zurück, was der Lauf bekam. Gemerkt hält Ihre Antworten für spätere Starts."),
                          T("The page keeps reading the questions while the window is closed to the tray; pop-up notifications are off unless you turn them on. When you are unsure, allow once.",
                            "Die Seite liest die Fragen weiter, auch wenn das Fenster im Infobereich ist; Benachrichtigungen sind aus, außer Sie schalten sie ein. Wenn Sie unsicher sind, erlauben Sie einmal."),
                      ]},
@@ -2153,8 +2154,8 @@ SERIES = {
                            "Pinnt ein Katalog ein neueres Image, sagt es der Status des Servers. Aktualisieren nimmt es, Alle aktualisieren tut das für jeden Server; Ordner, Variablen, Limits und Netz bleiben."),
                          T("Give a server network only where you would give it to the agent: a fetch or browser server sends whatever the agent asks it to.",
                            "Geben Sie einem Server nur dort Netz, wo Sie es dem Agenten geben würden: Ein Fetch- oder Browser-Server sendet, was immer der Agent von ihm verlangt."),
-                         T("A start uses a server by name, or you connect it to the agent on the board; Add MCP server on the Sandboxes page gives it to a running sandbox without a restart.",
-                           "Ein Start nutzt einen Server per Namen, oder Sie verbinden ihn auf dem Board mit dem Agenten; MCP-Server hinzufügen auf der Seite Sandboxen gibt ihn einer laufenden Sandbox ohne Neustart."),
+                         T("A start uses a server by name, or you connect it to the agent on the board; Add MCP server on the Sessions page gives it to a running sandbox without a restart.",
+                           "Ein Start nutzt einen Server per Namen, oder Sie verbinden ihn auf dem Board mit dem Agenten; MCP-Server hinzufügen auf der Seite Sitzungen gibt ihn einer laufenden Sandbox ohne Neustart."),
                      ]},
                     {"kind": "app", "page": "mcp", "shot": "mcp-properties", "heading": T("Properties, limits and variables", "Eigenschaften, Limits und Variablen"),
                      "zoom": [0.19, 0.03, 0.81, 0.62],

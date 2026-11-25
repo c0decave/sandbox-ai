@@ -45,7 +45,7 @@ from . import copying, dock_fold, drafts, help_view, labels, short_notices, stor
 from . import device_picker as DP
 from .prerequisites import Prerequisites
 from .session_start import SessionStart, StartTab
-from . import start_link
+from . import board_follow, start_link
 from .start_link import CommandEdit, StartLink, ViewSwitch
 from . import presets as PR
 from . import project_trust as PT
@@ -171,7 +171,7 @@ class DeviceField(QWidget):
 
 
 class RulesField(QWidget):
-    """The Start page's ruleset files (--rules): one per line (a ListField, read like one: value, set_value), with
+    """The Board page's ruleset files (--rules): one per line (a ListField, read like one: value, set_value), with
     New from example… and Check below (rules_tools)."""
     changed = Signal()
 
@@ -765,7 +765,7 @@ class OptionsForm(QTabWidget):
                 widget.setText("" if value is None else str(value))
 
 
-PROJECTS_KEPT = 40  # the projects whose Start page form is kept (the ones shown last)
+PROJECTS_KEPT = 40  # the projects whose Board page form is kept (the ones shown last)
 
 
 def without_file_values(options, values, file_values):
@@ -792,12 +792,12 @@ def without_file_values(options, values, file_values):
 
 class LaunchPage(Prerequisites, SessionStart, QWidget):
     """Choose the agent and every option, see the command line and edit it, start. In the window this is the Expert
-    view of the Start page: the same start as the Board view's board (self.link: start_link.StartLink, which keeps the
+    view of the Board page: the same start as the Board view's board (self.link: start_link.StartLink, which keeps the
     two the same) - what is set here is put onto the board, and Start, Dry run, the project's file and the presets
     are the board's. On its own (no link) it is a form with its own start, as before."""
     opened = Signal(str)  # a project folder was reviewed and trusted here
     images_wanted = Signal()  # a start refused for a service's image: the Images page, Your images
-    view_wanted = Signal(str)  # the window: show this view of the Start page ("board": what the Board alone shows)
+    view_wanted = Signal(str)  # the window: show this view of the Board page ("board": what the Board alone shows)
     link = None  # the Board view's board is this view's start (the window: start_link.StartLink); None: on its own
 
     def __init__(self, sai, terminal):
@@ -1289,7 +1289,9 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
                             agent=preset.agents[0]))
         elif preset.agent and preset.agent in self.sai.agents:
             self.agent.setCurrentText(preset.agent)
-        if preset.source == "sandbox-ai":
+        # (sandbox-ai's preset of another host only - the presets window lists every host's -: its options taken
+        # over, as the app's own; `--preset` there would not find it)
+        if preset.source == "sandbox-ai" and host in PR.from_hosts(preset):
             pairs = [f"{name}={values[marker]}" for marker, name in preset.value_names if values.get(marker)]
             self.set_option("--preset", preset.name)
             self.set_option("--preset-value", pairs)
@@ -2386,7 +2388,6 @@ class LaunchPage(Prerequisites, SessionStart, QWidget):
         self.show_project_note()  # trusted now: its values are read again
 
 
-GIT_URL_EXAMPLE = "https://git.example.org"  # the same in every language
 
 
 def given_network(text):
@@ -2411,10 +2412,11 @@ def given_network(text):
 
 class NetworkDialog(QDialog):
     def __init__(self, parent, presets, title, supported=None, current=None, op="allow", draft=None):
-        """CURRENT (given_network): what the run may reach now - shown above; to allow (OP), its presets ticked and
+        """CURRENT (given_network): what the run may reach now - shown above; to allow (OP), its host sets ticked and
         greyed, so a second Erlauben… never looks as if the first was lost, and only what is new is sent; to revoke,
-        the presets it does not have greyed. DRAFT: the key of what was typed and not sent (drafts.py), filled in
-        again; the Git login names where its token is (a variable, secret or file), never the token."""
+        the host sets it does not have greyed. DRAFT: the key of what was typed and not sent (drafts.py), filled in
+        again. A Git login or an API key is given from Credentials (one place for them, 2026-11-24): Git login or API
+        key… closes this dialog (what was typed is kept) with WANTS_CREDENTIALS set."""
         super().__init__(parent)
         self.setWindowTitle(title)
         self.supported = set(supported or ())
@@ -2430,7 +2432,7 @@ class NetworkDialog(QDialog):
                                   (tr("ports on this computer"), current.get("host_ports"))):
                 if values:
                     parts.append(f"{label}: {', '.join(values)}")
-        self.given.setText(tr("Allowed already during this run (Allowed during the run lists everything): {what}",
+        self.given.setText(tr("Allowed already during this run (What it may reach… lists everything): {what}",
                               what="; ".join(parts)) if parts else "")
         form.addRow(self.given)
         self.given.setVisible(bool(parts))
@@ -2448,7 +2450,7 @@ class NetworkDialog(QDialog):
         self.nets.setToolTip(safe_tooltip(tr("One or more, separated by commas or spaces")))
         form.addRow(tr("Host names (TCP/443)"), self.hosts)
         form.addRow(tr("IP:PORT (TCP)"), self.tcp)
-        form.addRow(tr("Addresses or networks (every port)"), self.nets)
+        form.addRow(tr("Addresses or networks, every port (--allow-net)"), self.nets)
         # What later versions of sandbox-ai can change during the run: shown only where the installed one can.
         self.domains = QLineEdit()
         self.domains.setPlaceholderText("example.org example.net")
@@ -2471,25 +2473,15 @@ class NetworkDialog(QDialog):
         self.keep.setToolTip(safe_tooltip(tr("net allow --keep: the options go into the project's .sandbox-ai.json, "
                                              "only while that file is exactly what you trusted (the new file is "
                                              "trusted at once); logins are kept as references, never as tokens")))
-        self.git_url = QLineEdit()
-        self.git_url.setPlaceholderText(GIT_URL_EXAMPLE)
-        self.git_kind = QComboBox()
-        for kind, label in (("env", tr("variable")), ("secret", tr("secret")), ("file", tr("file"))):
-            self.git_kind.addItem(label, kind)
-        self.git_ref = QLineEdit()
-        self.git_ref.setPlaceholderText(tr("NAME of the variable or secret, or the file"))
-        git_row = QHBoxLayout()
-        for widget in (self.git_url, self.git_kind, self.git_ref):
-            git_row.addWidget(widget, 2 if widget is not self.git_kind else 0)
         if "--allow-host-port" in self.supported:
             form.addRow(tr("Ports on this computer"), self.host_ports)
         if "--dns" in self.supported:
             form.addRow(tr("DNS"), self.dns)
         if "--nameserver" in self.supported:
             form.addRow(tr("Nameservers"), self.nameservers)
-        if "--git-token-env" in self.supported:
-            form.addRow(tr("Git login (the token, never shown)"), git_row)
         self.presets = {}
+        if presets:  # --allow-github ...: a fixed set of names each (TCP/443); "preset" is a start template
+            form.addRow(plain_label(tr("Host sets (TCP/443)")))
         have = set((current or {}).get("hosts") or ())
         for name, hosts in presets.items():
             box = QCheckBox(", ".join(hosts)[:80])
@@ -2504,6 +2496,16 @@ class NetworkDialog(QDialog):
             self.presets[name] = box
         if "--keep" in self.supported:  # net allow only (a revoke keeps nothing)
             form.addRow(tr("Later starts"), self.keep)
+        # A Git login or an API key for this run: Credentials › Give to a running sandbox… (the one place for them).
+        self.wants_credentials = False
+        self.credentials_link = QPushButton(tr("Git login or API key…"))
+        self.credentials_link.setToolTip(safe_tooltip(tr(
+            "Given from Credentials: Git logins › Give to a running sandbox… (a stored login, or one from a variable, "
+            "a secret or a file) and Secrets › Give to a running sandbox… (as an API key). Closes this dialog; what you "
+            "typed here is kept.")))
+        self.credentials_link.clicked.connect(lambda _=False: self.to_credentials())
+        if op == "allow":
+            form.addRow(tr("Logins"), self.credentials_link)
         # OK with nothing to send, or half a Git login: said here, the dialog stays (it closed without a word, and a
         # Git login without its token's place was dropped from what was sent)
         self.op = op
@@ -2517,8 +2519,12 @@ class NetworkDialog(QDialog):
         self.draft = None if draft is None else drafts.Draft(self, draft, {
             "hosts": self.hosts, "tcp": self.tcp, "nets": self.nets, "domains": self.domains,
             "host_ports": self.host_ports, "dns": self.dns, "nameservers": self.nameservers, "keep": self.keep,
-            "git_url": self.git_url, "git_kind": self.git_kind, "git_ref": self.git_ref,
             **{f"preset:{name}": box for name, box in self.presets.items()}})
+
+    def to_credentials(self):
+        """Git login or API key…: closed (not sent), the window opens Credentials for this host."""
+        self.wants_credentials = True
+        self.reject()
 
     def arguments(self):
         """The options of what was typed: each field's items (separated by commas or spaces, each once) an option
@@ -2536,17 +2542,10 @@ class NetworkDialog(QDialog):
             args.append("--dns")
         if "--nameserver" in self.supported:
             args += each("--nameserver", self.nameservers)
-        url, ref = self.git_url.text().strip(), self.git_ref.text().strip()
-        if "--git-token-env" in self.supported and url and ref:
-            args += [f"--git-token-{self.git_kind.currentData()}", f"{url}={ref}"]
         return args
 
     def why_not(self):
-        """Why OK cannot send this yet ("": it can): nothing typed or chosen, or a Git login without its URL or the
-        place of its token."""
-        url, ref = self.git_url.text().strip(), self.git_ref.text().strip()
-        if "--git-token-env" in self.supported and bool(url) != bool(ref):
-            return tr("A Git login needs both: the server's URL and the variable, secret or file of its token.")
+        """Why OK cannot send this yet ("": it can): nothing typed or chosen."""
         if not self.arguments():
             return tr("Type or tick what to allow first.") if self.op == "allow" else \
                 tr("Type or tick what to take back first.")
@@ -2563,47 +2562,6 @@ class NetworkDialog(QDialog):
     def kept(self):
         """Whether what is allowed is also kept for later starts (net allow --keep)."""
         return "--keep" in self.supported and self.keep.isChecked()
-
-
-class AllowedDialog(QDialog):
-    """What a running sandbox was given since its start (sandbox-ai net show), Untaint… for its taint, and - where
-    its sandbox-ai can (net show --keep) - Keep for later starts… and Keep everything for later starts…: what it was
-    given, into its project's .sandbox-ai.json (KEEP(every) does it, asked first)."""
-
-    def __init__(self, parent, title, text, untaint, keep=None):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        layout = QVBoxLayout(self)
-        self.view = QPlainTextEdit(text)
-        self.view.setReadOnly(True)
-        self.view.setFont(MONO)
-        self.view.setAccessibleName(tr("Allowed during the run"))
-        layout.addWidget(self.view, 1)
-        row = QHBoxLayout()
-        self.untaint_button = QPushButton(tr("Untaint…"))
-        self.untaint_button.setAccessibleName(tr("Untaint"))
-        self.untaint_button.setToolTip(tr("Take back the run's taint (sandbox-ai net untaint): only once you checked "
-                                          "the untrusted content that entered it"))
-        self.untaint_button.clicked.connect(lambda _=False: untaint())
-        self.keep_button = QPushButton(tr("Keep for later starts…"))
-        self.keep_button.setToolTip(tr("sandbox-ai net show --keep: the names and addresses you allowed (or approved "
-                                       "always), wildcards, networks, DNS, host ports, devices and workspaces added go "
-                                       "into the project's trusted .sandbox-ai.json; no Git logins"))
-        self.keep_all_button = QPushButton(tr("Keep everything for later starts…"))
-        self.keep_all_button.setToolTip(tr("sandbox-ai net show --keep-all: also what approvals opened once or for "
-                                           "the run"))
-        for button, every in ((self.keep_button, False), (self.keep_all_button, True)):
-            button.clicked.connect(lambda _=False, e=every: keep(e))
-            button.setVisible(keep is not None)
-        close = QPushButton(tr("Close"))
-        close.clicked.connect(self.reject)
-        row.addWidget(self.untaint_button)
-        row.addWidget(self.keep_button)
-        row.addWidget(self.keep_all_button)
-        row.addStretch()
-        row.addWidget(close)
-        layout.addLayout(row)
-        self.resize(720, 460)
 
 
 DEVICE_EXAMPLE = "/dev/..."  # the same in every language
@@ -3001,7 +2959,7 @@ DEMO_PORT = 4000  # the emulated device's port unless --port says otherwise (san
 STOP_WAIT = 30  # seconds sandbox-ai stop waits for a start to end unless --wait says otherwise
 REMOTE_SECONDS = 60  # between two looks at the other hosts' starts (over SSH) while the page is hidden
 REMOTE_SHOWN_SECONDS = 10  # the same while the page is shown: the fleet at a glance
-HIDDEN_EVERY = 4  # the Sandboxes page hidden: this account's starts are read every 4th tick of sandboxes_interval
+HIDDEN_EVERY = 4  # the Sessions page hidden: this account's starts are read every 4th tick of sandboxes_interval
 REMOTE_BACKOFF = 300  # seconds at most between two looks at a host that does not answer (doubled each time)
 START_NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,39}"  # a start's name as sandbox-ai takes it (rename NEW)
 ENDED_STATES = ("stopped", "ended")
@@ -3013,7 +2971,7 @@ SESSION_ACTIONS = (("attach", N_("Attach")), ("attach-app", N_("Attach in the ap
 TERMINAL_ACTIONS = ("attach", "attach-app", "shell")
 ACTION_TITLES = {**dict(SESSION_ACTIONS), "stop": N_("Stop")}
 BULK_ACTIONS = ("stop", "pause", "resume", "delete")  # what acts on several starts at once (Ctrl, Shift)
-# The kill switch (sandbox-ai net cut): its modes as the Sandboxes page offers them (mode, the menu's text, what it
+# The kill switch (sandbox-ai net cut): its modes as the Sessions page offers them (mode, the menu's text, what it
 # does), and what the State column says while one holds.
 CUT_CHOICES = (
     ("remote", N_("Cut the internet"),
@@ -3031,10 +2989,10 @@ EMERGENCY_KEYS = widgets.EMERGENCY_KEYS  # the window's emergency stop: every sa
 EMERGENCY_HELP = N_("Cut the network of every running sandbox at once, the model API too, on this machine and on every "
                     "host (sandbox-ai net cut --all-runs all); no question. File › Lift every cut gives it back.")
 REMOTE_WAIT = 60  # seconds one host may take to list its starts (the hosts are asked at the same time, each apart)
-# What hangs below a start on the Sandboxes page (start_tree.related), by its kind.
+# What hangs below a start on the Sessions page (start_tree.related), by its kind.
 PART_TITLES = {"mcp": N_("MCP server"), "helper": N_("Helper"), "pod": N_("Pod"), "companion": N_("Companion"),
                "team": N_("Team"), "serves": N_("Serves")}
-GROUPS_KEPT = 400  # groups of the Sandboxes page whose fold is kept (the ones changed last)
+GROUPS_KEPT = 400  # groups of the Sessions page whose fold is kept (the ones changed last)
 # Why a start is shown below another one (start_tree.owners' HOW), in its tooltip.
 BELONGS_HELP = {
     "started": N_("Started for {name}: it belongs to that start and is shown below it."),
@@ -3441,12 +3399,12 @@ class ResumeDialog(QDialog):
         # The whole start on the Start page - as a board, or as fields and its command line: every option of the
         # session with what is added here, to look at, change and start as a new start (the session itself is not
         # changed: that is this dialog's OK).
-        self.start_button = buttons.addButton(tr("On the Start page…"), QDialogButtonBox.ButtonRole.ActionRole)
+        self.start_button = buttons.addButton(tr("On the Board page…"), QDialogButtonBox.ButtonRole.ActionRole)
         self.start_button.setAutoDefault(False)
         set_enabled(self.start_button, start is not None, tr(
             "The options this session was created with are not known here (a session of another host, or one made "
             "by an older sandbox-ai)"), tr(
-            "Show this session's whole start on the Start page, with what is added here: as a board or as fields "
+            "Show this session's whole start on the Board page, with what is added here: as a board or as fields "
             "and its command line, to look at, change and start as a new start. The session itself is not changed "
             "(that is OK); what Take out names is this dialog's own."))
         self.start_button.clicked.connect(lambda _=False: self.show_on_start())
@@ -3458,7 +3416,7 @@ class ResumeDialog(QDialog):
             "options": self.options, "dropped": self.dropped})
 
     def show_on_start(self):
-        """On the Start page…: the dialog closes without resuming; its caller shows start_line() on the Start page."""
+        """On the Board page…: the dialog closes without resuming; its caller shows start_line() on the Board page."""
         self.to_start = True
         self.reject()
 
@@ -3521,6 +3479,9 @@ class SandboxesPage(QWidget):
     notice = Signal(str, str, str)  # level, title, text: a notification (what the kill switch cut)
     open_credentials = Signal(str)  # the secrets and logins of that host (the Credentials page with it chosen)
     open_given = Signal(str, str)  # (host, run): what that running start was given during its run, each with Revoke…
+    # (host, run): everything it may reach and why - Approvals › Inspection › Allowed now for it (Revoke…, Untaint…,
+    # Keep for later starts…, Copy as text): one view of it in the app (2026-11-24, proposal E)
+    show_reach = Signal(str, str)
     # Resume with…'s "On the Start page…": (agent, launcher options, agent arguments, host) of a session's start to
     # show on the Start page (the window: show_start_line)
     start_wanted = Signal(str, object, object, str)
@@ -3788,8 +3749,17 @@ class SandboxesPage(QWidget):
         storage.clicked.connect(lambda _=False: self.open_storage())
         self.transfer_buttons["storage"] = storage
         self.copy_to_host_button, self.move_to_host_button = self.transfer_buttons["copy"], self.transfer_buttons["move"]
+        # Show on the Board (user 2026-11-24): the Board with the selected session's project - its tab, its board, its
+        # Agent part selected (the window: board_request; board_follow.show). A button here and the first entry of
+        # the right-click menu.
+        self.board_request = None
+        self.board_button = button_icons.IconButton("board", tr("Show on the Board"))
+        self.board_button.setToolTip(tr("Show the Board with this session's project: its tab, its board, its Agent "
+                                        "part selected"))
+        self.board_button.clicked.connect(lambda _=False: self.show_on_board())
         self.session_row.layout().addWidget(flow(self.session_label, *self.session_buttons.values(),
-                                                 self.resume_with_button, *self.transfer_buttons.values()))
+                                                 self.resume_with_button, *self.transfer_buttons.values(),
+                                                 self.board_button))
         # What a running sandbox may reach (sandbox-ai net), its devices and limits (until it ends).
         self.run_buttons, self.run_named = [], {}
         for key, text, tip, slot in (
@@ -3797,7 +3767,9 @@ class SandboxesPage(QWidget):
                  lambda: self.network("allow")),
                 ("revoke", tr("Revoke…"), tr("Take back what was allowed during the run (sandbox-ai net revoke)"),
                  lambda: self.network("revoke")),
-                ("allowed", tr("Allowed during the run"), tr("What was allowed since the start (sandbox-ai net show)"),
+                ("allowed", tr("What it may reach…"), tr("What the selected sandbox may reach and why: what its start "
+                                                          "opened, each with its source, and what was allowed during "
+                                                          "the run (sandbox-ai net show)"),
                  self.show_allowed),
                 ("log", tr("Connection log"), tr("The connection proxy's log of its project"), self.log),
                 ("add-device", tr("Add device…"), tr("Hand a host device to the selected sandbox until it ends"),
@@ -3858,6 +3830,8 @@ class SandboxesPage(QWidget):
         layout.addWidget(self.devices_label)
         self.workspaces_label = plain_label(role="secondary")
         layout.addWidget(self.workspaces_label)
+        self.devices_label.hide()  # (only while something was added: show_added)
+        self.workspaces_label.hide()
         # The session bridges between running sessions of this machine (sandbox-ai bridge): listed below, marked on
         # both sessions' rows (State), made, shown, revoked and resumed in the background.
         from .bridges_view import BridgesBox
@@ -3878,16 +3852,12 @@ class SandboxesPage(QWidget):
         self.schedules_box.setStyleSheet("QGroupBox { border: none; margin-top: 0px; padding-top: 0px; }")
         self.schedules_box.layout().setContentsMargins(0, 0, 0, 0)
         QVBoxLayout(self.schedules_tab).addWidget(self.schedules_box)
-        self.tabs.addTab(self.sessions_tab, tr("Sessions & sandboxes").replace("&", "&&"))  # (no mnemonic)
+        self.tabs.addTab(self.sessions_tab, tr("Sessions").replace("&", "&&"))  # (no mnemonic)
         self.tabs.addTab(self.schedules_tab, tr("Schedules"))
         outer.addWidget(self.tabs)
         # A right click on a start: every command of the buttons around the list, as they are enabled for the
         # selected start(s) - the same rules, a disabled one with its reason.
-        widgets.list_menu(self.table, lambda: [
-            *self.session_buttons.values(), self.resume_with_button, None, self.stop_button, self.cut_button,
-            self.stop_all_button, None,
-            *self.run_menu_entries(), self.credentials_button, None, *self.transfer_buttons.values(), None,
-            *self.manage_buttons.values(), None, self.refresh_button])
+        widgets.list_menu(self.table, self.table_menu_entries)
         # This account's starts every sandboxes_interval while the page is shown; hidden, every HIDDEN_EVERY-th time
         # (the window's tabs and counts follow them); with the window in the tray or minimised, not at all (read again
         # when it is shown).
@@ -5081,6 +5051,33 @@ class SandboxesPage(QWidget):
                   ("remove", N_("Remove…"), ("remove-mcp", "remove-kits", "remove-toolchain", "remove-workspace",
                                              "remove-device")))
 
+    def table_menu_entries(self):
+        """The right click on a start (widgets.context_menu): every command of the buttons around the list, grouped
+        (the user 2026-11-24: one long list was overwhelming) - the most used first (to it: Show on the Board, into it;
+        its run, the kill switch), then what it may reach and has (Network, Add…, Remove…, Limits…, its secrets), what is inside it,
+        copy, move and export, and the rest under Manage; each group between separator lines."""
+        session, transfer, manage, run = (self.session_buttons, self.transfer_buttons, self.manage_buttons,
+                                          self.run_named)
+
+        def pick(buttons, *keys):
+            return [buttons[key] for key in keys if key in buttons]
+        group = widgets.MenuGroup
+        return [
+            self.board_button,  # (the ways to it: first the Board with this session's tab and project)
+            *pick(session, "attach", "attach-app", "shell"), *pick(run, "browser"), None,
+            *pick(session, "resume"), self.resume_with_button, *pick(session, "pause"), self.stop_button,
+            self.cut_button, None,
+            group(tr("Network"), pick(run, "allow", "revoke", "allowed", "log", "rules")),
+            *[group(tr(title), pick(run, *keys)) for _, title, keys in self.RUN_GROUPS],
+            *pick(run, "limits"), self.credentials_button, None,
+            group(tr("Look inside"), [*pick(transfer, "checkpoints", "memory", "files", "storage"),
+                                      *pick(manage, "history", "report")]),
+            group(tr("Copy, move, export"), pick(transfer, "copy", "move", "duplicate", "export", "export-state",
+                                                 "import")),
+            group(tr("Manage"), [*pick(manage, "rename"), *pick(session, "delete"), self.stop_all_button, None,
+                                 *pick(manage, "usage", "clean", "optimize")]),
+            None, self.refresh_button]
+
     def run_menu_entries(self):
         """The run buttons for a context menu (widgets.context_menu): the network's and the rest in their order, the
         add and remove actions as the submenus Add… and Remove… (RUN_GROUPS) where the first of them stood."""
@@ -5096,9 +5093,23 @@ class SandboxesPage(QWidget):
                             for _, title, keys in self.RUN_GROUPS]
         return entries
 
+    def show_on_board(self):
+        """Show on the Board: the Board with the selected session's project (the window's board_request)."""
+        instance = self.current()
+        if self.board_request is not None and board_follow.why_not(instance) is None:
+            self.log_asked("show-on-board", instance)
+            return self.board_request(instance)
+        return False
+
+    def update_board_button(self):
+        """Show on the Board: only with one session or sandbox selected (why not, in its tooltip)."""
+        why = board_follow.why_not(self.current())
+        set_enabled(self.board_button, why is None, why)
+
     def update_buttons(self):
         instance = self.current()
         self.update_cut_button()  # never held back by another command: the kill switch must act at once
+        self.update_board_button()  # (it changes nothing: never held back either)
         self.update_credentials_button(None if self.several() else instance)
         if busy(self):
             # A command runs: its buttons stay greyed out until it is done; a row of another host never keeps
@@ -5789,18 +5800,23 @@ class SandboxesPage(QWidget):
     # -- devices and limits --
 
     def load_devices(self):
-        """The devices added to the selected sandbox during its run (in the background)."""
+        """The devices and workspaces added to the selected sandbox during its run (in the background): their lines
+        below the list change only with what they say - the page reads them at each refresh, and emptied first, they
+        blinked every few seconds (the user 2026-11-24); nothing added: no line (only news is shown)."""
         instance = self.current()
         run = instance.run if instance and getattr(instance, "host", "local") == "local" else None
         self.devices_token += 1
         token = self.devices_token
         host = getattr(instance, "host", LOCAL) if instance is not None else LOCAL
+        key = getattr(instance, "key", None)
+        if key != getattr(self, "devices_of", None):  # another start: the lines of the one before go at once
+            self.devices_of = key
+            self.show_added(self.devices_label, "")
+            self.show_added(self.workspaces_label, "")
         if host != LOCAL and instance.state in ("running", "paused") and backend.valid_run(instance.name) and \
                 self.stale(instance) is None:
             # What was added there during the run, as that host lists it (devices|workspace list NAME --json there).
             self.added, self.added_workspaces = [], []
-            self.devices_label.setText("")
-            self.workspaces_label.setText("")
             name = instance.name
             background(self.sai.host_devices_added, host, name, timeout=90,
                        done=lambda found, error: self.devices_loaded(token, [label for _, label in found or []], None)
@@ -5810,13 +5826,20 @@ class SandboxesPage(QWidget):
             return
         if not run:
             self.added, self.added_workspaces = [], []
-            self.devices_label.setText("")
-            self.workspaces_label.setText("")
+            self.show_added(self.devices_label, "")
+            self.show_added(self.workspaces_label, "")
             return
         background(self.sai.devices_added, run, timeout=30,
                    done=lambda found, error: self.devices_loaded(token, found, error))
         background(self.sai.workspaces, run, timeout=30,
                    done=lambda found, error: self.workspaces_loaded(token, found, error))
+
+    @staticmethod
+    def show_added(label, text):
+        """LABEL says TEXT (set only when it changes: no repaint for the same words), hidden while it says nothing."""
+        if label.text() != text:
+            label.setText(text)
+        label.setVisible(bool(text))
 
     def workspaces_loaded(self, token, found, error):
         if token != self.devices_token:
@@ -5825,20 +5848,20 @@ class SandboxesPage(QWidget):
         instance = self.current()
         if getattr(instance, "host", LOCAL) != LOCAL:  # a host's: shown, never what Remove… acts on here
             added = [e for e in entries if e.get("source") == "added"]
-            self.workspaces_label.setText(tr("Workspaces added during the run on {host}: {list}", host=printable(
-                instance.host), list=", ".join(map(workspace_label, added))) if added else
-                tr("No workspace added during the run."))
+            self.show_added(self.workspaces_label, tr(
+                "Workspaces added during the run on {host}: {list}", host=printable(instance.host),
+                list=", ".join(map(workspace_label, added))) if added else "")
             return
         self.added_workspaces = [e for e in entries if e.get("source") == "added"]
         if isinstance(error, (AttributeError, ImportError)):
-            self.workspaces_label.setText(tr("This sandbox-ai version cannot add workspaces during a run."))
+            self.show_added(self.workspaces_label, tr("This sandbox-ai version cannot add workspaces during a run."))
             return
         def shown(entry):
             note = entry.get("note") if isinstance(entry.get("note"), str) else ""  # what sandbox-ai says of it
             return workspace_label(entry) + (f": {printable(note)[:300]}" if note else "")
-        self.workspaces_label.setText(tr("Workspaces added during the run: {list}",
-                                         list=", ".join(map(shown, self.added_workspaces)))
-                                      if self.added_workspaces else tr("No workspace added during the run."))
+        self.show_added(self.workspaces_label, tr("Workspaces added during the run: {list}",
+                                                  list=", ".join(map(shown, self.added_workspaces)))
+                        if self.added_workspaces else "")
 
     def devices_loaded(self, token, found, error):
         if token != self.devices_token:
@@ -5846,16 +5869,16 @@ class SandboxesPage(QWidget):
         instance = self.current()
         if getattr(instance, "host", LOCAL) != LOCAL:  # a host's: shown, never what Remove device acts on here
             found = list(found or [])
-            self.devices_label.setText(tr("Added during the run on {host}: {list}", host=printable(instance.host),
-                                          list=", ".join(map(printable, found))) if found else
-                                       tr("No device added during the run."))
+            self.show_added(self.devices_label, tr("Added during the run on {host}: {list}",
+                                                   host=printable(instance.host), list=", ".join(map(printable, found)))
+                            if found else "")
             return
         self.added = list(found or []) if error is None else []
         if isinstance(error, AttributeError):
-            self.devices_label.setText(tr("This sandbox-ai version cannot change devices during a run."))
+            self.show_added(self.devices_label, tr("This sandbox-ai version cannot change devices during a run."))
         else:
-            self.devices_label.setText(tr("Added during the run: {list}", list=", ".join(map(printable, self.added)))
-                                       if self.added else tr("No device added during the run."))
+            self.show_added(self.devices_label, tr("Added during the run: {list}",
+                                                   list=", ".join(map(printable, self.added))) if self.added else "")
 
     def on_host(self, host, method, *args):
         """METHOD(*ARGS) for a sandbox of HOST, to run in the background (another host: host=HOST)."""
@@ -6020,6 +6043,9 @@ class SandboxesPage(QWidget):
             row = choice["row"]
             label = tr("{name} {version}: {commands}", name=choice["name"], version=printable(row["version"]),
                        commands=printable(", ".join(row.get("commands") or [])[:80])) if choice["stored"] else \
+                tr("{name} {version} (built on this machine from its publisher's downloads first: a license to "
+                   "accept)", name=choice["name"], version=printable(row["version"])) \
+                if backend.license_terms(row) else \
                 tr("{name} {version} (downloaded from the signed catalog first)", name=choice["name"],
                    version=printable(row["version"]))
             labels[label] = choice
@@ -6034,15 +6060,23 @@ class SandboxesPage(QWidget):
         if opens:
             text += "\n\n" + tr("Its registries are opened for the run: {hosts} (not in the security modes high and "
                                 "paranoid).", hosts=printable(", ".join(opens)))
-        if download:
+        terms = backend.license_terms(row) if download else None
+        if download and terms:
+            text += "\n\n" + tr("It is built in the store first from {by}'s downloads ({size} MiB, each checked "
+                                "against the signed catalog's recipe); its license is asked next.", by=terms["by"],
+                                size=int((row.get("size") or 0) / (1 << 20)))
+        elif download:
             text += "\n\n" + tr("It is downloaded from the signed catalog into the store first ({size} MiB).",
                                 size=int((row.get("size") or 0) / (1 << 20)))
         if not ask_first(self, "toolchain-add", title, text, tr("Add")):
             return
+        # A license is the human's to accept: a question of its own, No its default; only then its option is given.
+        if terms and not widgets.accept_license(self, tr("The toolchain {name}", name=name), terms):
+            return
 
         def work():
             if download:
-                status, out, err = self.sai.toolchain_add(value, host=host)
+                status, out, err = self.sai.toolchain_add(value, host=host, accept=terms["option"] if terms else None)
                 if status != 0:
                     return status, out, err
             return self.sai.toolchain_attach(run, value, host=host)
@@ -6234,11 +6268,11 @@ class SandboxesPage(QWidget):
         it there; None, said, when none is selected."""
         instance = self.current()
         if instance is None or instance.kind != "session" or instance.state != "running":
-            QMessageBox.information(self, tr("Sandboxes"), tr("Select a running kept start (a session) first."))
+            QMessageBox.information(self, tr("Sessions"), tr("Select a running kept start (a session) first."))
             return None
         host, name = self.start_host(instance)
         if not backend.valid_run(name):
-            warn(self, tr("Sandboxes"), tr("Not a start's name: {ident}", ident=printable(name)[:60]))
+            warn(self, tr("Sessions"), tr("Not a start's name: {ident}", ident=printable(name)[:60]))
             return None
         return host, name, instance
 
@@ -6437,7 +6471,7 @@ class SandboxesPage(QWidget):
             # Stopped or paused: out of its options, for its later starts (mcp detach without --live).
             host, name = self.start_host(instance)
             if not backend.valid_run(name):
-                warn(self, tr("Sandboxes"), tr("Not a start's name: {ident}", ident=printable(name)[:60]))
+                warn(self, tr("Sessions"), tr("Not a start's name: {ident}", ident=printable(name)[:60]))
                 return
             from .start_tree import reached
             self.choose_detach(host, name, [server for server, _now in reached(instance)], None, live=False)
@@ -6558,7 +6592,7 @@ class SandboxesPage(QWidget):
                 return instance.host, instance.name
         elif instance is not None and instance.run:
             return "local", instance.run
-        QMessageBox.information(self, tr("Sandboxes"), tr("Select a running sandbox first."))
+        QMessageBox.information(self, tr("Sessions"), tr("Select a running sandbox first."))
         return None
 
     def network(self, op):
@@ -6598,6 +6632,8 @@ class SandboxesPage(QWidget):
         key = ("net", op, host, run)  # what was typed and not sent: filled in again (drafts.py)
         dialog = NetworkDialog(self, presets, title, supported, current=current, op=op, draft=key)
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted or not dialog.arguments():
+            if dialog.wants_credentials:  # Git login or API key…: given from Credentials, for this host
+                self.open_credentials.emit(host)
             return
         arguments = dialog.arguments()
         keep = dialog.kept()
@@ -6636,25 +6672,8 @@ class SandboxesPage(QWidget):
 
         def send(arguments):
             background(self.sai.host_run, host, "net", "allow", run, *arguments, *(["--keep"] if keep else []),
-                       owner=self, work=True, source=self.run_buttons, timeout=150,
-                       done=lambda result, error_: allowed(arguments, result, error_))
+                       owner=self, work=True, source=self.run_buttons, timeout=150, done=done)
 
-        def allowed(arguments, result, error_):
-            # A Git login the run's connection proxy cannot use (no proxy, a server it does not inspect, an older
-            # start) is refused, naming the only other way: into the sandbox, where the agent can read the token.
-            # Asked about by itself, saying so; only that yes adds --git-token-in-sandbox.
-            status, out, err = outcome(result, error_)
-            if status != 0 and "--git-token-in-sandbox" in err and "--git-token-in-sandbox" not in arguments:
-                why = printable_text((err.strip().splitlines() or [""])[-1])
-                if ask_first(self, "net-allow", title, tr(
-                        "{run} cannot be given this Git login through its connection proxy.\n\nThe only other way "
-                        "puts the token into the sandbox's session directory for its Git: the agent can read it "
-                        "there. Give it so?\n\n{why}", run=printable(run), why=why), tr("Give into the sandbox")):
-                    background(self.sai.host_run, host, "net", "allow", run, *arguments, "--git-token-in-sandbox",
-                               *(["--keep"] if keep else []), owner=self, work=True, source=self.run_buttons,
-                               timeout=150, done=done)
-                    return
-            done(result, error_)
         if wildcards and "--allow-shared-wildcard" in (supported or ()):
             # Below a shared service (anyone can rent a name there): its risk read in the background, then asked;
             # else (an older sandbox-ai there) it refuses such a wildcard itself, saying why.
@@ -6664,64 +6683,11 @@ class SandboxesPage(QWidget):
         send(arguments)
 
     def show_allowed(self):
+        """What it may reach…: the Approvals page's Inspection › Allowed now for the selected running sandbox (the
+        window opens it); its plain text (sandbox-ai net show) is copied from there."""
         target = self.target()
-        if not target:
-            return
-        host, run = target
-
-        def read():  # what it was given, and whether its sandbox-ai keeps it for later starts (net show --keep)
-            shown = self.sai.host_run(host, "net", "show", run, timeout=120)
-            try:
-                keeps = "--keep" in (self.sai.net_options("show") if host == LOCAL else
-                                     self.sai.host_net_options(host, "show"))
-            except ValueError:  # its --help not answered: not offered
-                keeps = False
-            return shown, keeps
-        background(read, owner=self, source=self.run_buttons, timeout=200,
-                   done=lambda result, error: self.allowed_shown(run, result[0] if error is None else None, error,
-                                                                 host, keeps=error is None and result[1]))
-
-    def allowed_shown(self, run, result, error, host="local", keeps=False):
-        """What the run was given since its start, with Untaint… (sandbox-ai net untaint RUN) and Keep…: not modal,
-        so the Approvals page stays usable while it is open."""
-        from . import widgets
-        title = tr("{run} on {host}", run=printable(run), host=printable(host)) if host != "local" else printable(run)
-        text = "\n".join(printable(line) for line in "\n".join(outcome(result, error)[1:]).strip().splitlines())
-        self.update_buttons()
-        self.allowed_dialog = AllowedDialog(self, title, text, lambda: self.untaint(host, run),
-                                            keep=(lambda every: self.keep_network(host, run, every)) if keeps else None)
-        if widgets.AUTO_ANSWER is not None:  # tests: what would be shown is collected
-            widgets.SHOWN.append((title, text, None))
-            return
-        widgets.show_modeless(self.allowed_dialog)
-
-    def keep_network(self, host, run, every=False):
-        """`sandbox-ai net show RUN --keep` (EVERY: --keep-all) on HOST: what the run was given goes into its project's
-        .sandbox-ai.json, for every later start of that project - asked first."""
-        title = tr("Keep for later starts: {run} on {host}", run=printable(run), host=printable(host)) \
-            if host != LOCAL else tr("Keep for later starts: {run}", run=printable(run))
-        text = tr("Keep what you gave {run} (allowed names and addresses, networks, DNS, ports, devices, workspaces) "
-                  "in its project's .sandbox-ai.json? Every later start of that project gets it.", run=printable(run))
-        if every:
-            text += " " + tr("Also what approvals opened once or for the run.")
-        if host != LOCAL:
-            text = tr("On {host}: {text}", host=printable(host), text=text)
-        if not backend.valid_run(run) or not ask_first(self, "net-keep", title, text, tr("Keep")):
-            return
-        background(self.sai.net_keep, host, run, every, owner=self, work=True, source=self.run_buttons, timeout=120,
-                   done=lambda result, error: self.reported(title, result, error))
-
-    def untaint(self, host, run):
-        """`sandbox-ai net untaint RUN` (on HOST): the rules for tainted runs no longer hold - asked first."""
-        title = tr("Untaint {run} on {host}", run=printable(run), host=printable(host)) if host != LOCAL else \
-            tr("Untaint {run}", run=printable(run))
-        if not backend.valid_run(run) or not ask_first(self, "net-untaint", title, tr(
-                "Take back the taint of {run}? Untrusted content entered it; the rules for tainted runs (what it may "
-                "reach, what is asked) no longer hold until such content enters it again. Only when you checked what "
-                "came in.", run=printable(run)), tr("Untaint")):
-            return
-        background(self.sai.host_run, host, "net", "untaint", run, owner=self, source=self.run_buttons, timeout=90,
-                   work=True, done=lambda result, error: self.reported(title, result, error))
+        if target:
+            self.show_reach.emit(*target)
 
     def reload_rules(self):
         """`sandbox-ai rules reload RUN` (on its host): the selected running sandbox reads its HTTP rules anew - asked
@@ -6892,13 +6858,13 @@ class SandboxesPage(QWidget):
         title = tr("Resume {name} on {host}", name=printable(name), host=printable(host)) if host != LOCAL else \
             tr("Resume {name}", name=printable(name))
         if widgets.exec_dropped(dialog) != QDialog.DialogCode.Accepted:
-            if getattr(dialog, "to_start", False):  # On the Start page…: the whole start there, nothing resumed
+            if getattr(dialog, "to_start", False):  # On the Board page…: the whole start there, nothing resumed
                 try:
                     agent, argv, arguments = dialog.start_line()
                 except ValueError as exc:
                     warn(self, title, printable_text(exc))
                     return
-                self.log_asked("resume with: its start shown on the Start page", instance)
+                self.log_asked("resume with: its start shown on the Board page", instance)
                 self.start_wanted.emit(agent, argv, arguments, host)
             return
         try:
@@ -7181,7 +7147,7 @@ class ConnectionsPage(QWidget):
                   host=self.hosts.label())
 
     def open_remote(self, host, source):
-        """The connection log of the start SOURCE (sandbox-ai activity's arguments) on HOST (the Sandboxes page's
+        """The connection log of the start SOURCE (sandbox-ai activity's arguments) on HOST (the Sessions page's
         Connection log of a host's start)."""
         if self.host() != host:
             self.hosts.set_host(host)
@@ -7918,11 +7884,12 @@ class McpPage(QWidget):
         self.host_choice = HostCombo(sai)
         self.host_choice.chosen.connect(lambda _host: self.host_changed())
         self.host_note = plain_label(role="secondary")
-        self.follow_note = follow_note()  # whose servers, when the window's pages follow the Sandboxes page's host
+        self.follow_note = follow_note()  # whose servers, when the window's pages follow the Sessions page's host
         layout.addWidget(flow(self.host_choice, self.follow_note, self.host_note))
         servers = QGroupBox(tr("Your MCP servers (use them with --mcp NAME)"))
         servers_layout = QVBoxLayout(servers)
-        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs"), tr("Catalog")], stretch=2, compact=(1,))
+        self.servers = table([tr("Name"), tr("Status"), tr("Serves"), tr("Runs"), tr("Catalog"), tr("Check")], stretch=2,
+                             compact=(1, 5))
         self.servers.setAccessibleName(tr("MCP servers"))
         widgets.multi_select(self.servers)  # several at once (Ctrl, Shift): Stop takes them all
         servers_layout.addWidget(self.servers)
@@ -7966,19 +7933,40 @@ class McpPage(QWidget):
                                              "pins, where there is one (sandbox-ai mcp update)"))
         self.update_all_button.clicked.connect(lambda _=False: self.update_servers(every=True))
         self.server_buttons += [self.update_button, self.update_all_button]
-        self.notes = {}
-        # Start…, Attach to… and Properties…: one server
-        widgets.one_only(self.servers, [self.server_buttons[0], self.attach_button, self.properties_button])
+        # The catalog's Burp in host mode: the extension jar your own Burp loads (sandbox-ai mcp burp extension)
+        self.burp_button = QPushButton(tr("Burp extension…"))
+        self.burp_button.setToolTip(tr("The Burp server selected: write the extension jar of its signed image for your "
+                                       "own Burp and show its path and SHA-256 to copy (sandbox-ai mcp burp "
+                                       "extension); in Burp: Extensions, Add, Java, that file, then its MCP tab"))
+        self.burp_button.clicked.connect(lambda _=False: self.burp_extension())
+        self.burp_button.setVisible(False)  # shown once the list has a Burp server (servers_read)
+        # Check / Check all: each server started as a start starts it, asked for its tools, stopped again (sandbox-ai
+        # mcp check): its result in the Check column - ok, or why and the fix (the user, 2026-11-25: "Bitte auch
+        # prüfen, ob wir mit anderen MCP-Servern solche Probleme haben").
+        self.check_button = QPushButton(tr("Check"))
+        self.check_button.setToolTip(tr("Start each server selected as a start would, ask it for its tools and stop it "
+                                        "again (sandbox-ai mcp check): ok, or why it failed and the fix"))
+        self.check_button.clicked.connect(lambda _=False: self.check_servers())
+        self.check_all_button = QPushButton(tr("Check all"))
+        self.check_all_button.setToolTip(tr("Check every server of the host shown (sandbox-ai mcp check --all): one "
+                                            "after the other, a few seconds each"))
+        self.check_all_button.clicked.connect(lambda _=False: self.check_servers(every=True))
+        self.server_buttons += [self.check_button, self.check_all_button]
+        self.notes, self.checks = {}, {}
+        # Start…, Attach to…, Properties… and Burp extension…: one server
+        widgets.one_only(self.servers, [self.server_buttons[0], self.attach_button, self.properties_button,
+                                        self.burp_button])
         self.servers.itemSelectionChanged.connect(self.update_copy_to)
         self.servers.doubleClicked.connect(lambda _index: self.properties())
         for keys in ("Alt+Return", "Alt+Enter"):
             shortcut = QShortcut(QKeySequence(keys), self.servers)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda: self.properties())
-        table_menu(self.servers, lambda: [*self.server_buttons, None, self.copy_to_button, self.copy_button])
+        table_menu(self.servers, lambda: [*self.server_buttons, *([self.burp_button] if self.burp_selected() else []),
+                                          None, self.copy_to_button, self.copy_button])
         # One row that wraps where the window is narrow: the copy buttons' texts are long in German, and Copy NAME to
         # another host… grows with the name selected (the page needed 996 px, more than a small laptop's 900)
-        servers_layout.addWidget(flow(*self.server_buttons, self.copy_to_button, self.copy_button))
+        servers_layout.addWidget(flow(*self.server_buttons, self.burp_button, self.copy_to_button, self.copy_button))
         layout.addWidget(servers)
         catalog = QGroupBox(tr("Catalogs: sandbox-ai-mcp (mcp:) and axross-mcp-hub (hub:)"))
         catalog_layout = QVBoxLayout(catalog)
@@ -8021,7 +8009,7 @@ class McpPage(QWidget):
         layout.addWidget(catalog)
         self.entries, self.catalog_requested, self.catalog_of, self.shown_before = {}, False, None, False
         # When another host was chosen while the page was hidden (time.monotonic; the window gives a hidden page the
-        # Sandboxes page's host as it is about to be shown): its servers were asked for then, not again by that show.
+        # Sessions page's host as it is about to be shown): its servers were asked for then, not again by that show.
         self.host_read_at = None
         self.update_copy_to()
         self.refresh()
@@ -8064,7 +8052,7 @@ class McpPage(QWidget):
                                   host=printable(host)) if host != LOCAL else "")
         fill(self.servers, [])
         fill(self.catalog, [])
-        self.entries = {}
+        self.entries, self.checks = {}, {}
         self.host_read_at = None if self.isVisible() else time.monotonic()
         self.refresh()
         if self.catalog_requested:
@@ -8081,7 +8069,10 @@ class McpPage(QWidget):
         if error is not None:
             rows = [(tr("(error)"), "", "", str(error), "")]
         self.server_rows = list(rows)
-        fill(self.servers, rows, ["ok" if r[1] == "running" else None for r in rows])
+        checked = [self.check_cell(r[0]) for r in rows]
+        fill(self.servers, [(*r, cell[0]) for r, cell in zip(rows, checked)],
+             ["ok" if r[1] == "running" else None for r in rows], tooltips=[cell[1] for cell in checked])
+        self.burp_button.setVisible(any(self.is_burp_row(row) for row in self.server_rows))
         if error is None:  # then what ended a server's processes, and limits below its catalog's (in the background)
             host = self.host()
             background(self.sai.host_mcp_notes, host, timeout=90,
@@ -8102,7 +8093,8 @@ class McpPage(QWidget):
                 problem = note["problem"]
                 status = tr("{status}, a problem at {time}", status=row[1], time=printable(problem.get("time") or ""))
                 tips.append(printable(f"{problem.get('what')}: {problem.get('why')}. ")
-                            + tr("Fix: {fix}", fix=printable_text(problem.get("fix") or "")))
+                            + tr("Fix: {fix}", fix=printable_text(problem.get("fix") or ""))
+                            + (" " + tr("Its log: {path}", path=printable(problem["log"])) if problem.get("log") else ""))
             if note and note.get("below"):
                 status += " · " + tr("below the catalog's limits")
                 tips.append(tr("Below the limits its catalog recommends: {limits}. Properties… applies them (sandbox-ai "
@@ -8118,11 +8110,86 @@ class McpPage(QWidget):
                                                 f"{backend.short_digest(pair[1])}"
                                                 for key, pair in newer.items() if key in ("image", "rootfs")),
                                name=printable(row[0])))
-            rows.append((row[0], status, *row[2:]))
+            cell, tip = self.check_cell(row[0])
+            if tip:
+                tips.append(tip)
+            rows.append((row[0], status, *row[2:5], cell))
             colors.append("bad" if note and note.get("problem") else "warn" if note and (note.get("below") or newer)
                           else "ok" if row[1] == "running" else None)
             tooltips.append("\n".join(tips) or None)
         fill(self.servers, rows, colors, tooltips=tooltips)
+
+    @staticmethod
+    def is_burp_row(row):
+        """Whether a row of the list is a Burp server (its Runs column: backend.burp_text, in either language)."""
+        return len(row) > 3 and str(row[3]).startswith("Burp Suite")
+
+    def burp_selected(self):
+        name = selected(self.servers)
+        return any(row[0] == name and self.is_burp_row(row) for row in getattr(self, "server_rows", []))
+
+    def burp_extension(self):
+        """Burp extension…: the extension jar of the Burp server selected, written on the host shown (sandbox-ai mcp
+        burp extension) - its path and SHA-256 in a window to copy from, with how your Burp loads it."""
+        name = selected(self.servers)
+        if not name or not re.fullmatch(backend.MCP_NAME, name) or not self.burp_selected():
+            inform(self, tr("Burp extension"), tr("Select the Burp server first (sandbox-ai mcp add burp)."))
+            return
+        host = self.host()
+        background(self.sai.host_burp_extension, host, name, source=self.burp_button, owner=self, timeout=600,
+                   work=True, done=lambda found, error: alive(self) and self.burp_extension_shown(found, error))
+
+    def burp_extension_shown(self, found, error):
+        if error is not None:
+            inform(self, tr("Burp extension"), str(error), warning=True)
+            return
+        widgets.show_text_window(self, tr("Burp extension"), tr(
+            "{path}\n\nSHA-256 {sha256}\nFrom {image}\n\nIn Burp: Extensions, Add, Extension type Java, this file; "
+            "then its MCP tab: Enabled, Server host 127.0.0.1.", path=printable(str(found.get("path") or "")),
+            sha256=printable(str(found.get("sha256") or "")), image=printable(str(found.get("image") or ""))))
+
+    def check_cell(self, name):
+        """(the Check column's text, its tooltip or None) of server NAME: what the last check of it here said."""
+        row = self.checks.get(name)
+        if not row:
+            return "", None
+        if row["result"] == "ok":
+            return tr("ok, {count} tools, {seconds} s", count=row.get("tools") or 0,
+                      seconds=f"{row.get('seconds') or 0:g}"), row.get("note")
+        if row["result"] == "skipped":
+            return tr("skipped"), row.get("reason")
+        tip = tr("Why: {reason}", reason=row.get("reason") or "") + "\n" + tr("Fix: {fix}", fix=row.get("fix") or "")
+        return tr("failed: {reason}", reason=printable(row.get("reason") or "")[:80]), tip
+
+    def check_servers(self, every=False):
+        """Check (the servers selected) or Check all (EVERY): `sandbox-ai mcp check` on the host shown, in the
+        background - each server started as a start starts it, asked for its tools, stopped again; its result in the
+        Check column (the reason and the fix in its tooltip). Nothing is changed, so nothing is asked first."""
+        names = [] if every else [name for name in widgets.selected_keys(self.servers)
+                                  if name and re.fullmatch(backend.MCP_NAME, name)]
+        title = tr("Check all") if every else tr("Check")
+        if not every and not names:
+            inform(self, title, tr("Select a server first."))
+            return
+        host = self.host()
+        applog.log("INFO", "mcp", f"mcp check: {', '.join(names) or 'all'} on {printable(host)}")
+        self.catalog_status.setText(tr("Checking {names}…", names=", ".join(printable(n) for n in names)
+                                       if names else tr("every server")))
+        background(lambda: self.sai.host_mcp_check(host, names), owner=self, work=True, source=self.server_buttons,
+                   timeout=3700, done=lambda rows, error: alive(self) and self.checked(host, title, rows, error))
+
+    def checked(self, host, title, rows, error):
+        if error is not None:
+            self.catalog_status.setText(f"{title}: {printable_text(error)[:1500]}")
+            return
+        if host != self.host():
+            return
+        self.checks.update({row["server"]: row for row in rows or []})
+        failed = [row["server"] for row in rows or [] if row["result"] == "failed"]
+        ok = sum(1 for row in rows or [] if row["result"] == "ok")
+        self.catalog_status.setText(tr("{ok} of {count} ok", ok=ok, count=len(rows or [])) + (
+            "; " + tr("failed: {names}", names=", ".join(printable(name) for name in failed)) if failed else ""))
+        self.refresh()
 
     def update_servers(self, every=False):
         """Update (the servers selected) or Update all (EVERY: each server of yours from a catalog): asked first
@@ -8231,7 +8298,8 @@ class McpPage(QWidget):
         lines = [str(entry.get("title") or key), "", str(entry.get("description") or "")]
         if entry.get("notes"):
             lines += ["", tr("Notes: {text}", text=entry["notes"])]
-        network = str(entry.get("network", "none")) + (f" ({', '.join(map(str, entry.get('hosts', [])))})"
+        network = str(backend.mcp_network_word(entry.get("network", "none"))) + (
+            f" ({', '.join(map(str, entry.get('hosts', [])))})"
                                                        if entry.get("hosts") else "")
         lines += ["", tr("Network: {value}", value=network)]
         folders = [str(m.get("target")) + (f" ({tr('required')})" if m.get("required") else "")
@@ -8463,7 +8531,8 @@ class McpPage(QWidget):
         self.entries = {f"{prefix}:{e.get('name')}": e for prefix, e in entries}
         rows = sorted(self.entries.items())
         signatures = [(e.get("_signature") or {}).get("state", "unsigned") for _key, e in rows]
-        fill(self.catalog, [[key, e.get("network", "") + (" " + ",".join(e.get("hosts", [])) if e.get("hosts") else ""),
+        fill(self.catalog, [[key, str(backend.mcp_network_word(e.get("network", ""))) + (
+                                 " " + ",".join(e.get("hosts", [])) if e.get("hosts") else ""),
                              e.get("title", ""), tr("yes") if e.get("digest") else tr("not yet"),
                              tr("signed") if signature == "good" else tr("signature bad") if signature == "bad" else
                              tr("unsigned"), e.get("_catalog_name") or key.partition(":")[0]]
@@ -9127,10 +9196,10 @@ def risk_text(risk):
 
 
 # The navigation: sections with their pages, in this order (Ctrl+1 ... Ctrl+9 open the first nine).
-SECTIONS = ((N_("Project"), (("launch", N_("Start")), ("board", N_("Board")))),
-            # (user 2026-11-18: the terminals right after the sessions they belong to, then the approvals)
-            (N_("Running"), (("sandboxes", N_("Sandboxes & sessions")), ("terminals", N_("Terminals")),
-                             ("approvals", N_("Approvals")))),
+# (user 2026-11-24: the page Start is called Board, and it stands in the section of what runs, renamed Project; user
+# 2026-11-18: the terminals right after the sessions they belong to, then the approvals)
+SECTIONS = ((N_("Project"), (("launch", N_("Board")), ("board", N_("Board")), ("sandboxes", N_("Sessions")),
+                             ("terminals", N_("Terminals")), ("approvals", N_("Approvals")))),
             # Manage before Monitoring, the Files page first under Manage (it manages files; it watches nothing).
             (N_("Manage"), (("files", N_("File manager")), ("kits", N_("Kits & plugins")), ("mcp", N_("MCP servers")),
                             ("llm", N_("LLM servers")), ("images", N_("Images")), ("credentials", N_("Credentials")),
@@ -9145,6 +9214,8 @@ PAGES = tuple(page for _, pages in SECTIONS for page in pages)
 # its panels, help, video and tour are its own - but the navigation has one entry for both, Start: the row of
 # "launch". VIEW_OF: {a view without a row of its own: the page whose row it is shown under}.
 VIEW_OF = {"board": "launch"}
+# A view of the Board page by its own name, where the page's name alone does not say which (Go, the area tours).
+VIEW_TITLES = {"launch": N_("Board: Expert view"), "board": N_("Board: Board view")}
 START_VIEWS = start_link.VIEW_KEYS
 SHORTCUT_PAGES = 9
 HISTORY_KEPT = 50  # the steps Back can go (MainWindow.page_history)
@@ -9153,6 +9224,7 @@ NOTIFY_AT_ONCE = 5  # new questions announced one by one at once; more are count
 NAV_WIDTH, COMPACT_NAV_WIDTH = 224, 52  # the navigation with titles, and as a strip of icons
 NAV_MAX_WIDTH = 300  # the navigation with titles at most, however long a title is in the language chosen
 OWN_START_WINDOW = 120  # seconds in which a run that shows up is the one the app just started in its terminal
+START_MESSAGE_MS = 15000  # the status line's "sandbox-ai VERSION from PATH" at the start (the version stays bottom right)
 
 
 # A running session whose tmux session has ended (sessions.terminal_state "ended"): what its row and Attach say.
@@ -9170,9 +9242,9 @@ def terminal_of(instance):
 
 
 def attach_why_of(instance):
-    """Why the running start INSTANCE (of the Sandboxes page) has no terminal to attach to, in the app's language;
+    """Why the running start INSTANCE (of the Sessions page) has no terminal to attach to, in the app's language;
     "" when it has: another host's says it (list --json there: attachable, attach_why), this machine's as the
-    Sandboxes page's Attach decides (a session with tmux, running, whose terminal is there)."""
+    Sessions page's Attach decides (a session with tmux, running, whose terminal is there)."""
     record = instance.record if isinstance(instance.record, dict) else {}
     if getattr(instance, "host", LOCAL) != LOCAL:
         return terminal.attach_why({**record, "kind": record.get("kind") or instance.kind,
@@ -9197,7 +9269,7 @@ def attach_why_of(instance):
 
 def running_session(window, argv):
     """The session of this machine a start ARGV (sandbox-ai AGENT ... --session NAME, NAME before --) would start
-    again while WINDOW's Sandboxes page knows it running, of that agent, with a terminal to attach to; else None."""
+    again while WINDOW's Sessions page knows it running, of that agent, with a terminal to attach to; else None."""
     agent = started_agent(argv)
     options = list(argv[:argv.index("--")] if "--" in argv else argv)
     if agent is None or "--session" not in options or options.index("--session") + 1 >= len(options):
@@ -9229,13 +9301,13 @@ PROJECT_STATES = {"none": N_("no .sandbox-ai.json yet"), "trusted": N_(".sandbox
 # What each state means for a start in the project: the project bar's icon says it on hover.
 PROJECT_STATE_MEANINGS = {
     "none": N_("This folder has no project configuration: a start here takes only the options you give it. Save as "
-               "project configuration… on the Start page writes one."),
+               "project configuration… on the Board page writes one."),
     "trusted": N_("You reviewed this file and trusted exactly its content: every start in this folder applies its "
                   "options. If it changes, it is not used until you trust it again."),
     "changed": N_("The file changed since you trusted it: the launcher refuses to start here until you review and "
-                  "trust it again (Review and trust… on the Start page)."),
+                  "trust it again (Review and trust… on the Board page)."),
     "untrusted": N_("Nobody has trusted this file yet: the launcher refuses to start here until you review and trust "
-                    "it (Review and trust… on the Start page)."),
+                    "it (Review and trust… on the Board page)."),
     "unreadable": N_("The file is there but cannot be read: the launcher cannot use it.")}
 PROJECT_WARNINGS = ("changed", "untrusted", "unreadable")  # states that hold up a start in the project
 
@@ -9436,7 +9508,7 @@ class ProjectBar(QWidget):
         self.where.setText(printable(middle(path)) if path else tr("Choose a project folder to work in"))
         self.where.setToolTip(safe_tooltip(path) if path else "")
         self.combo.setToolTip(safe_tooltip("\n".join(filter(None, [printable(path) if path else "", tr(
-            "Switch the project: the Start page, the Board, Connections, Statistics, Files and Approvals follow it")]))))
+            "Switch the project: the Board page, the Board, Connections, Statistics, Files and Approvals follow it")]))))
         self.fill()
 
     def show_state(self, state, detail=""):
@@ -9478,7 +9550,7 @@ def project_entry(path):
 
 def parts_of_starts(instances):
     """The keys of INSTANCES (backend.Instance, of any hosts) that belong to another start (start_tree.owners, host by
-    host): the starts the Sandboxes page shows below another one."""
+    host): the starts the Sessions page shows below another one."""
     hosts = {}
     for instance in instances:
         hosts.setdefault(getattr(instance, "host", "local"), []).append(instance)
@@ -9592,7 +9664,7 @@ class ProjectTabs(widgets.ArrowTabBar):
             self.decorate(index)
 
 
-# The pages with a host chooser of their own, which follow the host chosen on the Sandboxes page (host_choice.HostFollow):
+# The pages with a host chooser of their own, which follow the host chosen on the Sessions page (host_choice.HostFollow):
 # key -> ([its choosers, the page's own first], the line beside it that says whose host it shows). Not the Start page
 # and the Board: they choose where a start runs, kept with the project and the board.
 FOLLOWERS = {
@@ -9912,7 +9984,7 @@ class KeepFocusOnActivation(QObject):
 DOCKS = (("parts", N_("Board: parts"), "board", Qt.DockWidgetArea.LeftDockWidgetArea),
          ("inspector", N_("Board: properties"), "board", Qt.DockWidgetArea.RightDockWidgetArea),
          ("findings", N_("Board: security score and findings"), "board", Qt.DockWidgetArea.BottomDockWidgetArea),
-         ("questions", N_("Approvals: open questions"), "approvals", Qt.DockWidgetArea.TopDockWidgetArea),
+         # (The Approvals page's open questions were a panel above it until 2026-11-24: its first tab now.)
          # The log window: on every page (page None), at the bottom, folded to its title bar at first.
          ("log", N_("Log"), None, Qt.DockWidgetArea.BottomDockWidgetArea))
 CLOSED_AT_FIRST = {"findings"}  # panels closed until asked for (also when the saved state predates them)
@@ -9978,7 +10050,7 @@ class MainWindow(QMainWindow):
         self.side_buttons = SideButtons(self)
         self.own_starts = []  # (agent, project folder, when) of sandboxes started in the app's terminal
         self.pages = PageStack()
-        # The host chosen on the Sandboxes page: the pages with a host chooser of their own show it too (FOLLOWERS).
+        # The host chosen on the Sessions page: the pages with a host chooser of their own show it too (FOLLOWERS).
         self.host_follow = HostFollow(self)
         self.project = None
         # The pages: made by PAGE_MAKERS. Lazy (the app's start): the first page, the Board and the open questions
@@ -10167,7 +10239,8 @@ class MainWindow(QMainWindow):
             if page is not None:
                 copying.copyable_all(page)
         copying.watch_focus(QApplication.instance())
-        self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory))
+        self.statusBar().showMessage(tr("sandbox-ai {version} from {path}", version=sai.version(), path=sai.directory),
+                                     START_MESSAGE_MS)
         self.make_busy_indicator()
         self.tray, self.tray_timer = None, None
         # The emergency stop and Lift every cut (request_cut): those on their way, the one to go after them.
@@ -10221,7 +10294,7 @@ class MainWindow(QMainWindow):
         self.sandboxes_here = 0
         self.questions_changed(self.approvals.open.rowCount(), [])
         self.nav.setCurrentRow(self.nav_rows["launch"])
-        # What runs is known with the first read of the Sandboxes page (in the background): what starts after that
+        # What runs is known with the first read of the Sessions page (in the background): what starts after that
         # opens a tab of its own (setting auto_tabs); what ran already at the first read does not (sync_tabs).
         self.seen_running = None
         self.register_state()
@@ -10347,7 +10420,7 @@ class MainWindow(QMainWindow):
                                                                   for view in START_VIEWS):
             # The two views of the Start page show one start from now on (before their state is read: attach_state).
             self.start_link = StartLink(self.built("board"), self.built("launch"))
-        if key in FOLLOWERS:  # the Sandboxes page's host (chosen there before it was made: taken when shown)
+        if key in FOLLOWERS:  # the Sessions page's host (chosen there before it was made: taken when shown)
             combos, note = FOLLOWERS[key](page)
             self.host_follow.attach(key, page, combos, note)
         if key == "help":
@@ -10358,12 +10431,14 @@ class MainWindow(QMainWindow):
             page.images_wanted.connect(self.show_your_images)
             page.view_wanted.connect(self.choose_view)
         elif key == "sandboxes":
+            page.board_request = self.show_on_board  # its "Show on the Board" (button and right-click menu)
             combo = page.host_filter
             combo.currentIndexChanged.connect(lambda _=0: self.host_follow.choose(combo.currentData()))
             page.open_log.connect(self.show_log)
             page.open_remote_log.connect(self.show_remote_log)
             page.open_credentials.connect(self.show_credentials_of)
             page.open_given.connect(self.show_given_of)
+            page.show_reach.connect(self.show_reach_of)
             page.start_wanted.connect(lambda agent, argv, arguments, host: self.show_start_line(
                 agent, argv, arguments, host))
             page.counted.connect(lambda running, here: self.update_activity(sandboxes=here))
@@ -10382,7 +10457,7 @@ class MainWindow(QMainWindow):
             if sandboxes is not None and getattr(sandboxes, "loaded", False):
                 page.set_fleet(sandboxes.fleet())
                 page.set_remote_starts(sandboxes.remote_running())
-        elif key == "monitor":  # a run's right click: its terminal tab, its row on the Sandboxes page
+        elif key == "monitor":  # a run's right click: its terminal tab, its row on the Sessions page
             page.go_terminal = self.go_to_terminal
             page.go_session = self.go_to_session
         elif key == "hosts":
@@ -10421,6 +10496,7 @@ class MainWindow(QMainWindow):
             page.project_request = self.set_project  # a project folder dropped on the board opens in its tab
             page.inspector_request = lambda: self.reopen_panel("inspector")  # a part selected: its inspector
             page.close_request = self.close_inspector  # OK or Cancel in it: the properties close
+            page.fit_request = self.fit_inspector  # its rows were made: big enough for them (centred when opened)
             page.score_request = lambda shown: self.set_panel("findings", shown)  # the score's button
         elif key == "system":
             page.update_button.clicked.connect(self.check_updates)
@@ -10435,7 +10511,7 @@ class MainWindow(QMainWindow):
 
     def fleet_changed(self, fleet):
         self.storage_hosts_used(fleet)
-        hosts = self.built("hosts")  # (one made later asks the Sandboxes page then)
+        hosts = self.built("hosts")  # (one made later asks the Sessions page then)
         if hosts is not None:
             hosts.set_fleet(fleet)
         approvals = self.built("approvals")
@@ -10490,8 +10566,12 @@ class MainWindow(QMainWindow):
                 # the panels of the page left go first: shown beside the next page's minimum for that moment, they
                 # would widen the window for good (Qt grows it at once; review 6 N1, the Board's two panels)
                 self.put_away_docks(key)
+            previous = self.current_page()
             page = getattr(self, key)
-            self.host_follow.before_show(key)  # the Sandboxes page's host, while the page is still hidden
+            self.host_follow.before_show(key)  # the Sessions page's host, while the page is still hidden
+            if key in START_VIEWS and previous in board_follow.SOURCES:
+                # From a session on Terminals or Sessions to the Board: its tab and project are the ones shown.
+                board_follow.follow(self, previous)
             self.pages.setCurrentWidget(page)
             if hasattr(self, "docks"):
                 self.page_changed(key)
@@ -10508,7 +10588,7 @@ class MainWindow(QMainWindow):
             page.show_your_images()
 
     def show_page(self, key, raise_window=True, unfold=True):
-        """Page KEY shown. A view of the Start page ("board", "launch": the Expert view) is that page in that view."""
+        """Page KEY shown. A view of the Board page ("board", "launch": the Expert view) is that page in that view."""
         section = self.section_of(key)
         if unfold and section in self.collapsed and not self.compact_nav:
             self.toggle_section(section, False)  # a page reached another way shows where it is
@@ -10527,11 +10607,11 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def show_start(self, raise_window=True):
-        """The Start page in the view chosen last (its row of the navigation, Ctrl+1, Go > Start)."""
+        """The Board page in the view chosen last (its row of the navigation, Ctrl+1, Go > Start)."""
         return self.show_page(self.start_view, raise_window=raise_window)
 
     def choose_view(self, key, raise_window=False):
-        """The human chose the view KEY of the Start page (the switch, its key, Ctrl+2, Show on the Board): shown, and
+        """The human chose the view KEY of the Board page (the switch, its key, Ctrl+2, Show on the Board): shown, and
         the view the page opens in from now on (kept: start_view). A tour or a link that shows a view by its key
         (show_page) chooses nothing."""
         if key not in START_VIEWS:
@@ -10542,13 +10622,13 @@ class MainWindow(QMainWindow):
             self.state.set("start_view", key)
 
     def switch_view(self):
-        """The other view of the Start page (the switch's key): Board <-> Expert. Nothing on another page."""
+        """The other view of the Board page (the switch's key): Board <-> Expert. Nothing on another page."""
         current = self.current_page()
         if current in START_VIEWS:
             self.choose_view(next(view for view in START_VIEWS if view != current))
 
     def show_start_line(self, agent, argv, agent_args=(), host=None, raise_window=True):
-        """The start AGENT ARGV -- AGENT_ARGS put onto the Start page (one step of its Undo: the parts that are there
+        """The start AGENT ARGV -- AGENT_ARGS put onto the Board page (one step of its Undo: the parts that are there
         stay where they are) and the page shown in the view chosen last: for what leads to a start from elsewhere."""
         board = self.board
         if host and host != board.host():
@@ -10757,11 +10837,23 @@ class MainWindow(QMainWindow):
         settings_menu = bar.addMenu(tr("&Settings"))
         action(settings_menu, "settings", tr("Settings…"), lambda: self.open_settings(), ["Ctrl+,"])
         action(settings_menu, "policy", tr("Administrator policy…"), lambda: self.open_settings(policy=True))
+        # Install: what starts need - images, MCP servers, toolchains, what presets need - all, nothing or a part, on
+        # this machine or a host (install_view: a checklist; sandbox-ai install in a terminal tab).
+        from . import install_view
+        install_menu = bar.addMenu(tr("&Install"))
+        install_menu.setToolTipsVisible(True)
+        for key, text, kind, every in install_view.MENU:
+            if key == "everything":
+                install_menu.addSeparator()
+            item = action(install_menu, f"install:{key}", tr(text),
+                          lambda k=kind, e=every: install_view.open_dialog(self, k, e))
+            if key in install_view.MENU_TIPS:
+                item.setToolTip(safe_tooltip(tr(install_view.MENU_TIPS[key])))
         go = bar.addMenu(tr("&Go"))
         self.shortcuts = []
         for number, (key, title) in enumerate(PAGES, 1):
-            # Start (Ctrl+1): the page in the view chosen last; Board (Ctrl+2, as ever): the page in its Board view.
-            text = tr("Start: {view}", view=tr(title)) if key in VIEW_OF else tr(title)
+            # Board (Ctrl+1): the page in the view chosen last; Board: Board view (Ctrl+2, as ever): in its Board view.
+            text = tr(VIEW_TITLES[key]) if key in VIEW_OF else tr(title)
             item = action(go, f"page:{key}", text,
                           (lambda: self.show_start()) if key in VIEW_OF.values() else
                           (lambda k=key: self.choose_view(k, raise_window=True)) if key in VIEW_OF else
@@ -10771,8 +10863,9 @@ class MainWindow(QMainWindow):
             if number <= SHORTCUT_PAGES:
                 self.shortcuts.append(item)
             if key in VIEW_OF:  # right after the page's views: the switch between them (on that page only)
-                switch = action(go, "switch-view", tr("Start: switch between Board and Expert"), self.switch_view)
-                switch.setToolTip(safe_tooltip(tr("The other view of the Start page: Board (parts and connections) "
+                switch = action(go, "switch-view", tr("Board: switch between the Board and Expert views"),
+                                self.switch_view)
+                switch.setToolTip(safe_tooltip(tr("The other view of the Board page: Board (parts and connections) "
                                                   "or Expert (fields and the command line); both show one start")))
         go.addSeparator()
         # The platform's keys (Alt+Left and Alt+Right; Cmd+[ and Cmd+] on macOS), and the mouse's side buttons.
@@ -10789,33 +10882,39 @@ class MainWindow(QMainWindow):
         go.addSeparator()
         action(go, "next-tab", tr("Next tab"), lambda: self.next_tab(1), ["Ctrl+Tab"])
         action(go, "previous-tab", tr("Previous tab"), lambda: self.next_tab(-1), ["Ctrl+Shift+Tab", "Ctrl+Backtab"])
+        # Help: the topics, then the tours and the videos one submenu each (the user 2026-11-24: x times Tour, Help
+        # ... in 1-2 entries or submenus); the keys stay (an entry of a submenu takes its key as any other).
         help_menu = bar.addMenu(tr("&Help"))
         action(help_menu, "help", tr("Help: every topic, in English and German"), lambda: self.show_help(),
                ["Shift+F1"])
-        action(help_menu, "tour", tr("Guided tour"), lambda: self.start_tour())
-        action(help_menu, "area-tour", tr("Tour of this page"), lambda: self.start_area_tour(self.current_page()),
+        tours_menu = help_menu.addMenu(tr("Tours"))
+        action(tours_menu, "area-tour", tr("Tour of this page"), lambda: self.start_area_tour(self.current_page()),
                ["F1"])
-        action(help_menu, "tour-about", tr("Tour about…"), lambda: self.tour_about(), ["Ctrl+F1"])
-        action(help_menu, "page-video", tr("Watch the video about this page"),
-               lambda: self.watch_video(self.current_page()), ["Shift+F2"])
-        action(help_menu, "videos", tr("Videos about the pages"), lambda: self.show_help(help_view.VIDEOS))
-        areas = help_menu.addMenu(tr("Area tours"))
+        action(tours_menu, "tour", tr("Guided tour"), lambda: self.start_tour())
+        action(tours_menu, "tour-about", tr("Tour about…"), lambda: self.tour_about(), ["Ctrl+F1"])
+        tours_menu.addSeparator()
+        areas = tours_menu.addMenu(tr("Area tours"))
         from . import tours
         for key, title in PAGES:
             if key in tours.AREA_TOURS:
-                item = action(areas, f"area-tour:{key}", tr(title), lambda k=key: self.start_area_tour(k))
+                item = action(areas, f"area-tour:{key}", tr(VIEW_TITLES.get(key, title)),
+                              lambda k=key: self.start_area_tour(k))
                 item.setIcon(theme.glyph(key, theme.colors()["text"], 16))
-        tasks = help_menu.addMenu(tr("Tours through a task"))
+        tasks = tours_menu.addMenu(tr("Tours through a task"))
         for key, tour in tours.TASK_TOURS.items():
             action(tasks, f"task-tour:{key}", tours.say(tour.title), lambda k=key: self.start_task_tour(k))
+        videos_menu = help_menu.addMenu(tr("Videos"))
+        action(videos_menu, "page-video", tr("Watch the video about this page"),
+               lambda: self.watch_video(self.current_page()), ["Shift+F2"])
+        action(videos_menu, "videos", tr("Videos about the pages"), lambda: self.show_help(help_view.VIDEOS))
+        action(videos_menu, "intro", tr("Watch the intro again"), self.play_intro)
         help_menu.addSeparator()
         action(help_menu, "check-updates", tr("Check for updates"), self.check_updates)
         action(help_menu, "self-update", tr("Update sandbox-ai…"), self.update_now).setEnabled(False)
         help_menu.addSeparator()
         action(help_menu, "log", tr("Show the log"), self.show_log_file)
-        action(help_menu, "intro", tr("Watch the intro again"), self.play_intro)
-        action(help_menu, "about", tr("About sandbox-ai-app"), self.about)
         action(help_menu, "readme", tr("Read the README"), self.readme)
+        action(help_menu, "about", tr("About sandbox-ai-app"), self.about)
         self.terminal_keys = {key: self.actions[key].shortcuts() for key in ("close-tab", "next-tab", "previous-tab",
                                                                          "back", "forward")}
 
@@ -10868,7 +10967,7 @@ class MainWindow(QMainWindow):
         once more after it (that lift may reach a host after it); a lift waits for what is on its way."""
         self.cut_serial += 1
         job = {"serial": self.cut_serial, "mode": mode, "quiet": False}
-        # The Sandboxes page's own cuts on their way would land after this one: the later choice holds there too.
+        # The Sessions page's own cuts on their way would land after this one: the later choice holds there too.
         if mode == "all":
             self.sandboxes.emergency_follows(tr("Emergency stop: every sandbox's network is cut"))
         else:
@@ -10922,7 +11021,7 @@ class MainWindow(QMainWindow):
             if failures:
                 text += "\n" + (tr("Not cut:") if mode == "all" else tr("Not lifted:")) + " " + "; ".join(failures)
             if mode == "all":
-                text += "\n" + tr("To lift it: File › Lift every cut, Kill switch › Lift the cut on the Sandboxes page, "
+                text += "\n" + tr("To lift it: File › Lift every cut, Kill switch › Lift the cut on the Sessions page, "
                                   "or sandbox-ai net cut --all-runs off.")
             self.notify(title, text, level="error" if failures else "warning" if mode == "all" else "success",
                         action=(tr("Show the sandboxes"), lambda: (self.show_page("sandboxes"),
@@ -11208,9 +11307,11 @@ class MainWindow(QMainWindow):
             help_view.explain_tree(getattr(self, key))  # what the page made since (it fills some parts later)
         for name, keys in getattr(self, "terminal_keys", {}).items():
             self.actions[name].setShortcuts([] if key == "terminals" else keys)
+        if key == "terminals" and self.built("terminals") is not None:
+            self.terminals.focus_current()  # what one types goes to the selected terminal at once
 
     def show_view_switch(self, key):
-        """The Start page's switch (Board | Expert) on that page only, the view shown down. What was typed in the
+        """The Board page's switch (Board | Expert) on that page only, the view shown down. What was typed in the
         Expert view is on the board before the Board is looked at; the switch's key works on that page only (F6 is
         the Files page's own elsewhere)."""
         on_start = key in START_VIEWS
@@ -11353,7 +11454,7 @@ class MainWindow(QMainWindow):
 
     def register_state(self):
         """The tables (sort order, widths the human gave), splitters, filters and check boxes of the pages, the
-        Start page's form per agent, the Board's drafts and zoom, the Sandboxes page's selection, the log folders,
+        Board page's form per agent, the Board's drafts and zoom, the Sessions page's selection, the log folders,
         the window itself: all come back at the next start (a page made later: register_page_state, then)."""
         s = self.state
         for key in BUILD_ORDER:
@@ -11417,6 +11518,7 @@ class MainWindow(QMainWindow):
             page.shell_request = lambda instance: self.sandboxes.open_shell(instance)
             page.workspace_request = self.add_folder_to
             page.run_menu_request = self.run_menu_for
+            page.board_request = self.show_on_board  # a tab's "Show on the Board"
             QTimer.singleShot(0, page.reopen)
         if key in ("connections", "statistics"):
             name = f"{key}-folder"
@@ -11445,7 +11547,7 @@ class MainWindow(QMainWindow):
             self.setWindowState(self.windowState() | Qt.WindowState.WindowFullScreen)
         view = self.state.get("start_view", "")
         if view in START_VIEWS:
-            self.start_view = view  # the Start page's view chosen last: the one it opens in
+            self.start_view = view  # the Board page's view chosen last: the one it opens in
         page = self.state.get("page", "")
         if page in START_VIEWS:
             page = self.start_view  # (one page: left on it, it comes back in the view chosen last)
@@ -11487,7 +11589,7 @@ class MainWindow(QMainWindow):
         """Fold (FOLDED) or unfold everything that folds: every section of the navigation (the current page's
         section stays open; in the strip of icons, which shows every page, it is kept for when the titles come back)
         and every tree of the page shown (the kits and what they bring, the doctor's checks, the canaries, the hosts and
-        starts of the Sandboxes page, which keeps it), which collapse to their top level or open all the way. Said in
+        starts of the Sessions page, which keeps it), which collapse to their top level or open all the way. Said in
         the status bar."""
         current = self.current_page()
         for section, (_, rows) in self.section_rows.items():
@@ -11600,8 +11702,8 @@ class MainWindow(QMainWindow):
     # -- panels (docks) --
 
     def make_docks(self):
-        """The Board's parts and its inspector, and the open questions of the Approvals page, as panels of the
-        page area: they can be floated (a floating one stays on every page), docked elsewhere and closed."""
+        """The Board's parts, its inspector and findings, and the log, as panels of the page area: they can be floated
+        (a floating one stays on every page), docked elsewhere and closed."""
         from . import logview
         self.log_panel = logview.LogPanel(self.state.get("log_level", logview.DEFAULT_LEVEL)
                                           if isinstance(self.state.get("log_level"), str) else logview.DEFAULT_LEVEL,
@@ -11610,7 +11712,7 @@ class MainWindow(QMainWindow):
         self.log_panel.level.currentIndexChanged.connect(
             lambda _i: self.state.set("log_level", self.log_panel.chosen()))
         widgets = {"parts": self.board.parts_panel, "inspector": self.board.side, "findings": self.board.findings_panel,
-                   "questions": self.approvals.open_box, "log": self.log_panel}
+                   "log": self.log_panel}
         self.docks, self.closed_docks = {}, set(CLOSED_AT_FIRST)
         for name, title, _, area in DOCKS:
             dock = PanelDock(tr(title), self.workspace)
@@ -11776,6 +11878,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "docks") or name not in self.docks:
             return
         dock, focus = self.docks[name], QApplication.focusWidget()
+        if name == "inspector" and (name in self.closed_docks or self.inspector_fold.is_folded()):
+            self.inspector_opened = True  # (fit_inspector: opened now - centred when it floats)
         if name in self.closed_docks:
             self.closed_docks.discard(name)
             dock.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)  # a floating one: not activated
@@ -11900,7 +12004,7 @@ class MainWindow(QMainWindow):
         if key == "board_grid" and self.built("board") is not None:  # its dots drawn again at the new spacing
             self.board.view.resetCachedContent()
             self.board.view.viewport().update()
-        if key == "show_flags":  # the options (--…) beside the fields' names: the Start page's form, the board's
+        if key == "show_flags":  # the options (--…) beside the fields' names: the Board page's form, the board's
             labels.set_flags_shown(backend.setting("show_flags"))
             for form in self.findChildren(OptionsForm):
                 form.show_flags()
@@ -11926,13 +12030,13 @@ class MainWindow(QMainWindow):
         return self.set_project(directory) if directory else False
 
     def new_project(self):
-        """The wizard; it ends on the board, whose folder then opens in a tab of its own (the board shown
-        before is kept for its project)."""
+        """New project… of the Board (BoardPage.new_project): this machine's - the wizard; it ends on the board, whose
+        folder then opens in a tab of its own (the board shown before is kept for its project) - or a host's."""
         self.show_page("board")
-        return self.board.open_wizard(ask=False)
+        return self.board.new_project(ask=False)
 
     def project_opened(self, directory):
-        """The Board or the Start page opened, reviewed or wrote a project folder: its tab is the current one."""
+        """The Board or the Board page opened, reviewed or wrote a project folder: its tab is the current one."""
         if not directory:
             return
         if not same_folder(directory, self.project):
@@ -11953,7 +12057,7 @@ class MainWindow(QMainWindow):
         return True
 
     def apply_project(self, path):
-        """Make PATH the current project: the Start page's workspace, the Board (the project's own, as it was
+        """Make PATH the current project: the Board page's workspace, the Board (the project's own, as it was
         left), Connections and Statistics (its logs), Files, Approvals and Sandboxes (its rows marked), Kits
         (what it uses). Kept for the next start."""
         if self.start_link is not None:
@@ -12090,7 +12194,7 @@ class MainWindow(QMainWindow):
         tab (setting auto_tabs). One that ran and ended normally loses its tab AUTO_CLOSE_MS later (a tab of an ended
         start makes no sense); one whose run failed (its exit status not 0) keeps it, marked as failed, until the
         human closes it; a tab kept from the last start of the app whose start has ended meanwhile goes at once.
-        Before the Sandboxes page's first read (in the background) nothing is known: no tab counts as stopped yet."""
+        Before the Sessions page's first read (in the background) nothing is known: no tab counts as stopped yet."""
         loaded = getattr(self.sandboxes, "loaded", True)
         # (a read that failed lists nothing: no tab is taken for ended then - it would be closed under the human)
         trusted = loaded and not getattr(self.sandboxes, "problems", None)
@@ -12133,7 +12237,7 @@ class MainWindow(QMainWindow):
         seen = getattr(self, "seen_running", set())
         if open_new and seen is not None and backend.setting("auto_tabs"):  # (None: the first read, what ran already)
             # One tab per start: what belongs to another start (a member of a team below its lead, a helper, an MCP
-            # server - start_tree.owners) opens none; Open terminal or the Sandboxes page reach it.
+            # server - start_tree.owners) opens none; Open terminal or the Sessions page reach it.
             owned = parts_of_starts(instances.values()) if running - seen else set()
             for key in sorted(running - seen):
                 if key in owned:
@@ -12205,7 +12309,7 @@ class MainWindow(QMainWindow):
             record = instance.record if instance is not None and isinstance(instance.record, dict) else {}
             found.append(("files", tr("File manager"), bool(record.get("workspace") or getattr(instance, "project", "")),
                           lambda: self.show_files_for(self.sandboxes.instances.get(entry["key"]))))
-            found.append(("show", tr("Show in Sandboxes & sessions"), True, lambda: self.show_instance(entry["key"])))
+            found.append(("show", tr("Show in Sessions"), True, lambda: self.show_instance(entry["key"])))
         found.append(("close", tr("Close tab"), True, lambda: self.close_tab(self.tabs.find(entry["key"]))))
         found.append(("close-others", tr("Close other tabs"), self.tabs.count() > 1,
                       lambda: self.close_other_tabs(entry["key"])))
@@ -12235,7 +12339,7 @@ class MainWindow(QMainWindow):
                 self.close_tab(index)
 
     def run_menu_for(self, parent, instance):
-        """The "While it runs" submenu of a terminal tab: the Sandboxes page's run actions (its buttons, as they are
+        """The "While it runs" submenu of a terminal tab: the Sessions page's run actions (its buttons, as they are
         enabled for INSTANCE, with their reasons) for INSTANCE's row, chosen there first (not shown: the page stays
         where it is). None when the page does not list the start."""
         sandboxes = self.sandboxes
@@ -12265,7 +12369,7 @@ class MainWindow(QMainWindow):
         return menu
 
     def select_quietly(self, key):
-        """The start KEY's row selected on the Sandboxes page without showing the page (its host and Ended as
+        """The start KEY's row selected on the Sessions page without showing the page (its host and Ended as
         show_instance sets them); its buttons follow the row. False when it is not listed."""
         page = self.sandboxes
         instance = page.instances.get(key)
@@ -12284,7 +12388,7 @@ class MainWindow(QMainWindow):
 
     def add_folder_to(self, instance):
         """A terminal tab's Add folder…: a folder (this machine's, its host's, another machine's over sshfs) for the
-        running session INSTANCE - the Sandboxes page's Add workspace… for it."""
+        running session INSTANCE - the Sessions page's Add workspace… for it."""
         target = self.sandboxes.target_of(instance)
         if target is None:
             inform(self, tr("Add folder"), tr("Only while the session runs."))
@@ -12335,7 +12439,7 @@ class MainWindow(QMainWindow):
                     and page.show_start(getattr(instance, "host", "local"), folder))
 
     def show_instance(self, key):
-        """The start KEY's row on the Sandboxes page selected, scrolled to and focused: its host chosen there first
+        """The start KEY's row on the Sessions page selected, scrolled to and focused: its host chosen there first
         when another one is shown, the project filter off, Ended checked for a start that ended. False when it is
         not listed there."""
         self.show_page("sandboxes")
@@ -12363,7 +12467,7 @@ class MainWindow(QMainWindow):
     # -- the System monitor's right click on a run: Go to Terminals, Go to Sessions --
 
     def run_start(self, host, run, name):
-        """The start of the Sandboxes page (an Instance) that the run RUN (its run id; NAME: its name) of HOST is: by
+        """The start of the Sessions page (an Instance) that the run RUN (its run id; NAME: its name) of HOST is: by
         its run, else by its name; None when it is not listed there (it ended, or that host was not read yet)."""
         starts = [i for i in self.sandboxes.instances.values()
                   if getattr(i, "host", LOCAL) == host and i.kind in ("session", "run")]
@@ -12377,13 +12481,13 @@ class MainWindow(QMainWindow):
         return None
 
     def not_listed(self, title, host, name):
-        text = tr("{name} is not listed in Sandboxes & sessions: it has ended, or it is not read yet.",
+        text = tr("{name} is not listed in Sessions: it has ended, or it is not read yet.",
                   name=printable(name))
         short_notices.short_notice(self, title, on_host(host, text), warning=True)
 
     def go_to_terminal(self, host, run, name):
         """The System monitor's "Go to Terminals" on the run RUN (NAME) of HOST: its terminal tab shown on the
-        Terminals page - attached first, as the Sandboxes page's Attach in the app does (over SSH for a host), when
+        Terminals page - attached first, as the Sessions page's Attach in the app does (over SSH for a host), when
         no tab shows it yet; never a second tab for it. Why not, briefly, when it has no terminal to attach to. True
         when its tab is shown or being opened."""
         title = tr("Go to Terminals")
@@ -12409,7 +12513,7 @@ class MainWindow(QMainWindow):
         return True
 
     def go_to_session(self, host, run, name):
-        """The System monitor's "Go to Sessions" on the run RUN (NAME) of HOST: its row on the Sandboxes page
+        """The System monitor's "Go to Sessions" on the run RUN (NAME) of HOST: its row on the Sessions page
         selected and scrolled to (that host chosen there first); not listed there: said briefly."""
         instance = self.run_start(host, run, name)
         if instance is None:
@@ -12423,6 +12527,28 @@ class MainWindow(QMainWindow):
             self.not_listed(tr("Go to Sessions"), host, name)
             return False
         return True
+
+    def show_on_board(self, instance, quiet=False):
+        """Show on the Board (Sessions, a terminal tab): the Board with the project of the session or sandbox INSTANCE -
+        its tab opened or selected, its board shown, its Agent part selected (board_follow.show). QUIET: the Board
+        following a session one comes from - nothing asked, nothing said, the page not changed."""
+        return board_follow.show(self, instance, quiet=quiet)
+
+    def fit_inspector(self, opened=False):
+        """The Board's properties show a part's rows: big enough for all of them - floating: sized to what they need
+        and, when the panel was just opened (OPENED), centred over the window; docked at a side: at least as wide as
+        they need (at most dock_fold.DOCK_SHARE of the window's width). User 2026-11-24: "Property-Fenster der Items müssen immer groß
+        genug gestartet werden, dass alles sichtbar ist, und immer auch zentriert"."""
+        dock = self.docks.get("inspector") if hasattr(self, "docks") else None
+        if dock is None or not dock.isVisible():
+            return
+        opened = opened or bool(self.__dict__.pop("inspector_opened", False))
+        if dock.isFloating():
+            placement = getattr(dock, "placement", None)
+            if placement is not None:
+                placement.place(force=True) if opened else placement.grow()
+        elif not self.inspector_fold.is_folded():
+            dock_fold.fit_docked(dock, self.workspace, self.inspector_fold)
 
     def fill_add_tab_menu(self, read=True):
         """"+": the known projects, the sessions and sandboxes of the account not open yet, Open folder…, New
@@ -12505,10 +12631,15 @@ class MainWindow(QMainWindow):
         self.show_page("connections")
 
     def show_credentials_of(self, host):
-        """The Credentials page with HOST chosen (a start's Secrets and logins on HOST… of the Sandboxes page)."""
+        """The Credentials page with HOST chosen (a start's Secrets and logins on HOST… of the Sessions page)."""
         page = self.credentials
         page.hosts.set_host(host)
         self.show_page("credentials")
+
+    def show_reach_of(self, host, run):
+        """Approvals › Inspection › Allowed now for the running start RUN of HOST: everything it may reach and why."""
+        self.show_page("approvals")
+        self.approvals.show_reach(host, run)
 
     def show_given_of(self, host, run):
         """The Credentials page's Given to sandboxes tab for HOST with the rows of the running start RUN selected:
@@ -12518,7 +12649,7 @@ class MainWindow(QMainWindow):
 
     def projects(self):
         """The "current project" folders for the file browser: the current project (else the folder the app
-        was started in) and the Start page's first workspace when it is another one."""
+        was started in) and the Board page's first workspace when it is another one."""
         project = getattr(self, "project", None)
         # Without a project chosen the folder the app was started in, named as that (not "Current project": the
         # window says it has none).
@@ -12597,10 +12728,10 @@ class MainWindow(QMainWindow):
             if rest:
                 self.notify(tr("sandbox-ai asks: {count} more questions", count=len(rest)),
                             tr("They wait on the Approvals page."), level="warning",
-                            action=(tr("Open approvals"), lambda: self.show_page("approvals")))
+                            action=(tr("Open approvals"), self.show_approvals_questions))
 
     def show_asking(self):
-        """Which starts ask (marked on the Sandboxes page), and how many questions wait on each host (Hosts page): only
+        """Which starts ask (marked on the Sessions page), and how many questions wait on each host (Hosts page): only
         the questions that still wait - the Approvals page also keeps those that timed out or were answered."""
         approvals = self.built("approvals")
         questions = getattr(approvals, "questions", {}) or {}
@@ -12693,10 +12824,17 @@ class MainWindow(QMainWindow):
                 path=printable(self.sai.directory)))
 
     def open_question(self, key):
-        """A notification's action: the Approvals page with its question selected (when it is still open)."""
-        self.show_page("approvals")
+        """A notification's action: the Approvals page's Questions with its question selected (when it is still
+        open)."""
+        self.show_approvals_questions()
         if key is not None:
             self.approvals.select_question(key)
+
+    def show_approvals_questions(self):
+        """The Approvals page at its Questions tab (a question's notification; the page keeps its tab otherwise)."""
+        self.show_page("approvals")
+        if hasattr(self.approvals, "show_questions"):
+            self.approvals.show_questions()
 
     def changeEvent(self, event):  # noqa: N802
         """A new theme: the navigation's icons and the question count take its colours."""
@@ -12874,7 +13012,7 @@ class MainWindow(QMainWindow):
         return True
 
     def storage_hosts_used(self, fleet):
-        """The hosts the app uses - those on which the Sandboxes page found starts - remembered (storage_hosts)."""
+        """The hosts the app uses - those on which the Sessions page found starts - remembered (storage_hosts)."""
         found = {name for name, instances in getattr(self.sandboxes, "remote", {}).items() if instances}
         found |= {name for name, info in (fleet or {}).items() if name != LOCAL and (info or {}).get("running")}
         used = self.state.get(storage_hosts.USED, [], list)
@@ -12943,7 +13081,7 @@ class MainWindow(QMainWindow):
             self.update_label.setText(text)
             self.update_label.setToolTip(safe_tooltip(tr("Each update must be signed by a release key this copy "
                                                          "trusts; update --check shows the details.")))
-            self.update_notice.setVisible(True)
+            self.show_update_notice(True)
         elif backend.newer(available, installed):
             text = tr("sandbox-ai {available} is available (installed: {installed}); update with: sandbox-ai update",
                       available=available, installed=installed)
@@ -13003,7 +13141,25 @@ class MainWindow(QMainWindow):
         self.update_now_button.hide()
         self.restart_button.hide()
         self.update_notice.hide()
+        self.update_notice_wanted = False
         self.statusBar().addWidget(self.update_notice)
+        self.statusBar().messageChanged.connect(self.follow_message)
+
+    def show_update_notice(self, shown):
+        """The status line's update notice wanted (SHOWN) or not. QStatusBar paints its message where this notice
+        is (a widget of its left part): shown over a message, the two texts overlapped (the user 2026-11-24). So a
+        notice that comes up ends the message there (it is the newer news), and a message that comes later hides it
+        for its time (follow_message) - explicitly: QStatusBar's own hiding is undone by the next layout of the bar,
+        which shows the notice again over the message."""
+        self.update_notice_wanted = shown
+        bar = self.statusBar()
+        if shown and bar.currentMessage():
+            bar.clearMessage()
+        self.follow_message()
+
+    def follow_message(self, _message=None):
+        """The update notice shown while it is wanted and the status line has no message (show_update_notice)."""
+        self.update_notice.setVisible(self.update_notice_wanted and not self.statusBar().currentMessage())
 
     def offer_update(self, installed=None, available=None, route=None, where=None, hint=""):
         """The status line's notice: "Update now…" beside what the check found when ROUTE (backend.update_route; WHERE:
@@ -13042,7 +13198,7 @@ class MainWindow(QMainWindow):
         self.update_now_button.setVisible(offered)
         self.update_now_button.setEnabled(offered and not self.update_running)
         self.restart_button.setVisible(self.updated_to is not None and not offered)
-        self.update_notice.setVisible(bool(text))
+        self.show_update_notice(bool(text))
         self.actions["self-update"].setEnabled(offered and not self.update_running)
 
     def update_now(self):
@@ -13094,7 +13250,7 @@ class MainWindow(QMainWindow):
             self.offer_update(*self.update_offer)
         self.update_label.setText(tr("The update to {version} failed (exit status {status}): its terminal shows why.",
                                      version=available, status=status))
-        self.update_notice.show()
+        self.show_update_notice(True)
         self.show_update_text(self.update_label.text())
 
     def restart_app(self):
@@ -13185,7 +13341,7 @@ class MainWindow(QMainWindow):
         return self.terminal_window(argv, title) if ended is None else self.terminal_window(argv, title, ended=ended)
 
     def fresh_starts(self, host, within):
-        """The starts of HOST (this machine: "local") as the Sandboxes page saw them at most WITHIN seconds ago
+        """The starts of HOST (this machine: "local") as the Sessions page saw them at most WITHIN seconds ago
         ([backend.Instance]), or None when its look is older, failed or was never made: a start under a session's
         name asks the host itself then (session_start.py)."""
         page = self.built("sandboxes")
@@ -13197,7 +13353,7 @@ class MainWindow(QMainWindow):
         return list(getattr(page, "remote", {}).get(host) or [])
 
     def refresh_starts(self, host):
-        """The Sandboxes page looks at HOST again now (a start there was stopped, or started)."""
+        """The Sessions page looks at HOST again now (a start there was stopped, or started)."""
         page = self.built("sandboxes")
         if page is None:
             return

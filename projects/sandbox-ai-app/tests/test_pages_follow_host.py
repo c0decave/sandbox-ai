@@ -1,8 +1,8 @@
-"""The pages with a host chooser of their own follow the host chosen on the Sandboxes page (the app, offscreen, with the
+"""The pages with a host chooser of their own follow the host chosen on the Sessions page (the app, offscreen, with the
 hosts ct1 and ct2 of `sandbox-ai hosts`; what goes to a host is answered by a stand-in that records who asked).
 
 A page that is hidden takes the host when it is shown (no SSH for a page nobody looks at) and then reads it once; a
-host chosen on the page itself holds until the Sandboxes page's host changes again; a late answer of the host before
+host chosen on the page itself holds until the Sessions page's host changes again; a late answer of the host before
 is never shown; the line beside the chooser says whose host the page shows."""
 import json
 import os
@@ -36,7 +36,7 @@ FOLLOWERS = {
     "monitor": lambda page: page.hosts.box,
     "files": lambda page: page.host_box,  # (whose sandboxes the left pane offers)
 }
-# Who looks at the hosts whatever page is shown (the Sandboxes page's list, the questions, the Hosts page's fleet).
+# Who looks at the hosts whatever page is shown (the Sessions page's list, the questions, the Hosts page's fleet).
 WATCHERS = ("SandboxesPage", "ApprovalsPage", "HostsPage", "MainWindow")
 
 
@@ -170,7 +170,7 @@ def close(qapp, window):
 
 
 def on_sandboxes(qapp, window, host):
-    """The human chooses HOST (None: all hosts) on the Sandboxes page."""
+    """The human chooses HOST (None: all hosts) on the Sessions page."""
     window.show_page("sandboxes")
     combo = window.sandboxes.host_filter
     assert combo.isVisible() and combo.findData(host) >= 0, [combo.itemData(i) for i in range(combo.count())]
@@ -198,7 +198,7 @@ def test_every_page_with_a_host_chooser_follows_the_sandboxes_page(qapp, window,
     readers = ("CredentialsPage", "VpnBox", "IdentitiesBox", "KitsPage", "TeamPage", "LlmPage", "McpPage",
                "ImagesPage", "TerminalsPage", "ActivityPage", "TrafficPage", "ConnectionsPage", "FilesPage")
     # The first time each page is shown, then again (each page was shown before: its own reads on a show and on a host
-    # change meet) with ct2 chosen on the Sandboxes page.
+    # change meet) with ct2 chosen on the Sessions page.
     for host in ("ct1", "ct2"):
         if host == "ct2":
             on_sandboxes(qapp, window, "ct2")
@@ -209,7 +209,7 @@ def test_every_page_with_a_host_chooser_follows_the_sandboxes_page(qapp, window,
             qapp.processEvents()
             assert chosen(window, key) == host, key
             label = note(window, key)
-            assert label.isVisible() and label.text() == f"{host}, as on the Sandboxes page", (key, label.text())
+            assert label.isVisible() and label.text() == f"{host}, as on the Sessions page", (key, label.text())
         # It read that host when shown, and each thing once (not once for the host change and again for the show).
         for page_class in readers:
             assert wait_for(qapp, lambda c=page_class: page_calls(sai, host, c)), (host, page_class)
@@ -227,16 +227,16 @@ def test_a_host_chosen_on_the_page_holds_until_the_sandboxes_page_changes(qapp, 
     page = window.credentials
     page.hosts.set_host("ct2")  # the human's own choice on the page
     qapp.processEvents()
-    assert note(window, "credentials").text() == "ct2, chosen here; the Sandboxes page shows ct1"
+    assert note(window, "credentials").text() == "ct2, chosen here; the Sessions page shows ct1"
     window.show_page("activity")
     window.show_page("credentials")
     qapp.processEvents()
-    assert page.host() == "ct2", "its own choice holds while the Sandboxes page's host stays"
+    assert page.host() == "ct2", "its own choice holds while the Sessions page's host stays"
     on_sandboxes(qapp, window, "local")
     window.show_page("credentials")
     qapp.processEvents()
     assert page.host() == "local"
-    assert note(window, "credentials").text() == "local (this machine), as on the Sandboxes page"
+    assert note(window, "credentials").text() == "local (this machine), as on the Sessions page"
     # All hosts: a page of one host keeps its host (and says nothing); the questions show every host's again.
     window.show_page("approvals")
     on_sandboxes(qapp, window, "ct2")
@@ -285,7 +285,7 @@ def test_a_late_answer_of_the_host_before_is_never_shown(qapp, window, sai, monk
             window.show_page(key)
             qapp.processEvents()
             assert chosen(window, key) == "ct1"
-        # Changed on the Sandboxes page while those reads are on their way; the pages are shown again.
+        # Changed on the Sessions page while those reads are on their way; the pages are shown again.
         on_sandboxes(qapp, window, "ct2")
         for key in pages:
             window.show_page(key)
@@ -300,7 +300,7 @@ def test_a_late_answer_of_the_host_before_is_never_shown(qapp, window, sai, monk
     settle(qapp, 0.6)
     assert rows(window.credentials.logins) == ["agent-of-ct2"], "nothing of ct1's under ct2"
     assert rows(window.llm.servers) == ["lm-of-ct2"] and started(window) == ["s-of-ct2"]
-    assert note(window, "llm").text() == "ct2, as on the Sandboxes page"
+    assert note(window, "llm").text() == "ct2, as on the Sessions page"
 
     # The same on a page that is shown when the host changes (it takes it at once, and the rows of the host before go).
     window.show_page("llm")
@@ -326,7 +326,7 @@ def test_a_page_made_later_shows_the_sandboxes_pages_host(qapp, sai):
         window.show_page("credentials")
         qapp.processEvents()
         assert window.credentials.host() == "ct2"
-        assert note(window, "credentials").text() == "ct2, as on the Sandboxes page"
+        assert note(window, "credentials").text() == "ct2, as on the Sessions page"
         assert wait_for(qapp, lambda: page_calls(sai, "ct2", "CredentialsPage"))
         settle(qapp)
         asked = [(args, who[0]) for args, who in page_calls(sai, "ct2", "CredentialsPage")]
@@ -361,23 +361,23 @@ def test_a_page_shown_another_way_takes_the_host_before_its_own_show(qapp):
     page.show()
     qapp.processEvents()
     assert page.seen == ["ct1"] and not follow.pending
-    assert page.note.isVisible() and page.note.text() == "ct1, as on the Sandboxes page"
+    assert page.note.isVisible() and page.note.text() == "ct1, as on the Sessions page"
     follow.choose("ct2")  # a host it does not list: its own stays, and the line says so
     assert page.combo.currentData() == "ct1"
-    assert page.note.text() == "ct1, chosen here; the Sandboxes page shows ct2"
+    assert page.note.text() == "ct1, chosen here; the Sessions page shows ct2"
     page.close()
     page.deleteLater()
 
 
 def test_a_page_opened_on_a_host_keeps_that_host(qapp, window):
-    """Secrets and logins on HOST… (the Sandboxes page) and Show questions (the Hosts page) open a page on a host: that
-    is newer than the Sandboxes page's host still waiting for the hidden page."""
+    """Secrets and logins on HOST… (the Sessions page) and Show questions (the Hosts page) open a page on a host: that
+    is newer than the Sessions page's host still waiting for the hidden page."""
     from sandbox_ai_app import ui
     on_sandboxes(qapp, window, "ct1")
     ui.MainWindow.show_credentials_of(window, "ct2")
     qapp.processEvents()
     assert window.current_page() == "credentials" and window.credentials.host() == "ct2"
-    assert note(window, "credentials").text() == "ct2, chosen here; the Sandboxes page shows ct1"
+    assert note(window, "credentials").text() == "ct2, chosen here; the Sessions page shows ct1"
     window.show_page("sandboxes")
     window.hosts.show_questions.emit("ct2")
     qapp.processEvents()

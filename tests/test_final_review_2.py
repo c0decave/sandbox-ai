@@ -97,11 +97,11 @@ def test_e2e_team_start_help_lists_the_agents_whole(host):
 
 def test_mcp_copy_says_the_network_in_words():
     mc = load("sandbox_mcp_copy_final_review_2", "mcp_copy.py")
-    assert mc.network_text({"network": "full", "vpn": None, "options": []}) == "network: internet (no LAN)"
+    assert mc.network_text({"network": "full", "vpn": None, "options": []}) == "network: egress-all (the internet, not your LAN)"
     assert mc.network_text({"network": "the start's rules", "vpn": None, "options": ["--network=none"]}) == \
         "network: its command's own options (the sandbox's rules), --network=none"
     assert mc.network_text({"network": "allowlist", "vpn": "mullvad", "options": ["--allow-tcp 10.0.0.7:80"]}) == \
-        "network: only its catalog entry's hosts, VPN mullvad, --allow-tcp 10.0.0.7:80"
+        "network: allowlist (only its catalog entry's hosts), VPN mullvad, --allow-tcp 10.0.0.7:80"
 
 
 # --- defaults show: the values in one column (the keys grew past its width: "desktop_notifications -") ------------

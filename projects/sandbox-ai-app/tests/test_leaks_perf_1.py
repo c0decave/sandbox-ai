@@ -162,7 +162,7 @@ def sessions(count, running_every=4):
 
 
 def test_a_look_at_unchanged_sandboxes_draws_no_tab_again(qapp, window, monkeypatch):  # noqa: F811
-    """Measured with 1000 sessions, 250 of them running (a tab each): every look of the Sandboxes page (every few
+    """Measured with 1000 sessions, 250 of them running (a tab each): every look of the Sessions page (every few
     seconds) set every tab's text, icon and tip again - each a layout of the whole tab row, 125,000 tab sizes
     measured: 1.6-2.2 s of the GUI thread per look. Now only a tab whose start changed is drawn again."""
     window.show()

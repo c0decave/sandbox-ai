@@ -207,6 +207,54 @@ def test_the_agents_environment_has_the_toolchains_variables_unless_you_set_them
     assert "JAVA_HOME" not in s.agent_environment(parsed())
 
 
+def test_qt_draws_offscreen_without_a_display_and_on_the_display_of_gui(tmp_path, signing_key, data_home,
+                                                                        monkeypatch):
+    """The Qt toolchains set QT_QPA_PLATFORM=offscreen (and pyside6 PYTHONPATH, its own folder): without --gui a Qt
+    program has no display and would end with "no Qt platform plugin could be initialized". With --gui (Xvfb) the
+    launcher says xcb - for the agent and, through its environment, for every shell (env.sh sets a variable only
+    where none is) -, with --gui-wayland wayland; what you pass with --env stays yours."""
+    key, trusted = signing_key
+    item = tt.entry(tmp_path, name="pyside6", version="6.12.0", hosts=[],
+                    members={"bin": None, "bin/tool": b"t", "python": None}, commands={"pyside6-uic": "bin/tool"},
+                    env={"PYTHONPATH": "{prefix}/python", "QT_QPA_PLATFORM": "offscreen"})
+    tt.t.add("pyside6", tt.catalog(tmp_path, [item], key), out=lambda line: None, keys=trusted)
+
+    def environment(*options):
+        a = parsed("--toolchain", "pyside6", *options)
+        s.plan_toolchains(a)
+        return s.agent_environment(a)
+    plain = environment()
+    assert (plain["PYTHONPATH"], plain["QT_QPA_PLATFORM"]) == ("/opt/toolchains/pyside6/python", "offscreen")
+    assert "DISPLAY" not in plain
+    gui = environment("--gui")
+    assert (gui["DISPLAY"], gui["QT_QPA_PLATFORM"], gui["PYTHONPATH"]) == \
+        (s.GUI_DISPLAY, "xcb", "/opt/toolchains/pyside6/python")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "vnc")
+    assert environment("--gui", "--env", "QT_QPA_PLATFORM")["QT_QPA_PLATFORM"] == "vnc"
+    assert environment("--env", "QT_QPA_PLATFORM")["QT_QPA_PLATFORM"] == "vnc"
+    monkeypatch.delenv("QT_QPA_PLATFORM")
+    # the display is the reason, not the toolchain: a toolchain attached later finds xcb set already
+    without = parsed("--gui")
+    assert s.agent_environment(without)["QT_QPA_PLATFORM"] == "xcb"
+    assert "QT_QPA_PLATFORM" not in s.agent_environment(parsed())
+    # and a new shell keeps what the start set (env.sh: only where the variable is not set)
+    folder = tmp_path / "session"
+    folder.mkdir()
+    T.write_session(folder, s.toolchain_entries(parsed_with(s, "--toolchain", "pyside6")))
+    result = subprocess.run(["sh", "-c", f". {folder}/env.sh; echo $QT_QPA_PLATFORM $PYTHONPATH"],
+                            env={"PATH": os.environ["PATH"], "QT_QPA_PLATFORM": "xcb"}, capture_output=True, text=True)
+    assert result.stdout.split() == ["xcb", "/opt/toolchains/pyside6/python"]
+    result = subprocess.run(["sh", "-c", f". {folder}/env.sh; echo $QT_QPA_PLATFORM"],
+                            env={"PATH": os.environ["PATH"]}, capture_output=True, text=True)
+    assert result.stdout.split() == ["offscreen"]
+
+
+def parsed_with(launcher, *options):
+    a = parsed(*options)
+    launcher.plan_toolchains(a)
+    return a
+
+
 def test_the_agents_processes_get_the_wrappers_first_on_path_the_supervisors_do_not():
     r = s.RUNTIME
     assert r.TOOLCHAINS_BIN == T.BIN and r.TOOLCHAINS_ENV == T.ENV_FILE

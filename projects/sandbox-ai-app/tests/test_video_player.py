@@ -99,7 +99,7 @@ def test_the_player_plays_pauses_seeks_and_shows_the_time(made):
     window, _found = made
     player = window.player
     assert player.source.endswith("sandbox-ai-app-02-board-de.mp4") and player.state == P.PLAYING
-    assert window.windowTitle() == "Video: Part 2: Board"
+    assert window.windowTitle() == "Video: Part 2: Board: Board view"
     assert window.play_button.accessibleName() == "Pause"
     window.play_button.click()
     assert player.state == "paused" and window.play_button.accessibleName() == "Play"
@@ -174,7 +174,7 @@ def test_another_video_of_the_series_and_the_system_player(made):
     from conftest import OPENED_URLS
     window, found = made
     assert [window.chooser.itemText(i) for i in range(window.chooser.count())] == [
-        "Part 1: Start (1:01) - German", "Part 2: Board (1:02) - German", "Part 18: Help (1:18) - German"]
+        "Part 1: Board: Expert view (1:01) - German", "Part 2: Board: Board view (1:02) - German", "Part 18: Help (1:18) - German"]
     assert window.chooser.currentIndex() == 1
     window.chooser.activated.emit(0)
     assert window.player.source.endswith("sandbox-ai-app-01-launch-de.mp4") and window.video.page == "launch"
@@ -326,7 +326,8 @@ def test_the_window_has_the_video_button_beside_the_pages_question_mark_and_the_
     assert help_view.VIDEO_SAI == [window.sai] and help_view.VIDEO_OPENER == window.watch_video
     from sandbox_ai_app import ui
     assert [key for key, _ in ui.PAGES] == list(V.PAGE_TITLES)  # every page of the navigation has its video
-    assert {key: title for key, title in ui.PAGES} == V.PAGE_TITLES
+    # (the Board page's two views by their own names, as Go names them: ui.VIEW_TITLES)
+    assert {key: ui.VIEW_TITLES.get(key, title) for key, title in ui.PAGES} == V.PAGE_TITLES
 
 
 def test_a_real_video_plays_with_its_sound_track_and_subtitles(qapp, wait):

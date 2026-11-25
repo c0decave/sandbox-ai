@@ -319,13 +319,21 @@ def test_the_network_dialog_takes_nameservers_and_keeps_for_later_starts(ui, sai
     older.keep.setChecked(True)
     assert not older.kept(), "a sandbox-ai without --keep is not asked to keep"
     page = ui.SandboxesPage(sai, lambda *a, **k: None)
-    allowed = ui.AllowedDialog(None, "api", "", lambda: None, keep=lambda every: page.keep_network("ct1", "api", every))
-    assert allowed.keep_button.isVisibleTo(allowed) and allowed.keep_all_button.isVisibleTo(allowed)
-    allowed.keep_all_button.click()
-    assert sai.asked[-1] == ("ct1", "net", "show", "api", "--keep-all") and ui.asked[-1][0] == "net-keep"
-    allowed.keep_button.click()
-    assert sai.asked[-1] == ("ct1", "net", "show", "api", "--keep")
-    assert not ui.AllowedDialog(None, "api", "", lambda: None).keep_button.isVisibleTo(allowed)
+    # Keep for later starts… of a start on a host: Approvals › Inspection › Allowed now (2026-11-24: one view).
+    from sandbox_ai_app import approvals_sections as sections
+    monkeypatch.setattr(sections, "ask_first", lambda parent, action, title, text, accept, **k: ui.asked.append(
+        (action, text)) or True)
+    monkeypatch.setattr(sections, "background", at_once)
+    header = sections.ContextHeader(sai, 60)
+    header.choose("ct1", "api")
+    allowed = sections.AllowedSection(sai, header)
+    allowed.refresh()  # (read there: net show --json)
+    assert allowed.keep.isEnabled()
+    allowed.keep_all.click()
+    assert ("ct1", "net", "show", "api", "--keep-all") in sai.asked and ui.asked[-1][0] == "net-keep"
+    assert ui.asked[-1][1].startswith("On ct1: ")
+    allowed.keep.click()
+    assert ("ct1", "net", "show", "api", "--keep") in sai.asked
     monkeypatch.setattr(ui.NetworkDialog, "exec", lambda self: (self.hosts.setText("pypi.org"), self.keep.setChecked(
         True), QtWidgets.QDialog.DialogCode.Accepted)[-1])
     page.network_dialog("ct1", "api", "allow", "Allow", {"--allow-host", "--keep"}, None)

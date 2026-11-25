@@ -93,9 +93,14 @@ KIND_DOES = {
              "Bestimmt, ob das HOME der Sandbox zwischen Läufen bleibt und wie der Login des Agenten hineinkommt."),
     "kits": ("The kits you tick are copied into HOME at the start; memory and plugins can be switched off.",
              "Die angehakten Kits werden beim Start ins HOME kopiert; Memory und Plugins lassen sich abschalten."),
-    "agent": ("Always on the board: which agent runs, its model and arguments. Everything else connects to it.",
+    "agent": ("Always on the board: which agent runs, its model and arguments. Everything else connects to it. "
+              "Tell the agent what its sandbox has (on): the start writes /sandbox/session/INTRO.md - every folder, "
+              "toolchain, MCP server, service and device with where it is and how to use it, no secret, no host path "
+              "- and tells the agent to read it; cleared: --no-intro.",
               "Immer auf dem Board: welcher Agent läuft, sein Modell und seine Argumente. Alles andere verbindet sich"
-              " mit ihm."),
+              " mit ihm. Dem Agenten sagen, was seine Sandbox hat (an): Der Start schreibt /sandbox/session/INTRO.md "
+              "- jeden Ordner, jede Toolchain, jeden MCP-Server, Dienst und jedes Gerät mit Ort und Benutzung, kein "
+              "Geheimnis, kein Host-Pfad - und weist den Agenten an, sie zu lesen; abgewählt: --no-intro."),
     "approvals": ("Sets when a running sandbox asks you (Approvals page) and which rulesets allow, ask or deny.",
                   "Legt fest, wann eine laufende Sandbox Sie fragt (Seite Freigaben) und welche Regelwerke "
                   "erlauben, fragen oder ablehnen."),
@@ -119,11 +124,17 @@ KIND_DOES = {
             "proxy.",
             "Öffnet nur Adresse und Port eines mit sandbox-ai llm eingetragenen Servers; sein Schlüssel bleibt "
             "beim Proxy."),
-    "network": ("Always on the board: profiles, allowed hosts, addresses, ports and DNS. Nothing listed here is "
-                "reachable (except the agent's provider). A host allowed here is reached; what a ruleset decides about "
-                "its requests (Approvals and rules) still holds: a request a ruleset asks about is asked all the same.",
-                "Immer auf dem Board: Profile, erlaubte Hosts, Adressen, Ports und DNS. Was hier nicht steht, ist "
-                "nicht erreichbar (außer dem Anbieter des Agenten). Ein hier erlaubter Host wird erreicht; was ein "
+    "network": ("Always on the board: profiles, allowed hosts, addresses, ports and DNS. Nothing else is reachable - "
+                "except the agent's provider and what another part opens: Opened by other parts lists that, "
+                "read-only, with its source (a toolchain's registries, a Git login's server, an API key's host, the "
+                "model server, an agent feature), as the launcher's check of the board says it. A host allowed here "
+                "is reached; what a ruleset decides about its requests (Approvals and rules) still holds: a request "
+                "a ruleset asks about is asked all the same.",
+                "Immer auf dem Board: Profile, erlaubte Hosts, Adressen, Ports und DNS. Sonst ist nichts erreichbar - "
+                "außer dem Anbieter des Agenten und dem, was ein anderes Teil öffnet: Von anderen Teilen geöffnet "
+                "listet das, nur lesbar, mit seiner Quelle (die Registrys einer Toolchain, der Server einer "
+                "Git-Anmeldung, der Host eines API-Schlüssels, der Modellserver, eine Agenten-Funktion), so wie es "
+                "die Prüfung des Boards durch den Launcher sagt. Ein hier erlaubter Host wird erreicht; was ein "
                 "Regelwerk über seine Anfragen entscheidet (Freigaben und Regeln), gilt trotzdem: Eine Anfrage, nach "
                 "der ein Regelwerk fragt, wird dennoch gefragt."),
     "vpn": ("Every connection leaves through the profile's tunnel; a kill switch blocks the rest, and the start "
@@ -136,13 +147,17 @@ KIND_DOES = {
                 "the task needs.",
                 "Die aufgeführten Geräte werden dem Agenten gegeben. Jedes schwächt die Isolation: Nennen Sie nur, "
                 "was die Aufgabe braucht."),
-    "toolchains": ("Each toolchain you list is mounted read-only at /opt/toolchains/NAME and its commands are on "
-                   "the agent's PATH; the registries it names are opened with it (not in the modes high and "
-                   "paranoid). It must be in the host's store first: sandbox-ai toolchain add NAME.",
-                   "Jede aufgeführte Toolchain wird nur lesbar unter /opt/toolchains/NAME eingehängt, ihre Befehle "
-                   "stehen im PATH des Agenten; die Registrys, die sie nennt, werden mit ihr geöffnet (nicht in den "
-                   "Modi high und paranoid). Sie muss zuerst im Lager des Hosts liegen: sandbox-ai toolchain add "
-                   "NAME."),
+    "toolchains": ("A toolchain is a compiler or SDK (Go, Rust, a JDK, Node, Python). Each one chosen is mounted "
+                   "read-only at /opt/toolchains/NAME, its commands on the agent's PATH - nothing is installed in the "
+                   "image. Registries lists the package registries each needs and what the start does: opened by "
+                   "itself, kept closed (the check box), or refused by the security mode high or paranoid. One the "
+                   "host's store lacks is added first: sandbox-ai toolchain add NAME.",
+                   "Eine Toolchain ist ein Compiler oder SDK (Go, Rust, ein JDK, Node, Python). Jede gewählte wird "
+                   "nur lesbar unter /opt/toolchains/NAME eingehängt, ihre Befehle im PATH des Agenten - nichts wird "
+                   "im Image installiert. Registrys listet die Paket-Registrys, die jede braucht, und was der Start "
+                   "tut: von selbst geöffnet, geschlossen gehalten (das Kästchen) oder vom Sicherheitsmodus high "
+                   "oder paranoid abgelehnt. Fehlt eine im Lager des Hosts, wird sie zuerst hinzugefügt: sandbox-ai "
+                   "toolchain add NAME."),
     "limits": ("Caps memory, CPUs and processes; a running sandbox of the project can get new limits at once.",
                "Begrenzt Speicher, CPUs und Prozesse; eine laufende Sandbox des Projekts kann sofort neue Grenzen "
                "bekommen."),
@@ -199,12 +214,12 @@ KIND_DOES = {
               "security mode, canaries, a name, checkpoints, a preset of sandbox-ai, an option of another version. "
               "The board puts the part there when a command line, a preset or a project file brings such an option; "
               "its field takes them as a shell does, and an option another part owns moves to that part. The Expert "
-              "view of the Start page has a field for each of them. Removed, its options are gone from the start.",
+              "view has a field for each of them. Removed, its options are gone from the start.",
               "Enthält die Optionen des Starts, die kein anderer Teil zeigt, genau wie die Befehlszeile sie hat: den "
               "Sicherheitsmodus, Canaries, einen Namen, Checkpoints, ein Preset von sandbox-ai, eine Option einer "
               "anderen Version. Das Board legt den Teil an, wenn eine Befehlszeile, ein Preset oder eine "
               "Projektdatei eine solche Option mitbringt; sein Feld nimmt sie, wie eine Shell es tut, und eine "
-              "Option, die einem anderen Teil gehört, wandert zu diesem Teil. Die Ansicht Experte der Seite Start "
+              "Option, die einem anderen Teil gehört, wandert zu diesem Teil. Die Ansicht Experte "
               "hat für jede ein eigenes Feld. Wird er entfernt, sind seine Optionen aus dem Start verschwunden."),
 }
 
@@ -258,9 +273,9 @@ AREA_TIPS = (
           "Server, den der Agent nicht nutzen kann, wird ausgegraut gezeigt."),
          "--llm NAME[:MODEL]", "llm"),
     _tip("launch.profile", ("Profile", "Profil"),
-         ("Your saved option sets for the Start page (Save as profile…): host, agent, options and arguments, "
+         ("Your saved option sets for the Board page (Save as profile…): host, agent, options and arguments, "
           "loaded with Load.",
-          "Ihre gespeicherten Optionssätze der Seite Start (Als Profil speichern…): Host, Agent, Optionen und "
+          "Ihre gespeicherten Optionssätze der Seite Board (Als Profil speichern…): Host, Agent, Optionen und "
           "Argumente, geladen mit Laden."),
          ("Load fills the whole form with the profile; nothing starts until you press a start button.",
           "Laden füllt das ganze Formular mit dem Profil; nichts startet, bevor Sie einen Start-Knopf drücken."),
@@ -294,7 +309,7 @@ AREA_TIPS = (
     _tip("launch.session", ("Session", "Sitzung"),
          ("A named sandbox that keeps running when you close the terminal or the app.",
           "Eine benannte Sandbox, die weiterläuft, wenn Sie das Terminal oder die App schließen."),
-         ("Start with as session starts it detached; attach, pause, resume and stop it on Sandboxes & sessions.",
+         ("Start with as session starts it detached; attach, pause, resume and stop it on Sessions.",
           "Start mit als Sitzung startet sie losgelöst; Verbinden, Pausieren, Fortsetzen und Stoppen auf Sandboxen & "
           "Sitzungen."),
          "--session NAME", "sessions"),
@@ -396,10 +411,11 @@ AREA_TIPS = (
           "Nichts startet; eine Ablehnung nennt die Option, die er nicht annimmt."),
          "--dry-run", "page-board"),
     _tip("board.presets", ("Presets and wizard", "Vorlagen und Assistent"),
-         ("New from preset… opens the gallery: ready boards, sandbox-ai's presets and your own. Wizard… builds a "
-          "new project step by step.",
-          "Neu aus Vorlage… öffnet die Galerie: fertige Boards, die Vorlagen von sandbox-ai und Ihre eigenen Vorlagen."
-          " Assistent… baut ein neues Projekt Schritt für Schritt."),
+         ("New project… sets up a new project: on this machine step by step (the wizard), or in a folder of a host "
+          "of sandbox-ai hosts. New from preset… opens the gallery: ready boards, sandbox-ai's presets and your own.",
+          "Neues Projekt… richtet ein neues Projekt ein: auf diesem Rechner Schritt für Schritt (der Assistent) oder "
+          "in einem Ordner eines Hosts von sandbox-ai hosts. Neu aus Vorlage… öffnet die Galerie: fertige Boards, die "
+          "Vorlagen von sandbox-ai und Ihre eigenen Vorlagen."),
          ("In the gallery, Save the board as a preset… keeps the board shown now as your own preset.",
           "In der Galerie speichert Board als Vorlage speichern… das gezeigte Board als Ihre eigene Vorlage."),
          "sandbox-ai presets list", "app-presets-gallery"),
@@ -970,9 +986,9 @@ AREA_TIPS = (
           "Aktualisieren und Alle aktualisieren führen das eigene signierte Update jedes Hosts aus."),
          "sandbox-ai hosts list | add | set | remove | test | update", "hosts"),
     _tip("hosts.show", ("Its starts and questions", "Seine Starts und Fragen"),
-         ("Show starts opens Sandboxes & sessions with only this host's starts, Show questions the Approvals page "
+         ("Show starts opens Sessions with only this host's starts, Show questions the Approvals page "
           "with only its questions.",
-          "Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts, Fragen zeigen die Seite "
+          "Starts zeigen öffnet Sitzungen nur mit den Starts dieses Hosts, Fragen zeigen die Seite "
           "Freigaben nur mit seinen Fragen."),
          ("Attach, pause, stop, allow and deny happen there, as for this computer.",
           "Verbinden, Pausieren, Stoppen, Erlauben und Ablehnen geschehen dort, wie für diesen Rechner."),
@@ -1094,11 +1110,15 @@ AREA_TIPS = (
           "& Geräte, Netzwerk, Datenschutz & Anonymität, Schreiben & Dokumentation, Lernen, Spiele & Demos, "
           "sandbox-ai testen) und Ihre (Meine Vorlagen), jede mit einem Bild ihrer Teile, ihrer "
           "Sicherheitspunktzahl und dem, was noch auszufüllen ist."),
-         ("Select one to see it on the right; Create (or Enter, or a double-click) makes it the board. A category "
-          "on the left shows its section; its description is under the heading.",
-          "Wählen Sie eine, um sie rechts zu sehen; Anlegen (oder Enter, oder ein Doppelklick) macht sie zum Board. "
-          "Eine Kategorie links zeigt ihren Abschnitt; ihre Beschreibung steht unter der Überschrift."),
-         "sandbox-ai presets list, sandbox-ai presets categories", "app-presets-gallery"),
+         ("One list over all hosts: each card says where the preset comes from; Host narrows it to one. Any preset "
+          "starts on the board's host: one from another host is taken along with its ruleset (secrets come from "
+          "the board's host). Select one to see it on the left; Create (or Enter, or a double-click) makes it the "
+          "board.",
+          "Eine Liste über alle Hosts: Jede Karte sagt, woher die Vorlage kommt; Host zeigt nur einen. Jede Vorlage "
+          "startet auf dem Host des Boards: Eine von einem anderen Host wird mit ihrem Regelwerk mitgenommen "
+          "(Geheimnisse kommen vom Host des Boards). Wählen Sie eine, um sie links zu sehen; Anlegen (oder Enter, "
+          "oder ein Doppelklick) macht sie zum Board."),
+         "sandbox-ai presets list --all-hosts, sandbox-ai presets categories", "app-presets-gallery"),
     _tip("gallery.mine", ("Your own presets", "Ihre eigenen Vorlagen"),
          ("Save as preset… (on the Board, its context menu, the File menu, or here) keeps the board under a name "
           "with a description, a category and notes. By default its folders and the values filled in are kept: "
@@ -1356,9 +1376,9 @@ SETTING_TIPS = _terms(
      "status lines stay, the (?)s and tooltips explain.",
      "An: die Seiten zeigen ihre Infotexte und Hinweise. Aus (die Voreinstellung): ausgeblendet; Warnungen, Fehler und "
      "Statuszeilen bleiben, (?) und Tooltips erklären."),
-    ("button_texts", "On: the icon buttons of Sandboxes & sessions show their texts too. Off (default): icons "
+    ("button_texts", "On: the icon buttons of Sessions show their texts too. Off (default): icons "
      "alone, the text on hover and in the right-click menu.",
-     "An: die Symbol-Schaltflächen von Sandboxen & Sitzungen zeigen auch ihre Texte. Aus (Standard): nur Symbole, "
+     "An: die Symbol-Schaltflächen von Sitzungen zeigen auch ihre Texte. Aus (Standard): nur Symbole, "
      "der Text beim Zeigen und im Kontextmenü."),
     ("storage_check", "How often the app checks what sandbox-ai keeps here: weekly (the default), daily or off; "
      "also at its start when due.",
@@ -1463,6 +1483,10 @@ SETTING_TIPS = _terms(
     ("default_template", "The preset a new board starts from.", "Die Vorlage, mit der ein neues Board beginnt."),
     ("board_confirm_remove", "On: the [x] of a part asks first. Off: it removes the part at once (Undo brings it "
      "back).", "An: das [x] eines Teils fragt zuerst. Aus: es entfernt das Teil sofort (Rückgängig holt es zurück)."),
+    ("agent_intro", "On: every start writes /sandbox/session/INTRO.md (what its sandbox has and how to use it) "
+     "and tells the agent to read it. Off: none does.",
+     "An: Jeder Start schreibt /sandbox/session/INTRO.md (was seine Sandbox hat und wie man es benutzt) und "
+     "lässt den Agenten sie lesen. Aus: keiner."),
     ("board_grid", "Moved parts snap to a grid of this many pixels; 0 switches it off.",
      "Verschobene Teile rasten in einem Raster dieser Pixelzahl ein; 0 schaltet es ab."),
     ("desktop_notifications", "What the sandboxes show on the desktop themselves while this app does not run: "

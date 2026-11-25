@@ -1,0 +1,15 @@
+#!/bin/sh
+# adb-service - what sandbox-ai's service adb runs: one adb server in the foreground on port 5037 of the sandbox
+# (the loopback it shares with the agent), with the USB devices this container was given (device=). Its key and
+# known hosts are kept in /adb (the service's data folder).
+set -eu
+[ -d /adb ] && [ -w /adb ] || { echo "adb: ERROR: /adb is not a writable folder (the service's data=/adb)" >&2; exit 1; }
+# HOME: adb keeps its key in ~/.android. ADB_LIBUSB=0: adb's own USB code, which reads the device nodes this
+# container was given (libusb would ask udev, which no container has).
+export HOME=/adb ADB_LIBUSB=0
+if [ -z "$(ls /dev/bus/usb 2>/dev/null)" ]; then
+    echo "adb: note: this service was given no USB device (--service adb:device=usb:VENDOR:PRODUCT; sandbox-ai" \
+         "devices scan shows them): adb devices will list none"
+fi
+echo "adb: the server listens on port ${ADB_PORT:-5037} of the sandbox: adb devices"
+exec adb -P "${ADB_PORT:-5037}" server nodaemon

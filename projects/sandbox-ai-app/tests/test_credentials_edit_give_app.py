@@ -543,7 +543,7 @@ def test_what_a_running_sandbox_was_given_is_listed_and_taken_back_after_a_quest
     page = loaded(world, wait)
     world.sai.answers[("net", "show")] = lambda args: (0, json.dumps(SHOWN if args[2] == "codex-1a2b3c4d" else {}),
                                                        "")
-    page.show_given("local", "codex-1a2b3c4d")  # (Sandboxes › Secrets and logins… of that start)
+    page.show_given("local", "codex-1a2b3c4d")  # (Sessions › Secrets and logins… of that start)
     box = page.given
     assert wait(lambda: box.list.rowCount() == 3, 30), box.message.text()
     rows = [[box.list.item(r, c).text() for c in range(box.list.columnCount())] for r in range(3)]
@@ -591,56 +591,37 @@ def test_the_allowed_now_rows_take_back_a_given_login_and_key():
     assert len({A.row_identity(row) for row in rows}) == 3
 
 
-# --- Sandboxes › Allow…: a Git login for a run whose proxy cannot log in ------------------------------------------
+# --- A Git login for a run whose proxy cannot log in (Credentials, since 2026-11-24 the one place for it) -----------
 
-def test_the_allow_dialog_asks_a_second_time_before_a_token_goes_into_a_sandbox(qapp, monkeypatch, wait):
-    """Sandboxes › Allow… with a Git login for a run without the connection proxy: sandbox-ai refuses it (naming the
-    only other way), and the window asks a second question that says the agent can read the token - only that yes
-    sends --git-token-in-sandbox; a no leaves it refused."""
-    from sandbox_ai_app import backend, ui
-    refusal = ("sandbox-ai net: web cannot be given the Git login for http://localhost:3080 through its connection "
-               "proxy: it runs without the connection proxy (--no-proxy). It can only be put into the sandbox's session "
-               "directory for its Git helper, where the agent can read the token: to give it so, add --in-sandbox "
-               "(sandbox-ai git-logins give ... --in-sandbox; net allow: --git-token-in-sandbox); or start it again "
-               "with the login\n")
-    ran, asked, reported = [], [], []
+def test_a_git_login_from_a_variable_asks_a_second_time_before_its_token_goes_into_a_sandbox(qapp, monkeypatch):
+    """Credentials › Git logins › Give to a running sandbox… with a login whose token is in a variable (what the
+    Sessions page's Allow… dialog did before 2026-11-24): a run without the connection proxy refuses it (naming the
+    only other way), and a second question says the agent can read the token - only that yes sends --in-sandbox; a
+    no leaves it refused."""
+    from sandbox_ai_app import credentials_page as CP
+    refusal = ("sandbox-ai git-logins: web cannot be given the Git login for http://localhost:3080 through its "
+               "connection proxy: it runs without the connection proxy (--no-proxy). It can only be put into the "
+               "sandbox's session directory for its Git helper, where the agent can read the token: to give it so, "
+               "add --in-sandbox\n")
+    ran, asked = [], []
 
     class Recorder:
         def host_run(self, host, *args, timeout=120, input=None):
             ran.append((host, *args))
-            return (0, "ok", "") if "--git-token-in-sandbox" in args else (1, "", refusal)
+            return (0, "ok", "") if "--in-sandbox" in args else (1, "", refusal)
 
-        def presets(self):
-            return {}
-
-    class Dialog:
-        def __init__(self, *a, **k):
-            pass
-
-        def exec(self):
-            return QtWidgets.QDialog.DialogCode.Accepted
-
-        def arguments(self):
-            return ["--git-token-secret", "http://localhost:3080=GT"]
-
-        def kept(self):
-            return False
-    monkeypatch.setattr(ui, "NetworkDialog", Dialog)
-    monkeypatch.setattr(widgets, "exec_dropped", lambda dialog, *a: dialog.exec())
-    page = types.SimpleNamespace(sai=Recorder(), run_buttons=[], update_buttons=lambda: None,
-                                 reported=lambda title, result, error, draft=None: reported.append(result))
-    answers = iter([True, False, True, True])
-    monkeypatch.setattr(ui, "ask_first", lambda parent, action, title, text, accept, **kw: asked.append(
+        def too_old_text(self, host, result, command):
+            return None
+    message = QtWidgets.QLabel()
+    entry = {"url": "http://localhost:3080", "env": "GITEA_TOKEN", "user": ""}
+    answers = iter([False, True])
+    monkeypatch.setattr(CP, "ask_first", lambda parent, action, title, text, accept, **kw: asked.append(
         (action, text, accept)) or next(answers))
-    monkeypatch.setattr(ui, "background", lambda function, *args, done=None, **kw: done(function(*args), None))
-    # the second question answered no: refused as it was, nothing more sent
-    ui.SandboxesPage.network_dialog(page, backend.LOCAL if hasattr(backend, "LOCAL") else "local", "web", "allow",
-                                    "Allow for web", {"--git-token-env"}, None)
-    assert [args[1:3] for args in ran] == [("net", "allow")] and "--git-token-in-sandbox" not in ran[0]
-    assert asked[1][0] == "net-allow" and "the agent can read it" in asked[1][1] and "web" in asked[1][1]
-    assert asked[1][2] == "Give into the sandbox" and reported[-1][0] == 1
-    # answered yes: sent again with the option that says so
-    ui.SandboxesPage.network_dialog(page, "local", "web", "allow", "Allow for web", {"--git-token-env"}, None)
-    assert ran[-1] == ("local", "net", "allow", "web", "--git-token-secret", "http://localhost:3080=GT",
-                       "--git-token-in-sandbox")
-    assert reported[-1][0] == 0
+    monkeypatch.setattr(CP, "background", lambda function, *args, done=None, **kw: done(function(*args), None))
+    CP.give_login(None, Recorder(), "local", "web", entry, False, "web", message, None)
+    assert ran == [("local", "git-logins", "give", "--env", "GITEA_TOKEN", "--", "web", "http://localhost:3080")]
+    assert asked[0][0] == "net-allow" and "the agent can read it" in asked[0][1] and asked[0][2] == "Give into the sandbox"
+    assert "Not given to web" in message.text()
+    CP.give_login(None, Recorder(), "local", "web", entry, False, "web", message, None)
+    assert ran[-1] == ("local", "git-logins", "give", "--env", "GITEA_TOKEN", "--in-sandbox", "--", "web",
+                       "http://localhost:3080")

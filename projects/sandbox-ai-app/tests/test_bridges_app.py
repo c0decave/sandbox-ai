@@ -1,5 +1,5 @@
 """Session bridges in the app (sandbox-ai bridge): the words of `bridge add` built from the dialog's choices, the paths
-checked as the launcher checks them, the bridges marked on both sessions' rows of the Sandboxes page, New bridge…
+checked as the launcher checks them, the bridges marked on both sessions' rows of the Sessions page, New bridge…
 with the launcher's dry run and its egress warning confirmed first, Show, Revoke and Resume in the background, and the
 bridge events of the activity log in German too."""
 import json
@@ -253,7 +253,7 @@ def test_making_resuming_and_revoking_a_bridge_is_asked_first():
         assert backend.needs_confirm(action, {}), action
 
 
-# -- the Sandboxes page --
+# -- the Sessions page --
 
 def sessions(env):
     def session(name, agent="claude"):

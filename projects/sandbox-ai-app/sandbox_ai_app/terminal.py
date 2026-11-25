@@ -67,9 +67,9 @@ HELPER_CLOSE_SECONDS = 30
 # Why a kept tab's start that runs was not reopened (reopen_listed): the line above the tabs says it.
 NOT_REOPENED = {
     "paused": N_("Not reopened (paused: resume it first): {names}"),
-    "no-terminal": N_("Not reopened (it runs without a terminal: see its log in Sandboxes & sessions): {names}"),
-    "ended": N_("Not reopened (its agent ended, its sandbox runs on: see Sandboxes & sessions): {names}"),
-    "starting": N_("Not reopened (no terminal yet: attach it from Sandboxes & sessions once it has started): {names}"),
+    "no-terminal": N_("Not reopened (it runs without a terminal: see its log in Sessions): {names}"),
+    "ended": N_("Not reopened (its agent ended, its sandbox runs on: see Sessions): {names}"),
+    "starting": N_("Not reopened (no terminal yet: attach it from Sessions once it has started): {names}"),
     "other": N_("Not reopened (nothing to attach to): {names}"),
 }
 
@@ -286,7 +286,7 @@ class TerminalView(QWidget):
         # records (SANDBOX_AI_APP_TAB in ENV), and the host and start it attaches to.
         self.tab_tag = (env or {}).get(TAB_TAG)
         self.start_host = self.start_name = None
-        self.instance_key = None  # the Sandboxes & sessions start it was found to show (TerminalsPage.instance_of)
+        self.instance_key = None  # the Sessions start it was found to show (TerminalsPage.instance_of)
         self.label = None  # a title given with Rename... (kept across restarts of the app)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -745,6 +745,11 @@ class TerminalView(QWidget):
                                                                  lambda _r: None)),
                     (tr("Clear selection"), selected, lambda: self.run_js("window.sandboxTerminal.clearSelection()",
                                                                           lambda _r: None))]
+        # Show on the Board: the Board with this terminal's session (its tab's menu has it too).
+        page = self.terminals_page()
+        if page is not None and getattr(page, "board_request", None) is not None:
+            _text, enabled, _why, act = page.board_entry(page.instance_of(self))
+            actions += [("", False, None), (tr("Show on the Board"), enabled, act)]
         return actions
 
     def show_menu(self, state, position):
@@ -1082,6 +1087,8 @@ class TerminalsPage(QWidget):
         self.close_key.activated.connect(self.close_ended_tab)
         self.close_key.setEnabled(False)
         self.tabs.currentChanged.connect(lambda _index: self.update_close_key())
+        # The tab chosen (a click on it, Alt+number, Ctrl+Tab, a tab opened or closed): its terminal has the keyboard.
+        self.tabs.currentChanged.connect(lambda _index: self.focus_current())
         # The sandboxes' own browsers (--browser): tabs beside their start's terminal (browser_tabs.py).
         self.browsers = browser_tabs.BrowserTabs(self)
         # The window's Sandboxes & sessions (set by the window): a tab's start, its Stop, Rename and Focus.
@@ -1113,9 +1120,21 @@ class TerminalsPage(QWidget):
         """Alt+1 ... Alt+0: the tab at INDEX (0-9) of the terminals, with the focus in its terminal; none there: nothing."""
         if 0 <= index < self.tabs.count():
             self.tabs.setCurrentIndex(index)
-            widget = self.tabs.widget(index)
-            if widget is not None:
-                widget.setFocus(Qt.FocusReason.ShortcutFocusReason)
+            self.focus_current()
+
+    def focus_current(self, later=True):
+        """The keyboard to the selected tab's terminal (or a sandbox's browser: its view) while the page is shown -
+        the user 2026-11-24: switched to Terminals, one typed and nothing happened (the focus stayed in the
+        navigation, or on the tab bar after a click on a tab). LATER: once more when the events of this moment are
+        done (a click that showed the page is still on its way)."""
+        if not self.isVisible():
+            return
+        widget = self.tabs.currentWidget()
+        target = getattr(widget, "view", None) or widget
+        if isinstance(target, QWidget):
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
+            if later:
+                QTimer.singleShot(0, self, lambda: self.focus_current(later=False))
 
     # -- the running starts (Sessions) --
 
@@ -1147,7 +1166,7 @@ class TerminalsPage(QWidget):
         self.refresh_button.clicked.connect(lambda _=False: self.refresh_starts())
         top.addWidget(self.host)
         from .host_choice import follow_note
-        self.follow_note = follow_note()  # whose starts, when the window's pages follow the Sandboxes page's host
+        self.follow_note = follow_note()  # whose starts, when the window's pages follow the Sessions page's host
         top.addWidget(self.follow_note)
         top.addWidget(self.summary, 1)
         top.addWidget(self.refresh_button)
@@ -1612,7 +1631,7 @@ class TerminalsPage(QWidget):
             listed = next((e for e in self.entries if (tag and e.get("app_tab") == tag) or
                            (name and e.get("name") == name and (host or LOCAL) == self.chosen_host())), None) \
                 if self.starts is not None else None
-            known = self.instance_of(view) if not (listed or {}).get("id") else None  # (Sandboxes & sessions')
+            known = self.instance_of(view) if not (listed or {}).get("id") else None  # (Sessions')
             entry = {"host": host or LOCAL, "name": name or (listed or {}).get("name") or getattr(known, "name", None),
                      "id": (listed or {}).get("id") or getattr(known, "ident", None), "tag": tag,
                      "title": self.tabs.tabText(self.tabs.indexOf(view)), "label": view.label}
@@ -1772,7 +1791,7 @@ class TerminalsPage(QWidget):
 
     def sandbox_of(self, view):
         """Whether VIEW's tab shows a sandbox (an address of its loopback is the sandbox's, not this computer's): a
-        start on another host, a run registered here for the tab, or a start of Sandboxes & sessions."""
+        start on another host, a run registered here for the tab, or a start of Sessions."""
         if (view.start_host or LOCAL) != LOCAL or self.runs_of(view):
             return True
         try:
@@ -1782,7 +1801,7 @@ class TerminalsPage(QWidget):
 
     def sandbox_browser_for(self, view):
         """OPENER(url) for VIEW's start when it has a browser of its own that shows you a display: its Browser tab
-        (Sandboxes & sessions' open_browser), the URL typed into its address bar. None otherwise."""
+        (Sessions' open_browser), the URL typed into its address bar. None otherwise."""
         from . import vnc_view
         try:
             instance = self.instance_of(view)
@@ -1890,8 +1909,8 @@ class TerminalsPage(QWidget):
         if self.stoppable(view, instance) is None:
             choices.append(("stop", tr("Stop session")))
         return choose(self, tr("Close terminal"), tr(
-            "{name} keeps running when only its tab is closed (attach it again from Sandboxes & sessions or the "
-            "Sessions list). Stop the session too?", name=name), choices, cancel=tr("Cancel"), destructive=("stop",))
+            "{name} keeps running when only its tab is closed (attach it again from the Sessions page or the "
+            "Sessions list below the terminals). Stop the session too?", name=name), choices, cancel=tr("Cancel"), destructive=("stop",))
 
     # -- a tab's session: its context menu, Ctrl+W --
 
@@ -1900,9 +1919,9 @@ class TerminalsPage(QWidget):
         return self.tabs.tabText(index) if index >= 0 else view.tab_title
 
     def instance_of(self, view):
-        """The start of Sandboxes & sessions the tab VIEW shows (an Instance): the one it attaches to (its host and
+        """The start of Sessions the tab VIEW shows (an Instance): the one it attaches to (its host and
         name), or the one started in it (its tag: run.json "app_tab"), else the one it showed before (a session
-        that stopped since); None when it is not known (no Sandboxes page, not listed yet, a build)."""
+        that stopped since); None when it is not known (no Sessions page, not listed yet, a build)."""
         page = self.sessions_page() if self.sessions_page is not None else None
         instances = getattr(page, "instances", None) or {}
         key, tag, name = (getattr(view, attr, None) for attr in ("instance_key", "tab_tag", "start_name"))
@@ -1930,7 +1949,7 @@ class TerminalsPage(QWidget):
         instance = instance if instance is not None else self.instance_of(view)
         page = self.sessions_page() if self.sessions_page is not None else None
         if instance is None or page is None:
-            return tr("Not a session the app knows (yet): see Sandboxes & sessions")
+            return tr("Not a session the app knows (yet): see Sessions")
         if instance.state not in ("running", "paused"):
             return tr("The session does not run")
         if instance.kind != "session" and not getattr(page, "stoppable", True):
@@ -1938,7 +1957,7 @@ class TerminalsPage(QWidget):
         return None
 
     def stop_session(self, view, asked=False):
-        """Stop the session of the tab VIEW (Sandboxes & sessions' Stop; ASKED: the human chose it already)."""
+        """Stop the session of the tab VIEW (Sessions' Stop; ASKED: the human chose it already)."""
         instance = self.instance_of(view)
         page = self.sessions_page() if self.sessions_page is not None else None
         if instance is None or page is None or self.stoppable(view, instance) is not None:
@@ -2052,7 +2071,7 @@ class TerminalsPage(QWidget):
         self.save_tabs()
 
     def focus(self, view):
-        """Focus in Sandboxes & sessions: the tab's start selected there."""
+        """Focus in Sessions: the tab's start selected there."""
         instance = self.instance_of(view)
         if instance is not None and self.focus_start is not None:
             self.focus_start(instance.key)
@@ -2064,7 +2083,7 @@ class TerminalsPage(QWidget):
 
     def tab_actions(self, index):
         """[(text, enabled, why, callback) or None] of the context menu of tab INDEX: its session's Rename…, Restart,
-        Stop session, Focus in Sandboxes & sessions; then Close tab, Stop session and close tab, Close other tabs."""
+        Stop session, Focus in Sessions; then Close tab, Stop session and close tab, Close other tabs."""
         view = self.tabs.widget(index)
         if view is None:
             return []
@@ -2073,12 +2092,13 @@ class TerminalsPage(QWidget):
         instance = self.instance_of(view)
         stop_why = self.stoppable(view, instance)
         focus_why = None if instance is not None and self.focus_start is not None else \
-            tr("Not a session the app knows (yet): see Sandboxes & sessions")
+            tr("Not a session the app knows (yet): see Sessions")
         restart_why = self.restartable(view, instance)
         return [(tr("Rename…"), True, None, lambda: self.rename(view)),
                 (tr("Restart"), restart_why is None, restart_why, lambda: self.restart(view)),
                 (tr("Stop session"), stop_why is None, stop_why, lambda: self.stop_session(view)),
-                (tr("Focus in Sandboxes & sessions"), focus_why is None, focus_why, lambda: self.focus(view)),
+                (tr("Focus in Sessions"), focus_why is None, focus_why, lambda: self.focus(view)),
+                self.board_entry(instance),
                 self.files_entry(instance),
                 self.shell_entry(instance),
                 self.workspace_entry(instance),
@@ -2088,25 +2108,33 @@ class TerminalsPage(QWidget):
                 (tr("Stop session and close tab"), stop_why is None, stop_why, lambda: self.stop_and_close(view)),
                 (tr("Close other tabs"), self.tabs.count() > 1, None, lambda: self.close_others(view))]
 
+    def board_entry(self, instance):
+        """The tab menu's "Show on the Board" (user 2026-11-24): the Board with this tab's session - its project's tab
+        and board, its Agent part selected (the window: board_request; board_follow.show)."""
+        from . import board_follow
+        why = tr("Not a session the app knows (yet): see Sessions") \
+            if getattr(self, "board_request", None) is None or instance is None else board_follow.why_not(instance)
+        return (tr("Show on the Board"), why is None, why, lambda: self.board_request(instance))
+
     def files_entry(self, instance):
         """The tab menu's "File manager": the Files page on the session's folder (its workspace; on a host, over SSH)."""
         record = instance.record if instance is not None and isinstance(instance.record, dict) else {}
         folder = record.get("workspace") or (instance.project if instance is not None else "")
         why = None if folder and getattr(self, "files_request", None) is not None else \
-            tr("Not a session the app knows (yet), or no folder of it: see Sandboxes & sessions")
+            tr("Not a session the app knows (yet), or no folder of it: see Sessions")
         return (tr("File manager"), why is None, why, lambda: self.files_request(instance))
 
     def shell_entry(self, instance):
         """The tab menu's "Open shell" (user 2026-11-19): a shell in the session's sandbox under the agent's rules
-        (`sandbox-ai shell NAME`; on a host over SSH) in a tab of its own - the Sandboxes page's Shell; while it runs."""
+        (`sandbox-ai shell NAME`; on a host over SSH) in a tab of its own - the Sessions page's Shell; while it runs."""
         running = instance is not None and instance.state == "running"
         why = None if running and getattr(self, "shell_request", None) is not None else \
-            tr("Only while the session runs (a session the app knows: see Sandboxes & sessions)")
+            tr("Only while the session runs (a session the app knows: see Sessions)")
         return (tr("Open shell"), why is None, why, lambda: self.shell_request(instance))
 
     def run_menu(self, instance):
-        """The tab menu's "While it runs" submenu (user 2026-11-19): the Sandboxes page's actions for a running start -
-        Allow…, Revoke…, Allowed during the run, the connection log, devices, workspaces, MCP servers, skills and
+        """The tab menu's "While it runs" submenu (user 2026-11-19): the Sessions page's actions for a running start -
+        Allow…, Revoke…, What it may reach…, the connection log, devices, workspaces, MCP servers, skills and
         plugins, limits, rules, the browser - for this tab's session (the window builds it: run_menu_request), or
         None (no window, a start the app does not know)."""
         request = getattr(self, "run_menu_request", None)
@@ -2114,10 +2142,10 @@ class TerminalsPage(QWidget):
 
     def workspace_entry(self, instance):
         """The tab menu's "Add folder…" (user 2026-11-19): a folder of this machine, of the session's host or of another
-        machine (sshfs) mounted into the running session - the Sandboxes page's Add workspace… for it."""
+        machine (sshfs) mounted into the running session - the Sessions page's Add workspace… for it."""
         running = instance is not None and instance.state == "running"
         why = None if running and getattr(self, "workspace_request", None) is not None else \
-            tr("Only while the session runs (a session the app knows: see Sandboxes & sessions)")
+            tr("Only while the session runs (a session the app knows: see Sessions)")
         return (tr("Add folder…"), why is None, why, lambda: self.workspace_request(instance))
 
     def tab_menu(self, position):

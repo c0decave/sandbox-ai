@@ -1,6 +1,6 @@
 """What a start needs on its host before it can run - an identity, an image variant (made from its recipe and built),
 a VPN profile, MCP servers - found and provided instead of left for the launcher to refuse: for the Board and the
-Start page alike (every preset and profile). A page mixes Prerequisites in and gives prerequisite_argv() (its
+Board page alike (every preset and profile). A page mixes Prerequisites in and gives prerequisite_argv() (its
 launcher options), prerequisite_agent(), host() and, optionally, show_notice(text, role)."""
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import weakref
 from . import applog, board as B, preparing as P
 from .files import printable, printable_text
 from .i18n import tr
-from .widgets import ask_first, background, confirm, warn
+from .widgets import accept_license, ask_first, background, confirm, warn
 
 LOCAL = "local"  # this machine, as `sandbox-ai hosts` names it
 
@@ -787,7 +787,13 @@ class Prerequisites:
             def service_images():
                 # {image: built}: your images there (built), sandbox-ai's own templates there not built (False)
                 mine = {str(row.get("name")): True for row in self.sai.user_images(host) if isinstance(row, dict)}
-                return {**{str(row["image"]): False for row in self.sai.service_templates(host)}, **mine}
+                templates = self.sai.service_templates(host)
+                # (the license of what one is built from - android-emulator: Google's SDK -, kept for the question
+                # asked before it is built: licensed_images, on the GUI thread, asks no host)
+                from . import backend
+                self.__dict__.setdefault("template_licenses", {})[host] = {
+                    str(row["image"]): terms for row in templates for terms in [backend.license_terms(row)] if terms}
+                return {**{str(row["image"]): False for row in templates}, **mine}
             readers = {"--identity": lambda: self.sai.identities() if host == LOCAL else self.sai.host_identities(host),
                        "--service": service_images,
                        "--image-variant": variants,
@@ -1072,14 +1078,32 @@ class Prerequisites:
                                          "minutes, room on the disk)", name=name, agent=agent,
                                          made=tr(", made from its recipe first") if name in variants else ""), False)
                     for name in to_build if "build" not in yes]
+            # What is built from downloads under a license (the toolchain android-sdk, the service image
+            # android-emulator: Google's SDK) is no row of that question: a license is asked on its own, No first,
+            # and never accepted by "Fix all" (license_rows, below).
+            licensed_images = self.licensed_images(host, images)
+            licensed_fixes = [item for item in fixes if item.get("terms")]
             rows += [(("service", name), tr("the service image {name} is not built on {host} → built from "
                                             "sandbox-ai's own Containerfile (a minute or two; like your images it "
                                             "is UNCHECKED)", name=name, host=host), False)
-                     for name in images if "build" not in yes]
+                     for name in images if "build" not in yes and name not in licensed_images]
             rows += [mcp_row(name, host, page, self.mcp_entry_of(name)) for name in servers if "mcp" not in yes]
             rows += [(("fix", item["id"]), fix_text(item), bool(item.get("unsigned") or item.get("security")))
-                     for item in fixes]
+                     for item in fixes if item not in licensed_fixes]
             chosen = self.ask_fix_plan(host, rows, questions) if rows else set()
+            answered = bool(chosen) or not rows  # (Cancel of that question: nothing more is asked)
+            asked = [(("service", name), tr("The service image {name}", name=printable(name)), terms, None)
+                     for name, terms in licensed_images.items()] + \
+                [(("fix", item["id"]), printable(item["missing"]), None, printable(item.get("security") or ""))
+                 for item in licensed_fixes]
+            for key, what, terms, text in asked:
+                rows.append((key, what, True))
+                if answered and accept_license(self, what, terms, text):
+                    chosen.add(key)
+                applog.log("INFO", "prerequisites", f"a license for {printable(str(key[1]))} on {printable(host)}: "
+                                                    f"{'accepted' if key in chosen else 'not accepted'}")
+            self.accepted_licenses = {name: terms["option"] for name, terms in licensed_images.items()
+                                      if ("service", name) in chosen}
             declined = [key for key, _text, _marked in rows if key not in chosen]
             tor_profiles += [name for name in tor_asked if ("tor", name) in chosen]
             no_tor = [name for kind, name in declined if kind == "tor"]
@@ -1102,10 +1126,16 @@ class Prerequisites:
                                                           built=[n for n in not_built if n not in variants]))]))
                 to_build = [name for name in to_build if name not in not_built]
             no_image = [name for kind, name in declined if kind == "service"]
-            if no_image:
+            no_license = [name for name in no_image if name in licensed_images and answered]
+            if no_license:
+                problems.append((tr("Service image {names}: not built - its license was not accepted (sandbox-ai "
+                                    "images build-image NAME --builtin NAME asks for it).",
+                                    names=", ".join(no_license)), [(tr("Build now"), again("--service", no_license))]))
+            if [name for name in no_image if name not in no_license]:
                 problems.append((tr("Service image {names}: not built (sandbox-ai images build-image NAME --builtin "
-                                    "NAME).", names=", ".join(no_image)),
-                                 [(tr("Build now"), again("--service", no_image))]))
+                                    "NAME).", names=", ".join(n for n in no_image if n not in no_license)),
+                                 [(tr("Build now"), again("--service", [n for n in no_image if n not in no_license]))]))
+            if no_image:
                 images = [name for name in images if name not in no_image]
             # (what the page said of a server to build from its source: decided there - not asked again)
             page["decided"] = {name: ("mcp", name) in chosen for name in servers
@@ -1154,6 +1184,20 @@ class Prerequisites:
                                 "NAME).", names=", ".join(images)),
                              [(tr("Build now"), again("--service", images))]))
             images = []
+        # One built from downloads under a license (android-emulator: Google's SDK): the license is asked on its
+        # own, whatever was answered before ("Build now" is no acceptance); without a yes it is not built.
+        accepted_before = dict(self.__dict__.get("accepted_licenses") or {}) if questions is not None else {}
+        for name, terms in self.licensed_images(host, images).items():
+            if name in accepted_before:
+                continue
+            if accept_license(self, tr("The service image {name}", name=printable(name)), terms):
+                accepted_before[name] = terms["option"]
+            else:
+                images = [other for other in images if other != name]
+                problems.append((tr("Service image {names}: not built - its license was not accepted (sandbox-ai "
+                                    "images build-image NAME --builtin NAME asks for it).", names=name),
+                                 [(tr("Build now"), again("--service", [name]))]))
+        self.accepted_licenses = accepted_before
         if servers and "mcp" not in yes and not confirm(self, tr("MCP servers"), tr(
                 "This start uses the MCP servers {names}, which are not added on {host}. Add them from their catalogs "
                 "now (their images are pulled)?", names=", ".join(servers), host=host), tr("Add")):
@@ -1244,6 +1288,14 @@ class Prerequisites:
         values), the words ADD added. True when the page did it (its next start has them); False where a page cannot
         change its start from here (the ways are then said, for the human to make the change)."""
         return False
+
+    def licensed_images(self, host, images):
+        """{name: terms} of the service images IMAGES (sandbox-ai's own Containerfiles, to be built on HOST) whose
+        downloads are under a license (`images templates`: "terms" - android-emulator: Google's SDK): asked about
+        on their own before they are built. One whose host did not tell is built as the others: its build then
+        refuses without the option, and says so."""
+        known = (self.__dict__.get("template_licenses") or {}).get(host) or {}  # (read with the start's check)
+        return {name: known[name] for name in images if name in known}
 
     def ask_start_choice(self, host, changes):
         """A choice between ways to start (CHANGES: the launcher's fixes with "options", the answers of one question
@@ -1626,6 +1678,8 @@ class Prerequisites:
         is not made, [(button, function)])]. NETWORKS: the servers added with the outside network (a yes to it).
         IMAGES: the services' images of sandbox-ai's own Containerfiles to build (images build-image --builtin)."""
         images = list(images)
+        accepted = dict(self.__dict__.get("accepted_licenses") or {})  # {service image: the option of its license}
+        self.accepted_licenses = {}
         # The agent's own image, not built and asked for (provide: agent_builds): built first.
         agent_images = list(self.__dict__.get("agent_builds", {}).pop(context, None) or [])
         # The fixes of the launcher's own plan that were asked for (provide: plan_fixes): each its commands on HOST.
@@ -1703,7 +1757,9 @@ class Prerequisites:
                            host, builds.get(name, ())))
              for name in servers] + \
             [("service", name, tr("building the service image {name} (sandbox-ai's own Containerfile)", name=name),
-              ("images", "build-image", name, "--builtin", name)) for name in images]
+              # (--accept-...: only for one whose license was asked and accepted in this preparation)
+              ("images", "build-image", name, "--builtin", name,
+               *([accepted[name]] if accepted.get(name) else []))) for name in images]
         in_tab = self.prerequisite_terminal() if slow else None
         here = fix_steps  # (made here, in the background, where no terminal tab runs them)
         if in_tab is not None:

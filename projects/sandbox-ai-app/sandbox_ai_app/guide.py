@@ -31,7 +31,7 @@ TOUR = (
     # The Start page: one start in two views, with the switch above the page (Board | Expert). Its two steps are its
     # two views (each a page key of the window): the Expert view first, as the pages' order has it; the page itself
     # opens as the Board.
-    Step("launch", N_("Start"),
+    Step("launch", N_("Board: Expert view"),
          N_("Start an agent in a sandbox. The page shows one start in two views, with a switch above it: Board (the "
             "start as parts and connections; the page opens with it) and Expert, shown here - the project folder, "
             "the agent, every option a field and the whole command line as text to edit or paste. Both are always "
@@ -39,14 +39,14 @@ TOUR = (
             "same command from either."),
          N_("Type --offline into the command line, then press Dry run to see the launcher's verdict without "
             "starting.")),
-    Step("board", N_("Start: the Board"),
-         N_("The Board view of the Start page: the same start as nodes - the agent, its folders, the proxy, the "
+    Step("board", N_("Board: Board view"),
+         N_("The Board view: the same start as nodes - the agent, its folders, the proxy, the "
             "network and everything else; options no part shows are on the part Other options. The checks below "
             "follow every change; Apply writes .sandbox-ai.json after showing it. The Expert view shows this very "
             "start as fields and its command line."),
          N_("Double-click a part in the list on the left to add it: the guide helps you set it up. Then choose "
             "Expert above the page (or F6) and find it in the command line.")),
-    Step("sandboxes", N_("Sandboxes & sessions"),
+    Step("sandboxes", N_("Sessions"),
          N_("Everything that runs or is kept: one-off runs, sessions, MCP servers, with pause, resume, stop and "
             "attach; a running one gets folders, MCP servers and toolchains without a restart."),
          N_("Select a session to see its options and history.")),
@@ -279,8 +279,10 @@ NODE_QUESTIONS = {
                                                            "below them, one or more per line, separated by commas or "
                                                            "spaces (not github.io or co.uk)."),
                  "list", placeholder="example.org"),
-        Question("--allow-pypi", N_("PyPI"), N_("Python packages."), "flag"),
-        Question("--allow-github", N_("GitHub"), N_("GitHub and its downloads."), "flag"),
+        Question("--allow-pypi", N_("PyPI"), N_("Open PyPI, so that pip and uv can download Python packages."),
+                 "flag"),
+        Question("--allow-github", N_("GitHub"),
+                 N_("Open GitHub: clone and fetch, its API and its release downloads."), "flag"),
         Question("--offline", N_("Offline"), N_("No network at all, not even the agent's provider."), "flag"),
     ),
     "vpn": (
@@ -292,19 +294,25 @@ NODE_QUESTIONS = {
     "devices": (
         Question("--device", N_("Devices"), N_("Host devices, one per line (/dev/ttyUSB0, /dev/kvm): each weakens "
                                                "the isolation."), "list"),
-        Question("--gpu", N_("GPU"), N_("A GPU for the agent."), "choice",
+        Question("--gpu", N_("GPU"),
+                 N_("Hand the agent a GPU of this computer (only the kinds found here are offered)."), "choice",
                  (("", N_("none")), ("nvidia", "NVIDIA"), ("dri", "DRI (Intel, AMD)"), ("rocm", "ROCm"))),
     ),
     "toolchains": (
-        Question("--toolchain", N_("Toolchains"), N_("Build tools from the signed catalog, one per line (go, rust, "
-                                                     "jdk, node ...): mounted read-only at /opt/toolchains/NAME."),
+        Question("--toolchain", N_("Which toolchains"),
+                 N_("Choose from the list: what is in this host's store, then the rest of the signed catalog (added to "
+                    "the store before the start). NAME is its newest version, NAME@VERSION that one (jdk@17). Each is "
+                    "mounted read-only at /opt/toolchains/NAME, its commands on the agent's PATH."),
                  "list"),
-        Question("--toolchain-offline", N_("Without their registries"),
-                 N_("Mount them, but keep the registries they name (the Go module proxy, crates.io ...) closed."),
+        Question("--toolchain-offline", N_("Keep their registries closed"),
+                 N_("A toolchain downloads packages from its registries (Go: proxy.golang.org, Rust: crates.io). The "
+                    "start opens them by itself. Ticked: they stay closed - the toolchain works with what is already "
+                    "in the project."),
                  "flag"),
     ),
     "limits": (
-        Question("--memory", N_("Memory"), N_("At most this much, e.g. 8g."), "text", placeholder="8g"),
+        Question("--memory", N_("Memory"), N_("The most memory the sandbox may use, e.g. 8g."), "text",
+                 placeholder="8g"),
         Question("--cpus", N_("CPUs"), N_("At most this many CPUs, e.g. 4."), "text", placeholder="4"),
         Question("--pids", N_("Processes"), N_("At most this many processes."), "text", placeholder="4096"),
     ),
@@ -371,8 +379,8 @@ NODE_QUESTIONS = {
     "other": (
         Question("tokens", N_("Options"),
                  N_("Options of the start that no other part shows, one per line as on the command line: the "
-                    "security mode (--mode high), a name (--name night), canaries, checkpoints. The Expert view of "
-                    "the Start page has a field for each."),
+                    "security mode (--mode high), a name (--name night), canaries, checkpoints. The Expert view has "
+                    "a field for each."),
                  "list", placeholder="--mode high"),
     ),
 }

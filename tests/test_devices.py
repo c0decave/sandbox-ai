@@ -57,6 +57,17 @@ def test_sandbox_processes_finds_this_pod_only(world):
     assert d.sandbox_processes({**record, "session_dir": str(proc / "none")}, proc) is None
 
 
+def test_the_anchor_is_the_sandboxs_oldest_process_not_the_lowest_pid(world):
+    """The user (2026-11-24): `mcp attach` said "process 792898 of the sandbox is gone": the anchor was the lowest PID
+    that sees the session's config.json - a command the agent ran a moment ago (PIDs wrap) - and it had ended before
+    the helper used it. The oldest process (by its start time) is the anchor."""
+    proc, record = world
+    fake_process(proc, 50, 1, 13, "/user.slice/.../libpod_pod_abc.slice/libpod-sup.scope", config='{"run": "mine"}')
+    for pid, start in ((50, 9000), (100, 100), (101, 200)):  # 50: a short command run after the PIDs wrapped
+        (proc / str(pid) / "stat").write_text(f"{pid} (x) S " + " ".join(["0"] * 18) + f" {start} 0\n")
+    assert d.sandbox_processes(record, proc)["user"] == 100
+
+
 def test_bubblewrap_sandboxes_are_told_apart_by_their_user_namespace(tmp_path):
     proc, session = tmp_path / "proc", tmp_path / "session"
     session.mkdir()

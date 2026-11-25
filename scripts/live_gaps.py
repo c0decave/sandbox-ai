@@ -15,12 +15,18 @@
     scripts/live_check.sh --only presets-live --llm NAME [--preset-values FILE] [--presets A,B] [--provider-login]
                                               every built-in preset started for real (its first agent; Podman and,
                                               where it can, Bubblewrap); FILE gives the values only you can give
-    scripts/live_check.sh --only mcp-live [--mcp-servers A,B] [--mcp-repo DIR]
+    scripts/live_check.sh --only mcp-live [--mcp-servers A,B] [--mcp-repo DIR] [--mcp-vpn PROFILE]
                                               every server of the signed MCP catalog through a start's path
                                               (mcp add, a session with --mcp, its relay, initialize, tools/list,
-                                              its smoke calls; Podman and Bubblewrap; per-workspace isolation)
+                                              its smoke calls; Podman and Bubblewrap; per-workspace isolation);
+                                              --mcp-vpn: those with network added behind a Tor profile PROFILE
+                                              (mcp add --vpn: its own Tor container, as gowitness-tor runs)
     scripts/live_check.sh --device PATH       the device for devices-live (default: one `devices scan` found)
     scripts/live_check.sh --only artex-live   ARTEX beside an agent (asks first; builds its image when missing)
+    scripts/live_check.sh --only burp-live [--burp-url URL] [--burp-jar JAR [--burp-edition E]
+                          [--burp-license-file FILE]]
+                                              Burp Suite's MCP server: host mode (your Burp with the extension
+                                              answers through sandbox-ai's relay), container mode (your jar)
     scripts/live_check.sh --dmg-old A --dmg-new B   on a Mac: also the update of sandbox-ai.app from disk image A to
                                               B and back (each a .dmg, or the folder of a downloaded release)
 
@@ -158,13 +164,42 @@ CHECKS = (
           "go and python (the signed catalog; SAI_LIVE_TOOLCHAINS=FILE: a toolchains.json of your own builds, added "
           "unsigned), attach into the running sandbox - mounted read-only, nosuid, nodev at /opt/toolchains/NAME, the "
           "commands found by a shell that was started before - a hello world built and run with go, python3 the "
-          "toolchain's, toolchain list --run, detach (the commands and the mount gone); and a start with --toolchain go",
+          "toolchain's, toolchain list --run, detach (the commands and the mount gone); and a start with --toolchain "
+          "go. Qt: pyside6 attached (it brings python) - import PySide6 in the shell's python3, a Widgets and a QML "
+          "program drawn without a display (offscreen), their pictures not empty, pyside6-uic; and a start with "
+          "--toolchain qt: a Widgets and QML program built with CMake and GCC (the image variant gcc, under "
+          "Bubblewrap the host's) and run. Each Qt part is skipped while the catalog has no such toolchain. With "
+          "--accept-android-sdk-license also android-sdk, the toolchain built on this machine: its recipe of "
+          "the signed catalog, Google's files fetched and held to it, a start with --toolchain android-sdk (the jdk "
+          "with it), adb and aapt2 run, and a small app assembled with Gradle and the Android Gradle plugin against "
+          "the read-only SDK (x86_64; skipped without the option: the license is yours to accept)",
           ("sandbox", "image:codex", "linux"),
           (f"{GAPS}::test_live_toolchains_attached_to_a_running_session",
-           f"{GAPS}::test_live_a_start_with_a_toolchain"), timeout=2400,
+           f"{GAPS}::test_live_a_start_with_a_toolchain",
+           f"{GAPS}::test_live_qt_for_python_attached_to_a_running_session",
+           f"{GAPS}::test_live_qt_for_cpp_built_and_run",
+           f"{GAPS}::test_live_the_android_sdk_toolchain_assembles_an_app"), timeout=5400,
           network="HTTPS to raw.githubusercontent.com and github.com (the signed toolchains.json and the archives of "
-                  "go and python, about 90 MB; nothing with SAI_LIVE_TOOLCHAINS)",
-          source="the user, 2026-11-22: build toolchains for every language, mounted in at run time"),
+                  "go and python, about 90 MB, of pyside6, about 175 MB, and of qt; nothing with SAI_LIVE_TOOLCHAINS); "
+                  "with --accept-android-sdk-license also dl.google.com (about 1.1 GB of the Android SDK), the jdk's "
+                  "archive (about 390 MB), and Google's Maven and Maven Central from the sandbox (the Android Gradle "
+                  "plugin)",
+          source="the user, 2026-11-22: build toolchains for every language, mounted in at run time; 2026-11-24: "
+                 "Android as a toolchain; a complete Qt toolchain for Python and C++"),
+    Check("android-emulator-live",
+          "The Android emulator as a service beside a real sandbox (Podman, a host with /dev/kvm, x86_64): its image "
+          "built from sandbox-ai's own Containerfile and Google's downloads (images build-image android-emulator "
+          "--builtin android-emulator), a start with --service android-emulator - the agent starts once Android has "
+          "booted, reaches it as adb connect android-emulator:5555 (sys.boot_completed 1; adb of the toolchain "
+          "android-sdk), and has no /dev/kvm itself; the image is removed again. Only with "
+          "--accept-android-sdk-license: the license is yours to accept",
+          ("sandbox", "image:codex", "linux", "podman", "kvm", "android-license"),
+          (f"{GAPS}::test_live_the_android_emulator_service_boots_beside_the_sandbox",), optional=True,
+          timeout=3 * 3600,
+          network="HTTPS to dl.google.com (about 2.7 GB: the emulator, one system image, platform-tools, the "
+                  "command-line tools; and the Android SDK of toolchain-live, 1.1 GB), deb.debian.org and docker.io "
+                  "(the image's base and packages), github.com (the signed catalog, the jdk)",
+          source="the user, 2026-11-24: Android as a service"),
     Check("update-live",
           "Signed updates from the real GitHub: the newest release's SHA256SUMS is signed by a key of this "
           "checkout's sandbox/release-signers and lists every kind's file (the bundle's SHA-256 checked); this "
@@ -260,6 +295,21 @@ CHECKS = (
                   "2 GB); the run itself reaches nothing (its target 192.0.2.1 is a documentation address)",
           source="the user, 2026-11-22: \"check if we can integrate artex ... we still have to be careful\" "
                  "(docs/ARTEX.md)"),
+    Check("burp-live",
+          "Burp Suite as an MCP server (sandbox-ai mcp add burp). Host mode: your Burp, with the extension of the "
+          "signed image loaded and enabled, answers at its endpoint (--burp-url, default http://127.0.0.1:9876/mcp): "
+          "mcp add burp says so, mcp burp check names the edition, and through the server's real relay (mcp start, its "
+          "socket, mcp_http.py on this host) initialize and tools/list answer with the extension's tools - 27 with "
+          "Professional (scanner, Collaborator), 24 with Community - and url_encode is called. Container mode "
+          "(--burp-jar JAR): your jar runs headless in the server's container - the terms accepted, a Professional "
+          "licence (--burp-license-file, typed into the container only) activated online once - and the same calls "
+          "answer through the relay, the licence in no log line of the check",
+          ("burp",), (f"{GAPS}::test_live_burp_host_mode", f"{GAPS}::test_live_burp_container_mode"),
+          optional=True, podman_only=True, timeout=3600,
+          network="host mode: nothing (your Burp on this host's loopback); container mode: the signed image "
+                  "(ghcr.io), portswigger.net for a Professional licence's activation (once)",
+          source="the user, 2026-11-24: \"Füge mal einen Burp-MCP hinzu ... die Pro-Variante von Burp zu nutzen, mit "
+                 "Code\""),
     Check("live-suites",
           "Every other live suite that needs no login (scripts/live_check.py's: the proxy, push check, network "
           "changes, devices, MCP, limits, approvals, namespaces, an escape probe)",
@@ -452,6 +502,14 @@ def preset_plan(preset, given=None, llm=None, provider_login=False, folders=None
         if flag in options:
             plan["skip"] = f"needs {what}, which the check's own runtime folder does not reach; run: {plan['by_hand']}"
             return plan
+    licensed = [value for value in option_pairs(options, "--toolchain") if module.licensed_toolchain(value)] \
+        if hasattr(module, "licensed_toolchain") else []
+    if licensed:  # (built from its publisher's downloads under a license: never accepted by a check for you)
+        plan["skip"] = (f"needs a license of yours: the toolchain {licensed[0]} is built from "
+                        f"{module.licensed_toolchain(licensed[0])['by']}'s downloads once you accepted the "
+                        f"{module.licensed_toolchain(licensed[0])['title']} (sandbox-ai toolchain add {licensed[0]}; "
+                        f"the check toolchain-live does it with --accept-android-sdk-license); run: {plan['by_hand']}")
+        return plan
     needs_variant = [need for need in preset.get("needs") or [] if "image variant" in need]
     if needs_variant or "--image-variant" in options:
         plan["skip"] = ("needs an image variant of yours, built once (" + (needs_variant[0] if needs_variant else
@@ -585,7 +643,38 @@ def mcp_by_hand(name, backend, extra=()):
             + f"; sandbox-ai claude --backend {backend} --mcp {name}")
 
 
-def mcp_plan(entry, spec, backend, tools=None):
+def mcp_behind(plan, entry, backend, vpn):
+    """PLAN (mcp_plan's) for a check behind the Tor profile VPN (--mcp-vpn: the path of a server added with --vpn,
+    the user's gowitness-tor, 2026-11-25): `mcp add --vpn VPN` - each connection's container in the namespace of its
+    own Tor container (NAME-VPN); skipped where nothing goes through it (no network), under Bubblewrap (no VPN there)
+    and where its catalog says it does not work behind Tor; a call about an .onion address (which only a start without
+    Tor refuses) is left out."""
+    name = plan["server"]
+    if str(entry.get("network") or "none") in ("none", "offline"):
+        plan["skip"] = f"it reaches no network: nothing of it goes through {vpn} (mcp-live without --mcp-vpn tests it)"
+        return plan
+    if backend == "bwrap":
+        plan["skip"] = "no VPN under Bubblewrap: behind a VPN it runs with Podman only"
+        return plan
+    tor = entry.get("tor") if isinstance(entry.get("tor"), dict) else {}
+    if tor.get("support") == "no":
+        plan["skip"] = f"its catalog says it does not work behind Tor: {tor.get('note') or '-'}"
+        return plan
+    plan["add"] += ["--vpn", vpn]
+    plan["vpn"] = vpn
+    plan["by_hand"] = mcp_by_hand(name, backend, ["--vpn", vpn])
+    kept = []
+    for call in plan["calls"]:
+        if ".onion" in json.dumps(call.get("arguments") or {}):
+            plan["skipped_calls"].append((call.get("tool"), "behind Tor an .onion address is reached: this call checks "
+                                                            "its refusal without Tor"))
+        else:
+            kept.append(call)
+    plan["calls"] = kept
+    return plan
+
+
+def mcp_plan(entry, spec, backend, tools=None, vpn=None):
     """How mcp-live tests catalog ENTRY (`mcp catalog --json`'s) with BACKEND from its smoke SPEC (mcp_spec) and its
     recorded TOOLS: {"server", "add" (mcp add's options: --backend both where it has a Bubblewrap form, a folder its
     smoke spec mounts otherwise than its default), "env" ([(VAR, VALUE, secret)]: the spec's made-up values - a secret
@@ -593,12 +682,14 @@ def mcp_plan(entry, spec, backend, tools=None):
     or None: what its /work gets), "folders" ({target: "fixtures" | [seed items]}: another folder the spec fills),
     "writable" (/work writable, as its spec mounts it), "calls" ([call]: those for this backend's runner), "skipped
     calls" ([(tool, why)]), "expect_tools", "tools", "isolation" (it works on the start's workspace: a second
-    workspace proves the other never reaches it), "skip" (why it cannot run here, or None), "by_hand"}."""
+    workspace proves the other never reaches it), "skip" (why it cannot run here, or None), "by_hand", "vpn"}. VPN:
+    the Tor profile it is added behind (--mcp-vpn: mcp_behind)."""
     name = entry.get("name")
     plan = {"server": name, "add": [], "env": [], "work": None, "folders": {}, "writable": False, "calls": [],
             "skipped_calls": [], "expect_tools": [str(t) for t in spec.get("expect_tools") or []], "tools": tools,
             "isolation": any(m.get("target") == "/work" for m in entry.get("mounts") or [] if isinstance(m, dict)),
-            "skip": None, "by_hand": mcp_by_hand(name, backend), "start_timeout": spec.get("start_timeout", 60)}
+            "skip": None, "by_hand": mcp_by_hand(name, backend), "start_timeout": spec.get("start_timeout", 60),
+            "vpn": None}
     if not entry.get("published"):
         plan["skip"] = f"not published (no signed image yet): sandbox-ai mcp add {name} --build builds it yourself"
         return plan
@@ -645,7 +736,7 @@ def mcp_plan(entry, spec, backend, tools=None):
             plan["skipped_calls"].append((call.get("tool"), f"not for {runner}: {call.get('runners_why')}"))
         else:
             plan["calls"].append(call)
-    return plan
+    return mcp_behind(plan, entry, backend, vpn) if vpn else plan
 
 
 def mcp_call_passed(call, answer):
@@ -682,7 +773,7 @@ def mcp_rows(facts):
             continue
         calls = found.get("calls") or {}
         rows.append({"server": found["server"], "backend": found["backend"],
-                     "outcome": found.get("outcome") or "?",
+                     "outcome": found.get("outcome") or "?", "vpn": found.get("vpn") or "",
                      "added": found.get("added") or "-", "started": found.get("started") or "-",
                      "handshake": found.get("handshake") or "-", "tools": found.get("tools") or "-",
                      "calls": (f"{calls.get('passed', 0)} passed, {calls.get('failed', 0)} failed"
@@ -885,7 +976,20 @@ def prerequisites(env, args, system=None, runner=run_command, proc="/proc", etc=
     found["mcp"] = Found(False, "give --only mcp-live (asked first)")
     found["model"] = Found(False, "give --llm NAME (a server of sandbox-ai llm) or --provider-login")
     found["device"] = Found(False, "give --device PATH")
+    kvm = Path("/dev/kvm")
+    found["kvm"] = Found(kvm.exists() and os.access(kvm, os.R_OK | os.W_OK),
+                         "/dev/kvm" if kvm.exists() and os.access(kvm, os.R_OK | os.W_OK) else
+                         "no /dev/kvm your user can open for reading and writing (the emulator needs KVM)")
+    accepted = bool(getattr(args, "accept_android_sdk_license", False))
+    if accepted:
+        env["SAI_LIVE_ANDROID_SDK_LICENSE"] = "accepted"
+    found["android-license"] = Found(accepted, "accepted with --accept-android-sdk-license" if accepted else
+                                     "give --accept-android-sdk-license: what the check fetches from Google is under "
+                                     "the Android Software Development Kit License Agreement "
+                                     "(https://developer.android.com/studio/terms), yours to accept")
     found["artex"] = Found(False, "run it with --only artex-live (it asks first: it builds ARTEX's image when missing)")
+    found["burp"] = Found(False, "run it with --only burp-live: your Burp with the extension (host mode) and/or "
+                                 "--burp-jar JAR (container mode)")
     found["dmgs"] = Found(False, "give --dmg-old DMG --dmg-new DMG (two disk images of sandbox-ai.app, the old one "
                                  "0.1.154 or later: built here or downloaded with the release's SHA256SUMS and "
                                  "SHA256SUMS.sig)")
@@ -1354,7 +1458,8 @@ def markdown(report):
         if check.get("mcp"):
             lines += ["| server | backend | outcome | added | started | handshake | tools | calls | isolation | seconds |",
                       "|---|---|---|---|---|---|---|---|---|---|",
-                      *(f"| {row['server']} | {row['backend']} | {cell(row['outcome'])} | {cell(row['added'])} | "
+                      *(f"| {row['server']}{' (behind ' + row['vpn'] + ')' if row.get('vpn') else ''} | "
+                        f"{row['backend']} | {cell(row['outcome'])} | {cell(row['added'])} | "
                         f"{cell(row['started'])} | {cell(row['handshake'])} | {cell(row['tools'])} | "
                         f"{cell(row['calls'])} | {cell(row['isolation'])} | "
                         f"{seconds_cell(row.get('seconds'))} |"
@@ -1461,11 +1566,29 @@ def parser():
                        help="presets-live: the agents' own providers with your logins (your HOME and data folder "
                             "are read for them; sandbox-ai's configuration and state stay the check's own) - in "
                             "place of or beside --llm")
+    parse.add_argument("--mcp-vpn", metavar="PROFILE",
+                       help="mcp-live: the servers with network added behind a Tor profile of this name (mcp add "
+                            "--vpn), made in the check's own configuration; the others are skipped. A VPN profile of "
+                            "yours needs your keys, which a check never copies: sandbox-ai mcp check --vpn PROFILE "
+                            "checks with it in your configuration")
     parse.add_argument("--mcp-servers", metavar="NAME[,NAME]",
                        help="mcp-live: only these servers of the signed catalog (default: every one)")
     parse.add_argument("--mcp-repo", type=Path, metavar="DIR",
                        help="mcp-live: the checkout of sandbox-ai-mcp whose servers/NAME/smoke.json and tools.json "
                             "it takes (default: projects/sandbox-ai-mcp of this checkout, else cloned from GitHub)")
+    parse.add_argument("--accept-android-sdk-license", action="store_true",
+                       help="toolchain-live, android-emulator-live: you accept the Android Software Development Kit "
+                            "License Agreement (https://developer.android.com/studio/terms) for what these checks "
+                            "fetch from Google (the Android SDK, the emulator); without it those parts are skipped")
+    parse.add_argument("--burp-url", metavar="URL", help="burp-live: your Burp's MCP endpoint (default "
+                                                         "http://127.0.0.1:9876/mcp)")
+    parse.add_argument("--burp-jar", type=Path, metavar="JAR", help="burp-live: your Burp jar for container mode "
+                                                                   "(Community or Professional; never copied out)")
+    parse.add_argument("--burp-edition", choices=["community", "professional"],
+                       help="burp-live: the edition of --burp-jar (default: from its name)")
+    parse.add_argument("--burp-license-file", type=Path, metavar="FILE",
+                       help="burp-live: a file with your Burp Suite Professional licence key, for container mode "
+                            "(the check's own secret store; activated online once)")
     parse.add_argument("--device", metavar="PATH", help="the device of devices-live (default: one devices scan "
                                                         "offers: a serial port, camera, render node or /dev/kvm)")
     parse.add_argument("--dmg-old", metavar="DMG", help="macos-update: the disk image updated from (sandbox-ai.app "
@@ -1540,12 +1663,15 @@ def main(argv=None, out=print, stdin=None):
         build_images(found, env, out)
     if "devices-live" in names:
         found["device"] = prepare_device(args, env)
+    if "burp-live" in names:
+        found["burp"] = prepare_burp(args, env)
     if found["macos"].ok:
         found["dmgs"] = prepare_dmgs(args, env)
         found["app"] = prepare_app(args, env)
     system_keys = ("macos", "podman-machine") if found["macos"].ok else ("linux", "userns", "subuid", "podman", "bwrap")
     for key in (*system_keys, "git", "pytest", *(f"image:{i}" for i in IMAGES if not found["macos"].ok),
-                *(key for key in ("device", "host", "llm", "model", "presets", "mcp", "artex", "dmgs", "app")
+                *(key for key in ("device", "host", "llm", "model", "presets", "mcp", "artex", "burp", "dmgs", "app",
+                                  "kvm", "android-license")
                   if key in found
                   and key in needed(checks))):
         if key not in found:
@@ -1702,6 +1828,25 @@ def prepare_artex(args, env, stdin=None, runner=run_command):
     if not (args.yes or ask(question, stdin)):
         return "not run: not confirmed (on a terminal it asks; else --yes)"
     return None
+
+
+def prepare_burp(args, env):
+    """Found: burp-live's Burp - host mode at --burp-url (SAI_LIVE_BURP_URL), container mode with --burp-jar
+    (SAI_LIVE_BURP_JAR, SAI_LIVE_BURP_EDITION; --burp-license-file: SAI_LIVE_BURP_LICENSE_FILE, never its text)."""
+    env["SAI_LIVE_BURP_URL"] = args.burp_url or "http://127.0.0.1:9876/mcp"
+    said = [f"host mode at {env['SAI_LIVE_BURP_URL']}"]
+    if args.burp_jar:
+        if not args.burp_jar.is_file():
+            return Found(False, f"--burp-jar {args.burp_jar}: no such file")
+        env["SAI_LIVE_BURP_JAR"] = str(args.burp_jar.resolve())
+        said.append(f"container mode with {args.burp_jar.name}")
+    if args.burp_edition:
+        env["SAI_LIVE_BURP_EDITION"] = args.burp_edition
+    if args.burp_license_file:
+        if not args.burp_license_file.is_file():
+            return Found(False, f"--burp-license-file {args.burp_license_file}: no such file")
+        env["SAI_LIVE_BURP_LICENSE_FILE"] = str(args.burp_license_file.resolve())
+    return Found(True, "; ".join(said))
 
 
 def prepare_device(args, env, runner=run_command):
@@ -1882,11 +2027,16 @@ def prepare_mcp(args, temporary, env, stdin=None, runner=run_command):
     repo = mcp_repo(args.mcp_repo)
     if args.mcp_repo and repo is None:
         return f"--mcp-repo {args.mcp_repo}: no servers/ there (a checkout of sandbox-ai-mcp)"
+    vpn = getattr(args, "mcp_vpn", None)
+    if vpn is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", vpn):
+        return f"--mcp-vpn {vpn}: a profile's name is 1-32 letters, digits, '_' or '-'"
     count = f"{len(only)} of its servers ({', '.join(only)})" if only else "every server"
     question = (f"mcp-live: {count} of the signed MCP catalog, each added in the check's own configuration (its "
                 "image pulled from ghcr.io, its rootfs for Bubblewrap from GitHub), started for real through a session "
                 "of the check's own with Podman and Bubblewrap, and its smoke calls made (the servers with network "
                 "reach the services their calls name)"
+                + (f"; those with network behind the Tor profile {vpn}, made in the check's own configuration (their "
+                   "calls go through Tor; the others are skipped)" if vpn else "")
                 + ("" if repo else f"; the MCP repository's smoke data cloned from {MCP_REPOSITORY}") + ". Run it?")
     if not (args.yes or ask(question, stdin)):
         return "not run: not confirmed (on a terminal it asks; else --yes)"
@@ -1927,7 +2077,10 @@ def prepare_mcp(args, temporary, env, stdin=None, runner=run_command):
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     env.update(SAI_LIVE_MCP_CATALOG=str(given / "mcp-catalog.json"), SAI_LIVE_MCP_SERVERS=",".join(names),
                SAI_LIVE_MCP_REPO=str(repo), SAI_LIVE_MCP_FIXTURES=str(fixtures), SAI_LIVE_MCP_HOME=str(home))
-    args.mcp_said = f"{len(names)} servers of the signed catalog; smoke data of {repo}"
+    if vpn:
+        env["SAI_LIVE_MCP_VPN"] = vpn
+    args.mcp_said = f"{len(names)} servers of the signed catalog; smoke data of {repo}" + (
+        f"; those with network behind the Tor profile {vpn}" if vpn else "")
     return None
 
 

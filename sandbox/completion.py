@@ -174,6 +174,18 @@ def mcp_names():
     return quietly(lambda: sorted(module("mcp").definitions()))
 
 
+def service_templates():
+    """sandbox-ai's own Containerfiles for services (sandbox-ai images templates: android-emulator, adb ...)."""
+    return quietly(lambda: sorted(module("services").builtin_images()))
+
+
+def service_images():
+    """What --service names: your images (sandbox-ai images list; read from their record, no Podman call) and
+    sandbox-ai's own Containerfiles for services (built once; some bring what their service starts with)."""
+    return quietly(lambda: sorted({*module("services").read_registry_parts()[0],
+                                   *module("services").builtin_images()}))
+
+
 def toolchain_names():
     """The toolchains of your store (sandbox-ai toolchain list): NAME, and NAME@VERSION where it has several."""
     def names():
@@ -195,6 +207,11 @@ def attached_toolchains():
 
 def llm_names():
     return quietly(lambda: sorted(module("llm").load_store().get("endpoints", {})))
+
+
+def agent_targets_and_images():
+    """What `sandbox-ai build` builds besides variants: the agents' images and team, cairn, artex, browser, vpn, tor."""
+    return [*AGENTS, "team", "cairn", "artex", "browser", "vpn", "tor"]
 
 
 def preset_names():
@@ -411,6 +428,7 @@ NAMED = {
     ("approvals", "relay", "id"): answered_ids, ("approvals", "callback", "id"): answered_ids,
     ("approvals", "decided", "run"): run_names,
     ("hosts", "update", "names"): host_names, ("mcp", "update", "names"): mcp_names,
+    ("mcp", "check", "names"): mcp_names,
     ("mcp", "attach", "start"): start_names,
     ("mcp", "detach", "start"): start_names, ("rules", "show", "name"): start_names,
     ("rules", "reload", "name"): start_names, ("presets", "show", "name"): preset_names,
@@ -436,6 +454,10 @@ NAMED = {
         ("packages", "agent"), ("extend", "target"), ("check", "target"), ("remove", "target"), ("history", "target"),
         ("os", "target"), ("search", "target"))},
     ("completion", None, "only"): lambda: ["bash", "zsh", "fish"],
+    # install ITEM: the images and the presets (local); MCP servers and toolchains come from catalogs read over the
+    # network, never on a Tab (sandbox-ai install --list names them)
+    ("install", None, "items"): lambda: [*(f"image:{target}" for target in agent_targets_and_images()),
+                                         *(f"preset:{name}" for name in preset_names() or [])],
     ("board", "show", "name"): lambda: board_names(), ("board", "delete", "name"): lambda: board_names(),
     ("board", "export", "out"): lambda: [FILES], ("session", "export", "out"): lambda: [FILES],
     ("session", "import", "file"): lambda: [FILES],
@@ -506,13 +528,13 @@ FREE_TEXT = {
                     "addresses you name: one or more, separated by commas or spaces"),
     # addresses, hosts, domains, URLs and networks: anything on the network
     **dict.fromkeys(("--subnet", "--subnet6", "--network", "--ip", "--ip6", "--allow-private",
-                     "--podman-url", "--url", "--address", "--listen", "--hostname", "--check-url", "--login-server",
+                     "--podman-url", "--url", "--burp-url", "--address", "--listen", "--hostname", "--check-url", "--login-server",
                      "--exit-node", "--dns", "--tailnet-allow", "--source", "--ntfy", "--webhook", "--api"),
                     "an address you name"),
     # texts and names of your own: a description, a new name, a task, a search
     **dict.fromkeys(("--description", "--email", "--user", "--cairn-goal", "--cairn-hint", "--cairn-origin", "--grep",
                      "--project-name", "--as", "--matcher", "--event", "--location", "--exit-country", "--provider",
-                     "--digest", "--version", "--model", "--effort", "--image", "--base", "--from", "--builtin",
+                     "--digest", "--version", "--model", "--effort", "--image", "--base", "--from",
                      "--project", "--kind", "--map", "--drop-option", "--observer-actions", "--agents",
                      "--llm-models", "--llm-tools", "--canaries", "--publish", "--cairn-workers", "--gui-screen",
                      "--loop-guard", "--events", "--template", "--language", "--chat", "--phone-id", "--recipient",
@@ -590,6 +612,7 @@ VALUES = {"--home": start_names, "--unpack": start_names, "--detail": start_name
           "--identity": lambda: identity_names(), "--image-variant": lambda: variant_names(),
           "--run": lambda: run_names(), "--history": lambda: start_names(), "--from-env": env_names,
           "--toolchain": lambda: toolchain_names(),
+          "--service": lambda: service_images(), "--builtin": lambda: service_templates(),
 
           "--hermes-enable": lambda: hermes_features(), "--qwen-enable": lambda: qwen_features(),
           "--goose-enable": lambda: goose_features(), "--openhands-enable": lambda: openhands_features(), "--nanobot-enable": lambda: nanobot_features(), "--letta-enable": lambda: letta_features(),
@@ -655,6 +678,8 @@ def value_candidates(action, option):
         return [str(c) for c in action.choices]
     metavar = str(action.metavar or action.dest or "").upper()
     # (activity --home DIR is a folder; secrets unlock --for DURATION is a time, not a start)
+    if option in ("--service", "-sv"):  # NAME[:KEY=VALUE,...]: its KEY is no key file - your images, sandbox-ai's own
+        return VALUES["--service"]()
     if option in VALUES and not any(hint in metavar for hint in PATH_HINTS) and "DURATION" not in metavar:
         return VALUES[option]()
     if action.type is Path or any(hint in metavar for hint in PATH_HINTS) or option in ("--workspace", "-w"):

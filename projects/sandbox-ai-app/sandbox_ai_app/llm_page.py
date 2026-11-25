@@ -595,7 +595,7 @@ class LlmPage(QWidget):
         self.host_box.setToolTip(tr("This machine, or a host of sandbox-ai hosts (over SSH)"))
         self.host_box.currentIndexChanged.connect(lambda *_: self.refresh() if self.isVisible() else None)
         top.addWidget(self.host_box, 1)
-        self.follow_note = follow_note()  # whose servers, when the window's pages follow the Sandboxes page's host
+        self.follow_note = follow_note()  # whose servers, when the window's pages follow the Sessions page's host
         top.addWidget(self.follow_note)
         layout.addLayout(top)
         self.servers = table([tr("Name"), tr("Kind"), tr("URL"), tr("Model"), tr("Key"), tr("VPN"), tr("Agents"),
@@ -1571,7 +1571,7 @@ ShareDialog = LSV.ShareDialog  # (a name of this module: the tests stand in for 
 
 
 class ServerStatusLine(QLabel):
-    """The status of the LLM server a start works with (--llm NAME[:MODEL]), for the Sandboxes page: what it has
+    """The status of the LLM server a start works with (--llm NAME[:MODEL]), for the Sessions page: what it has
     loaded (with sizes) and uses now, as `sandbox-ai llm status NAME --json` on the start's host says it. watch()
     names the server (None: none, the line hides); it is read then and every STATUS_REFRESH seconds while the line is
     shown, in the background (never on the GUI thread), one read at a time."""

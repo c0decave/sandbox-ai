@@ -1,4 +1,4 @@
-"""Schedules on the Sandboxes page (schedules_view.py) end to end, offscreen: the MainWindow's Sandboxes page with the
+"""Schedules on the Sessions page (schedules_view.py) end to end, offscreen: the MainWindow's Sessions page with the
 real `sandbox-ai schedule` of this checkout (SANDBOX_AI_HOME) - a schedule added through its dialog (checked as the
 command checks it, asked first), listed, paused and resumed, its history with a run's report, changed (Edit), removed
 (asked first) - the right-click menu carrying the buttons, and the timer asked first (its command faked here: no

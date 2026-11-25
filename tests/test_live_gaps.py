@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import secrets
@@ -584,7 +585,12 @@ def test_live_toolchains_attached_to_a_running_session(request, backend, tmp_pat
     started = session(sessions, request, backend, tmp_path, env=env, options=["--offline", *SLEEP])
     started.start()
     before = started.shell("test -d /opt/toolchains/bin && echo FOLDER; command -v go || echo NO-GO; echo $PATH")
-    assert "FOLDER" in before.stdout and "NO-GO" in before.stdout, said(before)
+    # No go OF A TOOLCHAIN before the attach: under Bubblewrap the host's /usr is the sandbox's, so a host with Go
+    # installed has /usr/bin/go (the user's live check 2026-11-23) - what is proved is that the toolchain's comes
+    # first once attached, and is gone after the detach.
+    lines = before.stdout.splitlines()
+    assert "FOLDER" in before.stdout and not any(line.startswith("/opt/toolchains") for line in lines[:-1]), \
+        said(before)
     assert "/opt/toolchains/bin" in before.stdout.splitlines()[-1].split(":")[0], said(before)
     attached = started.sai("toolchain", "attach", started.name, "go", "--offline", timeout=300)
     assert attached.returncode == 0 and "attached go" in attached.stdout, said(attached)
@@ -613,7 +619,9 @@ def test_live_toolchains_attached_to_a_running_session(request, backend, tmp_pat
         assert gone.returncode == 0, said(gone)
     after = started.shell("command -v go || echo NO-GO; ls /opt/toolchains/go 2>/dev/null | wc -l; "
                           "command -v python3")
-    assert "NO-GO" in after.stdout and "/opt/toolchains" not in after.stdout.splitlines()[-1], said(after)
+    found = after.stdout.splitlines()
+    assert not found[0].startswith("/opt/toolchains") and found[1].strip() == "0" and \
+        "/opt/toolchains" not in found[-1], said(after)  # (a host's own go under Bubblewrap may be there again)
     assert json.loads(started.sai("toolchain", "list", "--run", started.name, "--json").stdout) == []
     print(f"toolchains under {backend}: go and python attached, used, detached")
 
@@ -630,6 +638,254 @@ def test_live_a_start_with_a_toolchain(request, backend, tmp_path):
                     ["-c", "cd /work && go run hello.go && touch /opt/toolchains/go/x 2>/dev/null || echo READ-ONLY"],
                     env, timeout=900)
     assert "hello from go" in out and "READ-ONLY" in out, (out[-2000:], err[-2000:])
+
+
+# Qt (the user, 2026-11-24: "eine komplette Toolchain unter Python und C mit komplett Qt"): the toolchains pyside6
+# (Qt for Python, with Qt itself) and qt (the Qt SDK for C++).
+QT_QML = ('import QtQuick\nimport QtQuick.Controls\n\nRectangle {\n    width: 160; height: 120; color: "#2060c0"\n'
+          '    Button { text: "hello from QML"; anchors.centerIn: parent }\n}\n')
+QT_PYTHON = '''import sys
+from PySide6.QtCore import QTimer, QUrl, qVersion
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtQuick import QQuickView
+from PySide6.QtWidgets import QApplication, QLabel
+
+app = QApplication(sys.argv)
+label = QLabel("hello from PySide6")
+label.resize(200, 60)
+label.show()
+view = QQuickView()
+view.setSource(QUrl.fromLocalFile("hello.qml"))
+view.show()
+
+
+def colours(image):
+    return {image.pixelColor(x, y).name() for x in range(0, image.width(), 4) for y in range(0, image.height(), 4)}
+
+
+def done():
+    widget, quick = label.grab().toImage(), view.grabWindow()
+    widget.save("widget.png")
+    print("pyside6", qVersion(), QGuiApplication.platformName(), "widget", len(colours(widget)) > 1, "quick",
+          "#2060c0" in colours(quick) and len(colours(quick)) > 1)
+    app.quit()
+
+
+QTimer.singleShot(500, done)
+sys.exit(app.exec())
+'''
+QT_CPP = '''#include <QApplication>
+#include <QImage>
+#include <QLabel>
+#include <QQuickView>
+#include <QSet>
+#include <QTimer>
+#include <QUrl>
+#include <chrono>
+#include <cstdio>
+
+using namespace std::chrono_literals;
+
+static int colours(const QImage &image)
+{
+    QSet<QRgb> seen;
+    for (int x = 0; x < image.width(); x += 4)
+        for (int y = 0; y < image.height(); y += 4)
+            seen.insert(image.pixel(x, y));
+    return seen.size();
+}
+
+int main(int argc, char **argv)
+{
+    QApplication app(argc, argv);
+    QLabel label(QStringLiteral("hello from Qt"));
+    label.resize(200, 60);
+    label.show();
+    QQuickView view;
+    view.setSource(QUrl::fromLocalFile(QStringLiteral("hello.qml")));
+    view.show();
+    QTimer::singleShot(500ms, &app, [&] {
+        const QImage widget = label.grab().toImage(), quick = view.grabWindow();
+        widget.save(QStringLiteral("widget-cpp.png"));
+        std::printf("qt %s %s widget %d quick %d\\n", qVersion(), qPrintable(app.platformName()),
+                    colours(widget) > 1, colours(quick) > 1);
+        app.quit();
+    });
+    return app.exec();
+}
+'''
+QT_CMAKE = ("cmake_minimum_required(VERSION 3.22)\nproject(hello LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\n"
+            "find_package(Qt6 REQUIRED COMPONENTS Widgets Quick)\nqt_standard_project_setup()\n"
+            "qt_add_executable(hello main.cpp)\ntarget_link_libraries(hello PRIVATE Qt6::Widgets Qt6::Quick)\n")
+
+
+def test_live_qt_for_python_attached_to_a_running_session(request, backend, tmp_path, sessions):
+    """sandbox-ai toolchain attach RUN pyside6 (it brings python): `import PySide6` works in the python3 the next
+    shell finds (PYTHONPATH is the toolchain's own folder, read-only), a Widgets and a QML program run without a
+    display (QT_QPA_PLATFORM=offscreen) and their pictures are not empty, pyside6-uic makes a module; detach."""
+    env = environment(tmp_path)
+    toolchains_added(env, "pyside6")
+    started = session(sessions, request, backend, tmp_path, env=env, options=["--offline", *SLEEP])
+    started.start()
+    attached = started.sai("toolchain", "attach", started.name, "pyside6", "--offline", timeout=600)
+    assert attached.returncode == 0 and "attached pyside6" in attached.stdout and "attached python" in \
+        attached.stdout, said(attached)
+    (started.work / "app.py").write_text(QT_PYTHON)
+    (started.work / "hello.qml").write_text(QT_QML)
+    ran = started.shell("cd /work && command -v python3 && echo PYTHONPATH=$PYTHONPATH QPA=$QT_QPA_PLATFORM && "
+                        "python3 app.py && test -s widget.png && echo PICTURE", timeout=600)
+    assert ran.returncode == 0, said(ran)
+    assert ran.stdout.splitlines()[0] == "/opt/toolchains/bin/python3", said(ran)
+    assert "PYTHONPATH=/opt/toolchains/pyside6/python QPA=offscreen" in ran.stdout, said(ran)
+    assert "offscreen widget True quick True" in ran.stdout and "PICTURE" in ran.stdout, said(ran)
+    (started.work / "form.ui").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<ui version="4.0">\n <class>Form</class>\n'
+        ' <widget class="QWidget" name="Form"/>\n</ui>\n')
+    tools = started.shell("cd /work && pyside6-uic form.ui -o ui_form.py && python3 -c 'import ui_form, PySide6\n"
+                          "print(ui_form.Ui_Form.__name__, PySide6.__file__)' && pyside6-qmllint hello.qml && "
+                          "touch /opt/toolchains/pyside6/python/x 2>/dev/null || echo READ-ONLY", timeout=300)
+    assert "Ui_Form /opt/toolchains/pyside6/python/PySide6/__init__.py" in tools.stdout and \
+        "READ-ONLY" in tools.stdout, said(tools)
+    facts = started.shell("grep ' /opt/toolchains/pyside6 ' /proc/self/mountinfo")
+    options = facts.stdout.splitlines()[0].split()[5].split(",") if facts.stdout.strip() else []
+    assert {"ro", "nosuid", "nodev"} <= set(options), said(facts)
+    for name in ("pyside6", "python"):
+        gone = started.sai("toolchain", "detach", started.name, name, timeout=300)
+        assert gone.returncode == 0, said(gone)
+    after = started.shell("ls /opt/toolchains/pyside6 2>/dev/null | wc -l; command -v pyside6-uic || echo NO-UIC")
+    assert after.stdout.splitlines()[0].strip() == "0" and "NO-UIC" in after.stdout, said(after)
+    print(f"Qt for Python under {backend}: pyside6 attached, a Widgets and a QML program drawn offscreen, detached")
+
+
+def test_live_qt_for_cpp_built_and_run(request, backend, tmp_path):
+    """sandbox-ai AGENT --toolchain qt (the Qt SDK; GCC is the image variant gcc's under Podman, the host's under
+    Bubblewrap): a Widgets and QML program is built with CMake - find_package(Qt6) finds the toolchain, a call with a
+    std::chrono argument links (GCC's libstdc++, Qt's own ABI) - and run without a display; qmake and moc answer."""
+    env = environment(tmp_path)
+    toolchains_added(env, "qt")
+    variant = []
+    if backend == "podman":
+        listed = sai(env, "images", "--json", timeout=120)  # (the images and variants of this host)
+        if listed.returncode != 0 or "-sandbox-gcc" not in listed.stdout:
+            pytest.skip("the image variant gcc is not made: sandbox-ai images recipe gcc --from codex && sandbox-ai "
+                        "build gcc")
+        variant = ["--image-variant", "gcc"]
+    elif not all(shutil.which(tool) for tool in ("g++", "cmake", "make")):
+        pytest.skip("Bubblewrap: the compiler is the host's, which has no g++, cmake and make")
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    for name, text in (("main.cpp", QT_CPP), ("hello.qml", QT_QML), ("CMakeLists.txt", QT_CMAKE)):
+        (work / name).write_text(text)
+    out, err = once(request, backend, "codex", work,
+                    ["--toolchain", "qt", "--toolchain-offline", *variant, "--binary", "/bin/sh", "--no-tmux"],
+                    ["-c", "cd /work && cmake -S . -B build >cmake.log 2>&1 && cmake --build build >>cmake.log 2>&1 "
+                           "|| { tail -n 40 cmake.log; exit 1; }; ./build/hello && test -s widget-cpp.png && "
+                           "qmake --version && moc --version && touch /opt/toolchains/qt/x 2>/dev/null || "
+                           "echo READ-ONLY"],
+                    env, timeout=1800)
+    assert "offscreen widget 1 quick 1" in out and "moc 6." in out and "READ-ONLY" in out, (out[-3000:], err[-2000:])
+
+
+# --- Android: the SDK as a toolchain, the emulator as a service (toolchain-live, android-emulator-live) -------------
+
+ANDROID_LICENSE = "SAI_LIVE_ANDROID_SDK_LICENSE"  # "accepted": live_check --accept-android-sdk-license
+FLAG = "--accept-android-sdk-license"
+# A small app: one activity, Java only, the Android Gradle plugin from Google's Maven. compileSdk and
+# buildToolsVersion are the line's (android-sdk 37.0.0): the SDK is read-only, nothing can be added to it.
+# (2026-11-24: assembled so with the toolchains' own trees - jdk 21.0.13+9 with Gradle 9.9.0, android-sdk 37.0.0 -
+# and the plugin 9.5.2, then four days old; the daemon's default heap of 512 MiB was too small for the dex merge.)
+# The plugin pinned here is 9.5.1, released 2026-11-05 (on Google's Maven; older than 14 days when pinned).
+ANDROID_APP = {
+    "settings.gradle": 'pluginManagement { repositories { google(); mavenCentral() } }\n'
+                       'dependencyResolutionManagement { repositories { google(); mavenCentral() } }\n'
+                       'rootProject.name = "tiny"\ninclude ":app"\n',
+    "build.gradle": "plugins { id 'com.android.application' version '9.5.1' apply false }\n",
+    "gradle.properties": "org.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.daemon=false\n",
+    "app/build.gradle": "plugins { id 'com.android.application' }\nandroid {\n    namespace 'org.example.tiny'\n"
+                        '    compileSdk 37\n    buildToolsVersion "37.0.0"\n    defaultConfig { applicationId '
+                        '"org.example.tiny"; minSdk 24; targetSdk 37; versionCode 1; versionName "1.0" }\n}\n',
+    "app/src/main/AndroidManifest.xml":
+        '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
+        '    <application android:label="tiny">\n        <activity android:name=".MainActivity" '
+        'android:exported="true">\n            <intent-filter>\n                <action '
+        'android:name="android.intent.action.MAIN" />\n                <category '
+        'android:name="android.intent.category.LAUNCHER" />\n            </intent-filter>\n        </activity>\n'
+        '    </application>\n</manifest>\n',
+    "app/src/main/java/org/example/tiny/MainActivity.java":
+        "package org.example.tiny;\n\nimport android.app.Activity;\nimport android.os.Bundle;\n\n"
+        "public class MainActivity extends Activity {\n    @Override\n    protected void onCreate(Bundle state) {\n"
+        "        super.onCreate(state);\n    }\n}\n",
+}
+
+
+def android_sdk_added(env):
+    """android-sdk (and the jdk it requires) in the check's own store, built from Google's downloads - only when you
+    accepted their license for this check (live_check --accept-android-sdk-license), and on x86_64."""
+    if os.environ.get(ANDROID_LICENSE) != "accepted":
+        pytest.skip("the Android SDK is under Google's license (https://developer.android.com/studio/terms), which "
+                    f"is yours to accept: sandbox-ai live_check --only toolchain-live {FLAG}")
+    if platform.machine().lower() not in ("x86_64", "amd64"):
+        pytest.skip(f"Google ships the Android SDK's Linux tools for x86_64 only, not for {platform.machine()}")
+    own = os.environ.get("SAI_LIVE_TOOLCHAINS")
+    done = sai(env, "toolchain", "add", "android-sdk", FLAG, *(["--catalog", own, "--unsigned"] if own else []),
+               timeout=3600)
+    if done.returncode != 0 and not own and "no toolchain android-sdk" in done.stderr:
+        pytest.skip("the signed catalog has no android-sdk yet (sandbox-ai-mcp: toolchains/android-sdk, signed with "
+                    "the catalog); SAI_LIVE_TOOLCHAINS=.../toolchains.json takes a checkout's, unsigned")
+    assert done.returncode == 0, said(done)
+    assert "accepted with " + FLAG in done.stdout and "is in the store already" not in done.stdout.splitlines()[0]
+
+
+def test_live_the_android_sdk_toolchain_assembles_an_app(request, backend, tmp_path):
+    """sandbox-ai toolchain add android-sdk (the signed catalog's recipe: every file fetched from Google here and
+    held to it), then a start with --toolchain android-sdk: ANDROID_HOME is the read-only tree, the jdk came with it,
+    adb and aapt2 run, and gradle assembleDebug of a small app builds its APK without writing into the SDK."""
+    env = environment(tmp_path)
+    android_sdk_added(env)
+    listed = json.loads(sai(env, "toolchain", "list", "--json").stdout)
+    assert {"android-sdk", "jdk"} <= {row["name"] for row in listed}
+    assert next(row for row in listed if row["name"] == "android-sdk")["recipe"] is True
+    work = tmp_path / "work"
+    for name, text in ANDROID_APP.items():
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).write_text(text)
+    script = ("set -e; echo HOME=$ANDROID_HOME; test -f $ANDROID_HOME/licenses/android-sdk-license; adb version | "
+              "head -n 1; aapt2 version; touch $ANDROID_HOME/x 2>/dev/null || echo SDK-READ-ONLY; cd /work; "
+              "gradle --console=plain assembleDebug; ls -l app/build/outputs/apk/debug/app-debug.apk; "
+              "apksigner verify app/build/outputs/apk/debug/app-debug.apk && echo APK-VERIFIED; "
+              "test ! -e $ANDROID_HOME/.sdk && echo NOTHING-WRITTEN")
+    out, err = once(request, backend, "codex", work, ["--toolchain", "android-sdk", "--memory", "8g", "--binary",
+                                                      "/bin/sh", "--no-tmux"], ["-c", script], env, timeout=3000)
+    assert "HOME=/opt/toolchains/android-sdk" in out and "Android Debug Bridge" in out, (out[-3000:], err[-3000:])
+    assert "SDK-READ-ONLY" in out and "BUILD SUCCESSFUL" in out and "APK-VERIFIED" in out, (out[-3000:], err[-3000:])
+    assert "NOTHING-WRITTEN" in out
+    print(f"android-sdk under {backend}: added from Google's downloads, an app assembled against the read-only SDK")
+
+
+def test_live_the_android_emulator_service_boots_beside_the_sandbox(request, tmp_path):
+    """--service android-emulator: its image built here (sandbox-ai's own Containerfile, Google's emulator and system
+    image), the agent starts once Android has booted, reaches it as android-emulator:5555 and has no /dev/kvm
+    itself. The image is removed at the end."""
+    env = environment(tmp_path)
+    android_sdk_added(env)  # (adb for the agent's side: the toolchain's)
+    built = sai(env, "images", "build-image", "android-emulator", "--builtin", "android-emulator", FLAG, timeout=7200)
+    assert built.returncode == 0, said(built)
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    script = ("test -e /dev/kvm && echo AGENT-HAS-KVM; echo SERVICES=$SANDBOX_AI_SERVICES; "
+              "adb connect android-emulator:5555; sleep 5; "
+              "echo BOOTED=$(adb -s android-emulator:5555 shell getprop sys.boot_completed | tr -d '\\r'); "
+              "adb -s android-emulator:5555 shell getprop ro.build.version.sdk; adb devices")
+    try:
+        out, err = once(request, "podman", "codex", work, ["--toolchain", "android-sdk", "--toolchain-offline",
+                                                           "--service", "android-emulator", "--binary", "/bin/sh",
+                                                           "--no-tmux"], ["-c", script], env, timeout=1500)
+    finally:
+        sai(env, "images", "remove", "android-emulator", timeout=300)
+    assert "AGENT-HAS-KVM" not in out and "android-emulator=localhost:5555" in out, (out[-3000:], err[-3000:])
+    assert "BOOTED=1" in out, (out[-3000:], err[-3000:])
+    assert "service android-emulator is ready" in err, err[-3000:]
+    print("android-emulator: built, booted beside the sandbox, reached with adb; the agent had no /dev/kvm")
 
 
 # --- signed updates from the real GitHub (update-live) --------------------------------------------------------------
@@ -1329,6 +1585,11 @@ def mcp_added(env, name, plan, backend):
         mcp_workspace(host, {"work": "fixtures" if content == "fixtures" else None,
                              "seed": content if isinstance(content, list) else []}, "README.txt")
         folders += ["--mount", f"{target}={host}:rw"]
+    if plan.get("vpn") and not (Path(env["XDG_CONFIG_HOME"]) / "sandbox-ai" / "vpn" / f"{plan['vpn']}.json").exists():
+        # (--mcp-vpn: a Tor profile of the check's own, as `sandbox-ai vpn add NAME --tor` makes one)
+        made = sai(env, "vpn", "add", plan["vpn"], "--tor")
+        if made.returncode != 0:
+            return "no", f"sandbox-ai vpn add {plan['vpn']} --tor: {(made.stderr or made.stdout).strip()[-300:]}"
     begin = time.monotonic()
     # The signed catalog's entry by its prefix: a server of the same name in another catalog (axross's hub: binwalk,
     # radare2) made a bare NAME ambiguous - `mcp add` asks which one (the user's first mcp-live run, 2026-11-23).
@@ -1396,8 +1657,9 @@ def test_live_mcp_server(request, backend, tmp_path, name, sessions):
     catalog = json.loads(Path(os.environ["SAI_LIVE_MCP_CATALOG"]).read_text())
     entry = next(e for e in catalog["entries"] if e.get("prefix") == LG.MCP_PREFIX and e.get("name") == name)
     repo = os.environ.get("SAI_LIVE_MCP_REPO") or "/nonexistent"
-    plan = LG.mcp_plan(entry, LG.mcp_spec(repo, name), backend, LG.mcp_tools(repo, name))
-    record = {"by_hand": plan["by_hand"]}
+    plan = LG.mcp_plan(entry, LG.mcp_spec(repo, name), backend, LG.mcp_tools(repo, name),
+                       vpn=os.environ.get("SAI_LIVE_MCP_VPN") or None)
+    record = {"by_hand": plan["by_hand"], "vpn": plan["vpn"]}
     if plan["skip"]:
         mcp_record(name, backend, outcome="skipped", why=plan["skip"], **record)
         pytest.skip(plan["skip"])
@@ -1694,3 +1956,107 @@ def test_live_artex_beside_the_agent(request, backend, tmp_path, sessions):
     assert all(address in (LOOPBACK_V4, LOOPBACK_V6) for address, port in found["listeners"]
                if port in (8787, 8788)), found
     print("ARTEX live:", json.dumps({"url": url, "listeners": found["listeners"]}))
+
+
+# --- burp-live: Burp Suite as an MCP server (sandbox/burp.py, mcp_http.py; the catalog's burp) ---
+
+def burp_session(env, name, calls, timeout=600):
+    """MCP over the running server NAME's own socket (its relay: the gateway, then mcp_http.py on this host or the
+    container): initialize, tools/list, then each (tool, arguments) of CALLS; the answers by id."""
+    import socket
+    path = Path(env["XDG_STATE_HOME"]) / "sandbox-ai" / "mcp" / name / "sock" / "server.sock"
+    messages = [{"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "burp-live", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"}, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}]
+    messages += [{"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {"name": tool, "arguments": args}}
+                 for index, (tool, args) in enumerate(calls, start=2)]
+    answers = {}
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(timeout)
+        connection.connect(str(path))
+        stream = connection.makefile("rw")
+        for message in messages:
+            stream.write(json.dumps(message) + "\n")
+            stream.flush()
+            while "id" in message and message["id"] not in answers:
+                line = stream.readline()
+                assert line, f"{name} closed the connection before answering {message['method']}"
+                found = json.loads(line)
+                if "id" in found:
+                    answers[found["id"]] = found
+    return answers
+
+
+def burp_added(env, *options):
+    """`sandbox-ai mcp add burp OPTIONS` in the check's own configuration (the signed catalog); skipped while the
+    catalog has no published image of it yet."""
+    added = sai(env, "mcp", "add", "burp", *options, timeout=1800)
+    if added.returncode != 0 and "no digest for it yet" in added.stderr:
+        pytest.skip("the signed catalog has no image of burp yet (published with the next signed catalog)")
+    assert added.returncode == 0, said(added)
+    return " ".join((added.stdout + added.stderr).split())
+
+
+def test_live_burp_host_mode(tmp_path):
+    """Your Burp with the extension (SAI_LIVE_BURP_URL, scripts/live_check.sh --burp-url): mcp add burp says it
+    answers, mcp burp check names the edition, and through the server's real relay initialize and tools/list answer
+    with the extension's tools (27 with Professional, 24 with Community) and url_encode is called."""
+    url = os.environ.get("SAI_LIVE_BURP_URL") or "http://127.0.0.1:9876/mcp"
+    env = environment(tmp_path)
+    text = burp_added(env, "--burp-url", url)
+    if "does not answer" in text:
+        pytest.skip(f"nothing answers on {url}: load the extension in your Burp (sandbox-ai mcp burp extension), "
+                    "enable its MCP tab, then run burp-live again")
+    checked = sai(env, "mcp", "burp", "check", "--json")
+    assert checked.returncode == 0, said(checked)
+    found = json.loads(checked.stdout)
+    print(f"burp-live host mode: {found['server']}, Burp Suite {found['edition']}, {len(found['tools'])} tools"
+          + (f"; warning: {found['warning']}" if found.get("warning") else ""))
+    started = sai(env, "mcp", "start", "burp", timeout=300)
+    try:
+        assert started.returncode == 0, said(started)
+        answers = burp_session(env, "burp", [("url_encode", {"content": "a b"})])
+        names = {tool["name"] for tool in answers[1]["result"]["tools"]}
+        assert len(names) == (27 if found["edition"] == "professional" else 24), sorted(names)
+        assert {"get_scanner_issues", "generate_collaborator_payload"} <= names or found["edition"] == "community"
+        assert "a%20b" in answers[2]["result"]["content"][0]["text"] or "a+b" in answers[2]["result"]["content"][0]["text"]
+        listed = json.loads(sai(env, "mcp", "list", "--json").stdout)
+        assert [e for e in listed if e["name"] == "burp"][0]["command"].startswith("Burp Suite")
+    finally:
+        sai(env, "mcp", "stop", "burp", timeout=300)
+
+
+def test_live_burp_container_mode(tmp_path):
+    """Your Burp jar (SAI_LIVE_BURP_JAR, --burp-jar) headless in the server's container: the terms accepted, a
+    Professional licence (SAI_LIVE_BURP_LICENSE_FILE) typed in the container only and activated online once, the
+    extension loaded from the user options file, and through the relay tools/list and url_encode answer; the licence
+    appears in no log line of the server."""
+    jar = os.environ.get("SAI_LIVE_BURP_JAR")
+    if not jar:
+        pytest.skip("give scripts/live_check.sh --only burp-live --burp-jar JAR (your Burp jar)")
+    env = environment(tmp_path)
+    licence = None
+    if os.environ.get("SAI_LIVE_BURP_LICENSE_FILE"):
+        licence = Path(os.environ["SAI_LIVE_BURP_LICENSE_FILE"]).read_text().strip()
+        stored = sai({**env, "SAI_LIVE_BURP_KEY": licence}, "secrets", "set", "BURP_LICENSE", "--from-env",
+                     "SAI_LIVE_BURP_KEY")
+        assert stored.returncode == 0, "the check's own secret store took no licence"
+    edition = os.environ.get("SAI_LIVE_BURP_EDITION")
+    burp_added(env, "--burp-mode", "container", "--burp-jar", jar, *(["--burp-edition", edition] if edition else []))
+    started = sai(env, "mcp", "start", "burp", timeout=600)
+    try:
+        assert started.returncode == 0, said(started)
+        answers = burp_session(env, "burp", [("url_encode", {"content": "a b"}),
+                                             ("get_proxy_http_history", {"count": 1, "offset": 0})], timeout=900)
+        result = answers[2]["result"]
+        assert not result.get("isError"), result
+        assert "a%20b" in result["content"][0]["text"] or "a+b" in result["content"][0]["text"]
+        assert not answers[3]["result"].get("isError"), answers[3]["result"]
+    finally:
+        sai(env, "mcp", "stop", "burp", timeout=300)
+        logs = "".join(path.read_text(errors="replace") for path in
+                       (Path(env["XDG_STATE_HOME"]) / "sandbox-ai" / "mcp" / "burp").rglob("*.log"))
+        if licence:
+            assert licence not in logs, "the licence key reached a log line"
+        print("burp-live container mode: Burp's last lines:",
+              " | ".join([line for line in logs.splitlines() if "burp-mcp:" in line][-6:]))

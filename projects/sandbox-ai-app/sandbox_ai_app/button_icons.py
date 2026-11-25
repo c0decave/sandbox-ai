@@ -70,6 +70,9 @@ SVGS = {
     "storage": _svg('<ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/><path d="M4.5 5.5v13c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 '
                     '7.5-2.5v-13"/><path d="M4.5 12c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5"/>'),
     "optimize": _svg('<path d="M15.5 2.5L11 11.5"/><path d="M6 11.5h9.5l1.5 9H4.5z"/><path d="M8.5 15v5.5M12.5 15v5.5"/>'),
+    # Show on the Board: two parts and the one they are connected to (the Board's parts and connections)
+    "board": _svg('<rect x="2.5" y="3.5" width="7" height="5" rx="1"/><rect x="2.5" y="15.5" width="7" height="5" rx="1"/>'
+                  '<rect x="14.5" y="9.5" width="7" height="5" rx="1"/><path d="M9.5 6h2.5v12H9.5M12 12h2.5"/>'),
     # While it runs
     "allow": _svg(GLOBE, PLUS),
     "revoke": _svg(GLOBE, MINUS),

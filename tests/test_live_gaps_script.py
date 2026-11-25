@@ -54,7 +54,8 @@ def test_the_brief_s_gaps_each_have_a_check():
     assert gates.keyword == "isolation or strict_mode_starts or relays"
     assert {check.name for check in LG.CHECKS if check.optional} == {"remote-mcp", "local-llm", "harnesses-live",
                                                                        "presets-live", "cairn-workers-live",
-                                                                       "live-suites", "mcp-live", "artex-live"}
+                                                                       "live-suites", "mcp-live", "artex-live",
+                                                                       "android-emulator-live", "burp-live"}
     assert LG.LLM_MODELS == ("qwen3.8-flash-next", "ornith-1.5-35b-a3b-mlx", "ornith-1.5-122b-mlx")
 
 
@@ -856,3 +857,23 @@ def test_the_list_says_the_timeout_and_why_a_check_exists_on_lines_of_their_own(
     at = said.index("presets-live (optional)")
     block = said[at:at + 7]
     assert any(line.startswith("    why:      the user, 2026-11-22") for line in block), block
+
+
+def test_the_android_checks_fetch_from_google_only_with_your_yes_to_the_license(tmp_path):
+    """toolchain-live's android-sdk part and android-emulator-live (2026-11-24: Android as a toolchain and as a
+    service): what they fetch from Google is under a license that is yours to accept - live_check
+    --accept-android-sdk-license says so to the tests (SAI_LIVE_ANDROID_SDK_LICENSE); without it the emulator's check
+    is skipped by its prerequisite and the toolchain's test skips itself. The emulator needs /dev/kvm and Podman."""
+    toolchain, emulator = LG.BY_NAME["toolchain-live"], LG.BY_NAME["android-emulator-live"]
+    assert "tests/test_live_gaps.py::test_live_the_android_sdk_toolchain_assembles_an_app" in toolchain.tests
+    assert "--accept-android-sdk-license" in toolchain.proves and "dl.google.com" in toolchain.network
+    assert emulator.optional and {"kvm", "android-license", "podman", "linux"} <= set(emulator.needs)
+    assert "dl.google.com" in emulator.network and "no /dev/kvm itself" in emulator.proves
+    text = (ROOT / "tests" / "test_live_gaps.py").read_text()
+    assert 'os.environ.get(ANDROID_LICENSE) != "accepted"' in text and "pytest.skip" in text
+    source = (ROOT / "scripts" / "live_gaps.py").read_text()
+    assert 'env["SAI_LIVE_ANDROID_SDK_LICENSE"] = "accepted"' in source
+    assert 'found["android-license"] = Found(accepted' in source and 'found["kvm"]' in source
+    documented = (ROOT / "docs" / "LIVE_CHECK.md").read_text()
+    assert "`android-emulator-live` (optional)" in documented and "--accept-android-sdk-license" in documented
+

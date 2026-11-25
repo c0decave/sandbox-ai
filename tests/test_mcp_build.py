@@ -385,9 +385,13 @@ def test_build_plan_then_build_adds_it_unsigned(host):
     # The smoke run: sandbox-ai's own run line (no capabilities, read-only, no network, the spec's limits), the
     # fixtures at /work - list_files saw demo.apk there, the refused call was refused.
     (smoke,) = [call for call in runs if call[0] == "run"]
-    for flag in ("--cap-drop=ALL", "--read-only", "--network=none", "--memory=1g", "--pids-limit=256",
-                 "--security-opt=no-new-privileges", "--pull=never"):
+    for flag in ("--cap-drop=ALL", "--read-only", "--network=none", "--security-opt=no-new-privileges",
+                 "--pull=never"):
         assert flag in smoke, flag
+    # The spec's limits where this host can enforce them (m.unenforced_limits: as every MCP start, 0.1.232).
+    missing = m.unenforced_limits()[0]
+    for key, flag in (("memory", "--memory=1g"), ("pids", "--pids-limit=256")):
+        assert (flag in smoke) == (key not in missing), flag
     said = result.stdout + result.stderr
     assert "smoke: list_files: ok" in said and "smoke: refuse: ok" in said
     definition = host.definitions()["jadx"]

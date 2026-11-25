@@ -205,6 +205,7 @@ RUNTIME = (("sandbox/", "sandbox_ai/"), ("projects/sandbox-ai-app/sandbox_ai_app
 RUNTIME_SINCE_0_1_188 = (
     "sandbox/cairn_workers.json", "sandbox/live_evidence.json", "sandbox/model_evidence.json",
     "sandbox/toolchains.py", "sandbox/pid1.py", "sandbox/hostinit.py", "sandbox/fixes.py", "sandbox/llm_share.py",
+    "sandbox/intro.py",  # (the agent's intro: every start of an agent loads it)
     "sandbox/mcp_build.py", "sandbox/session_state.py", "sandbox/cairn_workers.py", "sandbox/web/help.json",
     "sandbox/web/fonts/fonts.json", "sandbox/web/fonts/Lexend-Regular.woff2", "sandbox/web/fonts/OFL-Lexend.txt",
     "sandbox/presets/android-development.json", "sandbox/presets/android-development.rules.json",

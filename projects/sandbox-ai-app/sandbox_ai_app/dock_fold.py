@@ -235,7 +235,9 @@ class DockFold(QObject):
         if self.dock.isFloating() or not self.dock.isVisible():
             return
         if self.as_strip():
-            if self.dock.width() > 2 * self.bar.sizeHint().width():
+            fitted = self.dock.property(FITTED)  # (widened for a part's rows, fit_docked: not the user's width)
+            if self.dock.width() > 2 * self.bar.sizeHint().width() and not (
+                    isinstance(fitted, int) and abs(self.dock.width() - fitted) <= 2):
                 self.sizes["width"] = self.dock.width()
         elif self.dock.height() > 2 * self.bar.sizeHint().height():
             self.sizes["height"] = self.dock.height()
@@ -341,6 +343,58 @@ def content_size(dock):
     return QSize(hint.width() + max(0, more_width), hint.height() + max(0, more_height))
 
 
+DOCK_SHARE = 0.6  # a panel docked at a side: at most this share of the window's width (the page keeps the rest)
+FITTED = "fittedWidth"  # the width fit_docked gave a panel (a dynamic property): not the user's own choice
+
+
+def least_width(dock):
+    """The least width at which nothing DOCK shows is cut sideways: its own layout's, and for each of its scrolled
+    areas (the properties' rows) their content's minimum with the frame, a scroll bar beside it and what the panel
+    has around the area. (Not the size it would like: content_size.)"""
+    width = dock.minimumSizeHint().width()
+    content = dock.widget()
+    if content is None:
+        return width
+    for scroll in content.findChildren(QScrollArea):
+        inner = scroll.widget()
+        if inner is None or not scroll.widgetResizable() or scroll.isHidden() or scroll.parentWidget() is None \
+                or any(isinstance(parent, QScrollArea) for parent in ancestors(scroll, content)):
+            continue  # (a nested one scrolls inside its own)
+        around = max(0, dock.width() - scroll.width())
+        bar = scroll.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        width = max(width, inner.minimumSizeHint().width() + 2 * scroll.frameWidth() + bar + around)
+    return width
+
+
+def ancestors(widget, top):
+    """WIDGET's parents up to (not including) TOP."""
+    found, parent = [], widget.parentWidget()
+    while parent is not None and parent is not top:
+        found.append(parent)
+        parent = parent.parentWidget()
+    return found
+
+
+def fit_docked(dock, window, fold=None, share=DOCK_SHARE):
+    """DOCK (docked at a side of WINDOW, unfolded) made wide enough that nothing it shows is cut (least_width), at
+    most SHARE of WINDOW's width, and never narrower than the user left it: FOLD (its DockFold) keeps that width, so
+    the panel goes back to it for a part that needs less. True when its width was changed."""
+    if dock.isFloating() or not dock.isVisible() or window.dockWidgetArea(dock) not in SIDES:
+        return False
+    fitted = dock.property(FITTED)
+    if fold is not None and (not isinstance(fitted, int) or abs(dock.width() - fitted) > 2):
+        fold.sizes["width"] = dock.width()  # (not the width this gave it: the user's own, as it is now)
+    own = fold.sizes["width"] if fold is not None else dock.width()
+    wanted = max(own, min(least_width(dock), int(window.width() * share)))
+    if abs(wanted - dock.width()) <= 2:
+        dock.setProperty(FITTED, dock.width())
+        return False
+    window.resizeDocks([dock], [wanted], Qt.Orientation.Horizontal)
+    dock.setProperty(FITTED, wanted)
+    QTimer.singleShot(0, dock, lambda: dock.setProperty(FITTED, dock.width()))  # (as the window laid it out)
+    return True
+
+
 def float_out(dock):
     """Undock DOCK as by its float button: centred and sized to its content (FloatPlacement)."""
     placement = getattr(dock, "placement", None)
@@ -433,6 +487,29 @@ class FloatPlacement(QObject):
                                         available, dock.maximumSize(), least=QSize(0, 0) if keep_size else MIN_FLOAT)
                 if placed != dock.geometry():
                     dock.setGeometry(placed)
+            self.placed = dock.geometry()
+        finally:
+            self.placing = False
+            self.quiet_until = time.monotonic() + self.QUIET
+
+    def grow(self):
+        """The floating panel shows something else: at least as big as that needs (content_size) and never smaller
+        than it is, around the point it is centred on now (one that was centred stays so; one the user moved stays
+        where they put it) - moved only as far as it takes to stay inside the screen."""
+        dock = self.dock
+        try:
+            if not dock.isFloating():
+                return
+            self.placing = True
+            screen = dock.screen()
+            if screen is None:
+                return
+            available = screen.availableGeometry()
+            wanted = QRect(dock.geometry().topLeft(), content_size(dock).expandedTo(dock.size()))
+            wanted.moveCenter(dock.geometry().center())
+            placed = float_geometry(wanted, dock.minimumSizeHint(), None, available, dock.maximumSize())
+            if placed != dock.geometry():
+                dock.setGeometry(placed)
             self.placed = dock.geometry()
         finally:
             self.placing = False

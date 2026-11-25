@@ -14,7 +14,7 @@ from test_projects import env, project, window  # noqa: E402,F401 - shared fixtu
 def test_the_tour_walks_the_pages_and_remembers_where_it_was(window):  # noqa: F811
     window.start_tour(0)
     assert window.tour_dock.isVisible() and window.current_page() == "launch"
-    assert "1 of" in window.tour.where.text() and window.tour.title.text() == "Start"
+    assert "1 of" in window.tour.where.text() and window.tour.title.text() == "Board: Expert view"
     window.tour.next.click()
     assert window.current_page() == "board" and window.state.get("tour_step") == 1
     window.tour.back.click()

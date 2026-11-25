@@ -1,4 +1,4 @@
-"""Reports in the app (sandbox-ai report): Report… on the Sandboxes page for the selected starts (one or several, this
+"""Reports in the app (sandbox-ai report): Report… on the Sessions page for the selected starts (one or several, this
 machine's), and on the Statistics page for the log folder shown; the dialog (format, file, period, parts), the report
 written in the background by sandbox-ai and opened afterwards; the backend's command line."""
 import json

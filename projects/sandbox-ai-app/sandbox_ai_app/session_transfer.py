@@ -1,4 +1,4 @@
-"""Copy to host… and Move to host… of the Sandboxes page: a session of this machine started again on a host of
+"""Copy to host… and Move to host… of the Sessions page: a session of this machine started again on a host of
 `sandbox-ai hosts` (`sandbox-ai session copy|move NAME HOST [--as NAME] [--map=LOCAL=REMOTE]... [--check]`).
 
 The dialog offers the hosts (this machine left out), the session's name there and every folder or file of this machine

@@ -3,7 +3,7 @@ RFB with a server played byte by byte - the handshake, Raw, CopyRect, DesktopSiz
 (another version, a password, a rectangle outside the display, a display too large, a clipboard text too long) - the
 socket it refuses (not yours, not a socket, a folder others can open), the keyboard and mouse it sends, the window
 (its [x], plain Esc closes it, Shift+Esc goes to the browser, the clipboard only when shared), the Browser button of
-the Sandboxes page and of a tab's menu, and the board's Browser part. With Xvfb and x11vnc on this machine, the view
+the Sessions page and of a tab's menu, and the board's Browser part. With Xvfb and x11vnc on this machine, the view
 also connects to a real x11vnc on a Unix socket, as the browser's container serves it."""
 import os
 from pathlib import Path
@@ -306,7 +306,7 @@ def test_why_not_and_one_window_per_browser(qapp, tmp_path, monkeypatch):
     assert V.open_browser(instance()) is None
 
 
-# -- the Sandboxes page, the tab's menu, the board --
+# -- the Sessions page, the tab's menu, the board --
 
 @pytest.fixture
 def sai(tmp_path, monkeypatch):

@@ -1,4 +1,4 @@
-"""Checkpoints… of the Sandboxes page (its button and a start's right-click menu): the workspaces of a start as they
+"""Checkpoints… of the Sessions page (its button and a start's right-click menu): the workspaces of a start as they
 were, and what an agent did undone (`sandbox-ai checkpoint` on the start's host).
 
 The checkpoints are taken on the host, where the sandbox cannot reach them: one when a start begins (before its agent

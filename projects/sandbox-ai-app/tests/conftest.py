@@ -335,7 +335,7 @@ def started_here(pid):
 
 @pytest.fixture(autouse=True)
 def only_this_sessions_launchers(monkeypatch):
-    """The Sandboxes page lists every sandbox-ai launcher process of the account it does not know ("Not registered"):
+    """The Sessions page lists every sandbox-ai launcher process of the account it does not know ("Not registered"):
     run beside another test session (the core suite's launchers, another checkout's app tests) or a real sandbox,
     a test that expects no row, or one, found theirs too. The tests see the launchers they started themselves."""
     if "sandbox_ai_app.backend" not in sys.modules or sys.platform != "linux":
@@ -588,7 +588,7 @@ def pytest_unconfigure(config):
 
 
 def read_now(page, timeout=60):
-    """The Sandboxes page's read (in the background in the app, the first one too) done and shown at once: after the
+    """The Sessions page's read (in the background in the app, the first one too) done and shown at once: after the
     read already running, if any, has come back (its late result would otherwise replace this one)."""
     import time
     from PySide6 import QtWidgets

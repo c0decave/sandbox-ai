@@ -103,7 +103,7 @@ def stage(root, home=None):
         "pid": os.getpid(), "session": None, "log_dir": str(logs),
         "session_dir": str(home / ".local" / "state" / "sandbox-ai" / "sessions" / RUN),
         "started": stamp(600), "proxy": True,
-        # its browser of its own (--browser): the Sandboxes page's Browser button opens its live view
+        # its browser of its own (--browser): the Sessions page's Browser button opens its live view
         "browser": {"kind": "chromium", "control": "human", "profile": "fresh", "container": f"{RUN}-browser",
                     "vnc": str(runtime / "sandbox-ai" / "runs" / f"{RUN}.browser-vnc" / "vnc.sock")}}))
 

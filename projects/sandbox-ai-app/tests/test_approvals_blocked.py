@@ -448,3 +448,44 @@ def test_allow_for_several_names_or_counts_every_one_it_allows(env, qapp, page, 
     assert len([argv for argv in called if argv[:2] == ["net", "allow"]]) == 15
     title, text, _ = widgets.SHOWN[-1]
     assert title == "Allow for this run?" and "lookup of h14.example" in text and "… and 3 more" in text
+
+
+def test_allowed_now_lists_what_its_start_opened_with_its_source(env, qapp, page, wait, monkeypatch):
+    """The one overview (todos 2026-11-24, "Netzwerkfreigaben"): Allowed now lists what the start opened too, each with
+    its source and how long it holds (net show's "started"), after what this run added; those rows are never revoked
+    from here (they are the start's: its options or its project file)."""
+    fake_run(env, "opencode-1", "alpha")
+    shown = {"https": [{"address": "192.0.2.10", "names": ["pypi.org"]}],
+             "started": [{"kind": "preset", "what": "opencode", "source": "provider", "detail": "opencode",
+                          "hosts": ["opencode.ai"]},
+                         {"kind": "preset", "what": "--allow-github", "source": "project", "detail": "/p/.sandbox-ai.json",
+                          "hosts": ["github.com", "api.github.com"], "scope": "every start of the project"},
+                         {"kind": "tcp", "what": "192.0.2.4:22", "source": "option"}]}
+    monkeypatch.setattr(page.sai, "call", lambda *argv, **kwargs: (0, json.dumps(shown), "")
+                        if argv[:2] == ("net", "show") else (0, "", ""))
+    page.poll()
+    page.set_active_tab({"kind": "run", "id": "opencode-1"})
+    page.allowed.refresh()
+    assert wait(lambda: page.allowed.reading is None and page.allowed.table.rowCount() == 4, 20)
+    table = page.allowed.table
+    got = [[table.item(r, c).text() for c in range(5)] for r in range(4)]
+    assert got[0][0] == "pypi.org" and got[0][3:] == ["allowed during this run", "until it ends"]
+    assert got[1] == ["opencode.ai", "", "HTTPS (port 443)", "the agent's provider (opencode)", "this start"]
+    assert got[2] == ["github.com, api.github.com", "--allow-github", "HTTPS (port 443)",
+                      "the project file (/p/.sandbox-ai.json)", "every start of the project"]
+    assert got[3][:4] == ["192.0.2.4:22", "", "TCP port", "the start's own options"]
+    assert "1 destinations allowed during this run, 3 from its start" in page.allowed.summary.text()
+    for row in range(1, 4):
+        table.selectRow(row)
+        assert page.allowed.selected() == [], "a start's allowance is not revoked from here"
+
+
+def test_the_project_scope_has_one_label():
+    """"Always allow" (the questions' button) is for the run; the project's scope reads the same everywhere: the Blocked
+    list's button said "Allow always…", in German the very words of the run's button."""
+    from sandbox_ai_app import i18n
+    assert dict(i18n.TEXTS)["Always, also for later sessions…"]["de"].startswith(
+        i18n.TEXTS["Always, also for later sessions"]["de"])
+    assert "Allow always…" not in i18n.TEXTS
+    labels = [label for _, _, label in pages.ALLOW_SCOPES]
+    assert labels[2] + "…" == "Always, also for later sessions…"

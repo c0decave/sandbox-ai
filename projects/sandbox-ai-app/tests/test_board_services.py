@@ -52,6 +52,23 @@ def test_a_service_survives_the_board(sai, spec):
     assert B.service_spec(node.props) == sai.module("services").spec_text(node.props)
 
 
+def test_a_service_whose_optional_value_is_left_empty_is_left_out(sai):
+    """A preset's service that holds an optional value of yours (android-development: /dev/kvm for the emulator, a
+    USB device for the adb server; database-services: Redis' image): left empty, the part goes whole - as the
+    launcher leaves the option out. Before, the part stayed with its name alone and the start asked for an image of
+    that name (found with android-development on 2026-11-24: "--service adb: port 5037 is a port of the host")."""
+    board = B.from_argv(sai, "claude", ["--service", "android-emulator:device=<text:kvm>", "--service",
+                                        "adb:port=5038,env=ADB_PORT=5038,device=<text:device>",
+                                        "--service", "db:image=postgres,port=5432"])
+    assert sorted(node.props["name"] for node in board.of_kind("service")) == ["adb", "android-emulator", "db"]
+    B.fill(board, {"<text:kvm>": "/dev/kvm"}, sai)
+    B.drop(board, ["<text:device>"])
+    back = B.to_argv(sai, board)
+    services = [back[index + 1] for index, word in enumerate(back[:-1]) if word == "--service"]
+    assert services == ["android-emulator:image=android-emulator,device=/dev/kvm", "db:image=postgres,port=5432"]
+    assert B.placeholders(board) == []
+
+
 def test_a_service_always_names_its_image(sai):
     """2026-11-15, live: a service without image= silently took its name as its image, which confused the user. The
     board writes image= always, even when it is the name; a part with no image yet names its own (the launcher's

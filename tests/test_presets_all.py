@@ -57,7 +57,8 @@ CATALOG_FOLDERS = {"engram": ["/data"], "memory": ["/data"], "binwalk": ["/work"
 # The entries of the two MCP catalogs (sandbox-ai-mcp: "mcp", axross-mcp-hub: "hub") a preset may name; checked against
 # the catalogs themselves where a checkout has them (test_the_mcp_servers_the_presets_name_are_in_the_catalogs).
 CATALOG_ENTRIES = {
-    "mcp": {"axross", "binwalk", "brave-search", "capa", "cfr", "duckduckgo", "engram", "frida", "gowitness", "jadx",
+    "mcp": {"axross", "binwalk", "brave-search", "burp", "capa", "cfr", "duckduckgo", "engram", "frida", "gowitness",
+            "jadx",
             "memory",
             "openosint", "osint-mcp", "playwright", "radare2", "searxng", "signal", "smali", "telegram",
             "telegram-user", "web-fetch", "whatsapp", "whatweb"},
@@ -153,6 +154,11 @@ def host(tmp_path_factory):
         images[name] = {"kind": "pulled", "image": f"docker.io/library/{name}@sha256:" + str(index) * 64,
                         "id": "sha256:" + str(index + 5) * 64, "digest": "sha256:" + str(index) * 64, "user": user,
                         "ports": [], "os": {}}
+    # sandbox-ai's own Containerfiles for services a preset starts (android-development, android-debugging: the
+    # emulator and an adb server beside the sandbox), built as `images build-image NAME --builtin NAME` records them.
+    for index, name in enumerate(("android-emulator", "adb")):
+        images[name] = {"kind": "built", "image": f"localhost/sandbox-ai-image-{name}:latest", "builtin": name,
+                        "id": "sha256:" + str(index + 3) * 64, "user": "0:0", "ports": [], "os": {}}
     (root / "config/sandbox-ai/user-images.json").write_text(json.dumps({"version": 1, "images": images}))
     # The image variants the presets start (--image-variant): made from their recipe, as the preset's "needs" says
     # (`sandbox-ai images recipe NAME --from AGENT`; a start of another agent takes it over), never built.
@@ -164,6 +170,8 @@ def host(tmp_path_factory):
         for variant, _ in P.option_values(preset, defaults, "--image-variant"):
             if variant not in {name for name, _ in images.variants()}:
                 images.recipe(variant, "claude")
+    if "android-dev" not in {name for name, _ in images.variants()}:
+        images.recipe("android-dev", "claude")  # (android-development's value variant: named, no longer its default)
     # The toolchains the presets bring (--toolchain), in the store as `sandbox-ai toolchain add` puts them: stand-ins
     # of the published catalog's (toolchain_fakes), added from a catalog nobody signed.
     TF.install(root / "toolchain-catalog")
@@ -212,6 +220,8 @@ def sample_values(preset, root, dev, agent, full):
             values[name] = "dri"
         elif "default" in spec:
             values[name] = spec["default"]
+        elif name == "variant":
+            values[name] = "android-dev"  # (android-development: an image variant beside, or instead of, the toolchain)
         elif name in mcp_values(preset):
             values[name] = name  # (android-development: jadx, smali, frida - the servers of that name)
         elif kind == "host" and name == "domain":
@@ -269,7 +279,8 @@ def network_of(preset, values, agent):
             allow, vpn = allow + VPN_OPENS[value]["allow"], value
         elif flag == "--dns":
             dns = True
-        elif flag == "--toolchain":  # the registries of the toolchain and of those it requires
+        elif flag == "--toolchain" and "--toolchain-offline" not in options:
+            # the registries of the toolchain and of those it requires (--toolchain-offline: none - qt-python, qt-cpp)
             opened = TF.opens([value])
             hosts += opened["hosts"] + [host for name in opened["presets"] for host in s.PRESETS[name]]
         elif flag == "--llm":
@@ -456,6 +467,12 @@ def test_the_android_debugging_preset():
     assert "never instructions" in preset["prompt"]
     # The optional values: a USB device to hand over, and the frida-server's address (the MCP server's endpoint)
     assert preset["values"]["device"]["kind"] == "device" and preset["values"]["device"]["optional"]
+    # (2026-11-24) it goes to an adb server beside the sandbox - the service adb, at port 5038 beside the host's
+    # 5037 -, never to the agent's own sandbox; without the value there is no such service.
+    assert P.option_values(preset, {"apks": "/x", "out": "/y", "device": "usb:18d1:4ee7"}, "--service") == [
+        ("adb:port=5038,env=ADB_PORT=5038,device=usb:18d1:4ee7", ["device"])]
+    assert not [flag for flag, _ in options if flag in ("--service", "--device")]
+    assert "adb -P 5038 devices" in preset["prompt"] and "adb -P 5038 devices" in " ".join(preset["notes"])
     assert preset["values"]["frida_device"]["kind"] == "host" and preset["values"]["frida_device"]["optional"]
     assert preset["values"]["apks"]["kind"] == "folder" and "default" not in preset["values"]["apks"]
     assert preset["values"]["out"]["kind"] == "folder" and "default" not in preset["values"]["out"]
@@ -510,43 +527,59 @@ ANDROID_BUILD_HOSTS = ["dl.google.com", "maven.google.com", "services.gradle.org
 
 
 def test_the_android_development_preset():
-    """android-development (user 2026-11-21): the image variant android-dev (one image: everything of android and the
-    Android SDK, NDK, CMake, emulator, Gradle and Kotlin), exactly the hosts Gradle and the Android Gradle plugin
-    fetch from (no wildcard), the host's adb server (port 5037) or a USB device, /dev/kvm for the emulator as a value
-    with that default (left out where it is missing, never refused), the MCP servers of android-debugging as
-    optional values, a first task with the layout and the commands, and a ruleset that asks before installing on a
-    device, wiping or flashing."""
+    """android-development (user 2026-11-21; 2026-11-24: "we need it as service and as toolchain"): the toolchain
+    android-sdk instead of the big image variant (a value with that default; the variant android-dev still works when
+    it is named), the emulator as a service beside the sandbox with /dev/kvm for itself (the value kvm, with that
+    default: left out where it is missing, never refused; nothing of it for the agent's own sandbox), a USB device
+    for an adb server beside it, exactly the hosts Gradle and the Android Gradle plugin fetch from (no wildcard), the
+    host's adb server (port 5037), the MCP servers of android-debugging as optional values, a first task with the
+    layout and the commands, and a ruleset that asks before installing on a device, wiping or flashing."""
     preset = PRESETS["android-development"]
     assert preset["category"] == "development" and preset["agents"] == ["claude", "codex", "opencode"]
     assert preset["translations"]["de"]["title"] == "Android-Entwicklung"
+    assert "Toolchain android-sdk" in preset["translations"]["de"]["description"]
     pairs = option_pairs(P.expand(preset, {}, extras=False))
-    assert ("--image-variant", "android-dev") in pairs
-    # (a value with that default, as the app wants it: a variant belongs to an agent, a preset only offers one)
-    assert preset["values"]["variant"]["default"] == "android-dev" and "{variant}" in preset["options"]
+    # The SDK: the toolchain by default; an image variant only when one is named (a value without a default).
+    assert ("--toolchain", "android-sdk") in pairs and not [flag for flag, _ in pairs if flag == "--image-variant"]
+    sdk, variant = preset["values"]["sdk"], preset["values"]["variant"]
+    assert (sdk["default"], sdk["optional"]) == ("android-sdk", True) and "android-sdk@36" in sdk["hint"]
+    assert "Android Software Development Kit License Agreement" in sdk["hint"]
+    assert variant["optional"] and "default" not in variant and "android-dev" in variant["hint"]
+    old = option_pairs(P.expand(preset, {"variant": "android-dev", "sdk": ""}, extras=False))
+    assert ("--image-variant", "android-dev") in old and not [flag for flag, _ in old if flag == "--toolchain"]
     assert [value for flag, value in pairs if flag == "--allow-host"] == ANDROID_BUILD_HOSTS
     assert not [flag for flag, _ in pairs if flag in ("--allow-domain", "--allow-shared-wildcard")]
     assert not any("*" in (value or "") for _, value in pairs)
     assert ("--allow-host-port", "5037") in pairs and ("--memory", "16g") in pairs
-    # /dev/kvm: a value with that default, optional; a USB device; the MCP servers: all optional, none by default
+    # /dev/kvm: a value with that default, optional - for the emulator's service, never a --device of the agent's
+    # sandbox; a USB device: for the adb server's service; the MCP servers: all optional, none by default.
     kvm, device = preset["values"]["kvm"], preset["values"]["device"]
     assert (kvm["kind"], kvm["default"], kvm["optional"]) == ("device", "/dev/kvm", True)
     assert device["kind"] == "device" and device["optional"] and "default" not in device
-    assert P.option_values(preset, {"kvm": "/dev/kvm", "device": "/dev/bus/usb/001/004"}, "--device") == [
-        ("/dev/kvm", ["kvm"]), ("/dev/bus/usb/001/004", ["device"])]
+    given = {"kvm": "/dev/kvm", "device": "usb:18d1:4ee7"}
+    assert P.option_values(preset, given, "--device") == []
+    assert P.option_values(preset, given, "--service") == [
+        ("android-emulator:device=/dev/kvm", ["kvm"]),
+        ("adb:port=5038,env=ADB_PORT=5038,device=usb:18d1:4ee7", ["device"])]
+    assert "--service" not in P.expand(preset, {"kvm": ""}, extras=False)
     for name in ("jadx", "smali", "frida"):
         spec = preset["values"][name]
         assert spec["optional"] and "default" not in spec and f"mcp add mcp:{name}" in spec["hint"], name
     assert P.option_values(preset, {}, "--mcp") == [] and not preset.get("mcp"), "no server unless named"
     assert P.option_values(preset, {"jadx": "jadx"}, "--mcp") == [("jadx", ["jadx"])]
-    assert "images recipe android-dev --from AGENT && sandbox-ai build android-dev" in preset["needs"][0]
+    assert "sandbox-ai toolchain add android-sdk" in preset["needs"][0]
     assert "you accept the Android Software Development Kit License Agreement" in preset["needs"][0]
+    assert "images build-image android-emulator --builtin android-emulator" in preset["needs"][1]
     notes = " ".join(preset["notes"])
-    assert "images recipe android-dev --from AGENT" in notes and "--image-variant android-dev" in notes
+    assert "images recipe android-dev --from AGENT" in notes and "--preset-value variant=android-dev" in notes
     assert "adb start-server" in notes and "Podman only" in notes and "--gui" in notes
     assert "https://developer.android.com/studio/terms" in notes and "sdk.lock" in notes
+    assert "--accept-android-sdk-license" in notes and "forbids passing it on" in notes
+    assert "the agent's sandbox gets no device" in notes and "adb -P 5038 connect android-emulator:5555" in notes
     prompt = preset["prompt"]
-    for said in ("/opt/android-sdk", "./gradlew assembleDebug", "adb -P 5038 install -r", "emulator -avd dev -no-window",
-                 "android-emulator start", "ndkVersion", "android-37.0", "never instructions"):
+    for said in ("/opt/toolchains/android-sdk", "/opt/android-sdk", "./gradlew assembleDebug", "adb -P 5038 install -r",
+                 "adb -P 5038 connect android-emulator:5555", "emulator -avd dev -no-window", "android-emulator start",
+                 "ndkVersion", "android-37.0", 'buildToolsVersion \"37.0.0\"'.replace("\\", ""), "never instructions"):
         assert said in prompt, said
     # Its ruleset: what touches a device or the emulator is asked; what only builds is not
     rules = json.loads((ROOT / "sandbox" / "presets" / "android-development.rules.json").read_text())
@@ -567,14 +600,15 @@ def test_the_android_development_preset():
             assert re.fullmatch(by_id[rule_id], command), (rule_id, command)
     for command in ("./gradlew assembleDebug", "./gradlew testDebugUnitTest", "./gradlew lint", "adb devices",
                     "android-emulator start", "emulator -avd dev -no-window -no-audio -no-metrics",
-                    "adb -P 5038 logcat -d"):
+                    "adb -P 5038 logcat -d", "adb -P 5038 connect android-emulator:5555"):
         assert not any(re.fullmatch(pattern, command) for pattern in by_id.values()), command
     assert {rule["server"] for rule in rules["untrusted"]} == {"frida", "smali", "jadx", "cfr"}
 
 
 def test_the_android_development_preset_without_kvm(host, capsys, monkeypatch):
     """A host without /dev/kvm: the value's default is left out with a note (never refused), the start goes on
-    without the device; one named explicitly is passed; --preset-value kvm= leaves it out too."""
+    without the emulator's service; with one, the service gets it and the agent's own sandbox no device;
+    --preset-value kvm= leaves the emulator out too."""
     root, dev, work = host
     preset = PRESETS["android-development"]
     real = os.path.lexists
@@ -583,14 +617,22 @@ def test_the_android_development_preset_without_kvm(host, capsys, monkeypatch):
     values, found = P.checked_values(preset, {}, notes)
     assert found == [] and "kvm" not in values
     assert any("kvm: /dev/kvm does not exist here, left out" in note for note in notes), notes
-    assert "--device" not in P.expand(preset, {}, extras=False)
+    assert "--service" not in P.expand(preset, {}, extras=False)
     assert P.missing(preset, {}, "claude") == []
     plan = dry_run(capsys, work, "claude", "android-development", {})
-    assert plan["devices"] == [] and plan["image"] == "localhost/claude-sandbox-android-dev:latest"
+    assert plan["devices"] == [] and plan["services"] == [] and plan["image"] == "localhost/claude-sandbox:latest"
+    assert [entry["name"] for entry in plan["toolchains"]] == ["jdk", "android-sdk"]
     plan = dry_run(capsys, work, "codex", "android-development", {"kvm": str(dev / "kvm")})
-    assert [entry["path"] for entry in plan["devices"]] == [str(dev / "kvm")]
+    assert plan["devices"] == [], "nothing of it for the agent's own sandbox"
+    service = plan["services"][0]
+    assert service["name"] == "android-emulator" and service["devices"] == [str(dev / "kvm")]
+    assert service["reachable_at"] == ["localhost:5555", "localhost:5554", "localhost:5550"]
+    assert (service["ready"], service["ready_timeout"], service["limits"]["memory"]) == (5550, 600, "6g")
     plan = dry_run(capsys, work, "opencode", "android-development", {"kvm": ""})
-    assert plan["devices"] == []
+    assert plan["devices"] == [] and plan["services"] == []
+    # The image variant android-dev instead of the toolchain: as before.
+    plan = dry_run(capsys, work, "claude", "android-development", {"variant": "android-dev", "sdk": "", "kvm": ""})
+    assert plan["image"] == "localhost/claude-sandbox-android-dev:latest" and plan["toolchains"] == []
 
 
 def test_presets_check_names_the_recipe_of_a_missing_image_variant(host, tmp_path, monkeypatch):
@@ -599,15 +641,21 @@ def test_presets_check_names_the_recipe_of_a_missing_image_variant(host, tmp_pat
     another agent is enough (the start takes it over)."""
     preset = PRESETS["android-development"]
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
-    found = P.missing(preset, {"kvm": ""}, "codex")
+    given = {"kvm": "", "sdk": "", "variant": "android-dev"}
+    found = P.missing(preset, given, "codex")
     assert found == ["the image variant android-dev is not made yet: sandbox-ai images recipe android-dev --from "
                      "codex && sandbox-ai build android-dev"], found
-    assert "--from AGENT" in P.missing(preset, {"kvm": ""})[0]
+    assert "--from AGENT" in P.missing(preset, given)[0]
     spec = importlib.util.spec_from_file_location("images_for_check", ROOT / "sandbox/images.py")
     images = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(images)
     images.recipe("android-dev", "claude")
-    assert P.missing(preset, {"kvm": ""}, "codex") == []
+    assert P.missing(preset, given, "codex") == []
+    # The toolchain it brings by default, not in the store: named with the license its add asks you to accept.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data"))
+    found = P.missing(preset, {"kvm": ""}, "codex")
+    assert len(found) == 1 and "sandbox-ai toolchain add android-sdk" in found[0], found
+    assert "once you accept the Android Software Development Kit License Agreement" in found[0]
 
 
 def test_the_mcp_servers_the_presets_name_are_in_the_catalogs():
@@ -619,8 +667,9 @@ def test_the_mcp_servers_the_presets_name_are_in_the_catalogs():
         if path.is_file():
             have = {entry["name"] for entry in json.loads(path.read_text())["entries"]}
             # A checkout of the catalog that is older than a preset here: only the servers whose branch is not
-            # merged yet may be missing, and they are named (smali and frida: sandbox-ai-mcp feat/android).
-            assert CATALOG_ENTRIES[prefix] - have <= {"smali", "frida"}, CATALOG_ENTRIES[prefix] - have
+            # merged yet may be missing, and they are named (smali and frida: sandbox-ai-mcp feat/android; burp:
+            # sandbox-ai-mcp feature/burp).
+            assert CATALOG_ENTRIES[prefix] - have <= {"smali", "frida", "burp"}, CATALOG_ENTRIES[prefix] - have
     named = []
     for name, preset in PRESETS.items():
         for server in preset.get("mcp", []):
@@ -870,10 +919,14 @@ def test_every_preset_with_bubblewrap(host, capsys, name, agent):
         return
     values = sample_values(preset, root, dev, agent, True)
     options = P.expand(preset, values, extras=False)
-    if "--allow-host-port" in options or "--vpn" in options or "--service" in options or loopback_llm(values):
+    if "--allow-host-port" in options or "--vpn" in options or "--service" in options or loopback_llm(values) or \
+            name == "qt-cpp":  # (its image variant gcc: an image is Podman's; with Bubblewrap the value is empty)
         assert any("Podman only" in note or "only with Podman" in note for note in preset.get("notes", [])), name
         with pytest.raises(ValueError, match="Podman backend"):
             dry_run(capsys, work, agent, name, values, "--backend", "bwrap")
+        if name == "qt-cpp":  # without the variant: the host's compiler, the toolchain mounted all the same
+            plan = dry_run(capsys, work, agent, name, {**values, "variant": ""}, "--backend", "bwrap")
+            assert plan["backend"] == "bwrap" and [e["name"] for e in plan["toolchains"]] == ["python", "pyside6", "qt"]
         return
     plan = dry_run(capsys, work, agent, name, values, "--backend", "bwrap")
     assert plan["backend"] == "bwrap" and plan["agent"] == agent
@@ -1064,7 +1117,10 @@ def test_the_commands_and_options_the_presets_name_exist(host):
                     continue
                 top = help_text([word])
                 choices = re.search(r"\{([a-z,-]+)\}", top or "")
-                if sub and choices and sub in choices.group(1).split(","):
+                # A subcommand of argparse's {a,b} usage, or one of a "Commands:" list laid out like docker's (mcp)
+                listed = bool(sub and re.search(rf"^  {re.escape(sub)}(?: |$)", (top or "").split("\nCommands:\n")[-1]
+                                                .split("\n\n")[0], re.M) and "\nCommands:\n" in (top or ""))
+                if sub and (choices and sub in choices.group(1).split(",") or listed):
                     helps.append(help_text([word, sub]))
                 else:
                     helps.append(top)
@@ -1213,7 +1269,10 @@ def test_the_presets_of_the_other_agents(host, capsys, monkeypatch, agent):
 # with it: rust brings cc, cc brings zig). The user, 2026-11-23: "vorher prüfen ob wir auch Toolchain-Presets haben".
 LANGUAGE_TOOLCHAINS = {"rust": ["rust"], "go": ["go"], "jvm": ["jdk"], "dotnet": ["dotnet"], "data-ml": ["python"],
                        "development": ["python", "node"], "node": ["node"], "python": ["python"], "c-cpp": ["cc"],
-                       "zig": ["zig"]}
+                       "zig": ["zig"], "qt-python": ["pyside6"], "qt-cpp": ["qt"]}
+# The Qt presets open nothing by themselves (the user, 2026-11-24: the registries only when asked): --toolchain-offline,
+# and a note that names the options.
+CLOSED_PRESETS = ("qt-python", "qt-cpp")
 
 
 def test_the_language_presets_bring_their_toolchain():
@@ -1231,16 +1290,23 @@ def test_the_language_presets_bring_their_toolchain():
         for toolchain in wanted:
             assert f"sandbox-ai toolchain add {toolchain}" in notes, (name, toolchain)
         assert "once, then --toolchain" not in notes, f"{name}: the toolchain was only named, now it comes with it"
-    assert set(TF.TOOLCHAINS) <= {toolchain for names in LANGUAGE_TOOLCHAINS.values() for toolchain in names} | {"cc"}
+    # (android-sdk: no language's - the preset android-development brings it)
+    assert set(TF.TOOLCHAINS) <= {toolchain for names in LANGUAGE_TOOLCHAINS.values() for toolchain in names} | {
+        "cc", "android-sdk"}
     assert "cc" in LANGUAGE_TOOLCHAINS["c-cpp"]
     for name, preset in PRESETS.items():
-        if name not in LANGUAGE_TOOLCHAINS:
+        if name not in LANGUAGE_TOOLCHAINS and name != "android-development":  # (its own test: a value, android-sdk)
             assert "--toolchain" not in preset.get("options", []), f"{name}: a language preset? add it above"
     # The registries the preset opens are the toolchain's, and more (rustup's, Go's downloads): never fewer.
     for name, wanted in LANGUAGE_TOOLCHAINS.items():
         options = P.expand(PRESETS[name], {}, extras=False)
         opened = {value for flag, value in option_pairs(options) if flag == "--allow-host"}
         profiles = {flag[len("--allow-"):] for flag, _ in option_pairs(options) if flag.startswith("--allow-")}
+        if name in CLOSED_PRESETS:
+            assert "--toolchain-offline" in options and not opened and not profiles, name
+            notes = " ".join(PRESETS[name]["notes"])
+            assert "The registries stay closed (--toolchain-offline)" in notes and "--allow-pypi" in notes, name
+            continue
         need = TF.opens(wanted)
         assert set(need["hosts"]) <= opened and set(need["presets"]) <= profiles, (name, need, opened, profiles)
 
@@ -1393,6 +1459,14 @@ def test_every_preset_works_out_of_the_box(fresh, name):
         for toolchain in toolchains:
             item = by_id.get(f"toolchain:{toolchain}")
             assert item and item["verdict"] == "offered", (name, agent, toolchain, item)
+            if toolchain == "android-sdk":
+                # Built here from Google's downloads, under their license: a question of its own (its yes is the
+                # acceptance, so the command carries the option), never done by --fix.
+                assert item["commands"] == [["sandbox-ai", "toolchain", "add", toolchain,
+                                             "--accept-android-sdk-license"]]
+                assert item["terms"] == "android-sdk-license" and item["choice"], item
+                assert "Android Software Development Kit License Agreement" in item["security"]
+                continue
             assert item["commands"] == [["sandbox-ai", "toolchain", "add", toolchain]]
 
 

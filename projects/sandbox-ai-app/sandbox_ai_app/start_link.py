@@ -1,4 +1,4 @@
-"""One start, two views: the Start page shows a start as a Board (parts and connections) or as Expert (every option
+"""One start, two views: the Board page shows a start as a Board (parts and connections) or as Expert (every option
 a field, and the whole command line as text to edit), with a switch between them.
 
 Both views show one start - the board of the Board view (board.Board, with its Undo). StartLink keeps them the same:
@@ -27,7 +27,7 @@ VIEWS = (("board", N_("Board"), N_("The start as parts and connections: drag par
                                     "read, edit or paste")))
 VIEW_KEYS = tuple(key for key, _, _ in VIEWS)
 DEFAULT_VIEW = "board"
-SWITCH_KEYS = "F6"  # switches between the two views while the Start page is shown
+SWITCH_KEYS = "F6"  # switches between the two views while the Board page is shown
 
 
 def view_title(key):
@@ -35,14 +35,14 @@ def view_title(key):
 
 
 class ViewSwitch(QWidget):
-    """Board | Expert: the view of the Start page that is shown, as two radio buttons (one of two: never a button
+    """Board | Expert: the view of the Board page that is shown, as two radio buttons (one of two: never a button
     that looks stuck pressed, in any theme)."""
     chosen = Signal(str)  # the view's key, when the human chose another one
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("viewSwitch")
-        self.setAccessibleName(tr("View of the Start page"))
+        self.setAccessibleName(tr("View of the Board page"))
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(10)

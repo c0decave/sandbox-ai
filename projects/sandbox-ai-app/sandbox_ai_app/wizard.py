@@ -1269,7 +1269,7 @@ class NetworkPage(Page):
             self.forbid(box, option)
             row.addWidget(box)
             self.presets[option] = box
-        self.form.addRow(tr("Presets"), row)
+        self.form.addRow(tr("Host sets"), row)
         # Further hosts, whole domains (--allow-domain DOMAIN: DOMAIN and every name below it, sandbox-ai's
         # --allow-host DOMAIN '*.DOMAIN') and ports of this host: one field of kinds (list_fields, 2026-11-19).
         self.lists = LF.ListFields([

@@ -545,13 +545,13 @@ def test_a_full_server_of_an_allowlist_entry_is_told_to_switch(home):
 
 
 def test_the_network_shown_for_people():
-    assert m.network_label({"image": IMAGE, "network": "full"}) == "internet (no LAN)"
+    assert m.network_label({"image": IMAGE, "network": "full"}) == "egress-all (the internet, not your LAN)"
     assert m.network_label({"image": IMAGE, "network": "allowlist", "hosts": ["a.example.com:443"]}) == \
-        "only its hosts (a.example.com:443)"
-    assert m.network_label({"image": IMAGE, "network": "lan"}) == "internet + LAN"
-    assert m.network_label({"image": IMAGE}) == "none"
+        "allowlist (only a.example.com:443)"
+    assert m.network_label({"image": IMAGE, "network": "lan"}) == "lan (the internet and your LAN)"
+    assert m.network_label({"image": IMAGE}) == "offline"
     assert m.network_label({"image": IMAGE, "network": "full", "allow_tcp": ["10.0.0.7:80"]}) == \
-        "internet (no LAN) + 10.0.0.7:80"
+        "egress-all (the internet, not your LAN) + 10.0.0.7:80"
 
 
 # --- Bubblewrap: the sandbox waits until its rules are in place ------------------------------------------------------
@@ -818,13 +818,13 @@ def test_mcp_list_tells_a_full_server_of_an_allowlist_entry_to_switch(home, caps
     entries, _ = m.catalog_entries([("t", str(path))])  # (read once: remembered, as mcp add or mcp catalog read it)
     m.write_definition("duckduckgo", {**m.definition_from_entry(ALLOWLIST, network="full"), "catalog": str(path)})
     found = [e for e in m.server_list() if e["name"] == "duckduckgo"][0]
-    assert found["network"] == "internet (no LAN)"
+    assert found["network"] == "egress-all (the internet, not your LAN)"
     assert "sandbox-ai mcp set duckduckgo --network allowlist" in found["egress_note"]
     assert m.cli(["list"]) == 0
     assert "duckduckgo: MCP server duckduckgo reaches the whole internet" in capsys.readouterr().out
     m.write_definition("duckduckgo", {**m.definition_from_entry(ALLOWLIST), "catalog": str(path)})
     found = [e for e in m.server_list() if e["name"] == "duckduckgo"][0]
-    assert found["network"] == "only its hosts (html.duckduckgo.com:443)" and found["egress_note"] is None
+    assert found["network"] == "allowlist (only html.duckduckgo.com:443)" and found["egress_note"] is None
 
 
 def test_mcp_add_and_set_take_the_network_options_on_the_command_line(home):
@@ -849,7 +849,8 @@ doctor = load("sandbox_doctor_for_egress_test", "doctor.py")
 def test_doctor_says_where_the_servers_reach_and_what_to_change():
     servers = [{"name": "ddg", "network": "internet (no LAN)", "egress_note": "MCP server ddg reaches the whole "
                 "internet ...: sandbox-ai mcp set ddg --network allowlist keeps it to them"},
-               {"name": "bw", "network": "none", "egress_note": None}, {"name": "demo", "network": None}]
+               {"name": "bw", "network": "none", "egress_note": None}, {"name": "demo", "network": None},
+               {"name": "quiet", "network": "offline", "egress_note": None}]  # (offline: its label since 2026-11-24)
     state, title, detail, fix = doctor.check_mcp_network(servers, problem="")
     assert (state, title) == ("warn", "MCP network") and detail == "ddg: internet (no LAN)" and "--network allowlist" in fix
     assert doctor.check_mcp_network(servers[1:], problem="")[0] == "skip"

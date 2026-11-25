@@ -1,4 +1,4 @@
-"""The kill switch in the app (sandbox-ai net cut): per sandbox from the Sandboxes page (also several at once, here
+"""The kill switch in the app (sandbox-ai net cut): per sandbox from the Sessions page (also several at once, here
 and on a host), what holds shown in the State column, and the window's emergency stop - instant, without a question,
 a notification afterwards that says what was cut and how to lift it."""
 import json
@@ -214,7 +214,7 @@ def test_the_emergency_stop_cuts_everything_at_once_and_says_how_to_lift_it(wind
 
 
 def test_the_emergency_stop_right_after_the_start_reaches_every_host(window, monkeypatch, wait):
-    """Right after the start the Sandboxes page has seen no host yet: the hosts are read for the cut itself."""
+    """Right after the start the Sessions page has seen no host yet: the hosts are read for the cut itself."""
     page = window.sandboxes
     page.remote_names = []
     monkeypatch.setattr(window.sai, "remote_hosts", lambda: ["ct1"])

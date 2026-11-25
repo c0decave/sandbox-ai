@@ -71,7 +71,10 @@ def registered(tmp_path_factory):
 # The toolchains of sandbox-ai-mcp's catalog, as stand-ins: {name: (commands, the toolchains it requires)}.
 TOOLCHAINS = {"zig": (["zig"], []), "cc": (["cc", "c++"], ["zig"]), "rust": (["cargo", "rustc"], ["cc"]),
               "go": (["go"], []), "jdk": (["java", "mvn"], []), "dotnet": (["dotnet"], []), "node": (["node", "npm"], []),
-              "python": (["python3", "uv"], [])}
+              "python": (["python3", "uv"], []), "pyside6": (["pyside6-uic"], ["python"]),
+              "qt": (["qmake", "moc"], ["pyside6"]),
+              # (in the published catalog a recipe built on the host from Google's downloads; here an archive too)
+              "android-sdk": (["adb", "aapt2"], ["jdk"])}
 
 
 def toolchain_catalog(folder):
@@ -168,6 +171,10 @@ def registered_servers(root, board):
                      "id": "sha256:" + digit * 64, "user": user}
               for name, digit, user in (("postgres", "1", "999:999"), ("redis", "2", "999:1000"), ("web", "3", "101:101"),
                                         ("showcase-web", "4", "101:101"))}
+    # sandbox-ai's own Containerfiles for services a preset starts (the Android emulator, an adb server), built.
+    for digit, name in (("5", "android-emulator"), ("6", "adb")):
+        images[name] = {"kind": "built", "image": f"localhost/sandbox-ai-image-{name}:latest", "builtin": name,
+                        "id": "sha256:" + digit * 64, "user": "0:0", "ports": [], "os": {}}
     (path.parent / "user-images.json").write_text(_json.dumps({"version": 1, "images": images}))
 
 
@@ -209,6 +216,13 @@ def test_every_preset_with_every_agent_passes_a_dry_run(registered, preset, agen
         devices["--device"] = [d for d in devices.get("--device", []) if d != "/dev/kvm"]
         if not devices["--device"]:
             devices.pop("--device")
+        plan, message = sai.dry_run(used, B.check_argv(sai, without))
+    if plan is None and "its device /dev/kvm: No such file" in message and not os.path.exists("/dev/kvm"):
+        # no KVM here (android-development's emulator, a service with /dev/kvm for itself): only that may be refused,
+        # the rest is checked without the emulator
+        without = B.Board.from_state(board.state())
+        for node in [n for n in without.of_kind("service") if n.props.get("name") == "android-emulator"]:
+            without.remove(node.id)
         plan, message = sai.dry_run(used, B.check_argv(sai, without))
     assert plan is not None, message
     assert plan["agent"] == used

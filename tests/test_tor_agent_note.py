@@ -54,8 +54,10 @@ def home(tmp_path, monkeypatch):
 
 
 def tor_start(agent="codex", *extra, socks=False):
+    """A Tor start whose note is the network note alone (--no-intro: the agent's intro joins the note by default -
+    tests/test_intro.py has it, alone and joined after this one)."""
     v.main(["add", "anon", "--tor", "--force", *(["--socks"] if socks else [])])
-    a = s.parse_args([agent, "--backend", "podman", "--vpn", "anon", *extra])
+    a = s.parse_args([agent, "--backend", "podman", "--vpn", "anon", "--no-intro", *extra])
     v.validate(a)
     return a
 
@@ -195,7 +197,7 @@ def test_the_loop_guards_text_and_the_note_share_their_place(home, monkeypatch, 
 
 @pytest.mark.parametrize("agent", AGENTS + NEWER)
 def test_without_a_vpn_no_agent_gets_a_note(home, agent):
-    a = s.parse_args([agent, "--backend", "podman"])
+    a = s.parse_args([agent, "--backend", "podman", "--no-intro"])
     a.run_id = f"{agent}-r2"
     assert s.network_note(a) is None and s.note_files(a) == {}
     command = " ".join(s.agent_command(a, agent))
@@ -254,7 +256,7 @@ def test_e2e_a_claude_start_through_tor_hands_claude_the_note(host):
     """The start itself: the sandbox's session directory holds network.md and Claude Code's managed CLAUDE.md, and
     /etc/claude-code is mounted read-only from it."""
     keep = host.directory / "kept"
-    result = host.run("claude", "--vpn", "tor-test", env={
+    result = host.run("claude", "--vpn", "tor-test", "--no-intro", env={
         "FAKE_PODMAN_RUN": "0:0", "FAKE_PODMAN_KEEP": str(keep),
         "FAKE_TOR_SCHEDULE": json.dumps([[[0, 100, "Done"]]])})
     assert result.returncode == 0, result.stderr

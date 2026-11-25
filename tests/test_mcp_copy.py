@@ -198,7 +198,7 @@ def test_secret_values_never_leave_their_host(two):
         secrets_set("PLAIN", "x")
         plan = mc.plan_import(exported)
         assert plan["ok"] and SECRET_VALUE not in json.dumps(plan)
-        assert plan["copied"][-1] == "network: internet (no LAN)"  # its network grant copied as defined, and shown
+        assert plan["copied"][-1] == "network: egress-all (the internet, not your LAN)"  # its network grant copied as defined, and shown
 
 
 def test_source_folders_are_never_mounted_on_the_target_unasked(two, tmp_path):

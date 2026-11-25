@@ -1,0 +1,31 @@
+{
+  "format": "sandbox-ai preset",
+  "version": 1,
+  "id": "qt-python",
+  "title": "Qt with Python (PySide6)",
+  "description": "Qt applications in Python: PySide6 with Qt itself (Widgets, QML and Quick, every module, Designer and the other tools) and a current Python mounted in; without a display Qt draws offscreen. Everything else closed.",
+  "translations": {
+    "de": {
+      "title": "Qt mit Python (PySide6)",
+      "description": "Qt-Anwendungen in Python: PySide6 mit Qt selbst (Widgets, QML und Quick, alle Module, Designer und die übrigen Werkzeuge) und ein aktuelles Python eingehängt; ohne Bildschirm zeichnet Qt offscreen. Alles andere zu."
+    }
+  },
+  "category": "development",
+  "agents": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "options": [
+    "--toolchain",
+    "pyside6",
+    "--toolchain-offline"
+  ],
+  "notes": [
+    "Qt for Python (PySide6 with Qt's libraries, plugins, QML modules and tools: pyside6-uic, pyside6-rcc, pyside6-designer, pyside6-linguist, pyside6-lupdate, pyside6-lrelease, pyside6-qmllint, pyside6-qmlformat, pyside6-qmlls) comes with the preset (--toolchain pyside6; it brings the toolchain python: Python 3.14 with pip and uv): from sandbox-ai's signed toolchains, mounted read-only at /opt/toolchains (nothing to install in the sandbox). Not in the store yet, the start offers to add them (sandbox-ai toolchain add pyside6: a download, its signature and SHA-256 checked) - on a terminal it asks, with --fix it does, the app asks in its window. The Qt of the long-term line: --toolchain pyside6@6.11 on the command line.",
+    "import PySide6 works in python3 and in a virtual environment (PYTHONPATH=/opt/toolchains/pyside6/python; a PYTHONPATH of your own needs that folder too). Without a display Qt draws offscreen (QT_QPA_PLATFORM=offscreen): a program runs, QWidget.grab() and QQuickWindow.grabWindow() give its picture. A real window - Designer, your application to look at: --gui on the command line (Xvfb, Qt then uses xcb; --gui-vnc DIR lets you watch).",
+    "The registries stay closed (--toolchain-offline): packages from PyPI need --allow-pypi on the command line, GitHub needs --allow-github.",
+    "Qt in C++: the preset qt-cpp. x86_64 with glibc 2.34 or newer and the libraries Qt loads (EGL, GL, X11, fontconfig, FreeType, xkbcommon, GLib, D-Bus ...): sandbox-ai's images have them; under Bubblewrap the start says which one the host lacks. Qt Multimedia needs libpulse, Qt WebEngine as root QTWEBENGINE_DISABLE_SANDBOX=1.",
+    "Pushes: a login during the run (sandbox-ai net allow --git-token-env ...) or the push proxy."
+  ]
+}

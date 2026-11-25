@@ -6,7 +6,7 @@ the list, the chosen run's cost so far with a bar per budget, and Raise budget (
 It reads what sandbox-ai's collectors recorded (monitor.py, a thread of each run's launcher): `sandbox-ai top --json`
 every INTERVAL_MS while the page is shown (none while it is hidden; one read at a time), and `sandbox-ai stats usage
 --json --series` for the history when the window or the host changes, at most every HISTORY_MS. On a host of
-`sandbox-ai hosts` the same commands run there over SSH; the page follows the host chosen on the Sandboxes page.
+`sandbox-ai hosts` the same commands run there over SSH; the page follows the host chosen on the Sessions page.
 The charts are drawn with QPainter (Sparkline, Chart; monitor_charts.py): the app ships without Qt Charts. Below the
 list: gauges of what the run chosen (or the host) uses now of its limits, and charts of its CPU, memory (with the
 92 % where the sandbox is slowed down and the limit), disk IO, network and processes over the window - the
@@ -412,7 +412,7 @@ class MonitorPage(QWidget):
         split.setSizes([320, 200, 90, 160])
         layout.addWidget(split, 1)
         # A right click on a run also leads to its terminal tab (opened when there is none) and to its row on the
-        # Sandboxes page (go_terminal, go_session: given by the window; this page alone has neither).
+        # Sessions page (go_terminal, go_session: given by the window; this page alone has neither).
         self.go_terminal = self.go_session = None
         list_menu(self.tree, lambda: [self.stop_button, self.raise_button, None, *self.goto_entries()])
         list_menu(self.warnings, lambda: [self.apply_button, self.stop_button])
@@ -1063,7 +1063,7 @@ class MonitorPage(QWidget):
         return None
 
     def tree_start(self):
-        """(run, name, why) of the tree's row chosen: a run with a terminal and a row on the Sandboxes page of its
+        """(run, name, why) of the tree's row chosen: a run with a terminal and a row on the Sessions page of its
         own (WHY None), else why not (a project, an MCP server's sandbox, nothing chosen)."""
         key = self.selected_key()
         if not key or key[0] != "run":
@@ -1071,13 +1071,13 @@ class MonitorPage(QWidget):
         row = next((row for row in (self.data or {}).get("runs") or [] if isinstance(row, dict)
                     and row.get("run") == key[1]), {})
         if row.get("kind") == "mcp":
-            return None, None, tr("An MCP server's sandbox: it has no terminal of its own (on Sandboxes & sessions "
+            return None, None, tr("An MCP server's sandbox: it has no terminal of its own (on Sessions "
                                   "it is below the start it serves).")
         return key[1], row.get("name") or key[1], None
 
     def goto_entries(self):
         """The tree's menu: Go to Terminals (the run's terminal tab, attached when there is none) and Go to Sessions
-        (its row on the Sandboxes page, marked) - for a run of the host shown."""
+        (its row on the Sessions page, marked) - for a run of the host shown."""
         run, name, why = self.tree_start()
         found = []
         for text, go in ((tr("Go to Terminals"), self.go_terminal), (tr("Go to Sessions"), self.go_session)):

@@ -418,7 +418,7 @@ KIND_NAMES = {"chromium": "Chromium", "firefox": "Firefox ESR"}
 class BrowserPanel(QWidget):
     """The live browser of one run: its display, a status line, Share the clipboard, Reconnect. A tab of the
     Terminals page beside its start's terminal (browser_tabs.py), or the whole of a window of its own (BrowserWindow,
-    or a tab opened in its own window). INSTANCE_KEY and NAME: the start it shows (Sandboxes & sessions)."""
+    or a tab opened in its own window). INSTANCE_KEY and NAME: the start it shows (Sessions)."""
 
     def __init__(self, title, path, control="human", parent=None, flags=Qt.WindowType.Widget, in_window=False,
                  tor=None):

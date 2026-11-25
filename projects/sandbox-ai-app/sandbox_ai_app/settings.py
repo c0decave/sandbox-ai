@@ -661,6 +661,20 @@ class SettingsDialog(QDialog):
             pass
         self.spin(form, "board_grid", tr("Board grid (0: no snapping)"), 0, 200, current)
         self.check(form, "board_confirm_remove", tr("Ask before the [x] of a part removes it"), current)
+        # The agent's intro (sandbox-ai's defaults: agent_intro, for every start - the app's and the command line's):
+        # on unless cleared here; a board's Agent part turns it off or on for its project (--no-intro, --intro).
+        defaults, problem = sai.sandbox_defaults()
+        self.agent_intro = WrapCheckBox(tr("Tell the agent what its sandbox has"))
+        self.agent_intro.setChecked(defaults.get("agent_intro") is not False)
+        self.agent_intro.setEnabled(not problem and "agent_intro" in getattr(sai.launcher, "DEFAULTS_KEYS", ()))
+        self.agent_intro.toggled.connect(lambda on: self.save_agent_intro(bool(on)))
+        self.fields["agent_intro"] = self.agent_intro
+        form.addRow("", self.agent_intro)
+        form.addRow(explanation(tr("On (the default): every start writes /sandbox/session/INTRO.md - its folders, "
+                                   "toolchains, MCP servers, services and devices with where each is and how to use "
+                                   "it, no secret, no host path - and tells the agent to read it. Off: no start does "
+                                   "(agent_intro in {path}); a board's Agent part decides for its project.",
+                                   path=breakable(printable(str(sai.sandbox_defaults_file()))))))
 
         # privacy: sandbox-ai's own defaults, for every start (the app's and the command line's)
         page, form = self.tab(tr("Privacy"))
@@ -729,7 +743,7 @@ class SettingsDialog(QDialog):
             form.addRow(label, field)
         form.addRow(explanation(tr("The app checks what sandbox-ai keeps on this machine at its start and then as "
                                    "chosen, and says when more than the threshold could be freed; Optimize… on the "
-                                   "Sandboxes page shows the plan ({command}).", command="sandbox-ai gc --check")))
+                                   "Sessions page shows the plan ({command}).", command="sandbox-ai gc --check")))
         for key, label in (("storage_caches_days", tr("Empty the download caches of starts unused for (days)")),
                            ("storage_compact_days", tr("Compact transcripts older than (days)")),
                            ("storage_pack_days", tr("Pack stopped kept starts unused for (days)")),
@@ -994,6 +1008,14 @@ class SettingsDialog(QDialog):
             warn(self, tr("Storage"), printable_text(exc))
             return
         self.changed.emit(key)
+
+    def save_agent_intro(self, on):
+        try:
+            self.sai.save_sandbox_default("agent_intro", None if on else False)
+        except (OSError, ValueError) as exc:
+            warn(self, tr("New projects"), printable_text(exc))
+            return
+        self.changed.emit("agent_intro")
 
     def save_hide_secrets(self, on):
         try:

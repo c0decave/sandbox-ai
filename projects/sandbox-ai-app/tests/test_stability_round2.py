@@ -127,7 +127,7 @@ def made_and_run(path):
 
 def test_every_dialog_and_menu_made_for_one_use_is_freed():
     """The rest of the dialogs, questions and context menus made anew each time (about 50: the Credentials, Hosts,
-    Images, Kits, Team, Identities, MCP and Sandboxes pages, the Board's guide and forms, the presets' forms, the
+    Images, Kits, Team, Identities, MCP and Sessions pages, the Board's guide and forms, the presets' forms, the
     copy menus): each exec()'d one stayed a child of its window. Every such exec() frees what it ran now - the file
     manager's own too (its review pass 13)."""
     left = {path.name: found for path in sorted(APP.glob("*.py")) for found in [made_and_run(path)] if found}

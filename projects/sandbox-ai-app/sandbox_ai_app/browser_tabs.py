@@ -1,10 +1,10 @@
 """The sandbox's own browser (--browser) in the app's window: a tab of the Terminals page, right beside the terminal tab
 of its start - "Browser: NAME" with a browser icon -, its live view (vnc_view.BrowserPanel) inside.
 
-One tab per start: asked for again (Sandboxes & sessions: the Browser button or its right click, a tab's menu), its
+One tab per start: asked for again (Sessions: the Browser button or its right click, a tab's menu), its
 tab is shown. Its right click: Open in its own window (a window of the desktop, on the app's screen, raised; its
-"Back into the tabs" puts it back beside its terminal), Focus in Sandboxes & sessions, Close tab, Close other tabs.
-It follows its start as the terminal tabs do (the Sandboxes page's reads): when the start ends, the tab (or its window)
+"Back into the tabs" puts it back beside its terminal), Focus in Sessions, Close tab, Close other tabs.
+It follows its start as the terminal tabs do (the Sessions page's reads): when the start ends, the tab (or its window)
 says so and closes AUTO_CLOSE_MS later unless the start runs again meanwhile; a start that runs again with another run
 (a resumed session) is connected to its new display. The browser tabs open when the app ends come back at its next
 start - only those whose start still runs with a browser that shows a display; the others are left out and logged.
@@ -218,10 +218,10 @@ class BrowserTabs:
     def actions(self, panel):
         """The context menu of a browser tab: [(text, enabled, why, callback) or None]."""
         known = self.focusable(panel)
-        focus_why = None if known else tr("Not a session the app knows (yet): see Sandboxes & sessions")
+        focus_why = None if known else tr("Not a session the app knows (yet): see Sessions")
         tabs = self.page.tabs
         return [(tr("Open in its own window"), True, None, lambda: self.to_window(panel)),
-                (tr("Focus in Sandboxes & sessions"), known, focus_why, lambda: self.focus(panel)),
+                (tr("Focus in Sessions"), known, focus_why, lambda: self.focus(panel)),
                 None,
                 (tr("Close tab"), True, None, lambda: self.close(panel)),
                 (tr("Close other tabs"), tabs.count() > 1, None, lambda: self.page.close_others(panel))]
@@ -235,10 +235,10 @@ class BrowserTabs:
         if self.focusable(panel):
             self.page.focus_start(panel.instance_key)
 
-    # -- following the starts (the Sandboxes page's reads) --
+    # -- following the starts (the Sessions page's reads) --
 
     def sync(self, instances, trusted=True):
-        """INSTANCES ({key: Instance} of this machine, as the Sandboxes page read them; TRUSTED: the read worked):
+        """INSTANCES ({key: Instance} of this machine, as the Sessions page read them; TRUSTED: the read worked):
         a browser whose start ended says so and closes AUTO_CLOSE_MS later; one whose start runs again shows its
         new display. The first trusted read reopens the browser tabs kept from the app's last run."""
         if not trusted:

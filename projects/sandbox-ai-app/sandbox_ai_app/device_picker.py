@@ -7,7 +7,7 @@ CACHE_SECONDS, read again on Refresh.
   readable labels ("FTDI FT232R USB UART (usb:0403:6001) - /dev/ttyUSB0"), what the launcher refuses left out; a GPU
   kind is offered as GPU_PREFIX + KIND and becomes the part's --gpu. A path or usb:VENDOR:PRODUCT typed by hand goes
   as before.
-- A running sandbox (the Board's live Devices part, Sandboxes & sessions' Add device): the same minus what the run
+- A running sandbox (the Board's live Devices part, Sessions' Add device): the same minus what the run
   has (`devices list RUN --json`); a GPU kind is shown and not offered: --gpu cannot change while it runs."""
 from __future__ import annotations
 

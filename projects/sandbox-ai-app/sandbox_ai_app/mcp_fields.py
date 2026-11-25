@@ -22,29 +22,32 @@ from .widgets import background, explanation, plain_label, safe_tooltip
 # How the app names an MCP server's network (sandbox-ai mcp add|set --network; what each reaches is held in the
 # server's own network namespace, behind a VPN too): the internet without your local network, only the hosts its
 # catalog entry declares, the internet and your local network (a warning; asked first), nothing.
-NETWORK_LABELS = {"full": N_("internet (no LAN)"), "allowlist": N_("only its hosts"),
-                  "lan": N_("internet + LAN (warning)"), "none": N_("none")}
+# In the agents' words (offline, egress-all, allowlist, lan; 2026-11-24), each with what it means; the data: what
+# --network takes on every host (backend.MCP_NETWORKS).
+NETWORK_LABELS = {"full": N_("egress-all (the internet, not your LAN)"), "allowlist": N_("allowlist (only its hosts)"),
+                  "lan": N_("lan (the internet and your LAN; a warning)"), "none": N_("offline")}
 
 
 def network_choice(current, hosts=()):
-    """A combo box of the networks (its text: NETWORK_LABELS, its data: the value of --network), CURRENT chosen;
-    "only its hosts" where the entry declares HOSTS or CURRENT is it already."""
+    """A combo box of the networks (its text: NETWORK_LABELS, its data: the value of --network), CURRENT (in either
+    words) chosen; "allowlist" where the entry declares HOSTS or CURRENT is it already."""
+    current = backend.mcp_network(current)
     box = QComboBox()
     for kind in backend.MCP_NETWORKS:
         if kind != "allowlist" or hosts or current == "allowlist":
             box.addItem(tr(NETWORK_LABELS[kind]), kind)
     index = box.findData(current if current in backend.MCP_NETWORKS else "none")
     box.setCurrentIndex(index if index >= 0 else box.findData("full"))
-    box.setToolTip(safe_tooltip(tr("internet (no LAN): every public address, never your local network or this host; only its "
-                         "hosts: what its catalog entry declares{hosts}; internet + LAN: your network too (a "
-                         "warning); none: no network", hosts=f" ({printable(', '.join(hosts))})" if hosts else "")))
+    box.setToolTip(safe_tooltip(tr("egress-all: every public address, never your local network or this host; allowlist: "
+                                   "only what its catalog entry declares{hosts}; lan: your network too (a warning); "
+                                   "offline: no network", hosts=f" ({printable(', '.join(hosts))})" if hosts else "")))
     box.setAccessibleName(tr("Network"))
     return box
 
 
 def lan_warning(box):
-    """The warning beneath a network choice BOX, shown while "internet + LAN" is chosen."""
-    label = plain_label(tr("internet + LAN: the server reaches your local network and this host (your router, "
+    """The warning beneath a network choice BOX, shown while "lan" is chosen."""
+    label = plain_label(tr("lan: the server reaches your local network and this host (your router, "
                            "printers, other machines' services), not only the internet; only the clouds' metadata "
                            "service stays closed."), role="notice-warn")
     label.setVisible(box.currentData() == "lan")
@@ -695,7 +698,7 @@ class ServerPropertiesDialog(QDialog):
             if str(now if now is not None else "") != str(before if before is not None else ""):
                 changes[key] = now if now is not None else "default"
         if kind != "command":
-            if self.network.currentData() != definition.get("network", "none"):
+            if self.network.currentData() != backend.mcp_network(definition.get("network", "none")):
                 changes["network"] = self.network.currentData()
             vpn = self.vpn.text().strip()
             if vpn != (definition.get("vpn") or ""):

@@ -1,0 +1,63 @@
+#!/bin/sh
+# android-emulator-service - what sandbox-ai's service android-emulator runs: one Android emulator without a window
+# (the image's system image, API 37, x86_64) for the agent beside it. Its adb is at port 5555 of the sandbox
+# (adb connect android-emulator:5555; the console port 5554 needs this container's token and is of no use outside).
+# The AVD is made once in /avd (the service's data folder) and kept there as long as the folder is. When Android has
+# booted (sys.boot_completed) port 5550 opens: the agent's start waits for it (ready=5550). Usage metrics stay off
+# (-no-metrics). The emulator ends: the service ends.
+set -eu
+
+image="system-images;android-37.0;google_apis;x86_64"
+name=${ANDROID_EMULATOR_AVD:-dev}
+device=${ANDROID_EMULATOR_DEVICE:-pixel_7}
+ready=${ANDROID_EMULATOR_READY_PORT:-5550}
+timeout=${ANDROID_EMULATOR_BOOT_TIMEOUT:-600}
+check=5039  # this script's own adb server while it waits for the boot: neither the agent's (5037) nor a host's
+say() { printf 'android-emulator: %s\n' "$*"; }
+fail() { printf 'android-emulator: ERROR: %s\n' "$*" >&2; exit 1; }
+
+case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *) fail "Google's emulator for Linux exists for x86_64 only, not for $(uname -m)" ;;
+esac
+[ -e /dev/kvm ] || fail "no /dev/kvm in this service: the x86_64 emulator needs it. Give it to the service" \
+    "(--service android-emulator brings device=/dev/kvm) on a host that has KVM."
+{ [ -r /dev/kvm ] && [ -w /dev/kvm ]; } || fail "/dev/kvm is here but cannot be opened for reading and writing: on" \
+    "the host, ls -l /dev/kvm - your user must be able to open it without a supplementary group (a udev rule or ACL)."
+[ -d /avd ] && [ -w /avd ] || fail "/avd is not a writable folder (the service's data=/avd)"
+
+export HOME=/avd/home ANDROID_USER_HOME=/avd/android ANDROID_EMULATOR_HOME=/avd/android ANDROID_AVD_HOME=/avd/avd
+mkdir -p "$HOME" "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME"
+if [ ! -f "$ANDROID_AVD_HOME/$name.ini" ]; then
+    say "making the AVD $name ($image, $device) in $ANDROID_AVD_HOME"
+    printf 'no\n' | avdmanager --silent create avd --name "$name" --package "$image" --device "$device"
+fi
+
+say "starting $name without a window (adb: port 5555; ready: port $ready once Android has booted)"
+# ANDROID_ADB_SERVER_PORT: the emulator announces itself to an adb server - to this script's own, never to port 5037
+# (the agent's, or with --allow-host-port 5037 the host's own adb server).
+ANDROID_ADB_SERVER_PORT=$check emulator -avd "$name" -port 5554 -no-window -no-audio -no-boot-anim \
+    -gpu swiftshader_indirect -no-snapshot-save -no-metrics &
+emulator_pid=$!
+listener_pid=""
+stop() {
+    [ -z "$listener_pid" ] || kill "$listener_pid" 2>/dev/null || true
+    kill "$emulator_pid" 2>/dev/null || true
+    wait "$emulator_pid" 2>/dev/null || true
+    exit 0
+}
+trap stop TERM INT
+
+adb -P "$check" start-server >/dev/null 2>&1 || true
+waited=0
+until [ "$(adb -P "$check" -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+    kill -0 "$emulator_pid" 2>/dev/null || fail "the emulator ended before Android had booted (its output is above)"
+    [ "$waited" -lt "$timeout" ] || fail "Android did not finish booting in ${waited}s"
+    sleep 5
+    waited=$((waited + 5))
+done
+adb -P "$check" kill-server >/dev/null 2>&1 || true
+say "Android has booted after ${waited}s: adb connect android-emulator:5555"
+nc -lk 127.0.0.1 "$ready" >/dev/null 2>&1 &
+listener_pid=$!
+wait "$emulator_pid"

@@ -1,5 +1,5 @@
 """Whether an agent shows its model's thinking in the terminal: the launcher's --show-thinking on|off, as the Board's
-agent part, its guide, the Start page and the new-project wizard offer it. No Qt.
+agent part, its guide, the Board page and the new-project wizard offer it. No Qt.
 
 The launcher maps it to each agent's own switch (agent_sandbox.AGENT_THINKING; a test keeps both the same): Claude
 Code's showThinkingSummaries, Codex's hide_agent_reasoning and show_raw_agent_reasoning, OpenCode's thinking_mode,

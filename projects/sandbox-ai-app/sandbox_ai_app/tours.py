@@ -40,10 +40,10 @@ AREA_TOURS = {
     # view; view_switch is the window's switch between them (an attribute of both pages).
     "launch": (
         step(None, ("Start a sandbox: the Expert view", "Eine Sandbox starten: die Ansicht Experte"),
-             ("The Start page starts one agent in one sandbox. It shows the start in two views: Board (parts and "
+             ("The Board page starts one agent in one sandbox. It shows the start in two views: Board (parts and "
               "connections; the page opens with it) and Expert, this one - every option a field, and the exact "
               "command as text you can edit. Both are always the same start.",
-              "Die Seite Start startet einen Agenten in einer Sandbox. Sie zeigt den Start in zwei Ansichten: Board "
+              "Die Seite Board startet einen Agenten in einer Sandbox. Sie zeigt den Start in zwei Ansichten: Board "
               "(Teile und Verbindungen; damit öffnet sich die Seite) und Experte, diese hier - jede Option ein Feld "
               "und der genaue Befehl als Text, den Sie bearbeiten können. Beide sind immer derselbe Start."),
              ("Open a project folder first (File > Open project folder).",
@@ -141,11 +141,11 @@ AREA_TOURS = {
               "Drücken Sie Start, sobald der Probelauf einen Plan zeigt.")),
     ),
     "board": (
-        step(None, ("The Start page: the Board", "Die Seite Start: das Board"),
-             ("The Start page opens as its Board: one start as parts you connect - the agent, its folders, the "
+        step(None, ("The Board page: the Board", "Die Seite Board: das Board"),
+             ("The Board page opens as its Board: one start as parts you connect - the agent, its folders, the "
               "network, MCP servers, rules. It starts the sandbox and writes the project's .sandbox-ai.json. The "
               "Expert view shows the same start as fields and a command line.",
-              "Die Seite Start öffnet sich als ihr Board: ein Start als Teile, die Sie verbinden - der Agent, seine "
+              "Die Seite Board öffnet sich als ihr Board: ein Start als Teile, die Sie verbinden - der Agent, seine "
               "Ordner, das Netzwerk, MCP-Server, Regeln. Es startet die Sandbox und schreibt die .sandbox-ai.json des "
               "Projekts. Die Ansicht Experte zeigt denselben Start als Felder und eine Befehlszeile."),
              ("Open a project, or start from a preset of the gallery.", "Öffnen Sie ein Projekt oder beginnen Sie mit "
@@ -166,13 +166,17 @@ AREA_TOURS = {
               "erklärt jedes."),
              ("Add a folder (a mount) read-only.", "Fügen Sie einen Ordner (ein Mount) nur lesbar hinzu.")),
         step("palette", ("Build toolchains", "Bau-Toolchains"),
-             ("The part Toolchains mounts build tools of the signed catalog - Go, Rust, a JDK, Node … - read-only at "
-              "/opt/toolchains/NAME, their commands on the agent's PATH and their registries opened (Without their "
-              "registries keeps those closed). Nothing of them runs on your host.",
-              "Das Teil Toolchains hängt Bauwerkzeuge aus dem signierten Katalog - Go, Rust, ein JDK, Node … - nur "
-              "lesbar unter /opt/toolchains/NAME ein, ihre Befehle im PATH des Agenten und ihre Registrys geöffnet "
-              "(Ohne ihre Registrys lässt diese geschlossen). Nichts davon läuft auf Ihrem Host."),
-             ("Add Toolchains and name go.", "Fügen Sie Toolchains hinzu und nennen Sie go.")),
+             ("A toolchain is a compiler or SDK of the signed catalog - Go, Rust, a JDK, Node …. The part Toolchains "
+              "mounts each read-only at /opt/toolchains/NAME, its commands on the agent's PATH; nothing is installed "
+              "in the image or on your host. The registries it needs (crates.io for Rust) are opened at the start - "
+              "the part lists them; Keep their registries closed leaves them shut.",
+              "Eine Toolchain ist ein Compiler oder SDK aus dem signierten Katalog - Go, Rust, ein JDK, Node …. Das "
+              "Teil Toolchains hängt jede nur lesbar unter /opt/toolchains/NAME ein, ihre Befehle im PATH des "
+              "Agenten; nichts wird im Image oder auf Ihrem Host installiert. Die Registrys, die sie braucht "
+              "(crates.io für Rust), werden beim Start geöffnet - das Teil listet sie; Ihre Registrys geschlossen "
+              "lassen hält sie zu."),
+             ("Add Toolchains and choose go from the list.",
+              "Fügen Sie Toolchains hinzu und wählen Sie go aus der Liste.")),
         step("view", ("Parts and connections", "Teile und Verbindungen"),
              ("Drag from a part's right port onto the agent to connect them: a folder, a server or a device counts "
               "only while it is connected. Every change is one step of Undo.",
@@ -193,6 +197,14 @@ AREA_TOURS = {
               "Das Board prüft sich nach jeder Änderung: ein fehlender Wert, ein nicht verbundenes Teil, eine "
               "Option, die die Richtlinie ablehnt. Klicken Sie einen Befund an, um das Teil zu sehen."),
              ("Make the list empty before you apply.", "Leeren Sie die Liste, bevor Sie übernehmen.")),
+        step("new_project_button", ("A new project", "Ein neues Projekt"),
+             ("New project… sets a project up step by step: its folder, the agent, a preset or your own setup, the "
+              "network, Git, MCP servers, devices and limits. It ends on this board, which you can still change.",
+              "Neues Projekt… richtet ein Projekt Schritt für Schritt ein: seinen Ordner, den Agenten, eine Vorlage "
+              "oder eine eigene Einrichtung, das Netzwerk, Git, MCP-Server, Geräte und Limits. Es endet auf diesem "
+              "Board, das Sie danach noch ändern können."),
+             ("Press New project… and choose an empty folder.",
+              "Drücken Sie Neues Projekt… und wählen Sie einen leeren Ordner.")),
         step("gallery_button", ("Start from a preset", "Mit einer Vorlage beginnen"),
              ("New from preset… opens the gallery: tested setups as cards, sandbox-ai's own and yours, each with its "
               "board and what it leaves to fill in. Create builds the board from one.",
@@ -363,11 +375,26 @@ AREA_TOURS = {
               "es bis zum Ende des Laufs ab, Einmal ablehnen nur dieses Mal, Immer sperren (Strg+Umschalt+K) auch "
               "bei jedem späteren Start - jedes sofort, Rückgängig nimmt es einige Sekunden lang zurück."),
              ("Answer the next question here.", "Beantworten Sie die nächste Frage hier.")),
+        step("page_tabs", ("Questions and Inspection", "Fragen und Inspektion"),
+             ("The page has two tabs. Questions - what is asked now; its title counts the open ones, and a new "
+              "question never switches the tab. Inspection - one sandbox at a time: the active tab's or one you "
+              "choose.",
+              "Die Seite hat zwei Tabs. Fragen - was jetzt gefragt wird; ihr Titel zählt die offenen, und eine neue "
+              "Frage wechselt den Tab nie. Inspektion - eine Sandbox nach der anderen: die des aktiven Tabs oder eine, "
+              "die Sie wählen."),
+             ("Open Inspection.", "Öffnen Sie Inspektion.")),
+        step("allowed", ("What it may reach", "Was sie erreichen darf"),
+             ("Inspection › Allowed now: everything the sandbox may reach, each with why and how long it holds - what "
+              "its start opened and what was added during the run. Revoke… takes back what the run added.",
+              "Inspektion › Jetzt erlaubt: alles, was die Sandbox erreichen darf, jeweils mit Grund und Dauer - was "
+              "ihr Start öffnete und was während des Laufs dazukam. Zurücknehmen… nimmt zurück, was der Lauf bekam."),
+             ("Choose a sandbox that runs.", "Wählen Sie eine laufende Sandbox.")),
         step("always", ("What you allowed always", "Was Sie immer erlaubt haben"),
-             ("Your standing answers, of this machine or of a host you choose below. Forget… one and it is asked "
-              "again; Ask again does the same for what a run decided.",
-              "Ihre dauerhaften Antworten, die dieses Rechners oder eines Hosts, den Sie darunter wählen. Vergessen… "
-              "Sie eine, wird wieder gefragt; Wieder fragen tut dasselbe für das, was ein Lauf entschied."),
+             ("Inspection › Remembered: your standing answers, of this machine or of a host you choose below. "
+              "Forget… one and it is asked again; Ask again does the same for what a run decided.",
+              "Inspektion › Gemerkt: Ihre dauerhaften Antworten, die dieses Rechners oder eines Hosts, den Sie "
+              "darunter wählen. Vergessen… Sie eine, wird wieder gefragt; Wieder fragen tut dasselbe für das, was ein "
+              "Lauf entschied."),
              ("Look through them now and then.", "Sehen Sie sie ab und zu durch.")),
     ),
     "terminals": (
@@ -559,7 +586,7 @@ AREA_TOURS = {
              ("Open the properties of a server and look at its folders.",
               "Öffnen Sie die Eigenschaften eines Servers und sehen Sie sich seine Ordner an.")),
         step("attach_button", ("Give it to a start", "Einem Start geben"),
-             ("Attach to… connects the selected server to an agent start; on Sandboxes & sessions, Add MCP server… "
+             ("Attach to… connects the selected server to an agent start; on Sessions, Add MCP server… "
               "gives one to a running sandbox without a restart.",
               "Verbinden mit… verbindet den gewählten Server mit einem Start eines Agenten; unter Sandboxen & "
               "Sitzungen gibt MCP-Server hinzufügen… einer laufenden Sandbox einen ohne Neustart."),
@@ -750,9 +777,9 @@ AREA_TOURS = {
               "SSH, das sandbox-ai des Hosts und sein doctor: ob alles da ist, was eine Sandbox braucht."),
              ("Test the host you added.", "Testen Sie den Host, den Sie hinzugefügt haben.")),
         step("starts_button", ("Its starts", "Seine Starts"),
-             ("Show starts opens Sandboxes & sessions with only this host's starts: attach, pause and stop them "
+             ("Show starts opens Sessions with only this host's starts: attach, pause and stop them "
               "there.",
-              "Starts zeigen öffnet Sandboxen & Sitzungen nur mit den Starts dieses Hosts: Verbinden, pausieren und "
+              "Starts zeigen öffnet Sitzungen nur mit den Starts dieses Hosts: Verbinden, pausieren und "
               "beenden Sie sie dort."),
              ("Show the starts of a host.", "Zeigen Sie die Starts eines Hosts.")),
         step("questions_button", ("Its questions", "Seine Fragen"),
@@ -856,11 +883,11 @@ TASK_TOURS = {tour.id: tour for tour in (
               "Der Login des Agenten wird hier aufbewahrt, außerhalb jeder Sandbox; jeder Start bekommt eine "
               "Kopie."),
              ("Log in to your agent.", "Melden Sie sich bei Ihrem Agenten an."), "page:credentials"),
-        task("board", "view_switch", ("The Start page", "Die Seite Start"),
-             ("The Start page opens as a Board: the start as parts. This tour uses its other view, Expert - every "
+        task("board", "view_switch", ("The Board page", "Die Seite Board"),
+             ("The Board page opens as a Board: the start as parts. This tour uses its other view, Expert - every "
               "option a field and the command line as text. Both show the same start; the switch above the page "
               "(or F6) changes the view.",
-              "Die Seite Start öffnet sich als Board: der Start als Teile. Diese Tour nutzt ihre andere Ansicht, "
+              "Die Seite Board öffnet sich als Board: der Start als Teile. Diese Tour nutzt ihre andere Ansicht, "
               "Experte - jede Option ein Feld und die Befehlszeile als Text. Beide zeigen denselben Start; der "
               "Schalter über der Seite (oder F6) wechselt die Ansicht."),
              ("Choose Expert above the page.", "Wählen Sie Experte über der Seite."), "page:launch"),
@@ -1028,8 +1055,9 @@ TASK_TOURS = {tour.id: tour for tour in (
               " Frage braucht."),
              ("Switch on only refused.", "Schalten Sie nur Abgelehntes und Fehler ein."), "page:connections"),
         task("approvals", "always", ("Standing answers", "Dauerhafte Antworten"),
-             ("What you allowed always, per project. Forget one and it is asked again.",
-              "Was Sie immer erlaubt haben, pro Projekt. Vergessen Sie eine, wird wieder gefragt."),
+             ("Inspection › Remembered: what you allowed always, per project. Forget one and it is asked again.",
+              "Inspektion › Gemerkt: was Sie immer erlaubt haben, pro Projekt. Vergessen Sie eine, wird wieder "
+              "gefragt."),
              ("Look through them.", "Sehen Sie sie durch."), "page:approvals"),
     )),
     TaskTour("presets-gallery", Text("The preset gallery: import, edit and delete your own",

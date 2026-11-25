@@ -436,3 +436,78 @@ def test_check_names_what_the_options_need(own_config, monkeypatch):
     tor = p.load("tor")
     found = p.missing(tor, {}, "codex", mcp_names=set())
     assert any("--preset-value tor=..." in line and "sandbox-ai vpn add anon --tor --socks" in line for line in found)
+
+
+# -- the presets of other hosts (todos 2026-11-24: "warum habe ich mehr presets auf coding-101"; "presets sollten im
+# grunde zusammengefasst angezeigt werden, gerne kann man host auch bei presets auswählen, per default alle zusammen") --
+
+class FakeHosts:
+    """sandbox-ai hosts with HOSTS: {name: (status, presets list --json there or a text, err)}."""
+
+    def __init__(self, hosts):
+        self.hosts, self.asked = hosts, []
+
+    def entries(self):
+        return [{"name": "local", "kind": "local"}, *({"name": name, "kind": "ssh"} for name in sorted(self.hosts))]
+
+    def run(self, name, args, timeout=120, **_kw):
+        self.asked.append((name, *args))
+        status, found, err = self.hosts[name]
+        return status, found if isinstance(found, str) else json.dumps(found), err
+
+
+def remote_list(*extra):
+    """What `presets list --json` prints on a host with the built-in presets and EXTRA (yours there)."""
+    return [{**p.public(preset), "origin": "built-in"} for preset in p.catalog().values()] + list(extra)
+
+
+def test_presets_list_of_another_host_and_of_all_hosts(capsys, monkeypatch):
+    """A host with presets of its own (the private presets installed there, ~/.config/sandbox-ai/presets) lists more
+    than this machine: --all-hosts shows each preset once with the hosts that have it, so that is seen at once."""
+    private = {**minimal(id="tor-researcher", title="Tor researcher", category="privacy"), "origin": "yours"}
+    team = {**minimal(id="team-tool", title="Team tool"), "origin": "extra", "directory": "/srv/team-presets"}
+    fake = FakeHosts({"coding-101": (0, remote_list(private, team), ""), "lab1": (255, "", "ssh: no route to host")})
+    monkeypatch.setattr(p, "_module", lambda name: fake if name == "hosts" else pytest.fail(name))
+    assert p.main(["list", "--host", "coding-101", "--json"]) == 0
+    there = json.loads(capsys.readouterr().out)
+    assert ("coding-101", "presets", "list", "--json") in fake.asked
+    assert {e["host"] for e in there} == {"coding-101"} and len(there) == len(p.catalog()) + 2
+    assert p.main(["list", "--all-hosts", "--json"]) == 0
+    captured = capsys.readouterr()
+    merged = {e["id"]: e for e in json.loads(captured.out)}
+    assert len(merged) == len(p.catalog()) + 2, "each preset once"
+    assert merged["mini-ctf"]["hosts"] == [{"host": "local", "origin": "built-in"},
+                                           {"host": "coding-101", "origin": "built-in"}]
+    assert merged["tor-researcher"]["hosts"] == [{"host": "coding-101", "origin": "yours"}]
+    assert merged["team-tool"]["hosts"] == [{"host": "coding-101", "origin": "extra", "directory": "/srv/team-presets"}]
+    assert "lab1 not read: lab1: ssh: no route to host" in captured.err, "a host that does not answer: said"
+    assert p.main(["list", "--all-hosts"]) == 0
+    text = capsys.readouterr().out
+    assert "tor-researcher" in text and "[coding-101 (yours)]" in text and "[local, coding-101]" in text
+    assert "[coding-101 (from /srv/team-presets)]" in text
+    with pytest.raises(SystemExit):
+        p.main(["list", "--host", "coding-101", "--all-hosts"])
+    capsys.readouterr()
+
+
+def test_presets_list_of_a_host_that_says_no_is_an_error(capsys, monkeypatch):
+    fake = FakeHosts({"old": (2, "", "sandbox-ai: invalid choice: 'presets'")})
+    monkeypatch.setattr(p, "_module", lambda name: fake)
+    assert p.main(["list", "--host", "old"]) == 1
+    assert "old: sandbox-ai: invalid choice" in capsys.readouterr().err
+
+
+def test_presets_show_json_carries_its_ruleset(capsys, own_config):
+    """What a start of the preset on another host takes along (the app's Board makes it from the preset's definition):
+    its ruleset, read beside it; one that cannot be read is said."""
+    assert p.main(["show", "research-memory", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["ruleset"] == json.loads((p.BUILTIN / shown["rules"]).read_text())
+    assert p.main(["show", "mini-ctf", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["ruleset"] is None
+    own_config.mkdir(parents=True)
+    (own_config / "ruled.json").write_text(json.dumps(minimal(id="ruled", rules="ruled.rules.json")))
+    (own_config / "ruled.rules.json").write_text("{not json")
+    assert p.main(["show", "ruled", "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["ruleset"] is None and "not valid JSON" in shown["ruleset_problem"]

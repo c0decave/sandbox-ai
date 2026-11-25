@@ -3525,6 +3525,13 @@ function cardDraft(key, inputs) {
   return { restored: Boolean(kept), save, drop: () => DRAFTS.delete(key) };
 }
 
+// What a start opened, by the source sandbox-ai names (net show --json "started": agent_sandbox.reach), and its kind.
+const REACH_SOURCES = { provider: N_("the agent's provider"), frontier: "--frontier", profile: N_("the profile"), project: N_("the project file"),
+  option: N_("the start's own options"), approved: N_("approved always"), toolchain: N_("a toolchain's registries"), "git-login": N_("a Git login"),
+  "api-key": N_("an API key"), publish: N_("a publish login"), llm: "--llm", feature: N_("an agent feature"), policy: N_("the administrator's policy") };
+const REACH_KINDS = { preset: "HTTPS (TCP/443)", https: "HTTPS (TCP/443)", wildcard: N_("Host wildcard"), tcp: "TCP", network: N_("All ports"),
+  "host-port": N_("Port on the host"), dns: N_("Real DNS"), everything: N_("every destination (--egress-all-allow)"), nothing: N_("no network (--offline)") };
+
 // the network of a running start (sandbox-ai net allow|revoke|show|untaint on its host): what widens it is asked
 // first (it applies at once: real DNS, ports on the host, wildcards, Git logins)
 function networkCard(main, s) {
@@ -3535,18 +3542,14 @@ function networkCard(main, s) {
   const field = (id, placeholder) => el("input", { id, placeholder, class: "mono" });
   const hosts = field("net-hosts", "pypi.org api.example.org"), tcp = field("net-tcp", "192.0.2.10:5432");
   const ports = field("net-ports", "3000 11434"), dns = el("input", { id: "net-dns", type: "checkbox" });
-  const gitUrl = field("net-git-url", "https://git.example.org"), gitRef = field("net-git-ref", "GITEA_TOKEN");
-  const gitKind = el("select", { id: "net-git-kind" }, el("option", { value: "env" }, t("variable")), el("option", { value: "secret" }, t("secret")), el("option", { value: "file" }, t("file (its path)")));
   const networks = field("net-allow", "192.0.2.0/24 2001:db8::/64"), nameservers = field("net-nameservers", "192.0.2.53");
-  // a secret of that host as an API key its proxy puts in for one server (net allow --api-key HOST=NAME=SECRET)
-  const keyHost = field("net-key-host", "api.example.com"), keyName = field("net-key-name", "EXAMPLE_KEY"), keySecret = field("net-key-secret", "EXAMPLE_KEY");
   const blockedList = el("div", { class: "net-blocked" });
   const presetBoxes = NET_PRESETS.map(p => el("input", { type: "checkbox", id: `net-preset-${p}`, value: p }));
   const keep = el("input", { id: "net-keep", type: "checkbox" });
   const shown = el("div", { class: "net-shown" });
   const notes = el("div");
   // what was typed and not sent for this start (cardDraft): filled in again
-  const draft = cardDraft(`net ${host} ${startId(s)}`, { hosts, tcp, ports, dns, gitUrl, gitRef, gitKind, networks, nameservers, keyHost, keyName, keySecret, keep,
+  const draft = cardDraft(`net ${host} ${startId(s)}`, { hosts, tcp, ports, dns, networks, nameservers, keep,
     ...Object.fromEntries(presetBoxes.map(b => [`preset-${b.value}`, b])) });
   // several in a field, separated by commas or spaces (as the launcher's list options take them), each once
   const words = (input) => [...new Set(String(input.value || "").split(/[\s,]+/).filter(Boolean))];
@@ -3555,9 +3558,6 @@ function networkCard(main, s) {
     // the further options only when given (the requests stay as small as what was asked)
     const more = { allow: words(networks), presets: presetBoxes.filter(b => b.checked && !b.disabled).map(b => b.value), nameservers: words(nameservers) };
     for (const [key, value] of Object.entries(more)) if (value.length) request[key] = value;
-    if (gitUrl.value.trim() && gitRef.value.trim()) request.git_login = { url: gitUrl.value.trim(), kind: gitKind.value, ref: gitRef.value.trim() };
-    const text = (input) => String(input.value || "").trim();
-    if (op === "allow" && text(keyHost) && text(keySecret)) request.api_key = { host: text(keyHost).toLowerCase(), name: text(keyName) || text(keySecret), secret: text(keySecret) };
     if (op === "allow" && keep.checked) request.keep = true;
     return request;
   };
@@ -3610,7 +3610,18 @@ function networkCard(main, s) {
       holder.append(untaint);
       taint = el("div", { class: "notice warn" }, t("Untrusted content: tainted since {since}", { since: d.taint.since || "?" }), " ", holder);
     }
-    clear(shown).append(taint || "", table([t("Kind"), t("What"), "", ""], rows, t("Nothing was allowed during this run."), t("Allowed during this run")));
+    // what its start opened, each with its source and how long it holds (net show's "started", where its
+    // sandbox-ai records it): the one place that says what this sandbox may reach and why; never revoked here
+    const started = list(d.started).filter(e => e && typeof e === "object").map((e) => {
+      const hosts = list(e.hosts).map(String);
+      const why = (REACH_SOURCES[e.source] ? t(REACH_SOURCES[e.source]) : String(e.source || "")) + (e.detail ? ` (${e.detail})` : "");
+      return el("tr", {}, el("td", {}, REACH_KINDS[e.kind] ? t(REACH_KINDS[e.kind]) : String(e.kind || "")),
+        el("td", { class: "mono" }, hosts.length ? (e.source === "provider" ? hosts.join(", ") : `${e.what}: ${hosts.join(", ")}`) : String(e.what || "")),
+        el("td", {}, why), el("td", { class: "hint" }, e.scope === "every start of the project" ? t("every start of the project") : t("this start")));
+    });
+    const fromStart = Array.isArray(d.started) ? table([t("Kind"), t("What"), t("Why"), t("Holds for")], started, t("Nothing: no network."), t("From its start"))
+      : el("p", { class: "hint" }, t("What its start opened is not recorded: it was started by an older sandbox-ai."));
+    clear(shown).append(taint || "", fromStart, table([t("Kind"), t("What"), "", ""], rows, t("Nothing was allowed during this run."), t("Allowed during this run")));
   };
   // approvals blocked NAME --json there: what it was refused and why; a destination can be allowed for the run
   const drawBlocked = (data) => {
@@ -3652,15 +3663,6 @@ function networkCard(main, s) {
         return;
       }
       if (!confirm && confirmable(e)) { askRefused(actions, e, () => send(op, request, true)); return; }
-      // A Git login the run's connection proxy cannot use (no proxy, a server it does not inspect, an older start):
-      // refused by sandbox-ai, which names the only other way - into the sandbox, where the agent can read the
-      // token. That is asked about by itself, saying so; only that yes sends {in_sandbox: true}.
-      const said = [errorText(e), errorDetail(e)].filter(Boolean).join("\n");
-      if (op === "allow" && request.git_login && !request.git_login.in_sandbox && said.includes("--in-sandbox")) {
-        confirmIn(actions, t("{name} on {host} cannot be given the Git login for {url} through its connection proxy. The only other way puts the token into the sandbox's session directory for its Git: the agent can read it there. Give it so?", { name, host, url: request.git_login.url }) + "\n" + said,
-          t("Yes, into the sandbox"), () => send(op, Object.assign({}, request, { git_login: Object.assign({}, request.git_login, { in_sandbox: true }) }), true));
-        return;
-      }
       failed(t("Could not change the network of {name} on {host}", { name, host }))(e);
     }
   };
@@ -3672,12 +3674,10 @@ function networkCard(main, s) {
     r.dns ? t("real DNS (every name it looks up)") : null,
     (r.allow || []).length ? t("every protocol and port of {networks}", { networks: r.allow.join(", ") }) : null,
     (r.presets || []).length ? t("the hosts of {presets}", { presets: r.presets.join(", ") }) : null,
-    (r.nameservers || []).length ? t("the resolvers {servers} (real DNS)", { servers: r.nameservers.join(", ") }) : null,
-    r.git_login ? t("a Git login for {url}", { url: r.git_login.url }) : null,
-    r.api_key ? t("the secret {secret} as the API key {name} for {server}", { secret: r.api_key.secret, name: r.api_key.name, server: r.api_key.host }) : null].filter(Boolean);
+    (r.nameservers || []).length ? t("the resolvers {servers} (real DNS)", { servers: r.nameservers.join(", ") }) : null].filter(Boolean);
   const allow = el("button", { class: "primary", onclick: () => {
     const request = body("allow"), what = widened(request);
-    if (!what.length) { toast("warning", t("Nothing to allow"), t("Name host names, addresses, ports, real DNS, a Git login or an API key first.")); return; }
+    if (!what.length) { toast("warning", t("Nothing to allow"), t("Name host names, addresses, ports or real DNS first.")); return; }
     if (!needsConfirm("net-allow")) { send("allow", request, false); return; }
     confirmIn(actions, request.keep ? t("Allow {what} for {name} on {host} now, and keep it in its project's configuration for every later start?", { what: what.join(t(" and ")), name, host })
       : t("Allow {what} for {name} on {host} now? It applies at once, until the sandbox ends (or you revoke it).", { what: what.join(t(" and ")), name, host }),
@@ -3697,7 +3697,7 @@ function networkCard(main, s) {
   const title = () => t("Network of {name} on {host}", { name, host });
   const heading = el("h2", {}, title());
   const card = el("div", { class: "card", id: "network-card" }, heading, notes,
-    el("p", { class: "hint" }, t("Until the sandbox ends. Ports on the host go through a relay only you start; a Git login names where its token is, never the token.")),
+    el("p", { class: "hint" }, t("Until the sandbox ends. Ports on the host go through a relay only you start.")),
     el("p", { class: "hint" }, t("Host names, IP:PORT, ports, networks and resolvers: one or more each, separated by commas or spaces.")),
     el("h3", {}, t("Allowed during this run")), shown,
     el("h3", {}, t("Refused during this run")), blockedList,
@@ -3706,16 +3706,14 @@ function networkCard(main, s) {
       el("label", { for: "net-tcp" }, "IP:PORT (TCP)"), tcp,
       el("label", { for: "net-ports" }, t("Ports on the host")), ports,
       el("label", { for: "net-dns" }, t("Real DNS")), dns,
-      el("label", { for: "net-git-url" }, t("Git login: server")), gitUrl,
-      el("label", { for: "net-git-kind" }, t("Git login: token in")), el("div", {}, gitKind, " ", gitRef),
-      el("label", { for: "net-key-host" }, t("API key: server")), keyHost,
-      el("label", { for: "net-key-secret" }, t("API key: secret of {host}", { host })), keySecret,
-      el("label", { for: "net-key-name" }, t("API key: variable (the agent sends its placeholder)")), keyName,
       el("label", { for: "net-allow" }, t("Networks (every port)")), networks,
-      el("span", {}, t("Known hosts")), el("div", { class: "row" }, presetBoxes.map((b, i) => el("label", {}, b, " ", NET_PRESETS[i]))),
+      el("span", {}, t("Host sets")), el("div", { class: "row" }, presetBoxes.map((b, i) => el("label", { title: NET_PRESET_HOSTS[NET_PRESETS[i]].join(", ") }, b, " ", `--allow-${NET_PRESETS[i]}`))),
       el("label", { for: "net-nameservers" }, t("Resolvers (real DNS)")), nameservers,
       el("label", { for: "net-keep" }, t("Also for later starts")), keep,
       el("span"), actions),
+    // A Git login or an API key for it: given on the page Logins (one place for them, 2026-11-24), this start chosen.
+    el("p", { class: "hint" }, t("A Git login or an API key for this sandbox: on the page Logins, under Give to a running sandbox."), " ",
+      el("button", { onclick: () => { state.giveTo = { host, name }; state.host = host; show("logins"); } }, t("Git login or API key…"))),
     el("h3", {}, t("Keep for the project")), keepRow, el("div", { class: "row" }, el("button", { onclick: () => dropCard(card) }, t("Close"))));
   openCard(main, card, s);
   registerCard(card, notes, cardRef(s, () => name, (fresh) => { name = fresh; }, heading, title));
@@ -8571,9 +8569,21 @@ function mcpOriginCell(x) {
 
 // MCP servers (sandbox-ai mcp): every defined one, running or not; start (for a start: attached to it), stop, the
 // catalogs and adding from them.
-// An MCP server's network as `mcp add|set --network` names it, for people (mcp_egress.py: what each reaches).
-const MCP_NETWORKS = { full: N_("internet (no LAN)"), allowlist: N_("only its hosts"), lan: N_("internet + LAN (warning)"),
-  none: N_("network|none") };
+// An MCP server's network as `mcp add|set --network` names it, in the agents' words (offline, egress-all, allowlist,
+// lan; 2026-11-24) with what each reaches (mcp_egress.py); keyed and sent as every sandbox-ai stores it (none, full).
+const MCP_NETWORKS = { full: N_("egress-all (the internet, not your LAN)"), allowlist: N_("allowlist (only its hosts)"),
+  lan: N_("lan (the internet and your LAN; a warning)"), none: N_("offline") };
+const MCP_NETWORK_ALIASES = { offline: "none", "egress-all": "full" };
+// VALUE (either words) as MCP_NETWORKS keys it.
+function mcpNetwork(value) {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(MCP_NETWORK_ALIASES, value) ? MCP_NETWORK_ALIASES[value] : value;
+}
+// VALUE (either words) in the agents' words alone: offline, egress-all, allowlist, lan.
+function mcpNetworkWord(value) {
+  const words = { none: "offline", full: "egress-all" };
+  const stored = mcpNetwork(value);
+  return Object.prototype.hasOwnProperty.call(words, stored) ? words[stored] : value;
+}
 
 // The network cell of a server of `mcp list --json`: a catalog server's kind (its hosts, the parts of your network
 // opened to it), with what to change (egress_note: switch to its hosts, it reaches your network) beneath; a server
@@ -8581,7 +8591,7 @@ const MCP_NETWORKS = { full: N_("internet (no LAN)"), allowlist: N_("only its ho
 function mcpNetworkCell(x) {
   const definition = (x && typeof x.definition === "object" && x.definition) || {};
   if (x.network === null || x.network === undefined) return el("td", { class: "hint" }, t("its sandbox's rules"));
-  const kind = typeof definition.network === "string" ? definition.network : "none";
+  const kind = typeof definition.network === "string" ? mcpNetwork(definition.network) : "none";
   const extra = [...(Array.isArray(definition.hosts) && kind === "allowlist" ? definition.hosts : []),
     ...(Array.isArray(definition.allow_private) ? definition.allow_private : []),
     ...(Array.isArray(definition.allow_tcp) ? definition.allow_tcp : [])].filter(v => typeof v === "string");
@@ -8649,28 +8659,67 @@ pages.mcp = async (main) => {
       el("label", { for: "mcp-backend" }, t("Backend")), backend, el("label", { for: "mcp-vpn" }, t("VPN profile")), vpn,
       el("label", { for: "mcp-for" }, t("For the start")), forStart, el("label", { for: "mcp-restart" }, t("Restart that start now")), restart, el("span"), row)));
   };
-  main.append(table([t("Name"), t("State"), t("Network"), t("Serves"), t("Catalog"), t("Command"), ""], servers.map(x => {
+  // Check / Check all (sandbox-ai mcp check): each server started as a start would, asked for its tools, stopped
+  // again; the result in the Check column (the user, 2026-11-25: every server of the host checked in minutes).
+  const checkCells = {};
+  const showCheck = (row) => {
+    const cell = checkCells[row && row.server];
+    if (!cell) return;
+    clear(cell);
+    if (row.result === "ok") cell.append(el("span", { class: "status-ok" }, t("ok, {count} tools, {seconds} s", { count: String(row.tools || 0), seconds: String(row.seconds || 0) })));
+    else if (row.result === "skipped") cell.append(el("span", { class: "hint" }, t("skipped")), el("div", { class: "hint", lang: "en" }, String(row.reason || "")));
+    else cell.append(el("span", { class: "status-bad" }, t("failed")), el("div", { class: "hint", lang: "en" }, String(row.reason || "")),
+      el("div", { class: "hint" }, t("Fix: {fix}", { fix: String(row.fix || "") })));
+    if (row.note) cell.append(el("div", { class: "hint status-warn", lang: "en" }, String(row.note)));
+  };
+  const runCheck = async (button, names) => {
+    for (const name of names.length ? names : Object.keys(checkCells)) { const cell = checkCells[name]; if (cell) clear(cell).append(el("span", { class: "hint" }, t("Checking…"))); }
+    await busy(button, async () => {
+      try {
+        const rows = await api("POST", hostPath("/mcp-check", host), { names });
+        const found = (Array.isArray(rows) ? rows : []).filter(r => r && typeof r.server === "string");
+        found.forEach(showCheck);
+        const failedNames = found.filter(r => r.result === "failed").map(r => r.server);
+        toast(failedNames.length ? "error" : "success", t("{ok} of {count} ok", { ok: String(found.filter(r => r.result === "ok").length), count: String(found.length) }), failedNames.length ? t("failed: {names}", { names: failedNames.join(", ") }) : "");
+      } catch (e) { failed(t("Could not check the MCP servers on {host}", { host }))(e); }
+    });
+  };
+  main.append(table([t("Name"), t("State"), t("Network"), t("Serves"), t("Catalog"), t("Command"), t("Check"), ""], servers.map(x => {
     const actions = el("td", { class: "actions" });
+    const checkCell = checkCells[x.name] = el("td", {});
     const stop = rowButton(t("Stop"), x.name, host, { class: "danger", onclick: () => confirmIn(actions, t("Stop the MCP server {name} on {host}? The starts it serves lose it until it starts again.", { name: x.name, host }), t("Yes, stop it"), async () => {
       try { await api("POST", hostPath(`/mcp/${encodeURIComponent(x.name)}/stop`, host), { confirm: true }); show("mcp"); } catch (e) { failed(t("Could not stop {name} on {host}", { name: x.name, host }))(e); }
     }, { trigger: stop }) });
-    actions.append(rowButton(t("Start…"), x.name, host, { onclick: () => startForm(x.name) }), stop);
+    const check = rowButton(t("Check"), x.name, host, { onclick: () => runCheck(check, [x.name]) });
+    actions.append(rowButton(t("Start…"), x.name, host, { onclick: () => startForm(x.name) }), stop, check);
     // A newer image its catalog pins (mcp list's "newer", as the catalog was last read there): Update takes it.
     const newer = mcpNewer(x);
     const stateCell = statusCell(x.status);
+    // What ended or failed its processes last (mcp list's "last_problem"): when, why, the fix and its log.
+    const problem = x.last_problem && typeof x.last_problem === "object" ? x.last_problem : null;
+    if (problem) {
+      stateCell.append(el("div", { class: "hint status-bad" }, t("last failure {time}", { time: String(problem.time || "") })),
+        el("div", { class: "hint", lang: "en" }, String(problem.why || "")),
+        el("div", { class: "hint" }, t("Fix: {fix}", { fix: String(problem.fix || "") })),
+        problem.log ? el("div", { class: "hint" }, t("Its log: {path}", { path: String(problem.log) })) : "");
+    }
     if (newer) {
       stateCell.append(el("div", { class: "hint status-warn" }, t("a newer image"), " ", el("span", { class: "mono" }, newer.change)));
       const update = rowButton(t("Update"), x.name, host, { onclick: () => confirmIn(actions, mcpUpdateQuestion([x.name], host, newer.signed ? [] : [x.name]), t("Yes, update it"), () => mcpUpdate([x.name], host, !newer.signed), { kind: "primary", trigger: update }) });
       actions.append(update);
     }
-    return el("tr", {}, el("td", { class: "mono" }, x.name), stateCell, mcpNetworkCell(x), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), actions);
+    return el("tr", {}, el("td", { class: "mono" }, x.name), stateCell, mcpNetworkCell(x), el("td", {}, (x.serves || []).join(", ")), mcpOriginCell(x), el("td", { class: "mono" }, String(x.command || "")), checkCell, actions);
   }), t("No MCP servers on this host yet: add one from a catalog below.")), startBox);
-  if (servers.some(x => mcpNewer(x) && mcpNewer(x).signed)) {
-    const row = el("div", { class: "row" });
-    const all = el("button", { onclick: () => confirmIn(row, mcpUpdateQuestion([], host, []), t("Yes, update them"), () => mcpUpdate([], host, false), { kind: "primary", trigger: all }) }, t("Update all"));
-    row.append(all);
-    main.append(row);
+  const serverRow = el("div", { class: "row" });
+  if (servers.length) {
+    const checkAll = el("button", { id: "mcp-check-all", title: t("Start each server as a start would, ask it for its tools and stop it again (sandbox-ai mcp check --all)"), onclick: () => runCheck(checkAll, []) }, t("Check all"));
+    serverRow.append(checkAll);
   }
+  if (servers.some(x => mcpNewer(x) && mcpNewer(x).signed)) {
+    const all = el("button", { onclick: () => confirmIn(serverRow, mcpUpdateQuestion([], host, []), t("Yes, update them"), () => mcpUpdate([], host, false), { kind: "primary", trigger: all }) }, t("Update all"));
+    serverRow.append(all);
+  }
+  if (serverRow.childNodes.length) main.append(serverRow);
 
   // the catalogs, and adding an entry with its options
   const catalogs = el("input", { id: "mcp-catalogs", class: "mono", placeholder: t("default catalogs (or files and https URLs)") });
@@ -8724,7 +8773,7 @@ pages.mcp = async (main) => {
     try { r = await api("POST", hostPath("/mcp-catalog", host), { catalogs: wordsOf(catalogs.value) }); } catch (e) { clear(catalogBox).append(errorNotice(e)); return; }
     const SIGNED = { good: N_("signed"), bad: N_("signature bad"), none: N_("unsigned") };
     clear(catalogBox).append(...(r.problems || []).map(x => notice(x, "warn")), table([t("Entry"), t("Network"), t("Title"), t("Catalog"), t("Signature"), ""], (r.entries || []).map(x =>
-      el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, x.network), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
+      el("tr", {}, el("td", { class: "mono" }, x.entry), el("td", { class: "mono" }, mcpNetworkWord(x.network)), el("td", {}, x.title, x.published ? "" : ` (${t("not published yet")})`),
         el("td", {}, typeof x.catalog === "string" ? x.catalog : ""),
         el("td", { class: x.signature === "good" ? "status-ok" : "status-fail" }, t(SIGNED[x.signature] || N_("unsigned"))),
         el("td", { class: "actions" }, el("button", { onclick: () => { entry.value = x.entry; unsigned.checked = false; env.value = ""; showVariables(x.env); showFolders(x.mounts); entry.focus(); } }, t("Add…"))))), t("The catalogs list no servers.")));
@@ -8772,7 +8821,7 @@ pages.mcp = async (main) => {
     };
     const writable = body.mounts.filter(m => m.mode === "rw" && m.host !== "default").map(m => m.host);
     const what = [body.unsigned ? t("from a catalog no trusted key signed") : null, writable.length ? t("with {dirs} writable", { dirs: writable.join(", ") }) : null,
-      body.network === "lan" ? t("reaching your local network and this host (internet + LAN)") : null].filter(Boolean);
+      body.network === "lan" ? t("reaching your local network and this host (lan)") : null].filter(Boolean);
     if (!what.length) { busy(event.target, () => send(false)); return; }
     confirmIn(addRow, t("Add the MCP server {name} on {host} {what}?", { name: body.entry, host, what: what.join(t(" and ")) }), t("Yes, add it"), () => send(true), { kind: "primary", trigger: event.target });
   };
@@ -8829,8 +8878,8 @@ function rowEditor(holder, title, fields, save, host) {
 
 // Why a kind of credential cannot be given to a sandbox that runs: its Give… button is there, greyed out, with this.
 const NOT_WHILE_RUNNING = {
-  publish: N_("A publish login cannot be given to a sandbox that runs: its tools' variables are set when it starts, and the questions before every upload are rules of that start. Restart it with --publish KIND; the token alone, without those questions, as an API key: the start's Network card."),
-  identities: N_("An identity is chosen when a sandbox starts (--identity NAME): its commit name, its Git logins and its publish logins are set up then. Restart the sandbox with it; one of its Git logins for a running sandbox: the start's Network card (Git login)."),
+  publish: N_("A publish login cannot be given to a sandbox that runs: its tools' variables are set when it starts, and the questions before every upload are rules of that start. Restart it with --publish KIND; the token alone, without those questions, as an API key: Logins, Give to a running sandbox."),
+  identities: N_("An identity is chosen when a sandbox starts (--identity NAME): its commit name, its Git logins and its publish logins are set up then. Restart the sandbox with it; one of its Git logins for a running sandbox: Logins, Give to a running sandbox."),
   vpn: N_("A VPN is set up before the agent starts (its tunnel and kill switch are the sandbox's network): a running sandbox cannot be given one. Restart it with --vpn PROFILE."),
 };
 function notWhileRunning(kind, what, host) {
@@ -8910,6 +8959,81 @@ async function drawSessionLogins(box, host) {
       el("td", { class: "mono" }, String(info.fingerprint || "")), actions);
   });
   clear(box).append(table([t("Session"), t("Agent"), t("State"), t("Login from"), t("Account (as the file says)"), t("Kind"), t("Expires"), t("Fingerprint"), ""], trs), detail);
+}
+
+// A Git login or an API key for a sandbox that runs on HOST (net allow RUN --git-token-* / --api-key, the one place
+// for them since 2026-11-24: the Network card leads here, this start chosen): a Git login names where its token is
+// (a variable, a secret, a file of that host), an API key a secret of that host - never the token. Asked first; a Git
+// login the run's proxy cannot use is refused, naming the only other way (into the sandbox), asked by itself.
+// Returns {box, fill(url, secret)} - fill: a Git login's row (Give to a running sandbox…) filled in.
+function giveCredentialsCard(host) {
+  const field = (id, placeholder) => el("input", { id, placeholder, class: "mono" });
+  const run = el("select", { id: "give-run" }, el("option", { value: "" }, t("Loading…")));
+  const gitUrl = field("give-git-url", "https://git.example.org"), gitRef = field("give-git-ref", "GITEA_TOKEN");
+  const gitKind = el("select", { id: "give-git-kind" }, el("option", { value: "secret" }, t("secret")), el("option", { value: "env" }, t("variable")), el("option", { value: "file" }, t("file (its path)")));
+  const keyHost = field("give-key-host", "api.example.com"), keyName = field("give-key-name", "EXAMPLE_KEY"), keySecret = field("give-key-secret", "EXAMPLE_KEY");
+  const keep = el("input", { id: "give-keep", type: "checkbox" });
+  const row = el("div", { class: "row" }), result = el("div", { class: "wide" });
+  const wanted = state.giveTo && state.giveTo.host === host ? state.giveTo.name : null;
+  state.giveTo = null;
+  (async () => {
+    let starts;
+    try { starts = await api("GET", hostPath("/starts", host)); } catch (e) { clear(run); clear(result).append(errorNotice(e)); return; }
+    const running = (Array.isArray(starts) ? starts : []).filter(x => x && x.state === "running" && x.kind !== "mcp" && typeof x.name === "string");
+    clear(run).append(...(running.length ? running.map(x => el("option", { value: x.name }, x.name)) : [el("option", { value: "" }, t("none runs"))]));
+    if (wanted && running.some(x => x.name === wanted)) run.value = wanted;
+  })();
+  const text = (input) => String(input.value || "").trim();
+  const request = () => {
+    const r = { op: "allow", allow_host: [], allow_tcp: [], host_ports: [], dns: false };
+    if (text(gitUrl) && text(gitRef)) r.git_login = { url: text(gitUrl), kind: gitKind.value, ref: text(gitRef) };
+    if (text(keyHost) && text(keySecret)) r.api_key = { host: text(keyHost).toLowerCase(), name: text(keyName) || text(keySecret), secret: text(keySecret) };
+    if (keep.checked) r.keep = true;
+    return r;
+  };
+  const send = async (name, r, trigger) => {
+    try {
+      const out = await api("POST", hostPath(`/net/${encodeURIComponent(name)}`, host), Object.assign({}, r, { confirm: true }));
+      clear(result);
+      toast("success", t("Given to {name} on {host}", { name, host }), (out && out.output) || "");
+    } catch (e) {
+      const said = [errorText(e), errorDetail(e)].filter(Boolean).join("\n");
+      if (r.git_login && !r.git_login.in_sandbox && said.includes("--in-sandbox")) {
+        confirmIn(row, t("{name} on {host} cannot be given the Git login for {url} through its connection proxy. The only other way puts the token into the sandbox's session directory for its Git: the agent can read it there. Give it so?", { name, host, url: r.git_login.url }) + "\n" + said,
+          t("Yes, into the sandbox"), () => send(name, Object.assign({}, r, { git_login: Object.assign({}, r.git_login, { in_sandbox: true }) }), trigger), { trigger });
+        return;
+      }
+      clear(result).append(errorNotice(e, t("Nothing was given")));
+    }
+  };
+  const give = el("button", { class: "primary", onclick: () => {
+    const name = run.value, r = request();
+    const what = [r.git_login ? t("a Git login for {url}", { url: r.git_login.url }) : null,
+      r.api_key ? t("the secret {secret} as the API key {name} for {server}", { secret: r.api_key.secret, name: r.api_key.name, server: r.api_key.host }) : null].filter(Boolean);
+    if (!name) { clear(result).append(notice(t("Choose a sandbox that runs first."), "error")); return; }
+    if (!what.length) { clear(result).append(notice(t("Name a Git login (its server and where its token is) or an API key (its server and secret) first."), "error")); return; }
+    confirmIn(row, r.keep ? t("Give {what} to {name} on {host} now, and keep it in its project's configuration for every later start?", { what: what.join(t(" and ")), name, host })
+      : t("Give {what} to {name} on {host} now? It applies at once, until the sandbox ends (or you revoke it on its Network card).", { what: what.join(t(" and ")), name, host }),
+      t("Yes, give it"), () => send(name, r, give), { kind: "primary", trigger: give });
+  } }, t("Give…"));
+  row.append(give);
+  const box = el("div", { class: "card", id: "give-card" }, el("h3", {}, t("Give to a running sandbox: a Git login or an API key")),
+    el("p", { class: "hint" }, t("Until the sandbox ends: its connection proxy logs in to the Git server or puts the key in; the token never enters the sandbox. Named by where it is - a secret, a variable or a file of {host} - never the token.", { host })),
+    el("div", { class: "form" },
+      el("label", { for: "give-run" }, t("Sandbox")), run,
+      el("label", { for: "give-git-url" }, t("Git login: server")), gitUrl,
+      el("label", { for: "give-git-kind" }, t("Git login: token in")), el("div", {}, gitKind, " ", gitRef),
+      el("label", { for: "give-key-host" }, t("API key: server")), keyHost,
+      el("label", { for: "give-key-secret" }, t("API key: secret of {host}", { host })), keySecret,
+      el("label", { for: "give-key-name" }, t("API key: variable (the agent sends its placeholder)")), keyName,
+      el("label", { for: "give-keep" }, t("Also for later starts")), keep,
+      el("span"), row, result));
+  const fill = (url, secret) => {
+    gitUrl.value = url; gitKind.value = "secret"; gitRef.value = secret || "";
+    if (box.scrollIntoView) box.scrollIntoView({ block: "nearest" });
+    if (gitRef.focus) gitRef.focus();
+  };
+  return { box, fill, wanted };
 }
 
 // Logins (sandbox-ai login, plugins, git-logins, publish-logins, identities): the tokens stay secrets of that host.
@@ -9057,9 +9181,12 @@ pages.logins = async (main) => {
     });
   };
 
+  // Give to a running sandbox: a Git login or an API key (the Network card of a start leads here)
+  const giving = giveCredentialsCard(host);
   await section(t("Git logins (every sandbox's proxy)"), "/git-logins", (box, list) => {
     const rows = (Array.isArray(list) ? list : []).filter(x => x && x.url).map(x => {
       const actions = el("td", { class: "actions" });
+      actions.append(rowButton(t("Give to a running sandbox…"), x.url, host, { onclick: () => giving.fill(x.url, x.secret) }));
       // Edit…: its server, its user, which secret holds the token (git-logins edit); the token itself is that
       // secret's value, replaced on the page Secrets - never shown here
       actions.append(rowButton(t("Edit…"), x.url, host, { onclick: () => rowEditor(gitEditor, t("Edit the Git login for {url}", { url: x.url }),
@@ -9070,7 +9197,7 @@ pages.logins = async (main) => {
           if (v.user && v.user !== (x.user || "")) body.user = v.user;
           if (v.secret && v.secret !== (x.secret || "")) body.secret = v.secret;
           if (Object.keys(body).length === 1) { clear(result).append(el("p", { class: "hint" }, t("Nothing changed."))); return; }
-          confirmIn(row, t("Change the Git login for {url} on {host}? It is for the starts from now on: a sandbox that runs keeps the login it was started with (its Network card gives it the new one).", { url: x.url, host }), t("Yes, change it"), async () => {
+          confirmIn(row, t("Change the Git login for {url} on {host}? It is for the starts from now on: a sandbox that runs keeps the login it was started with (Give to a running sandbox below gives it the new one).", { url: x.url, host }), t("Yes, change it"), async () => {
             try { const r = await api("POST", hostPath("/git-logins/edit", host), Object.assign({ confirm: true }, body)); toast("success", t("The Git login for {url} was changed on {host}", { url: x.url, host }), (r && r.output) || ""); show("logins"); }
             catch (e) { clear(result).append(errorNotice(e, t("The login was not changed"))); }
           }, { trigger });
@@ -9091,7 +9218,9 @@ pages.logins = async (main) => {
     });
     row.append(el("button", { class: "primary", onclick: add }, t("Add…")), el("button", { onclick: check("/git-logins/check", () => ({ url: url.value.trim() })) }, t("Check")));
     clear(box).append(table([t("Server"), t("User"), t("Secret"), ""], rows, t("No Git logins on this host.")), gitEditor, el("div", { class: "card" }, el("div", { class: "form" },
-      el("label", { for: "git-url" }, t("Server")), url, el("label", { for: "git-user" }, t("User")), user, ...token.fields, el("span"), row, result)));
+      el("label", { for: "git-url" }, t("Server")), url, el("label", { for: "git-user" }, t("User")), user, ...token.fields, el("span"), row, result)),
+      giving.box);
+    if (giving.wanted && giving.box.scrollIntoView) giving.box.scrollIntoView({ block: "nearest" });
   });
 
   await section(t("Publish logins (with --publish only)"), "/publish-logins", (box, list) => {
@@ -9569,6 +9698,10 @@ pages.images = async (main) => {
   main.append(el("h2", {}, t("Changes and builds")), el("div", { class: "row" }, el("button", { onclick: (ev) => busy(ev.target, async () => {
     try { clear(historyBox).append(dataView(await api("GET", hostPath("/images-history", host)), t("No changes or builds yet."))); } catch (e) { clear(historyBox).append(errorNotice(e)); }
   }) }, t("Show the history"))), historyBox);
+  // Install: all, nothing or a part (sandbox-ai install --list --json there, on demand: the catalogs are read over the
+  // network); what is ticked runs as `sandbox-ai install ITEM...` in a terminal - each item's own command and checks,
+  // signed entries only, a pending MCP server's build asked there
+  installItemsCard(main, host);
   // a build in a terminal: the agents, all, team, vpn, tor, and the variants (images --json: "target", "variant": true)
   const variants = listed.filter(x => x.variant && !BUILD_TARGETS.includes(x.target)).map(x => x.target);
   const buildTarget = el("select", { id: "build-target" }, [...BUILD_TARGETS, ...new Set(variants)].map(v => el("option", { value: v }, v)));
@@ -9591,6 +9724,55 @@ pages.images = async (main) => {
       el("button", { onclick: act("/demo-device/stop", () => ({})) }, t("Stop")), el("button", { onclick: () => openTerminal({ kind: "demo-device", host, port: port.value }, t("demo device")) }, t("Start in a terminal")), el("button", { onclick: refresh }, t("Refresh"))))));
   refresh();
 };
+
+const INSTALL_KINDS = [["images", N_("Agent images")], ["mcp", N_("MCP servers")], ["toolchains", N_("Toolchains")], ["presets", N_("What presets need")]];
+function sizeText(size) {
+  if (typeof size !== "number" || size < 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size, unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit += 1; }
+  return unit ? `${value.toFixed(1)} ${units[unit]}` : `${value} B`;
+}
+function installItemsCard(main, host) {
+  const box = el("div"), status = el("div");
+  let boxes = [];
+  const chosen = () => boxes.filter(b => b.checked && !b.disabled).map(b => b.value);
+  const go = el("button", { class: "primary", disabled: true, onclick: () => {
+    const items = chosen();
+    if (items.length) openTerminal({ kind: "install-items", host, items: items.join(",") }, t("install on {host}", { host }), () => {});
+  } }, t("Install in a terminal"));
+  const update = () => { const n = chosen().length; go.disabled = !n; go.textContent = n ? t("Install {count} in a terminal", { count: n }) : t("Install in a terminal"); };
+  const tick = (every) => { for (const b of boxes) if (!b.disabled) b.checked = every && b.dataset.all === "1"; update(); };
+  const read = (event) => busy(event.target, async () => {
+    clear(status).append(el("p", { class: "hint" }, t("Reading what {host} has and what the catalogs offer…", { host })));
+    let found;
+    try { found = await api("GET", hostPath("/install-items", host)); } catch (e) { clear(status).append(errorNotice(e)); return; }
+    const items = (found && Array.isArray(found.items) ? found.items : []).filter(r => r && typeof r.id === "string");
+    boxes = [];
+    clear(box);
+    for (const [kind, title] of INSTALL_KINDS) {
+      const mine = items.filter(r => r.kind === kind);
+      if (!mine.length) continue;
+      const rows = mine.map((r) => {
+        const b = el("input", { type: "checkbox", value: r.id, "aria-label": r.id });
+        b.dataset.all = r.all && kind !== "presets" ? "1" : "0";
+        if (r.installed) b.disabled = true;
+        b.addEventListener("change", update);
+        boxes.push(b);
+        const state = r.pending && !r.installed ? t("pending (built after a question)") : r.installed === true ? t("installed") : r.installed === false ? t("not installed") : t("not known");
+        const note = kind === "presets" ? t("needs {list}", { list: (Array.isArray(r.needs) ? r.needs : []).join(", ") }) : String(r.note || "");
+        return el("tr", {}, el("td", {}, b), el("td", { class: "mono" }, r.id), el("td", {}, state), el("td", {}, sizeText(r.size)), el("td", { class: "hint" }, note));
+      });
+      box.append(el("h3", {}, t(title)), table(["", t("Name"), t("State"), t("Size"), t("Note")], rows, t("Nothing."), t(title)));
+    }
+    clear(status).append(...(Array.isArray(found && found.problems) ? found.problems : []).map(p => el("p", { class: "notice warn" }, String(p))));
+    update();
+  });
+  main.append(el("h2", {}, t("Install")), el("div", { class: "card", id: "install-card" },
+    el("p", { class: "hint" }, t("Tick what to install. Each item runs its own command (build, mcp add, toolchain add) with its checks, in a terminal tab; only signed entries are offered.")),
+    el("div", { class: "row" }, el("button", { onclick: read }, t("List what can be installed")), el("button", { onclick: () => tick(true) }, t("All")), el("button", { onclick: () => tick(false) }, t("None")), go),
+    status, box));
+}
 
 // Activity (sandbox-ai activity --json): the last events of the runs, filtered; Follow asks again every few seconds.
 const ACTIVITY_KINDS = ["prompt", "reply", "tool", "command", "file", "network", "approval", "mcp", "session", "tokens", "resources"];

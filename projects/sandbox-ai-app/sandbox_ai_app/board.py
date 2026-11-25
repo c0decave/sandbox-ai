@@ -77,16 +77,22 @@ KINDS = {kind.key: kind for kind in (
                  "writable: data, models, caches - not where the agent works")),
     Kind("home", N_("HOME and login"), ("--state-dir", "--copy", "--copy-auth", "--no-auth", "--auth-file",
                                         "--auth-from-session", "--import-codex-auth"), column=0,
-         help=N_("The sandbox HOME (kept between runs or not) and the agent's login")),
+         help=N_("The agent's HOME in the sandbox - the start's own, or a folder of yours that stays - and where "
+                 "its login comes from (the stored one, a file, another session, none)")),
     Kind("kits", N_("Kits, memory, plugins"), ("--kit", "--kit-dir", "--no-default-kit", "--no-memory",
                                                "--no-plugins"), column=0,
-         help=N_("Kits copied into HOME, project memory and plugins")),
+         help=N_("Kits give the agent skills, commands, subagents and hooks (read-only in its HOME); project memory "
+                 "keeps its notes for this project between runs; plugins come from sandbox-ai's plugin store")),
     Kind("agent", N_("Agent"), ("--dangerously-skip-permissions", "--local-config", "--env", "--secret-env",
                                 "--api-key", "--hermes-enable", "--qwen-enable",
                                 "--goose-enable", "--openhands-enable", "--nanobot-enable", "--letta-enable",
                                 "--opencode2-enable",
-                                "--pi-enable"),
-         required=True, column=1, help=N_("The coding agent and how it runs")),
+                                "--pi-enable",
+                                # The agent's intro (/sandbox/session/INTRO.md: what its sandbox has): on unless the
+                                # part says no (--no-intro), or yes over a default of no (--intro).
+                                "--no-intro", "--intro"),
+         required=True, column=1, help=N_("Which coding agent runs in the sandbox, its model and effort, and "
+                                          "whether it asks before it runs a tool")),
     Kind("approvals", N_("Approvals and rules"), ("--ask", "--rules", "--hide"), column=1,
          help=N_("Ask before what the options do not allow; rulesets allow, ask or deny each request and MCP "
                  "tool call; files such as .env hidden from the agent")),
@@ -97,7 +103,8 @@ KINDS = {kind.key: kind for kind in (
                             "--token-proxy", "--git-credentials"), column=1,
          help=N_("Commit identity and push tokens (with the token proxy the agent never sees them)")),
     Kind("mcp", N_("MCP server"), single=False, column=2,
-         help=N_("A local MCP server in its own sandbox, with its own network and folders")),
+         help=N_("An MCP server gives the agent more tools (a search, a database, a browser ...). It runs in a "
+                 "sandbox of its own with its own network and folders; the agent reaches only its tools")),
     Kind("service", N_("Service (container)"), single=False, column=2,
          help=N_("A container of one of your images (a database, a cache, a search engine, a test target) beside the "
                  "agent, in the sandbox's pod: reached at localhost:PORT, behind the same firewall and proxy. Its image "
@@ -116,16 +123,20 @@ KINDS = {kind.key: kind for kind in (
          help=N_("A VPN profile in front (sandbox-ai vpn): everything leaves through the tunnel, a kill switch "
                  "blocks the rest, addresses and DNS are checked before the start")),
     Kind("devices", N_("Devices and GPU"), ("--device", "--gpu"), column=0,
-         help=N_("Host devices handed to the agent (weakens the isolation)")),
+         help=N_("Devices of this computer the agent may open: a serial port, a USB device, a camera, a GPU. Each "
+                 "one weakens the isolation")),
     # Build toolchains (--toolchain): from the signed catalog into the host's store (sandbox-ai toolchain add), and
     # from there read-only into the sandbox at /opt/toolchains/NAME. One part with the list of them, as Devices.
     Kind("toolchains", N_("Toolchains"), ("--toolchain", "--toolchain-offline"), column=0,
-         help=N_("Build tools from the signed catalog (Go, Rust, a JDK, Node, Python ...), mounted read-only at "
-                 "/opt/toolchains/NAME with their commands on the agent's PATH; their registries are opened")),
+         help=N_("A toolchain is a compiler or SDK (Go, Rust, a JDK, Node, Python ...) from the signed catalog. It is "
+                 "mounted read-only at /opt/toolchains/NAME, its commands on the agent's PATH - nothing is installed "
+                 "in the image. The package registries it needs (crates.io for Rust) are opened at the start; the "
+                 "security modes high and paranoid keep them closed")),
     Kind("limits", N_("Limits"), ("--memory", "--cpus", "--pids", "--tmp-size"), column=0,
-         help=N_("Memory, CPUs, processes and the size of /tmp")),
+         help=N_("The most the sandbox may use: memory, CPUs, processes and the size of /tmp")),
     Kind("display", N_("Display"), ("--gui", "--gui-screen", "--gui-vnc", "--gui-wayland"), column=0,
-         help=N_("A virtual display for GUI programs and browsers")),
+         help=N_("A virtual screen inside the sandbox, so that GUI programs and browsers can run there; a VNC "
+                 "socket lets you watch it")),
     # The sandbox's own browser (--browser): a container beside the agent, on its network; the app's Browser button
     # shows it. For you (human), for the agent (agent: Chrome's DevTools in the pod) or both.
     Kind("browser", N_("Browser"), ("--browser", "--browser-control", "--browser-profile"), column=2,
@@ -146,7 +157,8 @@ KINDS = {kind.key: kind for kind in (
                  "agent's network: its targets only what the allow-list opens; its console on this computer's "
                  "127.0.0.1 (sandbox-ai artex console)")),
     Kind("session", N_("Session and tmux"), ("--tmux", "--no-tmux"), column=0,
-         help=N_("tmux inside the sandbox (sessions are started from the Start page)")),
+         help=N_("Whether the agent runs in tmux inside the sandbox: with tmux you can detach from it and attach "
+                 "again while it works")),
     Kind("logs", N_("Logs"), ("--log-dir", "--log-debug"), column=1,
          help=N_("Where the logs go (hidden from the agent), and how much of what is refused they keep")),
     # A session bridge (sandbox-ai bridge) to another running session of this machine: no launcher option - the app
@@ -167,7 +179,8 @@ KINDS = {kind.key: kind for kind in (
     Kind("engine", N_("Engine"), ("--backend", "--image", "--image-variant", "--nested-containers", "--podman-url",
                                   "--binary", "--runtime"),
          column=0,
-         help=N_("Podman or Bubblewrap, the image and the agent's executable")),
+         help=N_("What isolates the agent - Podman (a container of sandbox-ai's image) or Bubblewrap (this "
+                 "computer's own programs) -, which image, and another executable for the agent")),
     # Other options: the launcher options no other part represents (the security mode, canaries, a session's name,
     # checkpoints, a preset of sandbox-ai, tokens of another version ...), exactly as the command line has them
     # (props "tokens": Board.extra). No option is its own: it holds what is left, so a command line and the board are
@@ -771,7 +784,8 @@ def default_service(name):
     """A service's properties with every default (as sandbox-ai's services.default_service)."""
     return {"name": name, "image": name, "ports": [], "ready": None, "ready_timeout": SERVICE_DEFAULTS["ready_timeout"],
             "env": [], "secrets": [], "data": [], "keep": False, "user": None, "read_only": True,
-            "memory": SERVICE_DEFAULTS["memory"], "cpus": SERVICE_DEFAULTS["cpus"], "pids": SERVICE_DEFAULTS["pids"]}
+            "memory": SERVICE_DEFAULTS["memory"], "cpus": SERVICE_DEFAULTS["cpus"], "pids": SERVICE_DEFAULTS["pids"],
+            "devices": []}
 
 
 def services_module(sai):
@@ -828,7 +842,23 @@ def service_spec(props):
     for key in ("memory", "cpus", "pids"):
         if key in props and str(props[key]) != str(SERVICE_DEFAULTS[key]):
             items.append(f"{key}={props[key]}")
+    # device=: a device of the host for the service alone (the emulator's /dev/kvm, an adb server's USB device)
+    items += [f"device={device}" for device in props.get("devices") or []]
     return name + (":" + ",".join(items) if items else "")
+
+
+def template_props(sai, name, image, template):
+    """The properties of the service NAME of the image IMAGE with what sandbox-ai's own Containerfile brings for its
+    service (TEMPLATE: a row of `images templates` - its "spec": the ports, the device, the limits), or None when it
+    brings nothing or this sandbox-ai cannot read it."""
+    spec = str((template or {}).get("spec") or "")
+    module = services_module(sai)
+    if not spec or module is None or not SERVICE_NAME.fullmatch(str(name or "")):
+        return None
+    try:
+        return dict(module.parse_spec(f"{name}:image={image},{spec}"))
+    except ValueError:
+        return None
 
 
 def your_images_text(user_images):
@@ -854,7 +884,7 @@ def image_problem(name, image, user_images):
 
 def service_image_problems(sai, specs, user_images, templates=()):
     """[text] of the --service values SPECS whose image is none of USER_IMAGES (their names; None: not known, nothing
-    said) nor of sandbox-ai's own TEMPLATES (built when the start needs one): the Start page's check before a start
+    said) nor of sandbox-ai's own TEMPLATES (built when the start needs one): the Board page's check before a start
     (a value sandbox-ai's parser refuses is the launcher's to say)."""
     if user_images is None:
         return []
@@ -1066,6 +1096,151 @@ def launcher_argv(sai, board, local=True):
     rules = project_rules(board)
     copy = ["--rules", str(rules_copy(rules))] if rules is not None and local else []
     return document_argv(board) + to_argv(sai, board) + copy + ["--no-config"]
+
+
+def toolchain_registries(value, found):
+    """(hosts, presets) the toolchain VALUE (NAME or NAME@VERSION, as --toolchain takes it) needs opened, as the
+    host's store and signed catalog say (FOUND: backend.host_toolchains), with those of the toolchains it requires;
+    None when it is in neither (typed, not known there)."""
+    choices = backend.toolchain_choices(found or {})
+    by_value = {choice["value"]: choice["row"] for choice in choices}
+    by_name = {}
+    for choice in choices:  # (the store's newest first: what NAME alone starts)
+        by_name.setdefault(choice["name"], choice["row"])
+    row = by_value.get(str(value)) or by_name.get(str(value).partition("@")[0])
+    if row is None:
+        return None
+    hosts, presets, seen = [], [], set()
+
+    def take(entry):
+        if entry["name"] in seen:
+            return
+        seen.add(entry["name"])
+        for name in entry.get("requires") or []:
+            if name in by_name:
+                take(by_name[name])
+        hosts.extend(host for host in entry.get("hosts") or [] if isinstance(host, str) and host not in hosts)
+        presets.extend(p for p in entry.get("allow") or [] if isinstance(p, str) and p not in presets)
+    take(row)
+    return hosts, presets
+
+
+def security_mode(board, plan=None):
+    """The security mode of BOARD's start: as the launcher's PLAN of it says (its dry run: the option, the project
+    file's, your default), else the board's own option (--mode among Other options), else None (not known yet)."""
+    mode = (plan or {}).get("mode")
+    if isinstance(mode, dict) and isinstance(mode.get("name"), str):
+        return mode["name"]
+    other = board.first("other")
+    tokens = [str(token) for token in (other.props.get("tokens") or [])] if other is not None else []
+    found = None
+    for index, token in enumerate(tokens):
+        if token in ("--mode", "-mo") and index + 1 < len(tokens):
+            found = tokens[index + 1]
+        elif token.startswith("--mode="):
+            found = token.partition("=")[2]
+    return found
+
+
+def toolchain_needs(board, found, plan=None):
+    """What the board's toolchains need of the network, and what the start does about it:
+    [{"toolchain", "needs": [host or "--allow-PRESET"], "state", "why"}] - STATE "opened" (set by the start itself),
+    "closed" (the part says so: --toolchain-offline, or the network is offline), "refused" (WHY: "mode high", the
+    administrator's policy), "none" (it needs nothing), "unknown" (not in the store or catalog of FOUND). PLAN: the
+    launcher's dry run of this very board (its "mode", "toolchain_hosts"): the truth where it is there; before it
+    the board's own options decide (--mode high among Other options)."""
+    _, values_, _ = values(board)
+    offline = bool(values_.get("--toolchain-offline") or values_.get("--offline"))
+    mode = security_mode(board, plan)
+    closed = set(((plan or {}).get("toolchain_hosts") or {}).get("closed") or []) \
+        if isinstance((plan or {}).get("toolchain_hosts"), dict) else None
+    return needs_rows(values_.get("--toolchain", []), found, offline, mode, closed)
+
+
+def needs_rows(toolchains, found, offline=False, mode=None, closed=None):
+    """toolchain_needs' rows for the --toolchain values TOOLCHAINS: OFFLINE (their registries are kept closed), MODE
+    (the security mode: high and paranoid refuse them), CLOSED (what the launcher's plan left closed, or None)."""
+    rows = []
+    for value in toolchains:
+        needs = toolchain_registries(value, found)
+        if needs is None:
+            rows.append({"toolchain": str(value), "needs": [], "state": "unknown", "why": ""})
+            continue
+        wanted = [*needs[0], *(f"--allow-{preset}" for preset in needs[1])]
+        if not wanted:
+            state, why = "none", ""
+        elif offline:
+            state, why = "closed", "offline"
+        elif mode in ("high", "paranoid"):
+            state, why = "refused", f"mode {mode}"
+        elif closed is not None and any(item in closed for item in wanted):
+            state, why = "refused", "policy"
+        else:
+            state, why = "opened", ""
+        rows.append({"toolchain": str(value), "needs": wanted, "state": state, "why": why})
+    return rows
+
+
+# The sources of what a start may reach (agent_sandbox.reach, in the launcher's dry-run plan as "reach") that are
+# another part of the board - not the Network part's own fields, the agent's provider, a profile, the project file or
+# an approval -, and the kind of part that opens each: what the Network part lists, read-only.
+REACH_PARTS = {"toolchain": "toolchains", "git-login": "git", "api-key": "agent", "publish": "agent", "llm": "llm",
+               "feature": "agent"}
+
+
+def opened_by_parts(board, plan):
+    """What the other parts of BOARD open, as the launcher's dry run of this very board says it (PLAN): {"opened":
+    [the plan's "reach" entries whose source is another part (REACH_PARTS)], "closed": [what the toolchains need and
+    the start keeps closed: the plan's "toolchain_hosts"."closed"], "why": why they stay closed - "mode high", "mode
+    paranoid" (refused), "offline" (the board says so: the Toolchains part's check box, or no network at all), "policy"
+    (the administrator's), "" (nothing closed)}. None without a plan that says what the start may reach (no check
+    yet, a refused board, a sandbox-ai before 0.1.245). Nothing is worked out here a second time: what is open is
+    reach()'s, what is closed the plan's own list; only the reason is put into words."""
+    reach = plan.get("reach") if isinstance(plan, dict) else None
+    if not isinstance(reach, list):
+        return None
+    opened = [entry for entry in reach if isinstance(entry, dict) and entry.get("source") in REACH_PARTS]
+    hosts = plan.get("toolchain_hosts") if isinstance(plan.get("toolchain_hosts"), dict) else {}
+    closed = [str(item) for item in hosts.get("closed") or [] if isinstance(item, str)]
+    why = ""
+    if closed:
+        _, values_, _ = values(board)
+        mode = security_mode(board, plan)
+        why = f"mode {mode}" if mode in ("high", "paranoid") else \
+            "offline" if values_.get("--toolchain-offline") or values_.get("--offline") or plan.get("offline") else \
+            "policy"
+    return {"opened": opened, "closed": closed, "why": why}
+
+
+def registry_shown(value):
+    """A registry as the Board names it: a host as it is, a preset of the launcher (--allow-github) by its name."""
+    return {"--allow-pypi": "PyPI", "--allow-github": "GitHub", "--allow-gitlab": "GitLab", "--allow-npm": "npm",
+            "--allow-kernel-org": "kernel.org", "--allow-duckduckgo": "DuckDuckGo"}.get(value, value)
+
+
+def toolchain_needs_lines(rows):
+    """The lines the Board shows for ROWS (toolchain_needs): one per toolchain, what it needs and what happens."""
+    lines = []
+    for row in rows:
+        needs = ", ".join(registry_shown(item) for item in row["needs"])
+        if row["state"] == "unknown":
+            lines.append(tr("{toolchain}: not in the store or the signed catalog of this host - what it needs is "
+                            "not known", toolchain=printable(row["toolchain"])))
+        elif row["state"] == "none":
+            lines.append(tr("{toolchain}: needs no registry", toolchain=printable(row["toolchain"])))
+        elif row["state"] == "opened":
+            lines.append(tr("{toolchain}: opened at the start: {needs}", toolchain=printable(row["toolchain"]),
+                            needs=printable(needs)))
+        elif row["state"] == "closed":
+            lines.append(tr("{toolchain}: needs {needs} - kept closed (you chose so)",
+                            toolchain=printable(row["toolchain"]), needs=printable(needs)))
+        elif row["why"] == "policy":
+            lines.append(tr("{toolchain}: needs {needs} - refused by the administrator's policy",
+                            toolchain=printable(row["toolchain"]), needs=printable(needs)))
+        else:
+            lines.append(tr("{toolchain}: needs {needs} - refused by {why}", toolchain=printable(row["toolchain"]),
+                            needs=printable(needs), why=printable(row["why"])))
+    return lines
 
 
 def check_argv(sai, board, local=True):
@@ -1551,8 +1726,8 @@ def fill(board, values, sai=None):
 
 
 def drop(board, markers):
-    """Leave out what holds one of MARKERS (optional placeholders not filled in): an MCP server, mount or
-    workspace, an option value (of a list: that entry; a part left with no option goes too), a token of
+    """Leave out what holds one of MARKERS (optional placeholders not filled in): an MCP server, mount,
+    workspace or service, an option value (of a list: that entry; a part left with no option goes too), a token of
     Board.extra with the option before it."""
     markers = set(markers)
     if not markers:
@@ -1561,7 +1736,10 @@ def drop(board, markers):
     def holds(value):
         return any(m in text for text in _strings(value) for m in markers)
     for node in list(board.nodes):
-        defining = {"mcp": "name", "mount": "source", "workspace": "path"}.get(node.kind)
+        # (a service: its --service value as given - one of its keys holds the placeholder: its image, or the device
+        # the preset gives it, android-development's emulator and adb server - goes whole, as the launcher leaves the
+        # option out; before, the part stayed with its name alone and started an image of that name)
+        defining = {"mcp": "name", "mount": "source", "workspace": "path", "service": "raw"}.get(node.kind)
         if defining and holds(node.props.get(defining, "")):
             board.remove(node.id)
             continue
@@ -2015,7 +2193,7 @@ TEAM_MEMBER_OPTIONS = (("models", "--model"), ("llms", "--llm"), ("modes", "--mo
 
 def team_label(name, host):
     """A team's (or member's) NAME as this machine names it: NAME here, HOST:NAME of another host (as bridges and
-    the Sandboxes page name a start of a host)."""
+    the Sessions page name a start of a host)."""
     return name if host in (None, "local") else f"{printable(host)}:{name}"
 
 
@@ -2825,14 +3003,15 @@ def server_network(definition):
     """(reaches the network, [what it reaches], VPN profile or None) of an MCP server's DEFINITION: an image's
     network and hosts, or the launcher options of a server with a command (no network unless they allow it)."""
     if "image" in definition:
-        return (definition.get("network", "none") != "none", [str(h) for h in definition.get("hosts", [])],
+        return (backend.mcp_network(definition.get("network", "none")) != "none",
+                [str(h) for h in definition.get("hosts", [])],
                 definition.get("vpn"))
     options, reached, vpn, everything = [str(o) for o in definition.get("options", [])], [], None, False
     for index, option in enumerate(options):
         value = options[index + 1] if index + 1 < len(options) else ""
         if option in PRESET_OPTIONS:
             reached.append(option[len("--allow-"):])
-        elif option in ("--allow-host", "--allow-shared-wildcard", "--allow", "--allow-tcp"):
+        elif option in ("--allow-host", "--allow-shared-wildcard", "--allow", "--allow-net", "--allow-tcp"):
             reached.append(value)
         elif option == "--allow-domain":
             reached.append(f"{_domain(value)}, *.{_domain(value)}")
@@ -2856,11 +3035,17 @@ def mcp_summary(definition):
     runs = definition.get("image") or " ".join(map(str, definition.get("command", []))) or "?"
     mounts = [f"{tr('the start’s workspace') if m.get('host') == WORKSPACE_FOLDER else m.get('host', '?')} → "
               f"{m.get('target', '?')} ({m.get('mode', 'ro')})" for m in definition.get("mounts", []) if isinstance(m, dict)]
-    network = definition.get("network", "none")
+    network = backend.mcp_network_word(definition.get("network", "none"))  # (offline, egress-all, allowlist, lan)
     if "image" not in definition:
         reaches, hosts, _ = server_network(definition)
-        network = (", ".join(hosts) or tr("every destination")) if reaches else "none"
+        network = (", ".join(hosts) or tr("every destination")) if reaches else "offline"
     rows = [(tr("Runs"), printable(runs)), (tr("Network"), printable(network))]
+    if backend.is_burp(definition):
+        # Burp Suite: host mode (your Burp, reached from this host) or container mode (your jar), Community or Pro
+        rows.insert(0, (tr("Burp"), backend.burp_text(definition)))
+        if "endpoint" in definition:
+            rows[1] = (tr("Runs"), tr("your Burp on this host, reached at {endpoint}",
+                                      endpoint=printable(str(definition["endpoint"]))))
     if server_network(definition)[2]:
         rows.append((tr("VPN"), printable(server_network(definition)[2])))
     if definition.get("hosts"):

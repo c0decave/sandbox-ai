@@ -28,10 +28,19 @@ TOOLCHAINS = {
             ["repo.maven.apache.org", "repo1.maven.org", "plugins.gradle.org", "plugins-artifacts.gradle.org",
              "services.gradle.org", "downloads.gradle.org"], ["github"], []),
     "node": ("26.13.0", ["node", "npm", "npx", "tsc", "tsserver"], [], ["npm", "github"], []),
+    "pyside6": ("6.12.0", ["pyside6-uic", "pyside6-rcc", "pyside6-designer", "pyside6-lupdate", "pyside6-qmllint"],
+                [], [], ["python"]),
     "python": ("3.14.10", ["python", "python3", "pip", "pip3", "uv", "uvx"], [], ["pypi"], []),
+    "qt": ("6.12.0", ["qmake", "qt-cmake", "moc", "uic", "rcc", "lupdate", "lrelease", "designer", "qmllint"],
+           [], [], ["pyside6"]),
     "rust": ("1.99.1", ["cargo", "rustc", "rustdoc", "rustfmt", "cargo-clippy"],
              ["crates.io", "index.crates.io", "static.crates.io"], ["github"], ["cc"]),
     "zig": ("0.17.1", ["zig"], [], ["github"], []),
+    # (in the published catalog a recipe built on the user's machine from Google's downloads, after their license was
+    # accepted: tests/test_toolchain_recipes.py; here an archive like the others - what a start mounts is the same)
+    "android-sdk": ("37.0.0", ["adb", "fastboot", "apkanalyzer", "aapt", "aapt2", "apksigner", "zipalign", "d8",
+                               "aidl", "ndk-build", "cmake", "ninja"], ["dl.google.com", "maven.google.com"], [],
+                    ["jdk"]),
 }
 
 

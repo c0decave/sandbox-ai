@@ -136,13 +136,14 @@ def outer(widget):
 
 def expected_place(dialog, screen):
     """Where the rule puts DIALOG on SCREEN: centred over the window it was opened from (its parent's window, else
-    the screen), at that window's top left (24 px in) when wider or higher than 70% of the screen; inside the
-    screen."""
+    the screen), at that window's top left (24 px in) when wider or higher than 70% of the screen - unless it is
+    as large as that window (widgets.as_large_as_window: the presets window); inside the screen."""
     size = QtWidgets.QWidget.size(dialog)
     parent = dialog.parentWidget()
     anchor = parent.window() if parent is not None else QtWidgets.QApplication.activeWindow()
     over = anchor.frameGeometry() if anchor is not None and anchor is not dialog and anchor.isVisible() else screen
-    if size.width() > screen.width() * LARGE or size.height() > screen.height() * LARGE:
+    large = size.width() > screen.width() * LARGE or size.height() > screen.height() * LARGE
+    if large and not dialog.property("windowShare"):  # (widgets.as_large_as_window: centred all the same)
         x, y = over.left() + INSET, over.top() + INSET
     else:
         x, y = over.center().x() - size.width() // 2, over.center().y() - size.height() // 2
@@ -207,8 +208,8 @@ def ask_everything(window):
     widgets.confirm(window, tr("Stop all"), tr("Stop {what}? It ends; its HOME is kept and Resume starts it again.",
                                                what=tr("session {name}", name=name)), tr("Stop"), destructive=True)
     widgets.choose(window, tr("Close terminal"), tr(
-        "{name} keeps running when only its tab is closed (attach it again from Sandboxes & sessions or the "
-        "Sessions list). Stop the session too?", name=name),
+        "{name} keeps running when only its tab is closed (attach it again from the Sessions page or the "
+        "Sessions list below the terminals). Stop the session too?", name=name),
         [("close", tr("Close tab")), ("stop", tr("Stop session"))], cancel=tr("Cancel"), destructive=("stop",))
     widgets.ask_first(window, "start-delete", tr("Delete {name}", name=name), tr("Delete {name}", name=name) + "?",
                       tr("Delete"))
@@ -268,8 +269,6 @@ def dialogs(window):
              "model": "qwen2.5-coder:32b", "tags": ["code"], "params": 32, "size": 19 << 30}]
     return [
         ("network", lambda: ui.NetworkDialog(window, {}, tr("Allow during the run of {run}", run=name))),
-        ("allowed", lambda: ui.AllowedDialog(window, tr("Allowed for {run}", run=name), "api.example.org\n",
-                                             lambda: None)),
         ("device", lambda: ui.DeviceDialog(window, [("/dev/ttyUSB0", None, "serial"), ("/dev/mem", "raw memory",
                                                                                          None)])),
         ("workspace", lambda: ui.WorkspaceDialog(window, f"claude-{name}")),
@@ -311,6 +310,7 @@ def dialogs(window):
         ("owner", lambda: files_page.OwnerDialog(window, 3, False)),
         ("identity", lambda: identities_page.IdentityDialog(window, "", {}, [], [])),
         ("give", lambda: credentials_page.GiveDialog(window, [instance])),
+        ("give a git login not stored", lambda: credentials_page.OtherLoginDialog(window, "ein-host-mit-langem-namen")),
         ("server", lambda: wizard.ServerDialog(window.sai, parent=window)),
         ("settings", lambda: settings.SettingsDialog(window.sai, window)),
         ("message", lambda: widgets.MessageDialog(window, QtWidgets.QMessageBox.Icon.Warning, tr("Stop all"),
@@ -432,8 +432,26 @@ def more_dialogs(window):
             "fingerprint": "ab" * 32})),
         ("give to a running sandbox", lambda: kits_live_view.GiveDialog(window, window.sai, start=name,
                                                                         value=LONG_FOLDER + "/skills/review")),
+        ("install", lambda: install_dialog(window)),
         ("text", lambda: text_dialog(window)),
     ]
+
+
+def install_dialog(window):
+    """The Install menu's checklist (install_view), with long rows of every kind, read from a stand-in sandbox-ai."""
+    import json
+    from sandbox_ai_app import install_view
+    rows = [{"id": f"{kind}:{name}", "kind": group, "name": name, "title": name, "installed": installed,
+             "size": 396208172, "note": "pending: no signed image yet; built here from its reviewed source after a "
+             "question (sandbox-ai mcp add NAME --build), unsigned", "pending": False, "all": True, "command": []}
+            for kind, group, name, installed in (("image", "images", "openhands", True),
+                                                 ("mcp", "mcp", "hub:telegram-user", False),
+                                                 ("toolchain", "toolchains", "python@3.13", False),
+                                                 ("preset", "presets", "android-debugging", False))]
+    stand_in = SimpleNamespace(host_run=lambda *a, **k: (0, json.dumps({"items": rows, "problems": []}), ""),
+                               command=lambda *a: list(a), host_terminal=lambda *a: list(a),
+                               hosts_supported=lambda: False, host_entries=lambda: [])
+    return install_view.InstallDialog(window, stand_in, lambda *a: None, kind="mcp")
 
 
 def text_dialog(window):

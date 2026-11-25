@@ -213,7 +213,7 @@ def test_start_page_workflow(qapp, env, monkeypatch, wait, agent, engine, langua
         for option, _, dest, value in FORM_CHOICES:
             assert getattr(parsed, dest) == value, option
         assert w.pages.currentWidget() is w.terminals
-        # The run shows up in the registry: a row on the Sandboxes page, no second tab for it.
+        # The run shows up in the registry: a row on the Sessions page, no second tab for it.
         tabs = w.tabs.count()
         run = instance("run", f"{agent}-project-9f8e", project, agent, engine)
         monkeypatch.setattr(sai, "instances", lambda: ([run], []))
@@ -987,7 +987,7 @@ def test_every_setting_round_trips_through_a_restart(qapp, env, monkeypatch, age
     assert theme.apply(settings["theme"]) == "dark"
     w = make_window(qapp, monkeypatch, language=settings["language"])
     try:
-        assert w.nav.item(1).text() == "Start" and w.view_switch.buttons["board"].text() == "Board"
+        assert w.nav.item(1).text() == "Board" and w.view_switch.buttons["board"].text() == "Board"
         dialog = w.settings_dialog()
         assert {key: field_value(dialog.fields[key]) for key in values} == values
         assert {key: backend.setting(key) for key in values} == values

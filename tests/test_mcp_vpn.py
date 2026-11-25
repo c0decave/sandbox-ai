@@ -187,7 +187,7 @@ def oracle(kind, own, start, explicit):
     if kind == "rootfs-only" and chosen:
         return ("refused", "Bubblewrap only")
     if kind == "image-none" and chosen:
-        return ("refused", "a VPN needs network full")
+        return ("refused", "a VPN needs network egress-all")
     if chosen and reaches and PROFILES[chosen]["type"] == "tailscale" and \
             not PROFILES[chosen]["tailscale"]["exit_node"]:
         return ("refused", "carries only the tailnet")
@@ -424,7 +424,7 @@ def test_only_server_network_names_a_network_or_a_vpn_for_a_server():
                                  text.startswith("--pod=") or text in ("--net", "--pod")):
             assert where in allowed_network, (where, text, node.lineno)
         if text == "--network":
-            assert where == "cli", (where, node.lineno)  # (mcp add --network none|full: the definition's)
+            assert where in ("cli", "parser"), (where, node.lineno)  # (mcp add|set --network: the definition's)
         if isinstance(node, (ast.List, ast.Tuple)) and any(strings(e) == "--vpn" for e in node.elts):
             assert where in ("server_network", "checked_plan"), (where, node.lineno)
 
@@ -465,6 +465,7 @@ ENSURE_RUNNING_CALLS = {
     ("mcp.py", "attach", "server_vpn(a, name, vpn)"),
     ("mcp.py", "attach_live", "server_vpn(a, name)"),
     ("mcp.py", "cli", "a.vpn"),  # mcp start NAME [--vpn]: no start, only what was given
+    ("mcp.py", "check_server", "vpn"),  # mcp check [NAME...] [--vpn]: as mcp start, only what was given
 }
 
 

@@ -1,7 +1,7 @@
 """The automatic storage check for the configured hosts too (user 2026-11-19): the app runs `sandbox-ai gc --check`
 on each host of `sandbox-ai hosts` in the background on the same schedule as this machine's (the host's own
 storage_check once its check said it), its notice names the host, the Hosts page shows each host's last result; a
-setting per host, on by default only for the hosts the app uses (the Sandboxes page found starts there).
+setting per host, on by default only for the hosts the app uses (the Sessions page found starts there).
 
 Unit tests of storage_hosts.py, the window offscreen with the host's check stood in for, then end to end: the real
 ./sandbox-ai of another host (fake ssh, its own HOME with a kept start: tests/live_fakes.py) checked by the window."""
